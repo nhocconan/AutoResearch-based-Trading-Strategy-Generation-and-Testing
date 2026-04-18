@@ -40,19 +40,15 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Align all daily data to 1h timeframe (primary)
-    upper_channel_1h = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_1h = align_htf_to_ltf(prices, df_1d, lower_channel)
-    ema_34_1h = align_htf_to_ltf(prices, df_1d, ema_34)
-    rsi_1h = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align all daily data to 12h timeframe (primary)
+    upper_channel_12h = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_channel_12h = align_htf_to_ltf(prices, df_1d, lower_channel)
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34)
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Calculate 1h volume spike indicator (volume > 1.5x 20-period average)
+    # Calculate 12h volume spike indicator (volume > 1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
-    
-    # Session filter: 8-20 UTC (already datetime64 index)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,35 +56,35 @@ def generate_signals(prices):
     start_idx = max(19, 34) + 1
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available or outside session
-        if (np.isnan(upper_channel_1h[i]) or np.isnan(lower_channel_1h[i]) or 
-            np.isnan(ema_34_1h[i]) or np.isnan(rsi_1h[i]) or not session_filter[i]):
+        # Skip if any required data is not available
+        if (np.isnan(upper_channel_12h[i]) or np.isnan(lower_channel_12h[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(rsi_12h[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter: price above/below EMA
-        uptrend = close[i] > ema_34_1h[i]
-        downtrend = close[i] < ema_34_1h[i]
+        uptrend = close[i] > ema_34_12h[i]
+        downtrend = close[i] < ema_34_12h[i]
         
         # RSI filter: avoid overbought/oversold extremes
-        rsi_not_extreme = (rsi_1h[i] > 30) and (rsi_1h[i] < 70)
+        rsi_not_extreme = (rsi_12h[i] > 30) and (rsi_12h[i] < 70)
         
         # Volume confirmation: require volume spike
         vol_confirmed = volume_spike[i]
         
         if position == 0:
             # Long: price breaks above upper Donchian channel with uptrend, RSI not extreme, and volume spike
-            if close[i] > upper_channel_1h[i] and uptrend and rsi_not_extreme and vol_confirmed:
+            if close[i] > upper_channel_12h[i] and uptrend and rsi_not_extreme and vol_confirmed:
                 signals[i] = 0.20
                 position = 1
             # Short: price breaks below lower Donchian channel with downtrend, RSI not extreme, and volume spike
-            elif close[i] < lower_channel_1h[i] and downtrend and rsi_not_extreme and vol_confirmed:
+            elif close[i] < lower_channel_12h[i] and downtrend and rsi_not_extreme and vol_confirmed:
                 signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Long exit: price crosses below lower Donchian channel OR trend reverses OR RSI overbought
-            if (close[i] < lower_channel_1h[i]) or (not uptrend) or (rsi_1h[i] >= 70):
+            if (close[i] < lower_channel_12h[i]) or (not uptrend) or (rsi_12h[i] >= 70):
                 signals[i] = -0.20  # reverse to short
                 position = -1
             else:
@@ -96,7 +92,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price crosses above upper Donchian channel OR trend reverses OR RSI oversold
-            if (close[i] > upper_channel_1h[i]) or (not downtrend) or (rsi_1h[i] <= 30):
+            if (close[i] > upper_channel_12h[i]) or (not downtrend) or (rsi_12h[i] <= 30):
                 signals[i] = 0.20  # reverse to long
                 position = 1
             else:
@@ -104,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Donchian20_1dEMA34_RSI_VolumeFilter_Session_v1"
-timeframe = "1h"
+name = "12h_Donchian20_1dEMA34_RSI_VolumeFilter_v2"
+timeframe = "12h"
 leverage = 1.0
