@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with volume confirmation and 1d ADX trend filter.
+Hypothesis: 4h Donchian breakout with volume confirmation and 1d ADX trend filter.
 Breakouts of the 20-period high/low capture momentum, while volume confirms institutional participation.
 The ADX filter avoids false breakouts in ranging markets. Designed for 20-30 trades/year to minimize fee drag.
 Works in bull markets (buy breakouts) and bear markets (sell breakdowns).
