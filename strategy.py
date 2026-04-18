@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_FundingRate_MeanReversion_With_Regime
-Hypothesis: Funding rate mean reversion works on BTC/ETH in both bull and bear markets.
-When weekly funding rate Z-score (30-day) < -2, go long; > +2, go short.
-Use 1d timeframe for entries, with 1w funding data as HTF filter.
-Add volatility regime filter: only trade when ATR(30) < 1.5 * ATR(90) (low vol regime).
-Target: 10-20 trades/year (40-80 total over 4 years) to minimize fee drift.
+4h_BollingerBandwidth_Breakout_Volume_Trend
+Hypothesis: Breakouts from Bollinger Bandwidth extremes with volume confirmation and EMA trend filter work in both bull and bear markets.
+In low volatility (bandwidth < 20th percentile), price often breaks out with momentum. High bandwidth (>80th) signals exhaustion.
+Uses Bollinger Bands (20,2) to define dynamic channels. Requires volume > 1.3x 20-period average and EMA20 alignment.
+Targets 20-30 trades/year (80-120 total) to avoid fee drag while capturing volatility expansion moves.
 """
 
 import numpy as np
@@ -14,82 +13,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # ATR for volatility regime filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
-    atr_90 = pd.Series(tr).ewm(span=90, adjust=False, min_periods=90).mean().values
-    vol_regime = atr_30 < (1.5 * atr_90)  # Low volatility regime
+    # Bollinger Bands (20,2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Load weekly funding rate data (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
+    # Bandwidth = (Upper - Lower) / Middle
+    bb_width = (upper_bb - lower_bb) / sma_20
     
-    # Calculate funding rate Z-score (30-week lookback)
-    funding = df_1w['funding_rate'].values if 'funding_rate' in df_1w.columns else np.zeros(len(df_1w))
-    if len(funding) < 30:
-        funding_z = np.zeros(len(funding))
-    else:
-        funding_mean = pd.Series(funding).rolling(window=30, min_periods=30).mean().values
-        funding_std = pd.Series(funding).rolling(window=30, min_periods=30).std().values
-        funding_std = np.where(funding_std == 0, 1e-10, funding_std)  # Avoid division by zero
-        funding_z = (funding - funding_mean) / funding_std
+    # Percentile lookback for regime (252 days ~ 252*6=1512 bars for 4h)
+    lookback = min(1512, i if 'i' in locals() else 1512)  # Will be computed in loop
+    # We'll compute percentile in loop to avoid look-ahead
     
-    # Align funding Z-score to 1d timeframe (with 1-week delay for completion)
-    funding_z_aligned = align_htf_to_ltf(prices, df_1w, funding_z)
+    # Volume filter: >1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma)
+    
+    # EMA20 trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 90  # Warmup for ATR90
+    start_idx = 20  # Warmup for BB and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_30[i]) or np.isnan(atr_90[i]) or 
-            np.isnan(funding_z_aligned[i]) or np.isnan(vol_regime[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(bb_width[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_20[i])):
             signals[i] = 0.0
             continue
         
-        vol_ok = vol_regime[i]
-        fz = funding_z_aligned[i]
+        price = close[i]
+        upper = upper_bb[i]
+        lower = lower_bb[i]
+        vol_ok = volume_filter[i]
+        ema20 = ema_20[i]
+        
+        # Calculate bandwidth percentile lookback (up to 252 days)
+        lb_start = max(0, i - 1512)
+        bb_width_slice = bb_width[lb_start:i+1]
+        if len(bb_width_slice) < 20:  # Need minimum for percentile
+            bandwidth_pct = 50  # neutral
+        else:
+            bandwidth_pct = (bb_width_slice <= bb_width[i]).sum() * 100.0 / len(bb_width_slice)
         
         if position == 0:
-            # Long when funding extremely negative (oversold)
-            if fz < -2.0 and vol_ok:
+            # Long: breakout above upper BB in low volatility (bandwidth < 20th percentile) with volume in uptrend
+            if price > upper and bandwidth_pct < 20 and vol_ok and price > ema20:
                 signals[i] = 0.25
                 position = 1
-            # Short when funding extremely positive (overbought)
-            elif fz > 2.0 and vol_ok:
+            # Short: breakdown below lower BB in low volatility with volume in downtrend
+            elif price < lower and bandwidth_pct < 20 and vol_ok and price < ema20:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit when funding returns to neutral or volatility increases
-            if fz > -0.5 or not vol_ok:
+            # Exit: price returns to middle (SMA) or volatility expands (bandwidth > 80th)
+            if price < sma_20[i] or bandwidth_pct > 80:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit when funding returns to neutral or volatility increases
-            if fz < 0.5 or not vol_ok:
+            # Exit: price returns to middle (SMA) or volatility expands (bandwidth > 80th)
+            if price > sma_20[i] or bandwidth_pct > 80:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_FundingRate_MeanReversion_With_Regime"
-timeframe = "1d"
+name = "4h_BollingerBandwidth_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
