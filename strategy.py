@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot R1/S1 Breakout with Volume Confirmation and Daily Trend Filter
-Hypothesis: On the 12h timeframe, price breaking above/below Camarilla pivot levels (R1/S1) 
-from the previous daily session, confirmed by volume (>1.5x average) and aligned with 
-daily trend (price above/below daily EMA34), captures high-probability moves in both 
-bull and bear markets. The 12h timeframe reduces trade frequency to minimize fee drag, 
-while the daily trend filter ensures trades are taken in the direction of the higher-timeframe 
-trend, improving win rate. Target: 15-30 trades/year to stay well within fee limits.
+4h Keltner Channel Breakout with Volume Confirmation and ADX Filter
+Hypothesis: Price breaking above/below Keltner Channel (EMA20 + 2*ATR) with volume confirmation 
+(volume > 1.5x average) and trend strength (ADX > 20) indicates strong momentum. 
+Keltner Channels adapt better than Bollinger Bands in trending markets, reducing false breakouts.
+Target: 20-40 trades/year to minimize fee drain.
 """
 
 import numpy as np
@@ -23,74 +21,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d data for Camarilla pivots and EMA34 (loaded ONCE) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:  # Need at least 34 for EMA + 1 for previous day
-        return np.zeros(n)
+    # EMA20 for Keltner Channel middle
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla pivots for each day using previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C, H, L are from the *previous* day
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # True Range and ATR(20)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Avoid look-ahead: use only previous day's data
-    camarilla_width = (prev_high - prev_low) * 1.1 / 12
-    r1 = prev_close + camarilla_width
-    s1 = prev_close - camarilla_width
+    # Keltner Channels
+    upper_kc = ema20 + 2 * atr
+    lower_kc = ema20 - 2 * atr
     
-    # Align R1/S1 to 12h timeframe (waits for 1d bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # ADX for trend strength (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Daily EMA34 for trend filter (only needs completed 1d candle)
-    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # --- Volume confirmation: volume > 1.5x 30-period average ---
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_ratio = volume / vol_ma
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
+    
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: volume > 1.5x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ratio = volume / vol_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup: need 30 for volume MA and alignment is handled by align_htf_to_ltf
-    start_idx = 30
+    start_idx = 35  # Warmup for indicators (max of 20,20,14)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema20[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_34_val = ema_34_aligned[i]
+        upper = upper_kc[i]
+        lower = lower_kc[i]
+        adx_val = adx[i]
         vol_conf = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: price breaks above R1, above daily EMA34, with volume
-            if price > r1_val and price > ema_34_val and vol_conf:
+            # Strong trend (ADX > 20) and volume confirmation
+            # Price breaks above upper KC = long
+            if adx_val > 20 and price > upper and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below daily EMA34, with volume
-            elif price < s1_val and price < ema_34_val and vol_conf:
+            # Price breaks below lower KC = short
+            elif adx_val > 20 and price < lower and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if price returns to daily EMA34 or breaks below S1 (reversal)
-            if price < ema_34_val or price < s1_val:
+            # Exit if trend weakens or price returns to EMA20
+            if adx_val < 15 or price < ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price returns to daily EMA34 or breaks above R1 (reversal)
-            if price > ema_34_val or price > r1_val:
+            # Exit if trend weakens or price returns to EMA20
+            if adx_val < 15 or price > ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume_DailyTrend"
-timeframe = "12h"
+name = "4h_Keltner_Breakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
