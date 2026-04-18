@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe with 1-day EMA trend filter and volume confirmation.
-Trades breakouts of key intraday support/resistance levels in trending markets. Works in bull/bear by using EMA trend filter.
-Target: 15-30 trades/year (60-120 total over 4 years).
+4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Regime
+Hypothesis: Camarilla pivot levels from 1d provide high-probability reversal/continuation zones.
+Breakouts above R1 or below S1 with volume confirmation and ADX trend filter capture strong moves.
+In bull markets: buy R1 breakouts; in bear markets: sell S1 breakdowns. Volume confirms institutional
+participation, ADX filters out chop. Target: 20-40 trades/year (80-160 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,98 +21,119 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    def camarilla_levels(h, l, c):
-        range_ = h - l
-        if range_ <= 0:
-            return c, c, c, c  # fallback
-        R4 = c + (range_ * 1.1 / 2)
-        R3 = c + (range_ * 1.1/4)
-        R2 = c + (range_ * 1.1/6)
-        R1 = c + (range_ * 1.1/12)
-        S1 = c - (range_ * 1.1/12)
-        S2 = c - (range_ * 1.1/6)
-        S3 = c - (range_ * 1.1/4)
-        S4 = c - (range_ * 1.1/2)
-        return R1, R2, S1, S2
-    
-    # Get daily data once
+    # Get 1-day data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
-    R1_1d = np.zeros(len(df_1d))
-    R2_1d = np.zeros(len(df_1d))
-    S1_1d = np.zeros(len(df_1d))
-    S2_1d = np.zeros(len(df_1d))
+    # Calculate Camarilla pivot levels for each day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Using previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    for i in range(len(df_1d)):
-        R1, R2, S1, S2 = camarilla_levels(
-            df_1d['high'].iloc[i],
-            df_1d['low'].iloc[i],
-            df_1d['close'].iloc[i]
-        )
-        R1_1d[i] = R1
-        R2_1d[i] = R2
-        S1_1d[i] = S1
-        S2_1d[i] = S2
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
     
-    # Align to 12h timeframe
-    R1_12h = align_ltf_to_htf(prices, df_1d, R1_1d)
-    R2_12h = align_ltf_to_htf(prices, df_1d, R2_1d)
-    S1_12h = align_ltf_to_htf(prices, df_1d, S1_1d)
-    S2_12h = align_ltf_to_htf(prices, df_1d, S2_1d)
+    # Align to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 1-day EMA trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h = align_ltf_to_htf(prices, df_1d, ema_1d)
-    
-    # Volume filter: >1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume filter: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
+    
+    # ADX trend filter (14-period) - avoid chop
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] > minus_dm[i]:
+                minus_dm[i] = 0
+            elif minus_dm[i] > plus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+                
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
+        
+        # Smooth with Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_di = np.zeros_like(plus_dm)
+        minus_di = np.zeros_like(minus_dm)
+        
+        atr[period-1] = np.mean(tr[:period])
+        plus_dm_smooth = np.zeros_like(plus_dm)
+        minus_dm_smooth = np.zeros_like(minus_dm)
+        plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+        minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+        
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+        minus_di = 100 * minus_di_smooth / (atr + 1e-10)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        
+        adx = np.zeros_like(dx)
+        adx[2*period-1] = np.mean(dx[period-1:2*period-1])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
+    
+    adx = calculate_adx(high, low, close, 14)
+    trend_filter = adx > 25  # Only trade in trending conditions
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for volume MA
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_12h[i]) or np.isnan(R2_12h[i]) or 
-            np.isnan(S1_12h[i]) or np.isnan(S2_12h[i]) or
-            np.isnan(ema_12h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = R1_12h[i]
-        r2 = R2_12h[i]
-        s1 = S1_12h[i]
-        s2 = S2_12h[i]
+        r1_level = r1_4h[i]
+        s1_level = s1_4h[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_12h[i]
+        trend_ok = trend_filter[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume in uptrend
-            if price > r1 and vol_ok and price > ema_trend:
+            # Long: break above R1 with volume in uptrend
+            if price > r1_level and vol_ok and trend_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume in downtrend
-            elif price < s1 and vol_ok and price < ema_trend:
+            # Short: break below S1 with volume in downtrend
+            elif price < s1_level and vol_ok and trend_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Maintain long until price crosses below S2 or trend reverses
-            if price < s2 or price < ema_trend:
+            # Maintain long until price breaks below S1 or loses momentum
+            if price < s1_level or not trend_ok:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Maintain short until price crosses above R2 or trend reverses
-            if price > r2 or price > ema_trend:
+            # Maintain short until price breaks above R1 or loses momentum
+            if price > r1_level or not trend_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
