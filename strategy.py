@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_1dEMA34_VolumeSpike
-Hypothesis: Daily Camarilla H3/L3 levels act as strong support/resistance in 12h timeframe.
-Breakouts with volume spike and daily EMA(34) trend filter capture momentum while minimizing trades.
-Designed to work in both bull and bear markets by using tight entry conditions and volatility filtering.
-Target: 12-37 trades/year on 12h timeframe.
+4h_PriceChannel_Breakout_1dTrend_VolumeSpike
+Hypothesis: Price channels (donchian-like) based on prior 12h high/low act as support/resistance.
+Breakouts above/below these levels with volume spike and daily EMA(34) trend filter capture momentum.
+Designed to work in both bull and bear by requiring trend alignment (EMA) and volume confirmation.
+Target: 10-20 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -21,34 +21,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and EMA (once before loop)
+    # Get 12h data for channel calculation (prior period high/low)
+    df_12h = get_htf_data(prices, '12h')
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels (H3, L3)
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
+    # Calculate 12-period high/low on 12h timeframe (for channel)
+    high_12h = df_12h['high']
+    low_12h = df_12h['low']
+    
+    # Upper channel: 12h high, lower channel: 12h low
+    upper_channel = high_12h
+    lower_channel = low_12h
+    
+    # Shift by 1 to use only completed 12h periods (no look-ahead)
+    upper_prev = upper_channel.shift(1).values
+    lower_prev = lower_channel.shift(1).values
+    
+    # Align to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_prev)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_prev)
+    
+    # Daily EMA(34) for trend filter
     close_1d = df_1d['close']
-    
-    range_1d = high_1d - low_1d
-    close_prev = close_1d.shift(1)
-    
-    # Camarilla H3 and L3 levels
-    h3 = close_prev + 1.1 * range_1d / 6
-    l3 = close_prev - 1.1 * range_1d / 6
-    
-    # Shift by 1 to use previous day's levels only
-    h3_prev = h3.shift(1).values
-    l3_prev = l3.shift(1).values
-    
-    # Align to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
-    
-    # Get daily data for EMA trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR for volatility filter (14-period on 12h)
+    # ATR for volatility filter (14-period)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -60,7 +59,7 @@ def generate_signals(prices):
     atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     volatility_filter = atr > atr_ma
     
-    # Volume spike: 3.0x 20-period average on 12h (tight to reduce trades)
+    # Volume spike: 3.0x 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (3.0 * vol_ma)
     
@@ -71,8 +70,8 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or
             np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(atr[i]) or
@@ -82,51 +81,51 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        h3_val = h3_aligned[i]
-        l3_val = l3_aligned[i]
+        upper_val = upper_aligned[i]
+        lower_val = lower_aligned[i]
         ema_trend = ema_34_1d_aligned[i]
         vol_filter = volatility_filter[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
             bars_since_entry = 0
-            # Long: break above H3 with volume spike, price above daily EMA, and sufficient volatility
-            if price > h3_val and vol_spike and price > ema_trend and vol_filter:
+            # Long: break above upper channel with volume spike, price above daily EMA, and sufficient volatility
+            if price > upper_val and vol_spike and price > ema_trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below L3 with volume spike, price below daily EMA, and sufficient volatility
-            elif price < l3_val and vol_spike and price < ema_trend and vol_filter:
+            # Short: break below lower channel with volume spike, price below daily EMA, and sufficient volatility
+            elif price < lower_val and vol_spike and price < ema_trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Minimum holding period: 2 bars (24 hours for 12h)
-            if bars_since_entry < 2:
+            # Minimum holding period: 4 bars (16 hours for 4h)
+            if bars_since_entry < 4:
                 signals[i] = 0.25
                 bars_since_entry += 1
             else:
                 signals[i] = 0.25
-                # Exit: price returns to L3 or breaks below daily EMA
-                if price <= l3_val or price < ema_trend:
+                # Exit: price returns to lower channel or breaks below daily EMA
+                if price <= lower_val or price < ema_trend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
         
         elif position == -1:
-            # Minimum holding period: 2 bars (24 hours for 12h)
-            if bars_since_entry < 2:
+            # Minimum holding period: 4 bars (16 hours for 4h)
+            if bars_since_entry < 4:
                 signals[i] = -0.25
                 bars_since_entry += 1
             else:
                 signals[i] = -0.25
-                # Exit: price returns to H3 or breaks above daily EMA
-                if price >= h3_val or price > ema_trend:
+                # Exit: price returns to upper channel or breaks above daily EMA
+                if price >= upper_val or price > ema_trend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
     
     return signals
 
-name = "12h_Camarilla_H3L3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_PriceChannel_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
