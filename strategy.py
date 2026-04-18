@@ -1,17 +1,15 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Chaikin Oscillator (CO) with 1d EMA50 trend filter and volume confirmation.
-# Chaikin Oscillator = EMA3(ADL) - EMA10(ADL), where ADL = Accumulation/Distribution Line.
-# CO > 0 indicates buying pressure, CO < 0 indicates selling pressure.
-# 1d EMA50 ensures we trade in the direction of the daily trend (long when price > EMA50, short when price < EMA50).
-# Volume confirmation: current volume > 1.5x 20-period average volume.
-# This combination captures momentum with trend alignment, reducing false signals.
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
-name = "12h_ChaikinOscillator_1dEMA50_VolumeConfirmation"
-timeframe = "12h"
+# Hypothesis: 4h TRIX (12,9) with 1d volume confirmation and volatility filter.
+# TRIX measures momentum as % rate of change of triple-smoothed EMA.
+# Long when TRIX > 0 and 1d volume > 1.5x 20-day average; short when TRIX < 0 and volume condition.
+# 1d volume filter ensures institutional participation. Volatility filter (ATR ratio) avoids chop.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+name = "4h_TRIX_1dVolumeVolFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,67 +22,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 filter (ONCE before loop)
+    # Get 1d data for volume filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Accumulation/Distribution Line (ADL)
-    # Avoid division by zero: if high == low, use 0 (no money flow)
-    hl_range = high - low
-    clv = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0)
-    adl = np.cumsum(clv * volume)
+    # Calculate TRIX (12,9): triple EMA then % ROC
+    close_s = pd.Series(close)
+    ema1 = close_s.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.pct_change(periods=1) * 100
+    trix_values = trix.values
     
-    # Calculate Chaikin Oscillator: EMA3(ADL) - EMA10(ADL)
-    adl_series = pd.Series(adl)
-    ema3_adl = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10_adl = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin_osc = ema3_adl - ema10_adl
+    # Calculate 1d volume average
+    vol_1d = pd.Series(df_1d['volume'].values)
+    vol_ma_20_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume confirmation: current volume > 1.5 * 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    # ATR ratio: current ATR / 50-period average ATR (to detect low volatility)
+    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / atr_ma_50  # < 1 = low volatility, > 1 = high volatility
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(chaikin_osc[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(atr_ratio[i]) or np.isnan(atr_ma_50[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        # Volume filter: 1d volume > 1.5x 20-day average
+        volume_filter = df_1d['volume'].values[min(i // 24, len(df_1d)-1)] > (1.5 * vol_ma_20_1d_aligned[i]) if i >= 24 else False
+        
+        # Volatility filter: avoid extremely low volatility (chop)
+        vol_filter = atr_ratio[i] > 0.8
         
         if position == 0:
-            # Long: Chaikin Oscillator > 0 (buying pressure) AND uptrend AND volume confirmation
-            if chaikin_osc[i] > 0 and uptrend and volume_confirm[i]:
+            # Long: TRIX positive AND volume filter AND volatility filter
+            if trix_values[i] > 0 and volume_filter and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Chaikin Oscillator < 0 (selling pressure) AND downtrend AND volume confirmation
-            elif chaikin_osc[i] < 0 and downtrend and volume_confirm[i]:
+            # Short: TRIX negative AND volume filter AND volatility filter
+            elif trix_values[i] < 0 and volume_filter and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Chaikin Oscillator turns negative OR trend reverses
-            if chaikin_osc[i] <= 0 or not uptrend:
+            # Long exit: TRIX turns negative OR volume filter fails
+            if trix_values[i] <= 0 or not volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Chaikin Oscillator turns positive OR trend reverses
-            if chaikin_osc[i] >= 0 or not downtrend:
+            # Short exit: TRIX turns positive OR volume filter fails
+            if trix_values[i] >= 0 or not volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
