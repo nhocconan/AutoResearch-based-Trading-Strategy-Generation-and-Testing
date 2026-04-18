@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_Momentum_Confluence
-Uses 4h momentum (price > SMA50) and 1d trend (price > EMA200) for direction,
-enters on 1h pullbacks to VWAP with volume confirmation.
-Designed for low trade frequency (15-30/year) and works in both bull/bear markets.
+6h Weekly Pivot Breakout with Volume Spike
+Trade breakouts from weekly pivot levels (R4/S4) with volume confirmation.
+Designed for low-frequency, high-conviction trades in both bull and bear markets.
 """
 
 import numpy as np
@@ -12,94 +11,82 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for momentum filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h SMA50 for momentum
-    sma_50_4h = pd.Series(close_4h).rolling(window=50, min_periods=50).mean().values
-    sma_50_4h_aligned = align_htf_to_ltf(prices, df_4h, sma_50_4h)
+    # Calculate weekly pivot points
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    r4_1w = r3_1w + (high_1w - low_1w)
+    s4_1w = s3_1w - (high_1w - low_1w)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Align weekly pivot levels to 6h
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
-    # Calculate 1d EMA200 for trend
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # Calculate 1h VWAP (typical price * volume) / volume
-    typical_price = (high + low + close) / 3.0
-    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
-    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vwap = vwap_num / vwap_den
-    
-    # Volume filter: above average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection (2x 24-period average - 4 days worth)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 200  # need enough history for indicators
+    start_idx = 30  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(sma_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
-            np.isnan(vwap[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        sma_50_4h_val = sma_50_4h_aligned[i]
-        ema_200_1d_val = ema_200_1d_aligned[i]
-        vwap_val = vwap[i]
-        vol_ma_val = vol_ma[i]
+        r4_level = r4_1w_aligned[i]
+        s4_level = s4_1w_aligned[i]
         
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
-        
-        if position == 0 and in_session:
-            # Long: 4h momentum up, 1d trend up, pullback to VWAP with volume
-            if (price > sma_50_4h_val and 
-                price > ema_200_1d_val and
-                price <= vwap_val * 1.005 and  # within 0.5% above VWAP
-                volume > vol_ma_val * 1.5):     # 1.5x average volume
-                signals[i] = 0.20
+        if position == 0:
+            # Long: breakout above weekly R4 + volume spike
+            if price > r4_level and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h momentum down, 1d trend down, bounce to VWAP with volume
-            elif (price < sma_50_4h_val and 
-                  price < ema_200_1d_val and
-                  price >= vwap_val * 0.995 and  # within 0.5% below VWAP
-                  volume > vol_ma_val * 1.5):
-                signals[i] = -0.20
+            # Short: breakout below weekly S4 + volume spike
+            elif price < s4_level and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: momentum breaks down or price moves significantly above VWAP
-            if price < sma_50_4h_val or price > vwap_val * 1.02:
+            # Long exit: price closes below weekly pivot or reverse signal
+            if price < pivot_1w_aligned[i] or (price < s4_level and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: momentum breaks up or price moves significantly below VWAP
-            if price > sma_50_4h_val or price < vwap_val * 0.98:
+            # Short exit: price closes above weekly pivot or reverse signal
+            if price > pivot_1w_aligned[i] or (price > r4_level and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h1d_Momentum_Confluence"
-timeframe = "1h"
+name = "6h_WeeklyPivotBreakout_Volume"
+timeframe = "6h"
 leverage = 1.0
