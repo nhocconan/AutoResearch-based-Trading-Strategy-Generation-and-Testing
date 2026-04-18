@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_Filter_V1
-12h strategy using Kaufman's Adaptive Moving Average (KAMA) for trend filtering.
-- Long: Price above KAMA(10,2,30) + rising KAMA slope + volume > 1.5x average
-- Short: Price below KAMA(10,2,30) + falling KAMA slope + volume > 1.5x average
+1d_WeeklyTrend_Filter_Refined
+1d strategy using weekly trend filter with daily price action confirmation.
+- Long: Weekly EMA21 trending up + daily price crosses above daily EMA21 with volume confirmation
+- Short: Weekly EMA21 trending down + daily price crosses below daily EMA21 with volume confirmation
 - Exit: Opposite signal
-Designed for ~12-25 trades/year per symbol (48-100 total over 4 years)
-Adapts to market conditions: fast in trends, slow in ranging markets
+Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
+Uses weekly trend to avoid whipsaws in ranging markets
 """
 
 import numpy as np
@@ -21,89 +21,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA(10,2,30) on close
-    # ER (Efficiency Ratio) = |change over 10 periods| / sum of absolute changes over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    # For t < 10, we need to handle boundary
-    change_full = np.full(n, np.nan)
-    change_full[10:] = change
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Sum of absolute changes over 10 periods
-    abs_changes = np.abs(np.diff(close, n=1))
-    abs_sum = np.full(n, np.nan)
-    for i in range(10, n):
-        abs_sum[i] = np.sum(abs_changes[i-9:i+1])  # sum of last 10 absolute changes
+    # Calculate weekly EMA21 for trend direction
+    weekly_close = df_weekly['close'].values
+    ema_21_weekly = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_21_weekly)
     
-    # ER = change / abs_sum, handle division by zero
-    er = np.full(n, np.nan)
-    mask = (abs_sum > 0) & (~np.isnan(abs_sum))
-    er[mask] = change_full[mask] / abs_sum[mask]
+    # Calculate daily EMA21 for entry signals
+    ema_21_daily = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # for EMA(2)
-    slow_sc = 2 / (30 + 1)  # for EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]  # start with first price
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # KAMA slope (direction) - 3-period slope
-    kama_slope = np.full(n, np.nan)
-    for i in range(3, n):
-        if not np.isnan(kama[i]) and not np.isnan(kama[i-3]):
-            kama_slope[i] = (kama[i] - kama[i-3]) / 3
-    
-    # Volume filter: 1.5x 20-period average
+    # Volume confirmation (1.5x 20-day average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need sufficient lookback for KAMA
+    start_idx = 30  # need 21 for EMA + buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or np.isnan(kama_slope[i]) or 
+        if (np.isnan(ema_21_weekly_aligned[i]) or 
+            np.isnan(ema_21_daily[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        kama_rising = kama_slope[i] > 0
-        kama_falling = kama_slope[i] < 0
+        # Weekly trend direction
+        weekly_uptrend = ema_21_weekly_aligned[i] > ema_21_weekly_aligned[i-1]
+        weekly_downtrend = ema_21_weekly_aligned[i] < ema_21_weekly_aligned[i-1]
         
-        # Volume filter
-        volume_filter = volume[i] > 1.5 * vol_ma[i]
+        # Daily price relative to EMA21
+        price_above_ema = close[i] > ema_21_daily[i]
+        price_below_ema = close[i] < ema_21_daily[i]
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price above KAMA + rising KAMA + volume filter
-            if price_above_kama and kama_rising and volume_filter:
+            # Long: weekly uptrend + price crosses above daily EMA21 + volume
+            if weekly_uptrend and price_above_ema and volume_confirmed and close[i-1] <= ema_21_daily[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + falling KAMA + volume filter
-            elif price_below_kama and kama_falling and volume_filter:
+            # Short: weekly downtrend + price crosses below daily EMA21 + volume
+            elif weekly_downtrend and price_below_ema and volume_confirmed and close[i-1] >= ema_21_daily[i-1]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below KAMA
-            if price_below_kama:
+            # Long exit: weekly trend turns down OR price crosses below daily EMA21
+            if not weekly_uptrend or (price_below_ema and close[i-1] >= ema_21_daily[i-1]):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above KAMA
-            if price_above_kama:
+            # Short exit: weekly trend turns up OR price crosses above daily EMA21
+            if not weekly_downtrend or (price_above_ema and close[i-1] <= ema_21_daily[i-1]):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -111,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_Filter_V1"
-timeframe = "12h"
+name = "1d_WeeklyTrend_Filter_Refined"
+timeframe = "1d"
 leverage = 1.0
