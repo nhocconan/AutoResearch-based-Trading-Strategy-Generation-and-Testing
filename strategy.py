@@ -1,124 +1,105 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_HMA21_VolumeFilter_V2
-Strategy: 4h Donchian(20) breakout with HMA(21) trend filter and volume confirmation.
-Long: Close breaks above 20-period high AND HMA rising AND volume > 1.5x average.
-Short: Close breaks below 20-period low AND HMA falling AND volume > 1.5x average.
-Exit: Opposite breakout OR trend reversal.
-Designed for 4h timeframe: ~20-30 trades/year per symbol (80-120 total over 4 years).
-Works in bull/bear via HMA trend filter and volume confirmation to avoid false breakouts.
+12h_LowVolatilityBreakout_v1
+Strategy: 12h breakout from low volatility periods with trend filter and volume confirmation.
+Long: Price breaks above Bollinger Upper Band after low volatility period in uptrend.
+Short: Price breaks below Bollinger Lower Band after low volatility period in downtrend.
+Designed for 12h timeframe: ~15-25 trades/year per symbol (60-100 total over 4 years).
+Works in bull/bear via trend filter and volatility-based breakout logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_hma(array, period):
-    """Hull Moving Average"""
-    half_period = int(period / 2)
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA function
-    def wma(arr, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(arr, weights, 'valid') / weights.sum()
-    
-    if len(array) < period:
-        return np.full_like(array, np.nan)
-    
-    wma_half = wma(array, half_period)
-    wma_full = wma(array, period)
-    
-    # Handle array lengths
-    raw_hma = 2 * wma_half - wma_full
-    hma = wma(raw_hma, sqrt_period)
-    
-    # Pad to original length
-    result = np.full_like(array, np.nan)
-    start_idx = period - half_period  # offset due to WMAs
-    end_idx = start_idx + len(hma)
-    if end_idx <= len(array):
-        result[start_idx:end_idx] = hma
-    return result
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and HMA
+    # Get daily data for Bollinger Bands and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 20-day high and low (Donchian channels)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Daily Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # HMA(21) on daily close
-    hma_21 = calculate_hma(close_1d, 21)
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Align all daily data to 4h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
+    # Align all daily data to 12h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Bollinger Band Width for volatility regime
+    bb_width = (upper_bb - lower_bb) / sma_20
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    
+    # Low volatility threshold (20th percentile of BB width)
+    bb_width_20th = np.nanpercentile(bb_width[~np.isnan(bb_width)], 20) if np.sum(~np.isnan(bb_width)) > 0 else 0.02
+    low_vol = bb_width_aligned < bb_width_20th
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for HMA calculation
+    start_idx = 50  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(low_vol[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions: HMA rising/falling
-        hma_rising = hma_21_aligned[i] > hma_21_aligned[i-1]
-        hma_falling = hma_21_aligned[i] < hma_21_aligned[i-1]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_long = close[i] > high_20_aligned[i]
-        breakout_short = close[i] < low_20_aligned[i]
+        # Breakout conditions
+        breakout_up = high[i] > upper_bb_aligned[i] and close[i] > upper_bb_aligned[i]
+        breakout_down = low[i] < lower_bb_aligned[i] and close[i] < lower_bb_aligned[i]
         
         if position == 0:
-            # Long: breakout above 20-day high + HMA rising + volume
-            if breakout_long and hma_rising and vol_confirm:
+            # Long: uptrend + low volatility + volume + breakout up
+            if uptrend and low_vol[i] and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below 20-day low + HMA falling + volume
-            elif breakout_short and hma_falling and vol_confirm:
+            # Short: downtrend + low volatility + volume + breakout down
+            elif downtrend and low_vol[i] and vol_confirm and breakout_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: breakdown below 20-day low OR HMA falling OR loss of volume
-            if breakout_short or not hma_rising or not vol_confirm:
+            # Long exit: trend change, volatility expansion, or breakout down
+            if not uptrend or not low_vol[i] or breakout_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: breakout above 20-day high OR HMA rising OR loss of volume
-            if breakout_long or hma_rising or not vol_confirm:
+            # Short exit: trend change, volatility expansion, or breakout up
+            if not downtrend or not low_vol[i] or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -126,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_HMA21_VolumeFilter_V2"
-timeframe = "4h"
+name = "12h_LowVolatilityBreakout_v1"
+timeframe = "12h"
 leverage = 1.0
