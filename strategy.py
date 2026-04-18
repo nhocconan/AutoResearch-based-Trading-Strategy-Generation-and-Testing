@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h Candlestick Strength + Daily Trend Filter
-Hypothesis: Strong daily closes with high close-to-open ratio indicate institutional conviction.
-Combined with 6h bullish/bearish candle strength (close near high/low) to enter in direction
-of daily trend. Works in bull via continuation and bear via mean reversion at extremes.
+6h Weekly Pivot + Volume Breakout with 1w Trend Filter
+Hypothesis: Weekly pivots provide strong support/resistance. Breakouts with volume confirmation
+and 1-week trend alignment capture momentum moves in both bull and bear markets. Weekly trend
+filter avoids counter-trend trades, reducing whipsaw in sideways markets.
 """
 
 import numpy as np
@@ -12,77 +12,89 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot and trend (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Daily close-to-open ratio (body strength)
-    body_size = np.abs(df_1d['close'].values - df_1d['open'].values)
-    candle_range = df_1d['high'].values - df_1d['low'].values
-    daily_body_ratio = np.where(candle_range > 0, body_size / candle_range, 0.0)
-    # Daily trend: strong bullish/bearish close
-    daily_bull_strong = (df_1d['close'].values > df_1d['open'].values) & (daily_body_ratio > 0.6)
-    daily_bear_strong = (df_1d['close'].values < df_1d['open'].values) & (daily_body_ratio > 0.6)
+    # Weekly OHLC for pivot calculation
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Align to 6h timeframe
-    daily_bull_strong_aligned = align_htf_to_ltf(prices, df_1d, daily_bull_strong.astype(float))
-    daily_bear_strong_aligned = align_htf_to_ltf(prices, df_1d, daily_bear_strong.astype(float))
+    # Calculate weekly pivot points (standard formula)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    # 6h candle strength: close near high/low
-    body_size_6h = np.abs(close - open_)
-    candle_range_6h = high - low
-    close_to_high = np.where(candle_range_6h > 0, (high - close) / candle_range_6h, 0.0)
-    close_to_low = np.where(candle_range_6h > 0, (close - low) / candle_range_6h, 0.0)
-    # Bullish 6h candle: close near high (small upper shadow)
-    bullish_6h = close_to_high < 0.2
-    # Bearish 6h candle: close near low (small lower shadow)
-    bearish_6h = close_to_low < 0.2
+    # Align weekly levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
+    
+    # 1-week EMA50 for trend filter
+    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume spike detection: current volume > 2.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_spike = volume > (vol_ma * 2.5)
+    
+    # Price breakout conditions
+    breakout_up = close > r1_aligned
+    breakout_down = close < s1_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup
+    start_idx = 100  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(daily_bull_strong_aligned[i]) or np.isnan(daily_bear_strong_aligned[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        daily_bull = daily_bull_strong_aligned[i] > 0.5
-        daily_bear = daily_bear_strong_aligned[i] > 0.5
-        bull_candle = bullish_6h[i]
-        bear_candle = bearish_6h[i]
+        trend = ema50_1w_aligned[i]
+        vol_ok = vol_spike[i]
+        price = close[i]
         
         if position == 0:
-            # Enter long: daily bullish strength + 6h bullish candle
-            if daily_bull and bull_candle:
+            # Enter long on volume spike + breakout above R1 + uptrend
+            if vol_ok and breakout_up[i] and price > trend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: daily bearish strength + 6h bearish candle
-            elif daily_bear and bear_candle:
+            # Enter short on volume spike + breakdown below S1 + downtrend
+            elif vol_ok and breakout_down[i] and price < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: daily turns bearish or 6h candle loses strength
-            if daily_bear or not bull_candle:
+            # Exit long on breakdown below S1 or trend change
+            if close[i] < s1_aligned[i] or price < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: daily turns bullish or 6h candle loses strength
-            if daily_bull or not bear_candle:
+            # Exit short on breakout above R1 or trend change
+            if close[i] > r1_aligned[i] or price > trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Candlestick_Strength_DailyTrend"
+name = "6h_Weekly_Pivot_Volume_Breakout_1wTrend"
 timeframe = "6h"
 leverage = 1.0
