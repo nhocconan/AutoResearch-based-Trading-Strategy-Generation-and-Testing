@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_VolumeTrend_v1
-Hypothesis: Use 4h Donchian breakout with volume confirmation and trend filter for directional entries. 
-Long when price breaks above Donchian upper band (20), volume > 1.5x 20-period average, and price > 4h EMA34 (trend filter).
-Short when price breaks below Donchian lower band (20), volume > 1.5x 20-period average, and price < 4h EMA34.
-Exit on opposite Donchian breakout. Uses 1d ADX > 25 to ensure trending market regime.
-Target: 20-40 trades/year by combining breakout with volume and trend filters to reduce false signals.
-Works in bull via long breakouts and in bear via short breakouts during downtrends.
+12h_Camarilla_R1_S1_Breakout_Volume_Regime_v1
+Hypothesis: On 12h timeframe, price breaks above Camarilla R1 or below S1 from prior 12h bar with volume > 1.5x 20-period average and choppy market filter (Choppiness Index > 61.8 for mean reversion). Long at R1 breakout, short at S1 breakout. Uses 1w EMA34 for trend filter: only long when price > weekly EMA34, short when price < weekly EMA34. Designed for low trade frequency (~15-25/year) to avoid fee drag, works in bull via trend-aligned breaks and in bear via mean reversion in chop.
 """
 
 import numpy as np
@@ -23,151 +18,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels and EMA
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get 12h data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 4h Donchian channels (20-period)
-    donch_len = 20
-    upper_4h = np.full_like(high_4h, np.nan)
-    lower_4h = np.full_like(low_4h, np.nan)
+    # Calculate Camarilla levels for each 12h bar
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    camarilla_width = 1.1 * (high_12h - low_12h) / 12.0
+    r1_12h = close_12h + camarilla_width
+    s1_12h = close_12h - camarilla_width
     
-    if len(high_4h) >= donch_len:
-        for i in range(donch_len, len(high_4h)):
-            upper_4h[i] = np.max(high_4h[i-donch_len:i])
-            lower_4h[i] = np.min(low_4h[i-donch_len:i])
+    # Align Camarilla levels to 12h timeframe (already aligned, but use for safety)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
-    # 4h EMA34 for trend filter
-    ema_len = 34
-    ema_4h = np.full_like(close_4h, np.nan)
-    if len(close_4h) >= ema_len:
-        multiplier = 2 / (ema_len + 1)
-        ema_4h[ema_len-1] = np.mean(close_4h[:ema_len])
-        for i in range(ema_len, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * multiplier) + (ema_4h[i-1] * (1 - multiplier))
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 34:
+        ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Align 4h indicators to 4h timeframe (same as primary)
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Get 1d data for ADX (trend strength filter)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # 1d ADX(14) calculation
-    adx_len = 14
-    if len(high_1d) >= adx_len * 2:
-        # True Range
-        tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                        np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                                   np.abs(low_1d[1:] - close_1d[:-1])))
-        tr = np.concatenate([[np.nan], tr])
+    # Choppiness Index on 12h (for regime filter)
+    def choppiness_index(high, low, close, period=14):
+        atr = np.full_like(high, np.nan)
+        tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period if not np.isnan(atr[i-1]) else tr[i]
+        # For first period values, use simple average
+        if len(high) >= period:
+            atr[period-1] = np.mean(tr[:period])
         
-        # Directional Movement
-        dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                           np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-        dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                            np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-        dm_plus = np.concatenate([[np.nan], dm_plus])
-        dm_minus = np.concatenate([[np.nan], dm_minus])
+        hhll = np.zeros_like(high)
+        llh = np.zeros_like(low)
+        for i in range(len(high)):
+            if i == 0:
+                hhll[i] = high[i]
+                llh[i] = low[i]
+            else:
+                hhll[i] = max(high[i], hhll[i-1])
+                llh[i] = min(low[i], llh[i-1])
         
-        # Smoothed values
-        atr = np.full_like(tr, np.nan)
-        dm_plus_smooth = np.full_like(dm_plus, np.nan)
-        dm_minus_smooth = np.full_like(dm_minus, np.nan)
-        
-        if len(tr) >= adx_len:
-            # Initial averages
-            atr[adx_len-1] = np.nanmean(tr[1:adx_len])
-            dm_plus_smooth[adx_len-1] = np.nanmean(dm_plus[1:adx_len])
-            dm_minus_smooth[adx_len-1] = np.nanmean(dm_minus[1:adx_len])
-            
-            # Wilder smoothing
-            for i in range(adx_len, len(tr)):
-                atr[i] = (atr[i-1] * (adx_len - 1) + tr[i]) / adx_len
-                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (adx_len - 1) + dm_plus[i]) / adx_len
-                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (adx_len - 1) + dm_minus[i]) / adx_len
-        
-        # DI and DX
-        di_plus = np.full_like(dm_plus_smooth, np.nan)
-        di_minus = np.full_like(dm_minus_smooth, np.nan)
-        dx = np.full_like(atr, np.nan)
-        
-        valid = (atr != 0) & ~np.isnan(atr)
-        di_plus[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
-        di_minus[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
-        
-        dx_valid = (di_plus + di_minus) != 0
-        dx[dx_valid & ~np.isnan(di_plus) & ~np.isnan(di_minus)] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
-        
-        # ADX: smoothed DX
-        adx_1d = np.full_like(dx, np.nan)
-        if len(dx) >= adx_len:
-            valid_dx = ~np.isnan(dx)
-            if np.sum(valid_dx) >= adx_len:
-                adx_1d[adx_len-1] = np.nanmean(dx[valid_dx][:adx_len])
-                for i in range(adx_len, len(dx)):
-                    if not np.isnan(dx[i]):
-                        adx_1d[i] = (adx_1d[i-1] * (adx_len - 1) + dx[i]) / adx_len
-    else:
-        adx_1d = np.full_like(close_1d, np.nan)
+        chop = np.full_like(high, np.nan)
+        for i in range(period, len(high)):
+            if hhll[i] > llh[i]:
+                sum_atr = np.sum(atr[i-period+1:i+1]) if i >= period else np.sum(atr[:i+1])
+                chop[i] = 100 * np.log10(sum_atr / (hhll[i] - llh[i])) / np.log10(period)
+        return chop
     
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    chop_12h = choppiness_index(high_12h, low_12h, close_12h, 14)
+    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
+    # Volume confirmation: volume > 1.5x 20-period average on 12h
+    vol_ma_12h = np.full_like(volume, np.nan)
     vol_period = 20
-    
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+            vol_ma_12h[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donch_len, ema_len, vol_period) + 1
+    start_idx = max(1, vol_period) + 1  # Need at least one 12h bar and vol MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(chop_12h_aligned[i]) or 
+            np.isnan(vol_ma_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
-        
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_12h[i]
         
-        if position == 0 and trending:
-            # Long: price breaks above Donchian upper + volume + price > EMA34 (uptrend)
-            if close[i] > upper_4h_aligned[i] and vol_confirm and close[i] > ema_4h_aligned[i]:
+        # Chop regime: only trade in choppy markets (Choppiness > 61.8) for mean reversion
+        in_chop = chop_12h_aligned[i] > 61.8
+        
+        if position == 0 and vol_confirm and in_chop:
+            # Long: price breaks above R1 and above weekly EMA (uptrend filter)
+            if close[i] > r1_12h_aligned[i] and close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + volume + price < EMA34 (downtrend)
-            elif close[i] < lower_4h_aligned[i] and vol_confirm and close[i] < ema_4h_aligned[i]:
+            # Short: price breaks below S1 and below weekly EMA (downtrend filter)
+            elif close[i] < s1_12h_aligned[i] and close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian lower
-            if close[i] < lower_4h_aligned[i]:
+            # Long exit: price breaks below S1 OR chop breaks down (trend emerging)
+            if close[i] < s1_12h_aligned[i] or chop_12h_aligned[i] < 38.2:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian upper
-            if close[i] > upper_4h_aligned[i]:
+            # Short exit: price breaks above R1 OR chop breaks down (trend emerging)
+            if close[i] > r1_12h_aligned[i] or chop_12h_aligned[i] < 38.2:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -175,6 +128,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_VolumeTrend_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
+EOF
