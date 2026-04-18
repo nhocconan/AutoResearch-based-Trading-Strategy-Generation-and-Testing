@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_MultiTimeframe_Trend_Follow_With_Volume_Confirmation
-Hypothesis: Combine 1d EMA trend filter with 4h Donchian breakout and volume confirmation to capture major trends while avoiding chop. Works in both bull and bear markets by using the 1d trend as the primary filter. Target 20-40 trades/year to minimize fee drag.
+6h_Turtle_Soup_Reversal_With_1d_Trend_Filter
+Hypothesis: Turtle Soup reversals (false breakouts of prior 6h highs/lows) combined with 1d EMA200 trend filter capture mean-reversion in chop and trend continuation in strong moves. Works in both bull/bear via trend alignment.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,61 +18,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (once before loop)
+    # 1-day EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # 4h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Prior 6-bar high/low for Turtle Soup setup
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    high_shift[0] = high[0]
+    low_shift[0] = low[0]
     
-    # 4h volume filter: >1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # 6-bar rolling max/min of prior high/low
+    roll_max = pd.Series(high_shift).rolling(window=6, min_periods=6).max().values
+    roll_min = pd.Series(low_shift).rolling(window=6, min_periods=6).min().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 50  # Warmup for EMA and Donchian
+    start_idx = 200  # Warmup for EMA200
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(volume_filter[i])):
+        if np.isnan(ema_200_aligned[i]) or np.isnan(roll_max[i]) or np.isnan(roll_min[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend = ema_1d_aligned[i]
-        upper = high_max[i]
-        lower = low_min[i]
-        vol_ok = volume_filter[i]
+        ema_trend = ema_200_aligned[i]
+        prior_high = roll_max[i]
+        prior_low = roll_min[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper in uptrend with volume
-            if price > upper and price > ema_trend and vol_ok:
+            # Turtle Soup Long: false breakdown below prior low, then reversal up
+            if low[i] < prior_low and close[i] > prior_low and close[i] > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower in downtrend with volume
-            elif price < lower and price < ema_trend and vol_ok:
+            # Turtle Soup Short: false breakout above prior high, then reversal down
+            elif high[i] > prior_high and close[i] < prior_high and close[i] < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price returns below Donchian lower or trend reverses
-            if price < lower or price < ema_trend:
+            # Exit long on close below prior low or trend reversal
+            if close[i] < prior_low or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns above Donchian upper or trend reverses
-            if price > upper or price > ema_trend:
+            # Exit short on close above prior high or trend reversal
+            if close[i] > prior_high or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_MultiTimeframe_Trend_Follow_With_Volume_Confirmation"
-timeframe = "4h"
+name = "6h_Turtle_Soup_Reversal_With_1d_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
