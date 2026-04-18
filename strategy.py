@@ -1,87 +1,64 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud + 1d Trend Filter + Volume Confirmation
-Hypothesis: Ichimoku provides a comprehensive trend system (Tenkan/Kijun cross, cloud support/resistance).
-Combined with 1d trend filter (price above/below 1d Kumo) and volume confirmation, it captures strong
-trends while avoiding false signals in ranging markets. Designed for 6h timeframe to balance signal
-quality and trade frequency.
+12h Donchian Breakout + Volume Spike + ATR Filter
+Hypothesis: Donchian channels identify breakouts with clear support/resistance. Combined with volume spikes (institutional participation) and ATR-based volatility filtering, this captures strong trending moves while avoiding chop. Works in both bull (breakouts up) and bear (breakdowns down) markets. Low frequency due to breakout requirement + volume filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
-    """Calculate Ichimoku Cloud components"""
-    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 over tenkan period
-    tenkan_high = pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max()
-    tenkan_low = pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min()
-    tenkan = (tenkan_high + tenkan_low) / 2
+def calculate_atr(high, low, close, period=14):
+    """Calculate Average True Range"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Kijun-sen (Base Line): (highest high + lowest low)/2 over kijun period
-    kijun_high = pd.Series(high).rolling(window=kijun, min_periods=kijun).max()
-    kijun_low = pd.Series(low).rolling(window=kijun, min_periods=kijun).min()
-    kijun = (kijun_high + kijun_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted kijun periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 over senkou period shifted kijun ahead
-    senkou_high = pd.Series(high).rolling(window=senkou, min_periods=senkou).max()
-    senkou_low = pd.Series(low).rolling(window=senkou, min_periods=senkou).min()
-    senkou_b = ((senkou_high + senkou_low) / 2)
-    
-    # Chikou Span (Lagging Span): Close shifted back kijun periods
-    chikou = close  # We'll handle shifting in alignment
-    
-    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values, chikou
+    atr = np.zeros_like(tr)
+    if len(tr) < period:
+        return atr
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    return atr
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku and trend filter
+    # Get 1d data for trend filter (optional, can be removed if too restrictive)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Ichimoku on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels (20-period) on 12h data directly
+    # We need at least 20 periods for Donchian
+    lookback = 20
+    upper_channel = np.full_like(high, np.nan)
+    lower_channel = np.full_like(low, np.nan)
     
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d, chikou_1d = calculate_ichimoku(
-        high_1d, low_1d, close_1d, tenkan=9, kijun=26, senkou=52
-    )
+    for i in range(lookback-1, len(high)):
+        upper_channel[i] = np.max(high[i-lookback+1:i+1])
+        lower_channel[i] = np.min(low[i-lookback+1:i+1])
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    # Calculate ATR for volatility filter
+    atr = calculate_atr(high, low, close, period=14)
     
-    # Calculate 1d trend filter: price above/below cloud
-    # Cloud top is max(senkou_a, senkou_b), cloud bottom is min(senkou_a, senkou_b)
-    cloud_top = np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
-    cloud_bottom = np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
-    price_above_cloud = close > cloud_top
-    price_below_cloud = close < cloud_bottom
-    
-    # Tenkan/Kijun cross signals
-    tenkan_above_kijun = tenkan_1d_aligned > kijun_1d_aligned
-    tenkan_below_kijun = tenkan_1d_aligned < kijun_1d_aligned
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume spike: current volume > 1.5x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1])
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
     vol_spike = volume > (vol_ma * 1.5)
@@ -89,42 +66,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Warmup for Ichimoku
+    start_idx = max(lookback-1, 20)  # Wait for Donchian and volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
+        # Avoid trading in extremely low volatility (choppy) markets
+        # Use ATR ratio to normalize volatility
+        if i >= 30:
+            atr_ma = np.mean(atr[i-29:i+1])
+            if atr[i] < 0.5 * atr_ma:  # Avoid very low volatility periods
+                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+                continue
+        
         if position == 0:
-            # Enter long: Tenkan crosses above Kijun AND price above cloud AND volume spike
-            if (tenkan_above_kijun[i] and 
-                price_above_cloud[i] and 
-                vol_spike[i]):
+            # Enter long: price breaks above upper Donchian channel + volume spike
+            if close[i] > upper_channel[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Tenkan crosses below Kijun AND price below cloud AND volume spike
-            elif (tenkan_below_kijun[i] and 
-                  price_below_cloud[i] and 
-                  vol_spike[i]):
+            # Enter short: price breaks below lower Donchian channel + volume spike
+            elif close[i] < lower_channel[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Tenkan crosses below Kijun OR price falls below cloud
-            if (tenkan_below_kijun[i] or 
-                close[i] < cloud_bottom[i]):
+            # Exit long: price crosses below lower channel or volatility drops significantly
+            if close[i] < lower_channel[i] or (i >= 30 and atr[i] < 0.3 * np.mean(atr[i-29:i+1])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Tenkan crosses above Kijun OR price rises above cloud
-            if (tenkan_above_kijun[i] or 
-                close[i] > cloud_top[i]):
+            # Exit short: price crosses above upper channel or volatility drops significantly
+            if close[i] > upper_channel[i] or (i >= 30 and atr[i] < 0.3 * np.mean(atr[i-29:i+1])):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_TrendFilter_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_VolumeSpike_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
