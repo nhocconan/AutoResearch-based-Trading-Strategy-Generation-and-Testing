@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_FundingRateMeanReversion_Zscore
-Hypothesis: BTC/ETH exhibit mean-reverting funding rates. Extreme positive funding (> +0.03%) indicates overleveraged longs, expect short-term reversal downward. Extreme negative funding (< -0.03%) indicates oversold shorts, expect bounce upward. Uses 30-day z-score of funding rate to detect extremes. Works in both bull and bear markets as funding extremes occur during all regimes. Low trade frequency expected (< 25/year) due to extreme threshold.
+12h_KAMA_Trend_With_RSI_Filter
+Hypothesis: Use 12h KAMA to filter trend direction, with RSI(14) < 30 for long and > 70 for short entries. KAMA adapts to market noise, reducing false signals in choppy markets. RSI extremes provide mean-reversion entries within the trend. Designed for low trade frequency on 12h timeframe to minimize fee drift while capturing high-probability reversals in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,74 +13,92 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load funding rate data (assumed available via external source - placeholder)
-    # In practice, funding rate would be loaded similarly to price data
-    # For this implementation, we simulate funding rate based on price action
-    # as a proxy: negative returns suggest negative funding pressure, etc.
-    # NOTE: Actual implementation would load funding rate parquet files
-    
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Proxy for funding rate pressure: look for exhaustion moves
-    # Calculate 3-day cumulative return to detect exhaustion
-    returns = np.diff(np.log(close), prepend=0)
-    cum_ret_3d = pd.Series(returns).rolling(window=3, min_periods=3).sum().values
+    # 12h KAMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 30-day z-score of 3-day cumulative returns
-    mean_30d = pd.Series(cum_ret_3d).rolling(window=30, min_periods=30).mean().values
-    std_30d = pd.Series(cum_ret_3d).rolling(window=30, min_periods=30).std().values
-    zscore = (cum_ret_3d - mean_30d) / (std_30d + 1e-10)
+    # Efficiency Ratio for KAMA
+    change = np.abs(np.diff(close_12h, k=10))  # 10-period change
+    abs_change = np.sum(np.abs(np.diff(close_12h)), axis=0)  # placeholder, will fix below
     
-    # Weekly trend filter (1w timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Simple trend: price above/below 20-period EMA on weekly
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Proper ER calculation
+    er = np.zeros_like(close_12h)
+    for i in range(10, len(close_12h)):
+        direction = np.abs(close_12h[i] - close_12h[i-10])
+        volatility = np.sum(np.abs(np.diff(close_12h[i-9:i+1])))
+        if volatility > 0:
+            er[i] = direction / volatility
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close_12h, np.nan)
+    kama[9] = close_12h[9]  # seed
+    for i in range(10, len(close_12h)):
+        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 35  # Need 30-day stats and weekly EMA
+    start_idx = max(14, 10)  # RSI and KAMA seed
     
     for i in range(start_idx, n):
-        if (np.isnan(zscore[i]) or 
-            np.isnan(ema_20_1w_aligned[i])):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        z = zscore[i]
-        weekly_trend = ema_20_1w_aligned[i]
         price = close[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: extremely negative funding pressure (oversold) AND above weekly EMA
-            if z < -2.0 and price > weekly_trend:
+            # Long: price above KAMA and RSI oversold
+            if price > kama_val and rsi_val < 30:
                 signals[i] = 0.25
                 position = 1
-            # Short: extremely positive funding pressure (overbought) AND below weekly EMA
-            elif z > 2.0 and price < weekly_trend:
+            # Short: price below KAMA and RSI overbought
+            elif price < kama_val and rsi_val > 70:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: funding pressure normalizes or trend breaks
-            if z > -0.5 or price < weekly_trend:
+            # Exit: price below KAMA or RSI overbought
+            if price < kama_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: funding pressure normalizes or trend breaks
-            if z < 0.5 or price > weekly_trend:
+            # Exit: price above KAMA or RSI oversold
+            if price > kama_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_FundingRateMeanReversion_Zscore"
-timeframe = "1d"
+name = "12h_KAMA_Trend_With_RSI_Filter"
+timeframe = "12h"
 leverage = 1.0
