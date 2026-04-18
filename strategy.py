@@ -30,12 +30,12 @@ def generate_signals(prices):
     # Calculate 34-period EMA on daily for trend filter
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all daily data to 12h timeframe (primary)
-    upper_channel_12h = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_12h = align_htf_to_ltf(prices, df_1d, lower_channel)
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align all daily data to 6h timeframe (primary)
+    upper_channel_6h = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_channel_6h = align_htf_to_ltf(prices, df_1d, lower_channel)
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 12h volume spike indicator (volume > 2.0x 50-period average)
+    # Calculate 6h volume spike indicator (volume > 2.0x 50-period average)
     vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -46,31 +46,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_channel_12h[i]) or np.isnan(lower_channel_12h[i]) or 
-            np.isnan(ema_34_12h[i])):
+        if (np.isnan(upper_channel_6h[i]) or np.isnan(lower_channel_6h[i]) or 
+            np.isnan(ema_34_6h[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter: price above/below EMA
-        uptrend = close[i] > ema_34_12h[i]
-        downtrend = close[i] < ema_34_12h[i]
+        uptrend = close[i] > ema_34_6h[i]
+        downtrend = close[i] < ema_34_6h[i]
         
         # Volume confirmation: require volume spike
         vol_confirmed = volume_spike[i]
         
         if position == 0:
             # Long: price breaks above upper Donchian channel with uptrend and volume spike
-            if close[i] > upper_channel_12h[i] and uptrend and vol_confirmed:
+            if close[i] > upper_channel_6h[i] and uptrend and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below lower Donchian channel with downtrend and volume spike
-            elif close[i] < lower_channel_12h[i] and downtrend and vol_confirmed:
+            elif close[i] < lower_channel_6h[i] and downtrend and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long exit: price crosses below lower Donchian channel OR trend reverses
-            if (close[i] < lower_channel_12h[i]) or (not uptrend):
+            if (close[i] < lower_channel_6h[i]) or (not uptrend):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
@@ -78,7 +78,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price crosses above upper Donchian channel OR trend reverses
-            if (close[i] > upper_channel_12h[i]) or (not downtrend):
+            if (close[i] > upper_channel_6h[i]) or (not downtrend):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -86,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_VolumeFilter_v1"
-timeframe = "12h"
+name = "6h_Donchian20_1dEMA34_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
