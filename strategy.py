@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_Adjusted
-Hypothesis: Camarilla pivot levels act as strong support/resistance. Price breaking through R1/S1 with volume indicates institutional breakout. Works in both bull (breakouts up) and bear (breakdowns down) by following price action. Uses volume confirmation to avoid false breakouts and limits trades to reduce fee drag.
-Adjusted: Increased volume multiplier to 2.5x and added price filter (price must be outside previous day's range) to reduce overtrading.
+12h_Camarilla_R1S1_Breakout_Volume
+Hypothesis: Camarilla pivot levels (R1/S1) act as strong support/resistance on daily timeframe.
+Price breaking through these levels on 12h with volume confirmation indicates institutional breakout.
+Works in both bull (breakouts up) and bear (breakdowns down) by following price action.
+Volume filter reduces false breakouts. Targets 12-37 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -41,37 +43,18 @@ def generate_signals(prices):
             camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
             camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
     
-    # Align to 4h timeframe (use previous day's levels)
+    # Align to 12h timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume confirmation: current volume > 2.5x 20-period average (increased from 1.8x)
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
             vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_spike = volume > (vol_ma * 2.5)
-    
-    # Price outside previous day's range filter
-    prev_day_high = np.zeros_like(close)
-    prev_day_low = np.zeros_like(close)
-    prev_day_high[0] = high[0]  # placeholder
-    prev_day_low[0] = low[0]
-    for i in range(1, len(df_1d)):
-        # Map daily index to 4h indices (approximate)
-        start_idx = i * 16  # 4h bars per day
-        end_idx = min((i + 1) * 16, n)
-        if start_idx < n:
-            prev_day_high[start_idx:end_idx] = high_1d[i-1]
-            prev_day_low[start_idx:end_idx] = low_1d[i-1]
-    # Forward fill for remaining bars
-    for i in range(1, n):
-        if prev_day_high[i] == 0:
-            prev_day_high[i] = prev_day_high[i-1]
-            prev_day_low[i] = prev_day_low[i-1]
-    price_outside_range = (high > prev_day_high) | (low < prev_day_low)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,12 +68,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and outside previous day's range
-            if close[i] > camarilla_r1_aligned[i] and vol_spike[i] and price_outside_range[i]:
+            # Long: price breaks above R1 with volume spike
+            if close[i] > camarilla_r1_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and outside previous day's range
-            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i] and price_outside_range[i]:
+            # Short: price breaks below S1 with volume spike
+            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
@@ -112,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Adjusted"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
