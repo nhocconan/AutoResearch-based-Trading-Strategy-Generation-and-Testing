@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_R1S1_Breakout_Volume_Spike_v1
-Hypothesis: Weekly Pivot R1/S1 breakouts with volume spike filter capture institutional momentum on 6B timeframe, working in both bull (breakout continuation) and bear (mean reversion at extremes) markets. Target: 15-30 trades/year to minimize fee drag.
+12h_TRIX_VolumeSpike_1dTrendFilter_v1
+Hypothesis: TRIX (triple EMA) momentum with volume spike and 1d EMA trend filter captures trend continuation in both bull and bear markets. Designed for 15-25 trades/year on 12h timeframe to minimize fee drag while capturing major moves.
 """
 
 import numpy as np
@@ -18,24 +18,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot calculation (R1, S1)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    close_1w = df_1w['close']
+    # 1d EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close']
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly pivot points
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = (2 * pivot_1w) - low_1w
-    s1_1w = (2 * pivot_1w) - high_1w
+    # TRIX: Triple EMA (15,15,15) - momentum oscillator
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    trix_values = trix.fillna(0).values
     
-    # Align weekly levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # Volume spike: >1.8x 24-period average (4 days on 6h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Volume spike: >2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
@@ -43,44 +41,43 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(trix_values[i]) or 
+            np.isnan(volume_spike[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
+        trix_val = trix_values[i]
+        ema_trend = ema_50_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: break above weekly R1 with volume spike
-            if price > r1 and vol_spike:
+            # Long: TRIX positive (bullish momentum) + above 1d EMA + volume spike
+            if trix_val > 0.1 and close[i] > ema_trend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S1 with volume spike
-            elif price < s1 and vol_spike:
+            # Short: TRIX negative (bearish momentum) + below 1d EMA + volume spike
+            elif trix_val < -0.1 and close[i] < ema_trend and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Maintain long position
             signals[i] = 0.25
-            # Exit: price breaks below weekly S1 (full reversal)
-            if price < s1:
+            # Exit: TRIX turns negative OR price breaks below 1d EMA
+            if trix_val < -0.05 or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Maintain short position
             signals[i] = -0.25
-            # Exit: price breaks above weekly R1 (full reversal)
-            if price > r1:
+            # Exit: TRIX turns positive OR price breaks above 1d EMA
+            if trix_val > 0.05 or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Weekly_Pivot_R1S1_Breakout_Volume_Spike_v1"
-timeframe = "6h"
+name = "12h_TRIX_VolumeSpike_1dTrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
