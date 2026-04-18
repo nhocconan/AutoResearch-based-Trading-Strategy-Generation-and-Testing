@@ -1,138 +1,143 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_DonchianBreakout
-Breakout strategy using weekly pivot levels for direction and daily Donchian breakouts for entry.
-- Long when price breaks above daily Donchian(20) high AND weekly pivot shows bullish bias (price > weekly pivot)
-- Short when price breaks below daily Donchian(20) low AND weekly pivot shows bearish bias (price < weekly pivot)
-- Exit when price breaks opposite Donchian band
-- Uses weekly pivot for trend filter to avoid counter-trend trades
-- Designed for 15-25 trades/year per symbol
-Works in both bull (captures uptrends) and bear (captures downtrends) markets
+12h_Camarilla_R1S1_Breakout_Volume_Regime
+Camarilla pivot breakout on 12h with volume confirmation and 1d chop regime filter.
+- Calculate Camarilla levels from prior 1d OHLC
+- Long when close breaks above R1 with volume > 1.5x 20-period average
+- Short when close breaks below S1 with volume > 1.5x 20-period average
+- Use 1d chop regime: only trade when CHOP(14) < 61.8 (trending market)
+- Fixed position size: 0.25
+- Designed for 12-25 trades/year per symbol
+Works in bull (breaks up) and bear (breaks down) markets
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_hlf
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot point and support/resistance levels."""
-    n = len(high)
-    pivot = np.full(n, np.nan)
-    r1 = np.full(n, np.nan)
-    s1 = np.full(n, np.nan)
-    r2 = np.full(n, np.nan)
-    s2 = np.full(n, np.nan)
-    r3 = np.full(n, np.nan)
-    s3 = np.full(n, np.nan)
+def calculate_chop(high, low, close, window=14):
+    """Calculate Choppiness Index."""
+    atr = np.zeros_like(high)
+    for i in range(1, len(high)):
+        atr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
     
-    for i in range(n):
-        pivot[i] = (high[i] + low[i] + close[i]) / 3.0
-        r1[i] = 2 * pivot[i] - low[i]
-        s1[i] = 2 * pivot[i] - high[i]
-        r2[i] = pivot[i] + (high[i] - low[i])
-        s2[i] = pivot[i] - (high[i] - low[i])
-        r3[i] = high[i] + 2 * (pivot[i] - low[i])
-        s3[i] = low[i] - 2 * (high[i] - pivot[i])
+    # True Range sum over window
+    tr_sum = np.zeros_like(high)
+    for i in range(window, len(high)):
+        tr_sum[i] = np.sum(atr[i-window+1:i+1])
     
-    return pivot, r1, r2, r3, s1, s2, s3
-
-def calculate_donchian(high, low, window=20):
-    """Calculate Donchian channels."""
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    # Highest high and lowest low over window
+    max_high = np.zeros_like(high)
+    min_low = np.zeros_like(high)
+    for i in range(window-1, len(high)):
+        max_high[i] = np.max(high[i-window+1:i+1])
+        min_low[i] = np.min(low[i-window+1:i+1])
     
-    for i in range(window-1, n):
-        upper[i] = np.max(high[i-window+1:i+1])
-        lower[i] = np.min(low[i-window+1:i+1])
-    
-    return upper, lower
+    # Chop calculation
+    chop = np.full_like(high, 50.0, dtype=float)
+    for i in range(window, len(high)):
+        if max_high[i] != min_low[i]:
+            chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(window)
+        else:
+            chop[i] = 50.0
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Get 1d data for Camarilla calculation and chop filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot
-    pivot_w, r1_w, r2_w, r3_w, s1_w, s2_w, s3_w = calculate_weekly_pivot(high_weekly, low_weekly, close_weekly)
+    # Calculate 1d Chop for regime filter
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, window=14)
+    chop_1d_12h = align_ltf_to_hlf(prices, df_1d, chop_1d)  # align 1d chop to 12h
     
-    # Align weekly pivot to 6h timeframe
-    pivot_w_6h = align_htf_to_ltf(prices, df_weekly, pivot_w)
-    r1_w_6h = align_htf_to_ltf(prices, df_weekly, r1_w)
-    r2_w_6h = align_htf_to_ltf(prices, df_weekly, r2_w)
-    r3_w_6h = align_htf_to_ltf(prices, df_weekly, r3_w)
-    s1_w_6h = align_htf_to_ltf(prices, df_weekly, s1_w)
-    s2_w_6h = align_htf_to_ltf(prices, df_weekly, s2_w)
-    s3_w_6h = align_htf_to_ltf(prices, df_weekly, s3_w)
-    
-    # Calculate daily Donchian for entry signals
-    df_daily = get_htf_data(prices, '1d')
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    
-    donchian_upper_d, donchian_lower_d = calculate_donchian(high_daily, low_daily, window=20)
-    
-    # Align daily Donchian to 6h timeframe
-    donchian_upper_6h = align_htf_to_ltf(prices, df_daily, donchian_upper_d)
-    donchian_lower_6h = align_htf_to_ltf(prices, df_daily, donchian_lower_d)
+    # Calculate volume average (20-period)
+    vol_ma = np.zeros(n)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += prices['volume'].iloc[i]
+        if i >= 20:
+            vol_sum -= prices['volume'].iloc[i-20]
+        if i >= 19:
+            vol_ma[i] = vol_sum / 20
+        else:
+            vol_ma[i] = np.nan
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need sufficient data for calculations
+    start_idx = 20  # need volume MA and chop
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(pivot_w_6h[i]) or np.isnan(donchian_upper_6h[i]) or np.isnan(donchian_lower_6h[i])):
+        # Get prior 1d OHLC for Camarilla (yesterday's data)
+        # Find index of prior 1d bar in 1d data
+        # Since we're on 12h timeframe, we need the most recent completed 1d bar
+        # We'll use the 1d data index that corresponds to prior day
+        
+        # Simple approach: use prior 1d bar's OHLC
+        # We need to ensure we're using completed 1d bar
+        # For 12h timeframe, we can use the 1d data that ended at least 12h ago
+        
+        # Calculate Camarilla levels from prior 1d bar
+        # We'll use a rolling window approach on 1d data
+        if i < 2:  # need at least 2 12h bars to get prior day
+            continue
+            
+        # Get index in 1d data for prior day
+        # This is approximate - we'll use the last available 1d bar
+        idx_1d = min(len(df_1d) - 1, i // 2)  # 2x 12h bars per day
+        if idx_1d < 1:
+            continue
+            
+        # Prior 1d OHLC (yesterday's completed bar)
+        phigh = high_1d[idx_1d - 1]
+        plow = low_1d[idx_1d - 1]
+        pclose = close_1d[idx_1d - 1]
+        
+        # Calculate Camarilla levels
+        range_val = phigh - plow
+        if range_val <= 0:
+            continue
+            
+        R1 = pclose + (range_val * 1.1 / 12)
+        S1 = pclose - (range_val * 1.1 / 12)
+        
+        # Current 12h bar data
+        close_price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
+        
+        # Check regime: only trade in trending markets (chop < 61.8)
+        if np.isnan(chop_1d_12h[i]) or chop_1d_12h[i] >= 61.8:
             signals[i] = 0.0
             continue
         
-        # Determine weekly pivot bias
-        bullish_bias = close[i] > pivot_w_6h[i]
-        bearish_bias = close[i] < pivot_w_6h[i]
+        # Volume confirmation: volume > 1.5x 20-period average
+        if np.isnan(vol_ma[i]) or volume <= 1.5 * vol_ma[i]:
+            signals[i] = 0.0
+            continue
         
-        # Check Donchian breakout on daily timeframe (aligned to 6h)
-        breakout_upper = close[i] > donchian_upper_6h[i]
-        breakout_lower = close[i] < donchian_lower_6h[i]
-        
-        if position == 0:
-            # Long: bullish bias + break above daily Donchian upper
-            if bullish_bias and breakout_upper:
-                signals[i] = 0.25
-                position = 1
-            # Short: bearish bias + break below daily Donchian lower
-            elif bearish_bias and breakout_lower:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Long exit: break below daily Donchian lower (reverse to short)
-            if breakout_lower:
-                signals[i] = -0.25  # reverse to short
-                position = -1
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: break above daily Donchian upper (reverse to long)
-            if breakout_upper:
-                signals[i] = 0.25  # reverse to long
-                position = 1
-            else:
-                signals[i] = -0.25
+        # Breakout conditions
+        if close_price > R1:
+            signals[i] = 0.25  # long
+        elif close_price < S1:
+            signals[i] = -0.25  # short
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_WeeklyPivot_DonchianBreakout"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
