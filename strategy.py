@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Direction_Trend_Confirmation"
-timeframe = "4h"
+name = "12h_Pivot_R1_S1_Breakout_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,79 +12,72 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Load daily data for pivot levels
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_period))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
+    # Calculate daily pivot and R1/S1 from previous daily bar
+    prev_close_d = df_1d['close'].shift(1).values
+    prev_high_d = df_1d['high'].shift(1).values
+    prev_low_d = df_1d['low'].shift(1).values
     
-    # Pad ER array
-    er_full = np.zeros(n)
-    er_full[er_period:] = er
+    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
+    range_d = prev_high_d - prev_low_d
+    R1_d = pivot_d + (range_d * 1.1 / 2)  # R1 = pivot + 0.55*range
+    S1_d = pivot_d - (range_d * 1.1 / 2)  # S1 = pivot - 0.55*range
     
-    # Smoothing constants
-    sc = (er_full * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Align daily R1/S1 to 12h (wait for daily close)
+    R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
+    S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
+    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
     
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Trend confirmation: 200-period SMA
-    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
-    
-    # Volume filter: current volume > 1.5 * 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (1.5 * vol_ma_50)
+    # Volume filter: current volume > 2.0 * 10-period average (5 days)
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_filter = volume > (2.0 * vol_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for SMA calculation
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(sma_200[i]) or np.isnan(vol_ma_50[i]):
+        # Skip if any required data is not available
+        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
+            np.isnan(pivot_d_aligned[i]) or np.isnan(vol_ma_10[i])):
             signals[i] = 0.0
             continue
         
-        kama_val = kama[i]
-        sma_val = sma_200[i]
         close_val = close[i]
+        R1_val = R1_d_aligned[i]
+        S1_val = S1_d_aligned[i]
+        pivot_val = pivot_d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: KAMA above SMA200 with volume
-            if kama_val > sma_val and vol_filter:
+            # Long: break above R1 with volume
+            if close_val > R1_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA below SMA200 with volume
-            elif kama_val < sma_val and vol_filter:
+            # Short: break below S1 with volume
+            elif close_val < S1_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA crosses below SMA200
-            if kama_val < sma_val:
+            # Long exit: price falls back below pivot
+            if close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA crosses above SMA200
-            if kama_val > sma_val:
+            # Short exit: price rises back above pivot
+            if close_val > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
