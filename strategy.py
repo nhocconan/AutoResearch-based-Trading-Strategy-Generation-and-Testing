@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-1h RSI Mean Reversion with 4h Trend Filter and Volume Spike
-Designed for low trade frequency (target: 15-37 trades/year) by combining:
-- RSI(14) extremes for mean reversion entries
-- 4h EMA trend filter to align with higher timeframe direction
-- Volume spike confirmation to filter noise
-- Session filter (08-20 UTC) to reduce noise
-Works in both bull and bear markets by only taking mean reversion in direction of 4h trend.
+4h Camarilla Pivot + Volume Spike + RSI Filter
+Uses Camarilla pivot levels from 1d timeframe with volume confirmation and RSI filter.
+Designed for low trade frequency with strong edge in both trending and ranging markets.
+Targets 25-40 trades per year by requiring confluence of price at pivot levels, volume spike, and RSI momentum.
 """
 
 import numpy as np
@@ -18,20 +15,49 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Calculate Camarilla levels (R3, R2, R1, S1, S2, S3) from previous day
+    # Using previous day's range to calculate today's levels
+    range_1d = high_1d - low_1d
+    # Shift by 1 to use previous day's data for today's levels
+    range_1d_prev = np.roll(range_1d, 1)
+    close_1d_prev = np.roll(close_1d, 1)
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
     
-    # RSI calculation
+    # First value will be invalid due to roll, handle with nans
+    range_1d_prev[0] = np.nan
+    close_1d_prev[0] = np.nan
+    high_1d_prev[0] = np.nan
+    low_1d_prev[0] = np.nan
+    
+    # Camarilla levels calculation
+    r3 = close_1d_prev + (range_1d_prev * 1.1 / 4)
+    r2 = close_1d_prev + (range_1d_prev * 1.1 / 6)
+    r1 = close_1d_prev + (range_1d_prev * 1.1 / 12)
+    s1 = close_1d_prev - (range_1d_prev * 1.1 / 12)
+    s2 = close_1d_prev - (range_1d_prev * 1.1 / 6)
+    s3 = close_1d_prev - (range_1d_prev * 1.1 / 4)
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # RSI calculation (14-period)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -40,63 +66,59 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike detection (2x 4-period average)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume spike detection (1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
+    entry_price = 0.0
     
-    start_idx = 34  # need enough history for EMA and RSI
+    start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-        
-        rsi_val = rsi[i]
-        ema_trend = ema_34_4h_aligned[i]
         price = close[i]
         
         if position == 0:
-            # Long: RSI oversold (<30) with volume spike and price above 4h EMA (uptrend)
-            if (rsi_val < 30 and 
+            # Long: price at S1 level with volume spike and RSI > 50 (bullish momentum)
+            if (abs(price - s1_aligned[i]) < (s1_aligned[i] * 0.001) and  # Within 0.1% of S1
                 volume_spike[i] and 
-                price > ema_trend):
-                signals[i] = 0.20
+                rsi[i] > 50):
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) with volume spike and price below 4h EMA (downtrend)
-            elif (rsi_val > 70 and 
+                entry_price = price
+            # Short: price at R1 level with volume spike and RSI < 50 (bearish momentum)
+            elif (abs(price - r1_aligned[i]) < (r1_aligned[i] * 0.001) and  # Within 0.1% of R1
                   volume_spike[i] and 
-                  price < ema_trend):
-                signals[i] = -0.20
+                  rsi[i] < 50):
+                signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long position: hold until RSI returns to neutral or trend changes
-            signals[i] = 0.20
-            if rsi_val >= 50 or price < ema_trend:
+            # Long position management
+            signals[i] = 0.25
+            # Exit: price reaches S2 (support) or RSI turns bearish
+            if price <= s2_aligned[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position: hold until RSI returns to neutral or trend changes
-            signals[i] = -0.20
-            if rsi_val <= 50 or price > ema_trend:
+            # Short position management
+            signals[i] = -0.25
+            # Exit: price reaches R2 (resistance) or RSI turns bullish
+            if price >= r2_aligned[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_RSI_MeanReversion_4hEMA34_VolumeSpike_Session"
-timeframe = "1h"
+name = "4h_Camarilla_Pivot_Volume_Spike_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
