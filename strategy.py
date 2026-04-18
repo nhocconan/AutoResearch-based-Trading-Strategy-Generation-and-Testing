@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter
-Hypothesis: Uses KAMA(10) to capture trend direction on daily timeframe. 
-Enters long when price > KAMA and volume > 1.5x 20-day average, short when price < KAMA with volume confirmation.
-Designed for low trade frequency (~10-20/year) with trend-following capability in both bull and bear markets.
-KAMA adapts to market noise, reducing whipsaws in choppy conditions while capturing sustained trends.
+6h_ElderRay_ZeroLine_Cross
+Hypothesis: Uses Elder Ray Index (Bull/Bear Power) with zero-line cross and EMA(13) trend filter on 6h timeframe.
+Bull Power = High - EMA(13), Bear Power = Low - EMA(13).
+Goes long when Bull Power crosses above zero with rising EMA(13), short when Bear Power crosses below zero with falling EMA(13).
+Includes volume confirmation (volume > 1.5x 20-period average) to avoid false signals.
+Designed for low-to-moderate trade frequency (~15-30/year) and works in both bull and bear markets by capturing momentum shifts.
 """
 
 import numpy as np
@@ -16,33 +17,28 @@ def generate_signals(prices):
     if n < 30:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA(10) calculation
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, 10))  # |close[i] - close[i-10]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |diff| over 10 periods
-    
-    # Handle array dimensions
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    
-    # ER = change / volatility, handle division by zero
-    er = np.divide(change, volatility, out=np.full_like(change, np.nan), where=volatility!=0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # for 2-period EMA
-    slow_sc = 2 / (30 + 1)  # for 30-period EMA
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
+    # EMA(13) for trend and power calculation
+    ema13 = np.full(n, np.nan)
+    k = 2 / (13 + 1)
+    for i in range(13, n):
+        if i == 13:
+            ema13[i] = np.mean(close[0:14])
         else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+            ema13[i] = close[i] * k + ema13[i-1] * (1 - k)
+    
+    # Elder Ray: Bull Power and Bear Power
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # EMA13 slope (trend direction)
+    ema13_slope = np.full(n, np.nan)
+    for i in range(14, n):
+        ema13_slope[i] = ema13[i] - ema13[i-1]
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -53,34 +49,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup
+    start_idx = 25  # Warmup
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema13_slope[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price > KAMA with volume spike
-            if close[i] > kama[i] and vol_spike[i]:
+            # Long: Bull Power crosses above zero with rising EMA13 and volume spike
+            if bull_power[i] > 0 and bull_power[i-1] <= 0 and ema13_slope[i] > 0 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA with volume spike
-            elif close[i] < kama[i] and vol_spike[i]:
+            # Short: Bear Power crosses below zero with falling EMA13 and volume spike
+            elif bear_power[i] < 0 and bear_power[i-1] >= 0 and ema13_slope[i] < 0 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price < KAMA
-            if close[i] < kama[i]:
+            # Exit: Bull Power crosses below zero or EMA13 turns down
+            if bull_power[i] <= 0 or ema13_slope[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price > KAMA
-            if close[i] > kama[i]:
+            # Exit: Bear Power crosses above zero or EMA13 turns up
+            if bear_power[i] >= 0 or ema13_slope[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_Filter"
-timeframe = "1d"
+name = "6h_ElderRay_ZeroLine_Cross"
+timeframe = "6h"
 leverage = 1.0
