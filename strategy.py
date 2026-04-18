@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_S1R1_Breakout_VolumeSpike_1dTrend_v1
-Hypothesis: Daily Camarilla S1/R1 levels act as strong support/resistance on 12h timeframe.
-Breakouts with volume spike and daily EMA(34) trend filter capture momentum while minimizing trades.
-Target: 12-37 trades/year on 12h timeframe.
+4h_Pivot_S1R1_Breakout_VolumeSpike_1dTrend_v4
+Hypothesis: Daily pivot S1/R1 levels act as strong support/resistance. Breakouts with volume spike and daily EMA(34) trend filter capture momentum. Added tighter volume requirement and minimum holding period to reduce trade frequency and improve quality. Target: 15-25 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -20,28 +18,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation and EMA (once before loop)
+    # Get daily data for pivot calculation and EMA (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily pivot points using standard formula
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
     
-    # Pivot point
     pivot = (high_1d + low_1d + close_1d) / 3
-    # Camarilla levels
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
     # Shift by 1 to use previous day's levels only
-    r1_prev = np.roll(r1, 1)
-    s1_prev = np.roll(s1, 1)
-    r1_prev[0] = np.nan
-    s1_prev[0] = np.nan
+    r1_prev = r1.shift(1).values
+    s1_prev = s1.shift(1).values
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
     
@@ -49,7 +42,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR for volatility filter (14-period on 12h)
+    # ATR for volatility filter (14-period)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -61,9 +54,9 @@ def generate_signals(prices):
     atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     volatility_filter = atr > atr_ma
     
-    # Volume spike: 2.5x 20-period average on 12h (tighter to reduce trades)
+    # Volume spike: 3.0x 20-period average on 4h (tighter than before to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (3.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -101,8 +94,8 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Minimum holding period: 2 bars (24 hours for 12h)
-            if bars_since_entry < 2:
+            # Minimum holding period: 4 bars (16 hours for 4h)
+            if bars_since_entry < 4:
                 signals[i] = 0.25
                 bars_since_entry += 1
             else:
@@ -114,8 +107,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
         
         elif position == -1:
-            # Minimum holding period: 2 bars (24 hours for 12h)
-            if bars_since_entry < 2:
+            # Minimum holding period: 4 bars (16 hours for 4h)
+            if bars_since_entry < 4:
                 signals[i] = -0.25
                 bars_since_entry += 1
             else:
@@ -128,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_S1R1_Breakout_VolumeSpike_1dTrend_v1"
-timeframe = "12h"
+name = "4h_Pivot_S1R1_Breakout_VolumeSpike_1dTrend_v4"
+timeframe = "4h"
 leverage = 1.0
