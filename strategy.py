@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_WK1_Trend_Momentum_v1
-Hypothesis: Use 1w EMA34 for trend direction and 1d RSI for momentum confirmation on 12h timeframe. 
-Go long when price > 1w EMA34 AND 1d RSI > 55, short when price < 1w EMA34 AND 1d RSI < 45. 
-Requires volume > 1.5x 20-period average for confirmation. Target: 15-30 trades/year by combining multiple filters to reduce noise. 
-Works in bull markets via trend following and in bear via short signals. 
-Multi-timeframe: 1w trend (HTF), 1d momentum (MTF), 12h execution (LTF).
+4h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v1
+Hypothesis: Use daily Camarilla pivot levels (R1, S1) for breakout signals on 4h timeframe.
+Go long when price breaks above R1 with volume confirmation and favorable regime (Choppiness Index > 61.8 for mean-reversion or ADX < 20 for ranging).
+Go short when price breaks below S1 with same filters.
+Uses volume > 1.5x 20-period average for confirmation.
+Designed to work in both bull and bear markets by adapting to regime: in ranging markets (high Chop), fade breakouts; in trending markets (low Chop), follow breakouts.
+Target: 20-40 trades/year by combining multiple filters to avoid overtrading.
 """
 
 import numpy as np
@@ -22,52 +23,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # 1w EMA34
-    ema_len = 34
-    ema_1w = np.full_like(close_1w, np.nan)
-    
-    if len(close_1w) >= ema_len:
-        # Use pandas EMA for proper calculation
-        ema_series = pd.Series(close_1w).ewm(span=ema_len, adjust=False).mean()
-        ema_1w = ema_series.values
-    
-    # Align 1w EMA34 to 12h timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Get 1d data for RSI
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d RSI(14)
-    rsi_period = 14
-    rsi_1d = np.full_like(close_1d, np.nan)
+    # Calculate Camarilla pivot levels for each day
+    # R1 = Close + 1.1*(High-Low)/12
+    # S1 = Close - 1.1*(High-Low)/12
+    camarilla_width = 1.1 * (high_1d - low_1d) / 12
+    r1_1d = close_1d + camarilla_width
+    s1_1d = close_1d - camarilla_width
     
-    if len(close_1d) >= rsi_period + 1:
-        delta = np.diff(close_1d)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(close_1d, np.nan)
-        avg_loss = np.full_like(close_1d, np.nan)
-        
-        # First average
-        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
-        
-        # Wilder smoothing
-        for i in range(rsi_period + 1, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_1d = 100 - (100 / (1 + rs))
+    # Align Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Align 1d RSI to 12h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Get weekly data for regime filter (Choppiness Index)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Choppiness Index (14-period)
+    chop_period = 14
+    chop_1w = np.full_like(close_1w, np.nan)
+    
+    if len(close_1w) >= chop_period + 1:
+        atr_1w = np.full_like(close_1w, np.nan)
+        for i in range(1, len(close_1w)):
+            tr = max(
+                high_1w[i] - low_1w[i],
+                abs(high_1w[i] - close_1w[i-1]),
+                abs(low_1w[i] - close_1w[i-1])
+            )
+            if i == 1:
+                atr_1w[i] = tr
+            else:
+                atr_1w[i] = (atr_1w[i-1] * (chop_period - 1) + tr) / chop_period
+        
+        # Sum of true ranges over chop_period
+        tr_sum = np.full_like(close_1w, np.nan)
+        for i in range(chop_period, len(close_1w)):
+            tr_sum[i] = np.sum(atr_1w[i-chop_period+1:i+1])
+        
+        # Choppiness Index formula
+        for i in range(chop_period, len(close_1w)):
+            if tr_sum[i] > 0:
+                chop_1w[i] = 100 * np.log10(tr_sum[i] / (chop_period * atr_1w[i])) / np.log10(chop_period)
+    
+    # Align Choppiness Index to 4h timeframe
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -77,51 +84,59 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
-    # Time-based filters
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    # Avoid low liquidity hours: 22-06 UTC (6 hours)
-    # Active hours: 06-22 UTC (16 hours)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(ema_len, rsi_period, vol_period) + 1
+    start_idx = max(vol_period, chop_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(chop_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Time filter: avoid 22-06 UTC (low liquidity)
-        hour = hours[i]
-        in_active_hours = 6 <= hour < 22
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        if position == 0 and in_active_hours:
-            # Long: price > 1w EMA34 AND 1d RSI > 55 AND volume confirmation
-            if close[i] > ema_1w_aligned[i] and rsi_1d_aligned[i] > 55 and vol_confirm:
-                signals[i] = 0.25
-                position = 1
-            # Short: price < 1w EMA34 AND 1d RSI < 45 AND volume confirmation
-            elif close[i] < ema_1w_aligned[i] and rsi_1d_aligned[i] < 45 and vol_confirm:
-                signals[i] = -0.25
-                position = -1
+        # Regime filter: Choppiness Index > 61.8 = ranging (mean-revert), < 38.2 = trending
+        chop_value = chop_1w_aligned[i]
+        is_ranging = chop_value > 61.8
+        is_trending = chop_value < 38.2
+        
+        if position == 0 and vol_confirm:
+            # In ranging market: fade breakouts (sell at R1, buy at S1)
+            # In trending market: follow breakouts (buy at R1, sell at S1)
+            if is_ranging:
+                # Fade R1 (sell at resistance)
+                if close[i] > r1_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+                # Fade S1 (buy at support)
+                elif close[i] < s1_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            elif is_trending:
+                # Follow R1 breakout (buy)
+                if close[i] > r1_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Follow S1 breakdown (sell)
+                elif close[i] < s1_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: price < 1w EMA34 OR 1d RSI < 40
-            if close[i] < ema_1w_aligned[i] or rsi_1d_aligned[i] < 40:
+            # Long exit: price reaches opposite S1 level or chop becomes extreme ranging
+            if close[i] < s1_1d_aligned[i] or (chop_value > 70 and is_ranging):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > 1w EMA34 OR 1d RSI > 60
-            if close[i] > ema_1w_aligned[i] or rsi_1d_aligned[i] > 60:
+            # Short exit: price reaches opposite R1 level or chop becomes extreme ranging
+            if close[i] > r1_1d_aligned[i] or (chop_value > 70 and is_ranging):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -129,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WK1_Trend_Momentum_v1"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
