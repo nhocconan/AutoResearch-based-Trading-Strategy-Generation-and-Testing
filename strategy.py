@@ -1,32 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1_S1_Breakout_Volume_Regime_V2
-Improved version with stricter entry criteria to reduce trade frequency:
-- Long when price breaks above R1 with volume > 1.5x 20-period average AND price > weekly EMA34
-- Short when price breaks below S1 with volume > 1.5x 20-period average AND price < weekly EMA34
-- Exit only on trend reversal (cross weekly EMA34) to avoid whipsaw
-- Added minimum hold period of 3 bars to reduce churn
+1h_StructureMomentum_WithTrendFilter_V1
+1h momentum with 4h/1d trend and structure filter:
+- Long: price > 4h EMA50 AND price > 1d EMA50 AND close > open (bullish candle)
+- Short: price < 4h EMA50 AND price < 1d EMA50 AND close < open (bearish candle)
+- Exit when trend alignment breaks
+- Volume filter: volume > 1.2x 20-period average
+- Designed for 15-35 trades/year per symbol
+Works in bull (follow 4h/1d uptrend) and bear (follow 4h/1d downtrend)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close arrays."""
-    n = len(high)
-    R1 = np.full(n, np.nan)
-    S1 = np.full(n, np.nan)
-    PP = np.full(n, np.nan)
-    
-    for i in range(n):
-        if np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i]):
-            continue
-        PP[i] = (high[i] + low[i] + close[i]) / 3
-        R1[i] = close[i] + (high[i] - low[i]) * 1.1 / 12
-        S1[i] = close[i] - (high[i] - low[i]) * 1.1 / 12
-    
-    return PP, R1, S1
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,86 +23,80 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get weekly data for trend filter (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate weekly EMA34
-    close_1w_series = pd.Series(close_1w)
-    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 4h EMA50
+    close_4h_series = pd.Series(close_4h)
+    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate daily Camarilla levels
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    PP_1d, R1_1d, S1_1d = calculate_camarilla(high_1d, low_1d, close_1d)
-    
-    # Align daily Camarilla to 12h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    # Calculate 1d EMA50
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = 40  # need 20 for volume MA + buffer
+    start_idx = 50  # need 50 for EMA + buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
+        # Volume filter: current volume > 1.2x 20-period average
+        volume_ok = volume[i] > 1.2 * vol_ma[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_ok = volume[i] > 1.5 * vol_ma[i]
+        # Trend alignment
+        above_both_emas = close[i] > ema_50_4h_aligned[i] and close[i] > ema_50_1d_aligned[i]
+        below_both_emas = close[i] < ema_50_4h_aligned[i] and close[i] < ema_50_1d_aligned[i]
         
-        # Trend filter: price relative to weekly EMA34
-        price_above_ema = close[i] > ema_34_1w_aligned[i]
-        price_below_ema = close[i] < ema_34_1w_aligned[i]
+        # Candle direction
+        bullish_candle = close[i] > open_price[i]
+        bearish_candle = close[i] < open_price[i]
         
         if position == 0:
-            # Long: price breaks above R1 + volume + trend
-            if bars_since_entry >= 3 and close[i] > R1_1d_aligned[i] and volume_ok and price_above_ema:
-                signals[i] = 0.25
+            # Long: above both EMAs + bullish candle + volume
+            if above_both_emas and bullish_candle and volume_ok:
+                signals[i] = 0.20
                 position = 1
-                bars_since_entry = 0
-            # Short: price breaks below S1 + volume + trend
-            elif bars_since_entry >= 3 and close[i] < S1_1d_aligned[i] and volume_ok and price_below_ema:
-                signals[i] = -0.25
+            # Short: below both EMAs + bearish candle + volume
+            elif below_both_emas and bearish_candle and volume_ok:
+                signals[i] = -0.20
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            # Long exit: only on trend reversal (price crosses below weekly EMA34)
-            if close[i] < ema_34_1w_aligned[i]:
+            # Long exit: trend alignment breaks or bearish candle with volume
+            if not above_both_emas or (bearish_candle and volume_ok):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: only on trend reversal (price crosses above weekly EMA34)
-            if close[i] > ema_34_1w_aligned[i]:
+            # Short exit: trend alignment breaks or bullish candle with volume
+            if not below_both_emas or (bullish_candle and volume_ok):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_Regime_V2"
-timeframe = "12h"
+name = "1h_StructureMomentum_WithTrendFilter_V1"
+timeframe = "1h"
 leverage = 1.0
