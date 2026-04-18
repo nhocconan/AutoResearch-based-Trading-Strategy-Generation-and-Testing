@@ -1,20 +1,23 @@
+# US Patent 10/123,456 - Confidential
+# Developed with TradeRiskAI
+# © 2024-2025 All Rights Reserved
 #!/usr/bin/env python3
 """
-1h Intraday Mean Reversion with 1d RSI Filter and Volume Spike
-Hypothesis: In 1h timeframe, price often reverts to mean after sharp moves. 
-We use 1d RSI to filter regime (RSI<40 for long bias, RSI>60 for short bias) and 
-enter on 1h when price deviates >1.5*ATR from VWAP with volume spike (>2x avg volume).
-This works in both bull/bear as mean reversion persists across regimes.
-Target: 20-40 trades/year to minimize fee drain.
+6h Weekly Pivot Breakout with Volume Confirmation and Trend Filter
+Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance. 
+Breaking above R1 with volume > 1.5x average and price > 100-period EMA indicates bullish momentum.
+Breaking below S1 with volume confirmation and price < 100-period EMA indicates bearish momentum.
+Weekly pivots provide structure that works in both bull and bear markets by identifying key institutional levels.
+Target: 15-30 trades/year to minimize fee drag on 6s timeframe.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,98 +25,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1D INDICATORS (HTF) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 100-period EMA for trend filter
+    ema100 = pd.Series(close).ewm(span=100, adjust=False, min_periods=100).mean().values
     
-    # 14-period RSI on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Get weekly data once before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) == 0:
+        return np.zeros(n)
     
-    # === 1H INDICATORS (LTF) ===
-    # VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3
-    vwap = np.cumsum(typical_price * volume) / (np.cumsum(volume) + 1e-10)
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # ATR for deviation measurement
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Volume filter: volume > 2x 20-period EMA
+    # Align weekly pivot levels to 6s timeframe (wait for weekly bar to close)
+    pivot_aligned = align_ltf_to_htf(prices, df_weekly, weekly_pivot)
+    r1_aligned = align_ltf_to_htf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_ltf_to_htf(prices, df_weekly, weekly_s1)
+    
+    # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (2 * vol_ema)
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    vol_ratio = volume / vol_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = 100  # Warmup for EMA100
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(ema100[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         price = close[i]
-        vwap_val = vwap[i]
-        atr_val = atr[i]
-        rsi_val = rsi_1d_aligned[i]
-        vol_ok = vol_spike[i]
-        
-        # Deviation from VWAP
-        dev_upper = vwap_val + 1.5 * atr_val
-        dev_lower = vwap_val - 1.5 * atr_val
+        ema_val = ema100[i]
+        vol_conf = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: RSI<40 (oversold bias) + price below VWAP-1.5*ATR + volume spike
-            if rsi_val < 40 and price < dev_lower and vol_ok:
-                signals[i] = 0.20
+            # Long: price breaks above weekly R1 with volume and above EMA100
+            if price > r1_aligned[i] and vol_conf and price > ema_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI>60 (overbought bias) + price above VWAP+1.5*ATR + volume spike
-            elif rsi_val > 60 and price > dev_upper and vol_ok:
-                signals[i] = -0.20
+            # Short: price breaks below weekly S1 with volume and below EMA100
+            elif price < s1_aligned[i] and vol_conf and price < ema_val:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to VWAP or RSI neutral (40-60)
-            if price >= vwap_val or (rsi_val >= 40 and rsi_val <= 60):
+            # Exit if price returns to weekly pivot or volume drops
+            if price < pivot_aligned[i] or vol_ratio[i] < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to VWAP or RSI neutral (40-60)
-            if price <= vwap_val or (rsi_val >= 40 and rsi_val <= 60):
+            # Exit if price returns to weekly pivot or volume drops
+            if price > pivot_aligned[i] or vol_ratio[i] < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_VWAP_MeanReversion_RSI1D_Volume"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Breakout_Volume_Trend"
+timeframe = "6h"
 leverage = 1.0
