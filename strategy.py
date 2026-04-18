@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Stochastic_RSI_Trend_Signal
-Hypothesis: Use Stochastic RSI on daily timeframe to identify overbought/oversold conditions with trend confirmation from 1-week EMA. Enter long when StochRSI crosses above 20 in an uptrend (price > weekly EMA), short when StochRSI crosses below 80 in a downtrend (price < weekly EMA). Uses volume confirmation to avoid false signals. Designed for low frequency (target 10-20 trades/year) to minimize fee drag while capturing major trend reversals in both bull and bear markets.
+4h_12h_1d_SMA_Crossover_Volume_Strategy
+Hypothesis: Use 12h SMA(34) trend as primary filter, with 4h SMA(10) crossover for entry timing, and volume confirmation (>1.8x 20-period average). This avoids whipsaws by requiring alignment between 12h trend and 4h momentum. Works in bull markets via long entries when 12h trend up and 4h SMA crosses above; in bear markets via short entries when 12h trend down and 4h SMA crosses below. Targets 20-30 trades/year with strict conditions.
 """
 
 import numpy as np
@@ -18,119 +18,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Stochastic RSI
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for SMA trend (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Stochastic RSI (14, 14, 3, 3)
-    rsi_period = 14
-    stoch_period = 14
-    k_period = 3
-    d_period = 3
+    # Calculate 12h SMA(34)
+    sma_12h = np.full_like(close_12h, np.nan)
+    for i in range(33, len(close_12h)):
+        sma_12h[i] = np.mean(close_12h[i-33:i+1])
     
-    # RSI calculation
-    def calculate_rsi(close_prices, period):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close_prices)
-        avg_loss = np.zeros_like(close_prices)
-        
-        avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
-        avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
-        
-        for i in range(rsi_period+1, len(close_prices)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Align 12h SMA to 4h timeframe
+    sma_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_12h)
     
-    rsi = calculate_rsi(close_1d, rsi_period)
+    # Calculate 4h SMA(10) and SMA(30) for crossover
+    sma_10 = np.full(n, np.nan)
+    sma_30 = np.full(n, np.nan)
+    for i in range(9, n):
+        sma_10[i] = np.mean(close[i-9:i+1])
+    for i in range(29, n):
+        sma_30[i] = np.mean(close[i-29:i+1])
     
-    # Stochastic of RSI
-    stoch_rsi = np.full_like(close_1d, np.nan)
-    for i in range(stoch_period-1, len(rsi)):
-        min_rsi = np.min(rsi[i-stoch_period+1:i+1])
-        max_rsi = np.max(rsi[i-stoch_period+1:i+1])
-        if max_rsi - min_rsi != 0:
-            stoch_rsi[i] = (rsi[i] - min_rsi) / (max_rsi - min_rsi) * 100
-        else:
-            stoch_rsi[i] = 50.0
-    
-    # %K and %D
-    k = np.full_like(close_1d, np.nan)
-    d = np.full_like(close_1d, np.nan)
-    for i in range(k_period-1, len(stoch_rsi)):
-        k[i] = np.mean(stoch_rsi[i-k_period+1:i+1])
-    for i in range(d_period-1, len(k)):
-        d[i] = np.mean(k[i-d_period+1:i+1])
-    
-    # Get 1w data for trend filter (EMA)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA (20-period)
-    ema_1w = np.full_like(close_1w, np.nan)
-    multiplier = 2 / (20 + 1)
-    ema_1w[19] = np.mean(close_1w[:20])
-    for i in range(20, len(close_1w)):
-        ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
-    
-    # Align indicators to 1d timeframe
-    stoch_k_aligned = align_htf_to_ltf(prices, df_1d, k)
-    stoch_d_aligned = align_htf_to_ltf(prices, df_1d, d)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation: current volume > 1.5 x 20-day average
+    # Volume confirmation: current volume > 1.8 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # need Stochastic and volume MA
+    start_idx = 30  # need SMA30
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(stoch_k_aligned[i]) or np.isnan(stoch_d_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(sma_12h_aligned[i]) or np.isnan(sma_10[i]) or 
+            np.isnan(sma_30[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: StochRSI crosses above 20, price above weekly EMA, with volume
-            if (stoch_k_aligned[i] > 20 and stoch_k_aligned[i-1] <= 20 and
-                close[i] > ema_1w_aligned[i] and vol_confirm[i]):
+            # Long entry: 12h uptrend (close > SMA), 4h SMA10 crosses above SMA30, with volume
+            if (close[i] > sma_12h_aligned[i] and 
+                sma_10[i] > sma_30[i] and 
+                sma_10[i-1] <= sma_30[i-1] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: StochRSI crosses below 80, price below weekly EMA, with volume
-            elif (stoch_k_aligned[i] < 80 and stoch_k_aligned[i-1] >= 80 and
-                  close[i] < ema_1w_aligned[i] and vol_confirm[i]):
+            # Short entry: 12h downtrend (close < SMA), 4h SMA10 crosses below SMA30, with volume
+            elif (close[i] < sma_12h_aligned[i] and 
+                  sma_10[i] < sma_30[i] and 
+                  sma_10[i-1] >= sma_30[i-1] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: StochRSI crosses above 80 (overbought) or trend change
-            if (stoch_k_aligned[i] > 80 and stoch_k_aligned[i-1] <= 80) or \
-               close[i] < ema_1w_aligned[i]:
+            # Long exit: 12h trend turns down OR 4h SMA10 crosses below SMA30
+            if (close[i] < sma_12h_aligned[i] or 
+                (sma_10[i] < sma_30[i] and sma_10[i-1] >= sma_30[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: StochRSI crosses below 20 (oversold) or trend change
-            if (stoch_k_aligned[i] < 20 and stoch_k_aligned[i-1] >= 20) or \
-               close[i] > ema_1w_aligned[i]:
+            # Short exit: 12h trend turns up OR 4h SMA10 crosses above SMA30
+            if (close[i] > sma_12h_aligned[i] or 
+                (sma_10[i] > sma_30[i] and sma_10[i-1] <= sma_30[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -138,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Stochastic_RSI_Trend_Signal"
-timeframe = "1d"
+name = "4h_12h_1d_SMA_Crossover_Volume_Strategy"
+timeframe = "4h"
 leverage = 1.0
