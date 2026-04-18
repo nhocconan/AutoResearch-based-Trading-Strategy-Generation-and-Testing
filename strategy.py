@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_TrendBreakout_1wEMA40_Volume
-Hypothesis: Daily breakouts above weekly pivot resistance (R2) or below support (S2) with weekly EMA40 trend filter and volume confirmation.
-Weekly pivots capture key institutional levels, weekly EMA40 filters trend direction, volume confirms breakout strength.
-Designed for low trade frequency (target: 10-25/year) with strong performance in both bull and bear markets via trend-following logic.
+6h_Ichimoku_Cloud_Trend_v2
+Hypothesis: Use Ichimoku cloud from 1d timeframe as trend filter and 6h price action for entries.
+In bull markets, price above cloud + TK cross up triggers long; in bear markets, price below cloud + TK cross down triggers short.
+The cloud acts as dynamic support/resistance, reducing whipsaws in sideways markets. TK cross provides timely entry signals.
+Designed for low trade frequency (target: 15-30/year) with strong performance in both bull and bear markets.
 """
 
 import numpy as np
@@ -15,94 +16,105 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get weekly data for pivot and EMA calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Get 1d data for Ichimoku calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Ichimoku components on 1d
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = np.full(len(high_1d), np.nan)
+    period9_low = np.full(len(low_1d), np.nan)
+    for i in range(8, len(high_1d)):
+        period9_high[i] = np.max(high_1d[i-8:i+1])
+        period9_low[i] = np.min(low_1d[i-8:i+1])
+    tenkan_1d = (period9_high + period9_low) / 2
     
-    # Calculate weekly EMA40 trend filter
-    ema40_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 40:
-        ema40_1w[39] = np.mean(close_1w[0:40])
-        alpha = 2 / (40 + 1)
-        for i in range(40, len(close_1w)):
-            ema40_1w[i] = close_1w[i] * alpha + ema40_1w[i-1] * (1 - alpha)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = np.full(len(high_1d), np.nan)
+    period26_low = np.full(len(low_1d), np.nan)
+    for i in range(25, len(high_1d)):
+        period26_high[i] = np.max(high_1d[i-25:i+1])
+        period26_low[i] = np.min(low_1d[i-25:i+1])
+    kijun_1d = (period26_high + period26_low) / 2
     
-    # Calculate weekly pivot points (standard formula)
-    pivot_1w = np.full(len(close_1w), np.nan)
-    r1_1w = np.full(len(close_1w), np.nan)
-    s1_1w = np.full(len(close_1w), np.nan)
-    r2_1w = np.full(len(close_1w), np.nan)
-    s2_1w = np.full(len(close_1w), np.nan)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
     
-    for i in range(1, len(close_1w)):
-        # Use previous week's data for current week's pivot
-        pp = (high_1w[i-1] + low_1w[i-1] + close_1w[i-1]) / 3.0
-        r1 = 2 * pp - low_1w[i-1]
-        s1 = 2 * pp - high_1w[i-1]
-        r2 = pp + (high_1w[i-1] - low_1w[i-1])
-        s2 = pp - (high_1w[i-1] - low_1w[i-1])
-        
-        pivot_1w[i] = pp
-        r1_1w[i] = r1
-        s1_1w[i] = s1
-        r2_1w[i] = r2
-        s2_1w[i] = s2
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = np.full(len(high_1d), np.nan)
+    period52_low = np.full(len(low_1d), np.nan)
+    for i in range(51, len(high_1d)):
+        period52_high[i] = np.max(high_1d[i-51:i+1])
+        period52_low[i] = np.min(low_1d[i-51:i+1])
+    senkou_b_1d = (period52_high + period52_low) / 2
     
-    # Align weekly indicators to daily timeframe
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    # Align Ichimoku components to 6h timeframe (with proper look-ahead prevention)
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
     
-    # Volume spike: current volume > 2.0 x 20-day average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    # Determine cloud boundaries (Senkou Span A and B)
+    # The cloud is plotted 26 periods ahead, so we need to shift the spans back for current price comparison
+    # However, since we're using align_htf_to_ltf which already handles the timing correctly,
+    # we use the values as-is for current cloud assessment
+    upper_cloud = np.maximum(senkou_a_6h, senkou_b_6h)
+    lower_cloud = np.minimum(senkou_a_6h, senkou_b_6h)
+    
+    # TK Cross signals
+    tk_cross_above = (tenkan_6h > kijun_6h) & (tenkan_6h <= kijun_6h)  # Crossed above (current above, previous below or equal)
+    tk_cross_below = (tenkan_6h < kijun_6h) & (tenkan_6h >= kijun_6h)  # Crossed below (current below, previous above or equal)
+    
+    # Fix the TK cross logic - need to compare with previous values
+    tk_cross_above = np.zeros(n, dtype=bool)
+    tk_cross_below = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        if not (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(tenkan_6h[i-1]) or np.isnan(kijun_6h[i-1])):
+            if tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]:
+                tk_cross_above[i] = True
+            elif tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]:
+                tk_cross_below[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)
+    # Start after enough data for Ichimoku calculations
+    start_idx = max(52, 1)  # Need 52 periods for Senkou B
     
     for i in range(start_idx, n):
-        if (np.isnan(r2_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or 
-            np.isnan(ema40_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if any required values are NaN
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above weekly R2 with volume spike and weekly uptrend
-            if (close[i] > r2_1w_aligned[i] and vol_spike[i] and 
-                close[i] > ema40_1w_aligned[i]):
+            # Long: price above cloud + TK cross up
+            if (close[i] > upper_cloud[i] and tk_cross_above[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S2 with volume spike and weekly downtrend
-            elif (close[i] < s2_1w_aligned[i] and vol_spike[i] and 
-                  close[i] < ema40_1w_aligned[i]):
+            # Short: price below cloud + TK cross down
+            elif (close[i] < lower_cloud[i] and tk_cross_below[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below weekly S2 or weekly trend turns down
-            if (close[i] < s2_1w_aligned[i] or close[i] < ema40_1w_aligned[i]):
+            # Long exit: price falls below cloud or TK cross down
+            if (close[i] < lower_cloud[i] or tk_cross_below[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above weekly R2 or weekly trend turns up
-            if (close[i] > r2_1w_aligned[i] or close[i] > ema40_1w_aligned[i]):
+            # Short exit: price rises above cloud or TK cross up
+            if (close[i] > upper_cloud[i] or tk_cross_above[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_TrendBreakout_1wEMA40_Volume"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Trend_v2"
+timeframe = "6h"
 leverage = 1.0
