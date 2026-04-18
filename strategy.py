@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Adaptive_Kelly_Adjusted_Donchian_Breakout_Volume
-Hypothesis: Donchian(20) breakout with volume confirmation and Kelly-adjusted sizing.
-Adaptive position sizing based on volatility and signal strength reduces drawdown in bear markets.
-Works in bull (breakouts) and bear (mean-reversion at bands) via volatility-adjusted exits.
-Target: 20-30 trades/year for low fee drag and high edge.
+12h_Donchian_Breakout_W1EMA34_Volume
+Hypothesis: Price breaks above/below weekly Donchian(20) with volume spike and weekly EMA34 trend filter.
+Captures major trend continuations with tight entry conditions to minimize fee drag.
+Target: 15-30 trades/year to survive bear markets.
 """
 
 import numpy as np
@@ -21,80 +20,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly Donchian channels (20-period high/low)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # ATR for volatility and stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Donchian high/low (20-period)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike: >1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Align to 12h: weekly levels available after weekly bar closes
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Kelly fraction estimate: (win_rate * avg_win - avg_loss) / avg_win
-    # Simplified: use volatility-adjusted signal strength
-    price_change = np.abs(close - np.roll(close, 1))
-    price_change[0] = 0
-    vol_adj_strength = pd.Series(price_change).rolling(window=10, min_periods=10).mean().values / (atr + 1e-8)
-    kelly_fraction = np.clip(vol_adj_strength * 0.5, 0.1, 0.4)  # cap at 0.4, min 0.1
+    # Weekly EMA34 trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume spike: >2.0x 50-period average (higher threshold for lower frequency)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Warmup for Donchian
+    start_idx = max(50, 35)  # Warmup for Donchian and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(kelly_fraction[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = high_20[i]
-        lower = low_20[i]
+        donch_high = donchian_high_aligned[i]
+        donch_low = donchian_low_aligned[i]
+        ema34 = ema_34_1w_aligned[i]
         vol_spike = volume_spike[i]
-        kelly = kelly_fraction[i]
         
         if position == 0:
-            # Long: break above upper band with volume
-            if price > upper and vol_spike:
-                signals[i] = kelly
+            # Long: price breaks above weekly Donchian high with volume spike and uptrend
+            if price > donch_high and vol_spike and price > ema34:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume
-            elif price < lower and vol_spike:
-                signals[i] = -kelly
+            # Short: price breaks below weekly Donchian low with volume spike and downtrend
+            elif price < donch_low and vol_spike and price < ema34:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            signals[i] = kelly
-            # Exit: price closes below lower band OR ATR-based stop
-            if price < lower:
+            signals[i] = 0.25
+            # Exit: price closes below weekly EMA34 OR reverses below midpoint
+            midpoint = (donch_high + donch_low) / 2.0
+            if price < ema34:
                 signals[i] = 0.0
                 position = 0
-            elif price < high[i] - 2.0 * atr[i]:  # trailing stop
+            elif price < midpoint:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            signals[i] = -kelly
-            # Exit: price closes above upper band OR ATR-based stop
-            if price > upper:
+            signals[i] = -0.25
+            # Exit: price closes above weekly EMA34 OR reverses above midpoint
+            midpoint = (donch_high + donch_low) / 2.0
+            if price > ema34:
                 signals[i] = 0.0
                 position = 0
-            elif price > low[i] + 2.0 * atr[i]:  # trailing stop
+            elif price > midpoint:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Adaptive_Kelly_Adjusted_Donchian_Breakout_Volume"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_W1EMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
