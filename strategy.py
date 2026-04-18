@@ -1,37 +1,27 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R overbought/oversold with 1d ADX trend filter and volume confirmation.
-- Long: Williams %R < -80 (oversold), ADX > 25 (trending), volume > 1.5x average
-- Short: Williams %R > -20 (overbought), ADX > 25, volume > 1.5x average
-- Exit: Williams %R crosses above -50 (long) or below -50 (short) or ADX < 20
-- Williams %R identifies reversals in trends; ADX filters for trending markets only.
-Designed for 20-50 trades/year (80-200 total) to minimize fee drift.
+Hypothesis: 12h Williams Alligator (13/8/5 SMAs) with volume confirmation and 1d ADX trend filter.
+- Long: Jaw (13) > Teeth (8) > Lips (5), ADX > 25, volume > 1.5x average
+- Short: Jaw (13) < Teeth (8) < Lips (5), ADX > 25, volume > 1.5x average
+- Exit: Alligator lines crossover (Teeth crosses Jaw) or ADX < 20
+- Williams Alligator captures sustained trends with built-in smoothing, reducing whipsaws in chop.
+Designed for 12-37 trades/year (50-150 total) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R."""
-    if len(high) < period:
-        return np.full(len(high), np.nan)
+def calculate_sma(arr, period):
+    """Calculate Simple Moving Average."""
+    if len(arr) < period:
+        return np.full(len(arr), np.nan)
     
-    highest_high = np.full(len(high), np.nan)
-    lowest_low = np.full(len(high), np.nan)
+    sma = np.full(len(arr), np.nan)
+    for i in range(period - 1, len(arr)):
+        sma[i] = np.mean(arr[i - period + 1:i + 1])
     
-    for i in range(period - 1, len(high)):
-        highest_high[i] = np.max(high[i - period + 1:i + 1])
-        lowest_low[i] = np.min(low[i - period + 1:i + 1])
-    
-    wr = np.full(len(high), np.nan)
-    for i in range(period - 1, len(high)):
-        if highest_high[i] != lowest_low[i]:
-            wr[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
-        else:
-            wr[i] = -50  # avoid division by zero
-    
-    return wr
+    return sma
 
 def calculate_adx(high, low, close, period):
     """Calculate Average Directional Index."""
@@ -100,21 +90,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R and ADX
+    # Get 1d data for Williams Alligator and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R (14-period) on 1d
-    williams_r_14_1d = calculate_williams_r(high_1d, low_1d, close_1d, 14)
+    # Calculate Williams Alligator (13/8/5 SMAs) on 1d
+    jaw = calculate_sma(close_1d, 13)    # Jaw (13-period SMA)
+    teeth = calculate_sma(close_1d, 8)   # Teeth (8-period SMA)
+    lips = calculate_sma(close_1d, 5)    # Lips (5-period SMA)
     
     # Calculate ADX (14-period) on 1d
     adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align to 4h timeframe
-    williams_r_14_1d_4h = align_htf_to_ltf(prices, df_1d, williams_r_14_1d)
-    adx_14_1d_4h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Align to 12h timeframe
+    jaw_12h = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_12h = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_12h = align_htf_to_ltf(prices, df_1d, lips)
+    adx_14_1d_12h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -124,12 +118,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # need Williams %R, ADX, and volume MA
+    start_idx = 35  # need Alligator, ADX, and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_14_1d_4h[i]) or np.isnan(adx_14_1d_4h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_12h[i]) or np.isnan(teeth_12h[i]) or np.isnan(lips_12h[i]) or 
+            np.isnan(adx_14_1d_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -137,26 +131,26 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold), ADX > 25, volume confirmation
-            if williams_r_14_1d_4h[i] < -80 and adx_14_1d_4h[i] > 25 and vol_confirmed:
+            # Long: Jaw > Teeth > Lips (bullish alignment), ADX > 25, volume confirmation
+            if jaw_12h[i] > teeth_12h[i] > lips_12h[i] and adx_14_1d_12h[i] > 25 and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought), ADX > 25, volume confirmation
-            elif williams_r_14_1d_4h[i] > -20 and adx_14_1d_4h[i] > 25 and vol_confirmed:
+            # Short: Jaw < Teeth < Lips (bearish alignment), ADX > 25, volume confirmation
+            elif jaw_12h[i] < teeth_12h[i] < lips_12h[i] and adx_14_1d_12h[i] > 25 and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R crosses above -50 or ADX < 20 (trend weakening)
-            if williams_r_14_1d_4h[i] > -50 or adx_14_1d_4h[i] < 20:
+            # Long exit: Teeth crosses below Jaw (trend weakening) or ADX < 20
+            if teeth_12h[i] < jaw_12h[i] or adx_14_1d_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses below -50 or ADX < 20 (trend weakening)
-            if williams_r_14_1d_4h[i] < -50 or adx_14_1d_4h[i] < 20:
+            # Short exit: Teeth crosses above Jaw (trend weakening) or ADX < 20
+            if teeth_12h[i] > jaw_12h[i] or adx_14_1d_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -164,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_ADX14_Volume"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_ADX14_Volume"
+timeframe = "12h"
 leverage = 1.0
