@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_GoldenCross_1dVWAP_Rejection_V1
-Hypothesis: Trade the 12h EMA(50) crossing above/below EMA(200) as a long-term trend signal, 
-but only enter when price rejects the 1d VWAP (pullback to value area) to avoid chasing extended moves. 
-Use volume > 1.5x 24-period average for confirmation. This combines trend-following with mean-reversion 
-entries, working in bull markets (riding EMA crosses) and bear markets (avoiding false breaks during 
-downtrends by requiring VWAP support/resistance). Targets 15-25 trades/year via infrequent EMA crosses 
-+ strict VWAP rejection + volume filter. Uses 1d VWAP for institutional reference and 12h EMA cross 
-for trend definition. Works in sideways markets by requiring both trend alignment and value-area entry.
+4h_Donchian20_12hEMA_Trend
+Hypothesis: Use 4h Donchian(20) breakouts aligned with 12h EMA(34) trend direction, confirmed by volume > 1.8x 24-period average. The 12h EMA provides a smoother trend filter than 4h indicators, reducing whipsaw in choppy markets. Enter long when price breaks above upper Donchian channel and 12h EMA is rising; short when price breaks below lower Donchian channel and 12h EMA is falling. This combination captures strong trends while avoiding false breakouts in sideways markets. Designed to work in both bull and bear markets by following the dominant trend on 12h timeframe. Targets 20-40 trades/year via strict breakout conditions.
 """
 
 import numpy as np
@@ -16,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,102 +18,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA cross
+    # Get 12h data for EMA trend filter
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # EMA(50) and EMA(200) on 12h
-    ema_fast = np.full_like(close_12h, np.nan)
-    ema_slow = np.full_like(close_12h, np.nan)
+    # 12h EMA(34)
+    ema_period = 34
+    ema_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= ema_period:
+        ema_12h[ema_period-1] = np.mean(close_12h[:ema_period])
+        for i in range(ema_period, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 2 / (ema_period + 1)) + (ema_12h[i-1] * (ema_period - 1) / (ema_period + 1))
     
-    if len(close_12h) >= 50:
-        # EMA(50)
-        alpha_fast = 2 / (50 + 1)
-        ema_fast[0] = close_12h[0]
-        for i in range(1, len(close_12h)):
-            ema_fast[i] = alpha_fast * close_12h[i] + (1 - alpha_fast) * ema_fast[i-1]
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    if len(close_12h) >= 200:
-        # EMA(200)
-        alpha_slow = 2 / (200 + 1)
-        ema_slow[0] = close_12h[0]
-        for i in range(1, len(close_12h)):
-            ema_slow[i] = alpha_slow * close_12h[i] + (1 - alpha_slow) * ema_slow[i-1]
+    # 4h Donchian channels (20-period)
+    donch_len = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # Align EMA cross to 12h timeframe (same as input, but using alignment for consistency)
-    ema_fast_aligned = align_htf_to_ltf(prices, df_12h, ema_fast)
-    ema_slow_aligned = align_htf_to_ltf(prices, df_12h, ema_slow)
+    if n >= donch_len:
+        for i in range(donch_len-1, n):
+            upper[i] = np.max(high[i-donch_len+1:i+1])
+            lower[i] = np.min(low[i-donch_len+1:i+1])
     
-    # Get 1d data for VWAP
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # 1d VWAP (typical price * volume)
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    vwap_num = np.full_like(close_1d, np.nan)
-    vwap_den = np.full_like(close_1d, np.nan)
-    vwap = np.full_like(close_1d, np.nan)
-    
-    if len(close_1d) >= 1:
-        vwap_num[0] = typical_price[0] * volume_1d[0]
-        vwap_den[0] = volume_1d[0]
-        vwap[0] = typical_price[0] if volume_1d[0] != 0 else np.nan
-        
-        for i in range(1, len(close_1d)):
-            vwap_num[i] = vwap_num[i-1] + typical_price[i] * volume_1d[i]
-            vwap_den[i] = vwap_den[i-1] + volume_1d[i]
-            vwap[i] = vwap_num[i] / vwap_den[i] if vwap_den[i] != 0 else np.nan
-    
-    # Align 1d VWAP to 12h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
-    
-    # Volume confirmation: volume > 1.5x 24-period average (on 12h data)
-    vol_ma = np.full_like(volume, np.nan)
+    # Volume confirmation: volume > 1.8x 24-period average
+    vol_ma = np.full(n, np.nan)
     vol_period = 24
-    
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    if n >= vol_period:
+        for i in range(vol_period, n):
+            vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, vol_period)  # Need EMA(200) and volume MA
+    start_idx = max(donch_len, vol_period, 35)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_fast_aligned[i]) or np.isnan(ema_slow_aligned[i]) or 
-            np.isnan(vwap_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_confirm = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
-            # Long: EMA(50) > EMA(200) + price > VWAP (bullish rejection) + volume
-            if ema_fast_aligned[i] > ema_slow_aligned[i] and close[i] > vwap_aligned[i] and vol_confirm:
+            # Long: break above upper Donchian + rising 12h EMA + volume
+            if close[i] > upper[i] and i > 0 and not np.isnan(ema_12h_aligned[i-1]) and ema_12h_aligned[i] > ema_12h_aligned[i-1] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: EMA(50) < EMA(200) + price < VWAP (bearish rejection) + volume
-            elif ema_fast_aligned[i] < ema_slow_aligned[i] and close[i] < vwap_aligned[i] and vol_confirm:
+            # Short: break below lower Donchian + falling 12h EMA + volume
+            elif close[i] < lower[i] and i > 0 and not np.isnan(ema_12h_aligned[i-1]) and ema_12h_aligned[i] < ema_12h_aligned[i-1] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: EMA(50) < EMA(200) or price < VWAP (trend break or value rejection)
-            if ema_fast_aligned[i] < ema_slow_aligned[i] or close[i] < vwap_aligned[i]:
+            # Long exit: break below lower Donchian or 12h EMA turns down
+            if close[i] < lower[i] or (i > 0 and not np.isnan(ema_12h_aligned[i-1]) and ema_12h_aligned[i] < ema_12h_aligned[i-1]):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: EMA(50) > EMA(200) or price > VWAP (trend break or value rejection)
-            if ema_fast_aligned[i] > ema_slow_aligned[i] or close[i] > vwap_aligned[i]:
+            # Short exit: break above upper Donchian or 12h EMA turns up
+            if close[i] > upper[i] or (i > 0 and not np.isnan(ema_12h_aligned[i-1]) and ema_12h_aligned[i] > ema_12h_aligned[i-1]):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -127,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_GoldenCross_1dVWAP_Rejection_V1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA_Trend"
+timeframe = "4h"
 leverage = 1.0
