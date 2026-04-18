@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_Trend_Volume_V1
-Strategy: 12h Donchian breakout (20-period) with 1D trend filter and volume confirmation.
-Long: Price breaks above 20-day high in uptrend with volume.
-Short: Price breaks below 20-day low in downtrend with volume.
-Designed for 12h timeframe: ~15-25 trades/year per sym (60-100 total over 4 years).
-Works in bull/bear via trend filter + breakout momentum.
+4h_RSI_MeanReversion_v1
+Strategy: 4h RSI mean-reversion with volume confirmation and trend filter.
+Long: RSI < 30 + price > 200EMA + volume > 1.5x average.
+Short: RSI > 70 + price < 200EMA + volume > 1.5x average.
+Uses 1d trend filter to avoid counter-trend trades in strong trends.
+Designed for 4h timeframe: ~20-30 trades/year per symbol (80-120 total over 4 years).
+Works in bull/bear via trend filter and mean-reversion logic.
 """
 
 import numpy as np
@@ -17,89 +18,85 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for 20-day high/low and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # 20-day high and low (Donchian channels)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily EMA200 for trend filter
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all daily data to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align daily EMA200 to 4h timeframe
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # RSI calculation (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200
+    start_idx = 200  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if np.isnan(ema_200_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Trend filter: only trade in direction of daily trend
+        uptrend = close[i] > ema_200_aligned[i]
+        downtrend = close[i] < ema_200_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Donchian breakout conditions
-        breakout_long = close[i] > high_20_aligned[i]
-        breakout_short = close[i] < low_20_aligned[i]
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
         if position == 0:
-            # Long: uptrend + volume + breakout
-            if uptrend and vol_confirm and breakout_long:
+            # Long: oversold + uptrend + volume
+            if rsi_oversold and uptrend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakout
-            elif downtrend and vol_confirm and breakout_short:
+            # Short: overbought + downtrend + volume
+            elif rsi_overbought and downtrend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change or breakout in opposite direction
-            if not uptrend or breakout_short:
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long exit: RSI neutral or trend change
+            if rsi[i] >= 50 or not uptrend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change or breakout in opposite direction
-            if not downtrend or breakout_long:
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short exit: RSI neutral or trend change
+            if rsi[i] <= 50 or not downtrend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_Donchian_Breakout_Trend_Volume_V1"
-timeframe = "12h"
+name = "4h_RSI_MeanReversion_v1"
+timeframe = "4h"
 leverage = 1.0
