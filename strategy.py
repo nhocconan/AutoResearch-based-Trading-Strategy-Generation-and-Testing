@@ -1,13 +1,12 @@
-#%%
 #!/usr/bin/env python3
 """
-12h_Pivot_S1R1_Breakout_Volume
-12h strategy using daily Camarilla pivot points (S1/R1) with volume confirmation and daily trend filter.
-- Long: Close breaks above daily R1 + volume > 1.5x daily avg + daily EMA50 > EMA200
-- Short: Close breaks below daily S1 + volume > 1.5x daily avg + daily EMA50 < EMA200
-- Exit: Opposite breakout or trend reversal
-Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+1h_RSI2_Recovery_Volume_TrendFilter
+1h strategy using 2-period RSI for mean-reversion entries with volume confirmation and 4h trend filter.
+- Long: RSI(2) < 10 + volume > 1.5x 20-bar avg + price > 4h EMA50
+- Short: RSI(2) > 90 + volume > 1.5x 20-bar avg + price < 4h EMA50
+- Exit: RSI(2) > 60 for longs, RSI(2) < 40 for shorts (mean-reversion completion)
+Designed for ~15-35 trades/year per symbol (60-140 total over 4 years)
+Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
 """
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,89 +23,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and filters
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Camarilla pivot points for daily timeframe
-    # Pivot = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = C + (H - L) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    # S1 = C - (H - L) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate 2-period RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Wilder's smoothing (alpha = 1/period)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[1] = gain[1]
+    avg_loss[1] = loss[1]
+    for i in range(2, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2  # 2-period
+        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0] = 50  # neutral for first value
     
-    # Align all daily data to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Volume confirmation: 20-bar average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200
+    start_idx = 20  # need volume MA and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Trend conditions from 4h
+        uptrend = close[i] > ema_50_4h_aligned[i]
+        downtrend = close[i] < ema_50_4h_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakdown_down = close[i] < s1_aligned[i]
+        # RSI conditions for mean reversion
+        rsi_oversold = rsi[i] < 10
+        rsi_overbought = rsi[i] > 90
+        rsi_exit_long = rsi[i] > 60
+        rsi_exit_short = rsi[i] < 40
         
         if position == 0:
-            # Long: uptrend + volume + breakout above daily R1
-            if uptrend and vol_confirm and breakout_up:
-                signals[i] = 0.25
+            # Long: oversold RSI + volume + uptrend
+            if rsi_oversold and vol_confirm and uptrend:
+                signals[i] = 0.20
                 position = 1
-            # Short: downtrend + volume + breakdown below daily S1
-            elif downtrend and vol_confirm and breakdown_down:
-                signals[i] = -0.25
+            # Short: overbought RSI + volume + downtrend
+            elif rsi_overbought and vol_confirm and downtrend:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below daily S1
-            if not uptrend or (vol_confirm and breakdown_down):
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long exit: RSI recovery or trend change
+            if rsi_exit_long or not uptrend:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above daily R1
-            if not downtrend or (vol_confirm and breakout_up):
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short exit: RSI recovery or trend change
+            if rsi_exit_short or not downtrend:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Pivot_S1R1_Breakout_Volume"
-timeframe = "12h"
+name = "1h_RSI2_Recovery_Volume_TrendFilter"
+timeframe = "1h"
 leverage = 1.0
-#%%
