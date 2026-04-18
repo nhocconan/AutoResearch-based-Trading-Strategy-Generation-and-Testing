@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,15 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 34-period EMA on 1d for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 34-period EMA on 12h for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 12h ATR (14-period) for stop loss and volatility
+    # Align 12h EMA to 4h (properly delayed for completed 12h bar)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Calculate 4h ATR (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -30,31 +32,31 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h volume spike (volume > 2.0x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume spike (volume > 2.0x 30-period average)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Calculate 12h Donchian channel (20-period)
+    # Calculate 4h Donchian channel (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 14) + 1
+    start_idx = max(34, 30, 14, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_34_12h_aligned[i]) or 
             np.isnan(atr[i]) or
             np.isnan(donchian_high[i]) or
             np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA34
+        uptrend = close[i] > ema_34_12h_aligned[i]
+        downtrend = close[i] < ema_34_12h_aligned[i]
         
         # Volume confirmation
         vol_confirmed = volume_spike[i]
@@ -91,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
