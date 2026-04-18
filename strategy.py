@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for calculations
+    # Get 4h and 1d data for calculations (ONCE before loop)
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
@@ -26,9 +26,6 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA200 for long-term trend
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
     # Calculate 1d ATR (14-period) for volatility filter
     tr1_1d = df_1d['high'] - df_1d['low']
     tr2_1d = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
@@ -38,10 +35,33 @@ def generate_signals(prices):
     tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
+    # Calculate 1d Donchian Channels (20-period)
+    donch_high_1d = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d ADX (14-period) for trend strength
+    # +DI and -DI calculation
+    up_move = df_1d['high'] - np.roll(df_1d['high'], 1)
+    down_move = np.roll(df_1d['low'], 1) - df_1d['low']
+    up_move[0] = np.nan
+    down_move[0] = np.nan
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    tr = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    atr_adx = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_adx
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_adx
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
     # Align indicators to 4h timeframe
     atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Calculate 4h Bollinger Bands (20, 2.0)
     sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
@@ -55,13 +75,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for enough data for EMA200
+    start_idx = 150  # Wait for enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(atr_4h_aligned[i]) or
-            np.isnan(ema200_1d_aligned[i]) or
             np.isnan(atr_1d_aligned[i]) or
+            np.isnan(donch_high_1d_aligned[i]) or
+            np.isnan(donch_low_1d_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
             np.isnan(sma_20[i]) or
             np.isnan(std_20[i])):
             signals[i] = 0.0
@@ -82,20 +104,23 @@ def generate_signals(prices):
         else:
             vol_filter = False
         
-        trade_allowed = vol_filter
+        # Trend filter: ADX > 25 for trending market
+        trend_filter = adx_aligned[i] > 25
+        
+        trade_allowed = vol_filter and trend_filter
         
         if position == 0:
-            # Long: Price touches lower BB with long-term uptrend
-            if trade_allowed and close[i] <= lower_band[i] and close[i] > ema200_1d_aligned[i]:
+            # Long: Price touches lower BB in uptrend
+            if trade_allowed and close[i] <= lower_band[i] and close[i] > donch_low_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price touches upper BB with long-term downtrend
-            elif trade_allowed and close[i] >= upper_band[i] and close[i] < ema200_1d_aligned[i]:
+            # Short: Price touches upper BB in downtrend
+            elif trade_allowed and close[i] >= upper_band[i] and close[i] < donch_high_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches middle band or reverses to upper band
+            # Long exit: price touches middle band or breaks above upper BB
             if close[i] >= sma_20[i] or close[i] >= upper_band[i]:
                 signals[i] = 0.0
                 position = 0
@@ -103,7 +128,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price touches middle band or reverses to lower band
+            # Short exit: price touches middle band or breaks below lower BB
             if close[i] <= sma_20[i] or close[i] <= lower_band[i]:
                 signals[i] = 0.0
                 position = 0
@@ -112,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATR_VolumeFilter_BollingerMeanReversion_v1"
+name = "4h_BB_Donchian_ADX_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
