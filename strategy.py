@@ -1,107 +1,113 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud with 1d Trend Filter
-Long: Price above Kumo (cloud) + Tenkan > Kijun + 1d EMA50 up
-Short: Price below Kumo + Tenkan < Kijun + 1d EMA50 down
-Ichimoku provides multi-line support/resistance and momentum signals.
-The 1d EMA50 filter ensures alignment with higher timeframe trend.
-Designed for 6h timeframe to capture sustained trends while avoiding whipsaws.
-Target: 60-120 total trades over 4 years (15-30/year)
+4h Volume-Weighted RSI with 12h EMA Trend Filter
+Long: VWRSI(14) < 30 + price > VWAP(20) + 12h EMA34 up
+Short: VWRSI(14) > 70 + price < VWAP(20) + 12h EMA34 down
+Exit: VWRSI crosses 50 or price crosses VWAP
+Volume-weighted RSI reduces whipsaw in low-volume moves. VWAP acts as dynamic support/resistance.
+12h EMA ensures alignment with higher timeframe trend. Designed for 40-80 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku components: Tenkan-sen, Kijun-sen, Senkou Span A/B"""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan = (period9_high + period9_low) / 2
+def calculate_vwap(high, low, close, volume, window):
+    """Calculate Volume Weighted Average Price"""
+    typical_price = (high + low + close) / 3.0
+    vwap_num = (typical_price * volume).rolling(window=window, min_periods=window).sum()
+    vwap_den = volume.rolling(window=window, min_periods=window).sum()
+    return vwap_num / vwap_den
+
+def calculate_vw_rsi(close, volume, window):
+    """Calculate Volume-Weighted RSI"""
+    # Calculate price changes
+    delta = np.diff(close, prepend=close[0])
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun = (period26_high + period26_low) / 2
+    # Separate gains and losses
+    gains = np.where(delta > 0, delta, 0)
+    losses = np.where(delta < 0, -delta, 0)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2).shift(26)
+    # Volume-weight the gains and losses
+    vol_weighted_gains = gains * volume
+    vol_weighted_losses = losses * volume
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max()
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_b = ((period52_high + period52_low) / 2).shift(26)
+    # Calculate weighted averages
+    avg_gain = pd.Series(vol_weighted_gains).ewm(alpha=1/window, adjust=False).mean()
+    avg_loss = pd.Series(vol_weighted_losses).ewm(alpha=1/window, adjust=False).mean()
     
-    return tenkan, kijun, senkou_a, senkou_b
+    # Calculate RSI
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Ichimoku on 6h
-    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
+    # VWAP(20) on 4h
+    vwap = calculate_vwap(high, low, close, volume, 20)
     
-    # Get 1d data for trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Volume-Weighted RSI(14) on 4h
+    vw_rsi = calculate_vw_rsi(close, volume, 14)
     
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 12h data for trend filter (EMA34)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Align 1d EMA50 to 6h
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA34
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1d EMA slope for trend filter
-    ema_slope = np.diff(ema_50_1d_aligned, prepend=ema_50_1d_aligned[0])
+    # Align 12h EMA34 to 4h
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Calculate 12h EMA slope for trend filter
+    ema_slope = np.diff(ema_34_12h_aligned, prepend=ema_34_12h_aligned[0])
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 60  # need Ichimoku calculations
+    start_idx = 40  # need VWAP(20), VWRSI(14), and EMA calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_slope[i])):
+        if (np.isnan(vwap[i]) or np.isnan(vw_rsi[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(ema_slope[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        # Kumo (cloud) top and bottom
-        kumo_top = max(senkou_a[i], senkou_b[i])
-        kumo_bottom = min(senkou_a[i], senkou_b[i])
         
         if position == 0:
-            # Long: Price above Kumo + Tenkan > Kijun + 1d EMA50 up
-            if (price > kumo_top and 
-                tenkan[i] > kijun[i] and 
+            # Long: VWRSI oversold + price above VWAP + 12h EMA up
+            if (vw_rsi[i] < 30 and 
+                price > vwap[i] and 
                 ema_slope[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below Kumo + Tenkan < Kijun + 1d EMA50 down
-            elif (price < kumo_bottom and 
-                  tenkan[i] < kijun[i] and 
+            # Short: VWRSI overbought + price below VWAP + 12h EMA down
+            elif (vw_rsi[i] > 70 and 
+                  price < vwap[i] and 
                   ema_slope[i] < 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses below Kumo bottom OR Tenkan < Kijun
-            if (price < kumo_bottom) or (tenkan[i] < kijun[i]):
+            # Long exit: VWRSI crosses 50 OR price crosses below VWAP
+            if (vw_rsi[i] > 50) or (price < vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses above Kumo top OR Tenkan > Kijun
-            if (price > kumo_top) or (tenkan[i] > kijun[i]):
+            # Short exit: VWRSI crosses 50 OR price crosses above VWAP
+            if (vw_rsi[i] < 50) or (price > vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_1dEMA50_Trend"
-timeframe = "6h"
+name = "4h_VolumeWeighted_RSI_12hEMA34"
+timeframe = "4h"
 leverage = 1.0
