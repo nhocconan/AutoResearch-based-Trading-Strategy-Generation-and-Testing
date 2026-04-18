@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1d_KAMA_Trend_R1S1_Breakout_Volume
-Hypothesis: Use KAMA direction as primary trend filter on 4h to reduce whipsaws, combined with 1d Camarilla R1/S1 breakout and volume confirmation. KAMA adapts to market noise, making it effective in both trending and ranging markets. Targets 25-40 trades/year by requiring alignment of KAMA trend, price breakout beyond daily R1/S1, and volume > 1.5x 20-period average. Works in bull markets by following uptrend breaks above R1, and in bear markets by taking short breaks below S1 only when KAMA confirms downtrend.
+4h_1d_Volume_Weighted_RSI_Momentum
+Hypothesis: Combine 1-hour RSI momentum with volume-weighted price action and 1-day trend filter.
+- Long: RSI(14) > 55 on 1h (derived from 4h), price > VWAP(20), and close > 1-day EMA(50)
+- Short: RSI(14) < 45 on 1h, price < VWAP(20), and close < 1-day EMA(50)
+- Volume confirmation: current volume > 1.3 x 20-period average
+- Uses discrete position sizing (0.25) to minimize fee churn
+- Designed for 4h timeframe with 1d trend filter to reduce whipsaws and capture medium-term momentum
+- Targets 20-35 trades/year by requiring multiple confluence factors
 """
 
 import numpy as np
@@ -18,87 +24,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels (HTF)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla R1 and S1
-    rng_1d = high_1d - low_1d
-    r1_1d = close_1d + rng_1d * 1.1 / 12
-    s1_1d = close_1d - rng_1d * 1.1 / 12
+    # Calculate 1-day EMA(50) for trend filter
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = close_1d[:50].mean()
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 0.0392) + (ema_50_1d[i-1] * 0.9608)
     
-    # Align levels to 4h timeframe (wait for bar close)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align 1-day EMA(50) to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 4h KAMA for adaptive trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get 1h data for RSI (approximated from 4h by using every 4th bar)
+    df_1h = get_htf_data(prices, '1h')
+    close_1h = df_1h['close'].values
     
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_4h, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close_4h, n=1)), axis=1)  # sum of abs changes over 10 periods
-    # Avoid division by zero
-    er = np.zeros_like(close_4h)
-    er[10:] = change[10:] / np.where(volatility[10:] == 0, 1, volatility[10:])
-    # Smoothing constants: fastest SC = 2/(2+1) = 0.67, slowest SC = 2/(30+1) = 0.0645
-    sc = (er * (0.665 - 0.0645) + 0.0645) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close_4h, np.nan)
-    kama[9] = close_4h[9]  # seed
-    for i in range(10, len(close_4h)):
-        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
+    # Calculate RSI(14) on 1h data
+    rsi_1h = np.full_like(close_1h, np.nan)
+    if len(close_1h) >= 15:
+        delta = np.diff(close_1h)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close_1h, np.nan)
+        avg_loss = np.full_like(close_1h, np.nan)
+        
+        avg_gain[14] = gain[:14].mean()
+        avg_loss[14] = loss[:14].mean()
+        
+        for i in range(15, len(close_1h)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_1h = 100 - (100 / (1 + rs))
     
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
+    # Align 1h RSI to 4h timeframe (each 4h bar contains 4 1h bars)
+    # We'll use the last 1h bar's RSI value for each 4h period
+    rsi_1h_aligned = np.full(n, np.nan)
+    for i in range(n):
+        # Map 4h bar index to 1h bar index (4 1h bars per 4h bar)
+        idx_1h = i * 4 + 3  # Last 1h bar in the 4h period
+        if idx_1h < len(rsi_1h):
+            rsi_1h_aligned[i] = rsi_1h[idx_1h]
     
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # Volume confirmation: current volume > 1.3 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
+    
+    # VWAP(20) approximation for 4h
+    vwap = np.full(n, np.nan)
+    for i in range(20, n):
+        typical_price = (high[i-20:i] + low[i-20:i] + close[i-20:i]) / 3
+        vwap[i] = np.dot(typical_price, volume[i-20:i]) / volume[i-20:i].sum()
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA and KAMA seeded
+    start_idx = max(20, 34)  # need VWAP(20), volume MA, and RSI(14) with 4-hour offset
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(kama_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_1h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vwap[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above 1d R1, with volume, and KAMA uptrend (price > KAMA)
-            if (close[i] > r1_1d_aligned[i] and vol_confirm[i] and 
-                close[i] > kama_aligned[i]):
+            # Long entry: RSI > 55, price > VWAP, close > 1-day EMA(50), with volume
+            if (rsi_1h_aligned[i] > 55 and close[i] > vwap[i] and 
+                close[i] > ema_50_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below 1d S1, with volume, and KAMA downtrend (price < KAMA)
-            elif (close[i] < s1_1d_aligned[i] and vol_confirm[i] and 
-                  close[i] < kama_aligned[i]):
+            # Short entry: RSI < 45, price < VWAP, close < 1-day EMA(50), with volume
+            elif (rsi_1h_aligned[i] < 45 and close[i] < vwap[i] and 
+                  close[i] < ema_50_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns below KAMA (trend change) or breaks below S1 (failed breakout)
-            if (close[i] < kama_aligned[i] or 
-                (not np.isnan(s1_1d_aligned[i]) and close[i] < s1_1d_aligned[i])):
+            # Long exit: RSI < 50 or price < VWAP (momentum fade)
+            if (rsi_1h_aligned[i] < 50 or close[i] < vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above KAMA (trend change) or breaks above R1 (failed breakout)
-            if (close[i] > kama_aligned[i] or 
-                (not np.isnan(r1_1d_aligned[i]) and close[i] > r1_1d_aligned[i])):
+            # Short exit: RSI > 50 or price > VWAP (momentum fade)
+            if (rsi_1h_aligned[i] > 50 or close[i] > vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_KAMA_Trend_R1S1_Breakout_Volume"
+name = "4h_1d_Volume_Weighted_RSI_Momentum"
 timeframe = "4h"
 leverage = 1.0
