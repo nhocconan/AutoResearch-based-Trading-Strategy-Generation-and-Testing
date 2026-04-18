@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R3S3_Fade_R4S4_Breakout_Volume_v1
-Hypothesis: Use 1-week Pivot Points (R3, S3, R4, S4) with volume confirmation to capture mean-reversion at extreme weekly levels (R3/S3) and breakout continuation at stronger levels (R4/S4). Works in both bull/bear markets by fading extremes and riding breakouts with volume confirmation. Targets 15-25 trades/year on 6H timeframe.
+12h_Pivot_R1S1_Breakout_Volume_Confirmation_v1
+Hypothesis: Use 1d Camarilla R1/S1 levels with volume confirmation and 12h EMA trend filter on 12h timeframe to capture institutional breakouts. Designed for low trade frequency (~15-25/year) with trend-following edge in both bull and bear markets by following confirmed breakouts with volume and trend alignment.
 """
 
 import numpy as np
@@ -18,37 +18,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Weekly Pivot Points from previous week (1w timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate Camarilla levels from previous day (1d timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Camarilla calculation: R1/S1 from previous day
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    camarilla_range = high_1d - low_1d
+    r1_1d = close_1d + (1.1 * camarilla_range) / 12
+    s1_1d = close_1d - (1.1 * camarilla_range) / 12
     
-    # Use previous week's data for pivot calculation (avoid look-ahead)
-    prev_high = high_1w[:-1]  # All except last (current forming) week
-    prev_low = low_1w[:-1]
-    prev_close = close_1w[:-1]
+    # Align to 12h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Pivot Point calculation
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    # R3, S3, R4, S4 levels
-    r3 = pp + 2 * (prev_high - prev_low)
-    s3 = pp - 2 * (prev_high - prev_low)
-    r4 = pp + 3 * (prev_high - prev_low)
-    s4 = pp - 3 * (prev_high - prev_low)
+    # 12h EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w[:-1], r3)  # Use df_1w[:-1] to match prev data
-    s3_aligned = align_htf_to_ltf(prices, df_1w[:-1], s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w[:-1], r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w[:-1], s4)
-    
-    # Volume confirmation: >1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Volume confirmation: >2.0x 20-period average (stricter than before)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
@@ -56,55 +51,43 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        ema_12h_val = ema_12h_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Fade at R3/S3: Short at R3 with volume, Long at S3 with volume
-            if price > r3_val and vol_spike:
-                signals[i] = -0.25
-                position = -1
-            elif price < s3_val and vol_spike:
+            # Long: price breaks above R1 with volume and above 12h EMA
+            if price > r1 and vol_spike and price > ema_12h_val:
                 signals[i] = 0.25
                 position = 1
-            # Breakout continuation at R4/S4: Long at R4 break, Short at S4 break
-            elif price > r4_val and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            elif price < s4_val and vol_spike:
+            # Short: price breaks below S1 with volume and below 12h EMA
+            elif price < s1 and vol_spike and price < ema_12h_val:
                 signals[i] = -0.25
                 position = -1
         
-        elif position == 1:  # Long position
+        elif position == 1:
             signals[i] = 0.25
-            # Exit conditions: 
-            # 1. Mean reversion: price returns to pivot area (between S3 and R3)
-            # 2. Opposite extreme touched
-            if (price >= s3_val and price <= r3_val) or price < s4_val:
+            # Exit: price below S1 or below 12h EMA
+            if price < s1 or price < ema_12h_val:
                 signals[i] = 0.0
                 position = 0
         
-        elif position == -1:  # Short position
+        elif position == -1:
             signals[i] = -0.25
-            # Exit conditions:
-            # 1. Mean reversion: price returns to pivot area (between S3 and R3)
-            # 2. Opposite extreme touched
-            if (price >= s3_val and price <= r3_val) or price > r4_val:
+            # Exit: price above R1 or above 12h EMA
+            if price > r1 or price > ema_12h_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_Fade_R4S4_Breakout_Volume_v1"
-timeframe = "6h"
+name = "12h_Pivot_R1S1_Breakout_Volume_Confirmation_v1"
+timeframe = "12h"
 leverage = 1.0
