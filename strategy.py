@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_Volume
-Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance. Price breaking through R1/S1 on 12h with volume confirmation indicates institutional breakout. Works in both bull (breakouts up) and bear (breakdowns down) by following price action. Uses volume confirmation to avoid false breakouts and limits trades to reduce fee drag. Uses 12h timeframe for lower frequency.
+1h_VolumeTrend_Confirmation
+Hypothesis: In 1h timeframe, use 4h trend direction (EMA20) as filter and enter on volume spikes with price momentum.
+Works in bull (long when 4h EMA up + volume spike + close > open) and bear (short when 4h EMA down + volume spike + close < open).
+Volume confirms institutional interest, reducing false signals. Low trade frequency via strict 4h trend filter.
 """
 
 import numpy as np
@@ -10,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,80 +20,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4h EMA20 for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = np.zeros_like(close_1d)
-    camarilla_s1 = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            camarilla_r1[i] = close_1d[i]  # placeholder
-            camarilla_s1[i] = close_1d[i]
-        else:
-            rang = high_1d[i-1] - low_1d[i-1]
-            camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
-            camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
-    
-    # Align to 12h timeframe (use previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # 1h volume spike: current volume > 2.0x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
             vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_spike = volume > (vol_ma * 1.8)
+    vol_spike = volume > (vol_ma * 2.0)
+    
+    # 1h price momentum: close > open for bull, close < open for bear
+    bull_momentum = close > prices['open'].values
+    bear_momentum = close < prices['open'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 25  # Warmup
+    start_idx = 40  # Warmup for 4h EMA20 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike
-            if close[i] > camarilla_r1_aligned[i] and vol_spike[i]:
-                signals[i] = 0.25
+            # Long: 4h uptrend + volume spike + bullish momentum
+            if ema_4h_aligned[i] > ema_4h_aligned[i-1] and vol_spike[i] and bull_momentum[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 with volume spike
-            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i]:
-                signals[i] = -0.25
+            # Short: 4h downtrend + volume spike + bearish momentum
+            elif ema_4h_aligned[i] < ema_4h_aligned[i-1] and vol_spike[i] and bear_momentum[i]:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below S1 (mean reversion) or volume dies
-            if close[i] < camarilla_s1_aligned[i] or not vol_spike[i]:
+            # Exit long: 4h trend turns down OR volume spike ends
+            if ema_4h_aligned[i] < ema_4h_aligned[i-1] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns above R1 or volume dies
-            if close[i] > camarilla_r1_aligned[i] or not vol_spike[i]:
+            # Exit short: 4h trend turns up OR volume spike ends
+            if ema_4h_aligned[i] > ema_4h_aligned[i-1] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "1h_VolumeTrend_Confirmation"
+timeframe = "1h"
 leverage = 1.0
