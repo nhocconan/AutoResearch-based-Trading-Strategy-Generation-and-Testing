@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_RSI_ChopFilter_v1
-Hypothesis: KAMA adapts to market noise, providing reliable trend signals in both trending and ranging markets.
-Combined with RSI momentum and Choppiness Index regime filter to avoid false signals.
-Only takes positions when KAMA confirms trend, RSI shows momentum, and market is not too choppy.
-Designed for low trade frequency (<20 trades/year) to minimize fee impact while capturing major trends.
-Works in bull markets via trend following and in bear markets via inverse signals during weak trends.
+4h_Williams_Alligator_Trend_v1
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength. 
+Long when Lips > Teeth > Jaw (bullish alignment) with volume confirmation.
+Short when Lips < Teeth < Jaw (bearish alignment) with volume confirmation.
+Exit when alignment breaks or volume weakens. Uses 1d ADX filter to avoid weak trends.
+Target: 20-40 trades/year by requiring strong alignment and volume confirmation.
+Works in trending markets via trend following and avoids whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,68 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and chop filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
-        kama = np.full_like(close, np.nan)
-        if len(close) < er_period:
-            return kama
+    # Calculate Williams Alligator (SMMA-based)
+    def smoothed_moving_average(data, period):
+        """Williams Alligator uses SMMA (Smoothed Moving Average)"""
+        if len(data) < period:
+            return np.full_like(data, np.nan)
         
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=er_period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.zeros_like(close)
-        er[er_period:] = change[er_period-1:] / np.maximum(volatility[er_period-1:], 1e-10)
+        sma = np.full_like(data, np.nan)
+        smma = np.full_like(data, np.nan)
         
-        # Smoothing constants
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        # Calculate initial SMA
+        sma[period-1] = np.mean(data[:period])
+        smma[period-1] = sma[period-1]
         
-        # Initialize KAMA
-        kama[er_period] = close[er_period]
+        # Calculate SMMA using Wilder's smoothing
+        for i in range(period, len(data)):
+            smma[i] = (smma[i-1] * (period-1) + data[i]) / period
         
-        # Calculate KAMA
-        for i in range(er_period + 1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        
-        return kama
+        return smma
     
-    # Calculate RSI
-    def calculate_rsi(close, period=14):
-        rsi = np.full_like(close, np.nan)
-        if len(close) < period + 1:
-            return rsi
-        
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        
-        for i in range(period + 1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        
-        rs = np.zeros_like(close)
-        rs[period:] = avg_gain[period:] / np.maximum(avg_loss[period:], 1e-10)
-        rsi[period:] = 100 - (100 / (1 + rs[period:]))
-        
-        return rsi
+    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    jaw = smoothed_moving_average(close, 13)
+    teeth = smoothed_moving_average(close, 8)
+    lips = smoothed_moving_average(close, 5)
     
-    # Calculate Choppiness Index
-    def calculate_choppiness(high, low, close, period=14):
-        chop = np.full_like(close, np.nan)
-        if len(close) < period:
-            return chop
-        
+    # Calculate 14-period ADX for trend strength filter
+    def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high[1:] - low[1:]
         tr2 = np.abs(high[1:] - close[:-1])
@@ -91,89 +62,113 @@ def generate_signals(prices):
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
         tr = np.concatenate([[np.nan], tr])
         
-        # ATR (average true range)
-        atr = np.zeros_like(tr)
-        for i in range(1, len(tr)):
-            if i < period:
-                atr[i] = np.mean(tr[1:i+1])
-            else:
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[np.nan], dm_plus])
+        dm_minus = np.concatenate([[np.nan], dm_minus])
+        
+        # Smooth TR, DM+
+        atr = np.full_like(tr, np.nan)
+        dm_plus_smooth = np.full_like(dm_plus, np.nan)
+        dm_minus_smooth = np.full_like(dm_minus, np.nan)
+        
+        if len(tr) >= period:
+            # Initial values
+            atr[period] = np.nanmean(tr[1:period+1])
+            dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
+            dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
+            
+            # Wilder smoothing
+            for i in range(period+1, len(tr)):
                 atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
         
-        # Sum of ATR over period
-        atr_sum = np.zeros_like(close)
-        for i in range(period, len(close)):
-            atr_sum[i] = np.sum(atr[i-period+1:i+1])
+        # DI+ and DI-
+        di_plus = np.full_like(dm_plus_smooth, np.nan)
+        di_minus = np.full_like(dm_minus_smooth, np.nan)
+        valid = ~np.isnan(atr) & (atr != 0)
+        di_plus[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
+        di_minus[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
         
-        # Highest high and lowest low over period
-        max_high = np.zeros_like(close)
-        min_low = np.zeros_like(close)
-        for i in range(len(close)):
-            if i < period:
-                max_high[i] = np.max(high[:i+1])
-                min_low[i] = np.min(low[:i+1])
-            else:
-                max_high[i] = np.max(high[i-period+1:i+1])
-                min_low[i] = np.min(low[i-period+1:i+1])
+        # DX and ADX
+        dx = np.full_like(di_plus, np.nan)
+        dx_valid = ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
+        dx[dx_valid] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
         
-        # Choppiness Index
-        for i in range(period, len(close)):
-            if atr_sum[i] > 0 and max_high[i] > min_low[i]:
-                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
-            else:
-                chop[i] = 50.0
+        adx = np.full_like(dx, np.nan)
+        if len(dx) >= period:
+            # Initial ADX
+            adx[2*period-1] = np.nanmean(dx[period:2*period])
+            # Wilder smoothing for ADX
+            for i in range(2*period, len(dx)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
         
-        return chop
+        return adx
     
-    # Calculate indicators on weekly data
-    kama_1w = calculate_kama(close_1w, er_period=10, fast_sc=2, slow_sc=30)
-    rsi_1w = calculate_rsi(close_1w, period=14)
-    chop_1w = calculate_choppiness(high_1w, low_1w, close_1w, period=14)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align to daily timeframe
-    kama = align_htf_to_ltf(prices, df_1w, kama_1w)
-    rsi = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    chop = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # Align Alligator lines and ADX to 4h timeframe
+    jaw_4h = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_4h = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_4h = align_htf_to_ltf(prices, df_1d, lips)
+    adx_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    vol_period = 20
+    
+    if len(volume) >= vol_period:
+        for i in range(vol_period, len(volume)):
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure we have enough data for all indicators
+    start_idx = max(13, 8, 5, 14) + 1  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(jaw_4h[i]) or np.isnan(teeth_4h[i]) or 
+            np.isnan(lips_4h[i]) or np.isnan(adx_4h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Conditions
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        rsi_overbought = rsi[i] > 60
-        rsi_oversold = rsi[i] < 40
-        not_choppy = chop[i] < 61.8  # Not in choppy regime
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        
+        # Trend strength filter: ADX > 25
+        strong_trend = adx_4h[i] > 25
+        
+        # Alligator alignment signals
+        bullish_alignment = lips_4h[i] > teeth_4h[i] and teeth_4h[i] > jaw_4h[i]
+        bearish_alignment = lips_4h[i] < teeth_4h[i] and teeth_4h[i] < jaw_4h[i]
         
         if position == 0:
-            # Long: price above KAMA, RSI not overbought, not choppy
-            if price_above_kama and not rsi_overbought and not_choppy:
+            # Long: bullish alignment with volume and strong trend
+            if bullish_alignment and vol_confirm and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI not oversold, not choppy
-            elif price_below_kama and not rsi_oversold and not_choppy:
+            # Short: bearish alignment with volume and strong trend
+            elif bearish_alignment and vol_confirm and strong_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below KAMA OR RSI overbought OR market becomes choppy
-            if (price_below_kama or rsi[i] > 70 or chop[i] > 61.8):
+            # Long exit: alignment breaks or trend weakens
+            if not bullish_alignment or not strong_trend:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above KAMA OR RSI oversold OR market becomes choppy
-            if (price_above_kama or rsi[i] < 30 or chop[i] > 61.8):
+            # Short exit: alignment breaks or trend weakens
+            if not bearish_alignment or not strong_trend:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -181,6 +176,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "4h_Williams_Alligator_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
