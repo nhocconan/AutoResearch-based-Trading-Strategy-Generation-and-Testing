@@ -1,8 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_1dRSI_Pullback
-Hypothesis: Trade KAMA direction on 4h with 1d RSI pullback confirmation. KAMA adapts to market efficiency, reducing whipsaw in sideways markets and capturing trends. Enter long when KAMA turns up and 1d RSI < 40 (pullback in uptrend), short when KAMA turns down and 1d RSI > 60 (pullback in downtrend). Uses volume > 1.5x 24-period average for confirmation. Targets 20-40 trades/year via KAMA's adaptive smoothing + RSI pullback rarity. Works in bull/bear by following adaptive trend. Uses 1d RSI for pullback to avoid chasing extended moves.
+1d_Donchian20_Breakout_1wTrend_Volume
+Hypothesis: Trade Donchian(20) breakouts on daily timeframe with weekly trend filter and volume confirmation.
+Long when price breaks above 20-day high AND weekly EMA34 trend is up (price > weekly EMA34) AND volume > 1.5x 20-day average volume.
+Short when price breaks below 20-day low AND weekly EMA34 trend is down (price < weekly EMA34) AND volume > 1.5x 20-day average volume.
+Exit when price crosses weekly EMA34 in opposite direction or volatility contraction (ATR < 0.5x 20-day ATR average).
+Designed for low frequency (~10-25 trades/year) to minimize fee drag while capturing major trends in bull/bear markets.
 """
 
 import numpy as np
@@ -19,109 +22,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 1d RSI(14)
-    rsi_period = 14
-    close_1d = df_1d['close'].values
-    rsi_1d = np.full_like(close_1d, np.nan)
+    # Weekly EMA34 for trend filter
+    ema_period = 34
+    ema_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period-1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 / (ema_period + 1)) + (ema_1w[i-1] * (ema_period - 1) / (ema_period + 1))
     
-    if len(close_1d) >= rsi_period + 1:
-        delta = np.diff(close_1d)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(close_1d, np.nan)
-        avg_loss = np.full_like(close_1d, np.nan)
-        
-        # First average
-        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
-        
-        # Wilder smoothing
-        for i in range(rsi_period + 1, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_1d = 100 - (100 / (1 + rs))
+    # Align weekly EMA to daily timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Align 1d RSI to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
     
-    # KAMA on 4h
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    if len(high) >= lookback:
+        for i in range(lookback-1, len(high)):
+            highest_high[i] = np.max(high[i-lookback+1:i+1])
+            lowest_low[i] = np.min(low[i-lookback+1:i+1])
     
-    # KAMA parameters
-    fast_sc = 2 / (2 + 1)  # 2-period EMA
-    slow_sc = 2 / (30 + 1) # 30-period EMA
-    
-    kama = np.full_like(close_4h, np.nan)
-    
-    if len(close_4h) >= 2:
-        kama[0] = close_4h[0]
-        for i in range(1, len(close_4h)):
-            # Efficiency ratio
-            if i >= 1:
-                change = abs(close_4h[i] - close_4h[i-1])
-                volatility = 0
-                for j in range(1, i+1):
-                    volatility += abs(close_4h[j] - close_4h[j-1])
-                er = change / volatility if volatility != 0 else 0
-                sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-                kama[i] = kama[i-1] + sc * (close_4h[i] - kama[i-1])
-            else:
-                kama[i] = close_4h[i]
-    
-    # Align KAMA to 4h timeframe (same as input, but using alignment for consistency)
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
-    
-    # Volume confirmation: volume > 1.5x 24-period average
+    # Volume confirmation: volume > 1.5x 20-day average volume
+    vol_lookback = 20
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24
+    if len(volume) >= vol_lookback:
+        for i in range(vol_lookback, len(volume)):
+            vol_ma[i] = np.mean(volume[i-vol_lookback:i])
     
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    # ATR for volatility-based exit
+    atr_period = 14
+    tr = np.zeros_like(close)
+    atr = np.full_like(close, np.nan)
+    
+    if len(high) >= 2:
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(close)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        if len(tr) >= atr_period:
+            atr[atr_period-1] = np.mean(tr[:atr_period])
+            for i in range(atr_period, len(tr)):
+                atr[i] = (tr[i] * 2 / (atr_period + 1)) + (atr[i-1] * (atr_period - 1) / (atr_period + 1))
+    
+    # ATR average for volatility filter
+    atr_lookback = 20
+    atr_ma = np.full_like(atr, np.nan)
+    if len(atr) >= atr_lookback:
+        for i in range(atr_lookback, len(atr)):
+            atr_ma[i] = np.mean(atr[i-atr_lookback:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, vol_period)  # KAMA needs ~30 periods, vol MA needs 24
+    start_idx = max(lookback, vol_lookback, atr_lookback, ema_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_1w_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(atr_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
+        # Volatility filter: avoid trading in extremely low volatility
+        vol_filter = atr[i] > 0.5 * atr_ma[i]
+        
         if position == 0:
-            # Long: KAMA turning up + RSI pullback (<40) + volume
-            if i > 0 and not np.isnan(kama_aligned[i-1]) and kama_aligned[i] > kama_aligned[i-1] and rsi_1d_aligned[i] < 40 and vol_confirm:
+            # Long: price breaks above 20-day high AND weekly trend up AND volume confirmation AND volatility filter
+            if close[i] > highest_high[i-1] and close[i] > ema_1w_aligned[i] and vol_confirm and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turning down + RSI pullback (>60) + volume
-            elif i > 0 and not np.isnan(kama_aligned[i-1]) and kama_aligned[i] < kama_aligned[i-1] and rsi_1d_aligned[i] > 60 and vol_confirm:
+            # Short: price breaks below 20-day low AND weekly trend down AND volume confirmation AND volatility filter
+            elif close[i] < lowest_low[i-1] and close[i] < ema_1w_aligned[i] and vol_confirm and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA turns down or RSI > 60 (overbought)
-            if (i > 0 and not np.isnan(kama_aligned[i-1]) and kama_aligned[i] < kama_aligned[i-1]) or rsi_1d_aligned[i] > 60:
+            # Long exit: price crosses below weekly EMA OR volatility contraction
+            if close[i] < ema_1w_aligned[i] or not vol_filter:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA turns up or RSI < 40 (oversold)
-            if (i > 0 and not np.isnan(kama_aligned[i-1]) and kama_aligned[i] > kama_aligned[i-1]) or rsi_1d_aligned[i] < 40:
+            # Short exit: price crosses above weekly EMA OR volatility contraction
+            if close[i] > ema_1w_aligned[i] or not vol_filter:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -129,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Direction_1dRSI_Pullback"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
