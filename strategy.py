@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h 12-hour Momentum Pullback with Volume Confirmation
-Hypothesis: In trending markets, price pulls back to the 12-hour EMA before continuing.
-Long when price pulls back to 12h EMA in an uptrend with volume confirmation.
-Short when price pulls back to 12h EMA in a downtrend with volume confirmation.
-Designed for 20-50 trades/year on 4h timeframe.
+1h Time-Based Trend Reversal with Volume Filter
+Hypothesis: During low volatility overnight sessions (00-08 UTC), price often reverts to the 
+4-hour VWAP. During active sessions (08-20 UTC), we follow 4-hour momentum with volume confirmation.
+Designed for 15-30 trades/year on 1h timeframe (60-120 total over 4 years).
+Works in bull markets by riding 4h uptrends and in bear markets by fading overnight reversions.
 """
 
 import numpy as np
@@ -21,33 +21,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 (once before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Pre-compute hour filter for efficiency
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # 12h EMA34 on close
-    ema_34 = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
+    # Get 4H data once
+    df_4h = get_htf_data(prices, '4h')
     
-    # 12h trend: EMA34 slope (rising/falling)
-    ema_34_prev = np.roll(ema_34, 1)
-    ema_34_prev[0] = ema_34[0]
-    ema_34_slope = ema_34 - ema_34_prev
-    ema_34_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_34_slope)
+    # 4H VWAP (volume weighted average price)
+    typical_price_4h = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
+    vwap_4h = (typical_price_4h * df_4h['volume']).cumsum() / df_4h['volume'].cumsum()
+    vwap_4h_values = vwap_4h.values
     
-    # Volume spike: 2x 20-period average on 4h
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # 4H EMA34 for trend filter
+    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 4h RSI(14) for momentum confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align 4H indicators to 1H timeframe
+    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h_values)
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    
+    # 1H volume spike: 1.5x 24-period average
+    vol_ma_1h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.5 * vol_ma_1h)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -55,45 +49,70 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(ema_34_slope_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(rsi_values[i])):
+        if (np.isnan(vwap_4h_aligned[i]) or 
+            np.isnan(ema34_4h_aligned[i]) or
+            np.isnan(vol_ma_1h[i])):
             signals[i] = 0.0
             continue
         
+        hour = hours[i]
         price = close[i]
-        ema = ema_34_aligned[i]
-        slope = ema_34_slope_aligned[i]
+        vwap = vwap_4h_aligned[i]
+        ema34 = ema34_4h_aligned[i]
+        
+        # Session filter: 08-20 UTC active, 00-08 UTC overnight
+        is_active_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long: price near 12h EMA in uptrend with volume spike and bullish RSI
-            if abs(price - ema) / ema < 0.01 and slope > 0 and volume_spike[i] and rsi_values[i] > 50:
-                signals[i] = 0.25
-                position = 1
-            # Short: price near 12h EMA in downtrend with volume spike and bearish RSI
-            elif abs(price - ema) / ema < 0.01 and slope < 0 and volume_spike[i] and rsi_values[i] < 50:
-                signals[i] = -0.25
-                position = -1
+            if is_active_session:
+                # Active session: follow 4H trend with volume confirmation
+                if price > ema34 and volume_spike[i]:
+                    signals[i] = 0.20
+                    position = 1
+                elif price < ema34 and volume_spike[i]:
+                    signals[i] = -0.20
+                    position = -1
+            else:
+                # Overnight session: mean revert to 4H VWAP
+                if price < vwap * 0.995:  # Oversold threshold
+                    signals[i] = 0.20
+                    position = 1
+                elif price > vwap * 1.005:  # Overbought threshold
+                    signals[i] = -0.20
+                    position = -1
         
         elif position == 1:
             # Long position
-            signals[i] = 0.25
-            # Exit: trend changes or RSI turns bearish
-            if slope < 0 or rsi_values[i] < 50:
-                signals[i] = 0.0
-                position = 0
+            signals[i] = 0.20
+            # Exit conditions
+            if is_active_session:
+                # In active session: exit on trend reversal
+                if price < ema34:
+                    signals[i] = 0.0
+                    position = 0
+            else:
+                # In overnight: exit when price returns to VWAP
+                if price >= vwap:
+                    signals[i] = 0.0
+                    position = 0
         
         elif position == -1:
             # Short position
-            signals[i] = -0.25
-            # Exit: trend changes or RSI turns bullish
-            if slope > 0 or rsi_values[i] > 50:
-                signals[i] = 0.0
-                position = 0
+            signals[i] = -0.20
+            # Exit conditions
+            if is_active_session:
+                # In active session: exit on trend reversal
+                if price > ema34:
+                    signals[i] = 0.0
+                    position = 0
+            else:
+                # In overnight: exit when price returns to VWAP
+                if price <= vwap:
+                    signals[i] = 0.0
+                    position = 0
     
     return signals
 
-name = "4h_12hEMA_Pullback_Momentum"
-timeframe = "4h"
+name = "1h_TimeBased_Trend_Reversion_Volume"
+timeframe = "1h"
 leverage = 1.0
