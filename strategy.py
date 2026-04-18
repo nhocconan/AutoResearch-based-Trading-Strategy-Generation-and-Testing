@@ -1,11 +1,15 @@
-#!/usr/bin/env python3
+# 4h_Camarilla_Pivot_R1_S1_Breakout_Volume_RangeFilter_Strict
+# Hypothesis: Camarilla pivot levels (R1/S1) from 1-day act as strong support/resistance.
+# Breakouts above R1 or below S1 with volume confirmation and range filter (low ADX) indicate momentum.
+# Works in bull/bear: captures breakouts in trending markets while avoiding false signals in ranging markets via ADX filter.
+# Target: 20-40 trades/year to minimize fee drag.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,86 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators (HTF)
+    # Get 1-day data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channels on daily (upper and lower bands)
-    upper_channel = np.full_like(close_1d, np.nan)
-    lower_channel = np.full_like(close_1d, np.nan)
+    # Calculate Camarilla pivot levels (R1, S1) for each daily bar
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
     
-    for i in range(19, len(close_1d)):
-        upper_channel[i] = np.max(high_1d[i-19:i+1])
-        lower_channel[i] = np.min(low_1d[i-19:i+1])
+    # Calculate ADX (14) on 1-day for range filter
+    # +DM, -DM, TR
+    high_diff = np.diff(high_1d, prepend=high_1d[0])
+    low_diff = np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.append([np.nan], close_1d[:-1]))
+    tr3 = np.abs(low_1d - np.append([np.nan], close_1d[:-1]))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 34-period EMA on daily for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align R1, S1, and ADX to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 14-day RSI for momentum filter
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align all daily data to 12h timeframe (primary)
-    upper_channel_12h = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_12h = align_htf_to_ltf(prices, df_1d, lower_channel)
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34)
-    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Calculate 12h volume spike indicator (volume > 1.5x 20-period average)
+    # Volume spike on 4h: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(19, 34) + 1
+    start_idx = max(20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_channel_12h[i]) or np.isnan(lower_channel_12h[i]) or 
-            np.isnan(ema_34_12h[i]) or np.isnan(rsi_12h[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(adx_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA
-        uptrend = close[i] > ema_34_12h[i]
-        downtrend = close[i] < ema_34_12h[i]
-        
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_not_extreme = (rsi_12h[i] > 30) and (rsi_12h[i] < 70)
-        
-        # Volume confirmation: require volume spike
-        vol_confirmed = volume_spike[i]
+        # Range filter: only trade when ADX < 25 (ranging/mild trend) to avoid whipsaws
+        range_filter = adx_4h[i] < 25
         
         if position == 0:
-            # Long: price breaks above upper Donchian channel with uptrend, RSI not extreme, and volume spike
-            if close[i] > upper_channel_12h[i] and uptrend and rsi_not_extreme and vol_confirmed:
+            # Long: price breaks above R1 with volume spike and range filter
+            if close[i] > r1_4h[i] and volume_spike[i] and range_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian channel with downtrend, RSI not extreme, and volume spike
-            elif close[i] < lower_channel_12h[i] and downtrend and rsi_not_extreme and vol_confirmed:
+            # Short: price breaks below S1 with volume spike and range filter
+            elif close[i] < s1_4h[i] and volume_spike[i] and range_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below lower Donchian channel OR trend reverses OR RSI overbought
-            if (close[i] < lower_channel_12h[i]) or (not uptrend) or (rsi_12h[i] >= 70):
+            # Long exit: price crosses below S1 OR ADX rises above 25 (trending) OR volume drops
+            if (close[i] < s1_4h[i]) or (adx_4h[i] >= 25) or (not volume_spike[i]):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above upper Donchian channel OR trend reverses OR RSI oversold
-            if (close[i] > upper_channel_12h[i]) or (not downtrend) or (rsi_12h[i] <= 30):
+            # Short exit: price crosses above R1 OR ADX rises above 25 OR volume drops
+            if (close[i] > r1_4h[i]) or (adx_4h[i] >= 25) or (not volume_spike[i]):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -100,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_RSI_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_RangeFilter_Strict"
+timeframe = "4h"
 leverage = 1.0
