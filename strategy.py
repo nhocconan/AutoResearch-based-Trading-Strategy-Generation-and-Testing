@@ -1,12 +1,10 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_WeeklyTrend_Filter
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) on daily timeframe adapts to market noise,
-providing trend direction that avoids whipsaws in ranging markets. Combined with weekly trend
-filter (EMA34 on weekly) and volume confirmation, it captures strong trends while avoiding
-false signals in chop. Works in bull markets by riding uptrends and in bear markets by
-avoiding false longs and taking shorts when weekly trend turns down.
-Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+12h_PriceChannel_Breakout_Volume_Trend
+Hypothesis: 12-hour price channel breakouts (Donchian 20) with volume confirmation
+and daily EMA trend filter capture institutional move initiation. Works in bull/bear
+by following directional momentum. Target: 20-40 trades/year (80-160 total over 4 years).
 """
 
 import numpy as np
@@ -15,100 +13,70 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for KAMA calculation
+    # 1-day data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
-        return np.zeros(n)
+    # 20-period Donchian channels on 12h data
+    lookback = 20
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === KAMA on Daily (ER=10, FAST=2, SLOW=30) ===
-    def kama(close_vals, er_period=10, fast=2, slow=30):
-        n = len(close_vals)
-        change = np.abs(np.diff(close_vals, k=er_period))  # |close[t] - close[t-er]|
-        volatility = np.sum(np.abs(np.diff(close_vals)), axis=0) if False else None  # placeholder
-        
-        # Calculate ER (Efficiency Ratio) properly
-        change = np.abs(np.diff(close_vals, k=er_period))
-        # Volatility = sum of absolute changes over er_period window
-        volatility = np.zeros_like(close_vals)
-        for i in range(er_period, len(close_vals)):
-            volatility[i] = np.sum(np.abs(np.diff(close_vals[i-er_period+1:i+1])))
-        
-        # Avoid division by zero
-        er = np.zeros_like(close_vals)
-        mask = volatility != 0
-        er[mask] = change[mask] / volatility[mask]
-        
-        # Smooth constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        
-        # Calculate KAMA
-        kama_vals = np.zeros_like(close_vals)
-        kama_vals[0] = close_vals[0]
-        for i in range(1, n):
-            kama_vals[i] = kama_vals[i-1] + sc[i] * (close_vals[i] - kama_vals[i-1])
-        
-        return kama_vals
+    # Volume filter: >1.8x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (1.8 * vol_ma)
     
-    # Calculate KAMA on daily close
-    kama_1d = kama(df_1d['close'].values)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    
-    # === Weekly EMA34 for trend filter ===
-    ema_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # === Volume filter: >1.3x 20-period average ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    # 1-day EMA trend filter (34-period)
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = max(lookback, 30)  # Warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama_1d_aligned[i]
-        ema_trend = ema_1w_aligned[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
         vol_ok = volume_filter[i]
+        ema_trend = ema_1d_12h[i]
         
         if position == 0:
-            # Long: price above KAMA and above weekly EMA (uptrend) with volume
-            if price > kama_val and price > ema_trend and vol_ok:
+            # Long: break above upper band with volume in uptrend
+            if price > upper_val and vol_ok and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and below weekly EMA (downtrend) with volume
-            elif price < kama_val and price < ema_trend and vol_ok:
+            # Short: break below lower band with volume in downtrend
+            elif price < lower_val and vol_ok and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long: exit if price crosses below KAMA or weekly EMA turns down
-            if price < kama_val or price < ema_trend:
+            # Exit: price returns to lower band or trend reverses
+            if price < lower_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short: exit if price crosses above KAMA or weekly EMA turns up
-            if price > kama_val or price > ema_trend:
+            # Exit: price returns to upper band or trend reverses
+            if price > upper_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Direction_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "12h_PriceChannel_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
