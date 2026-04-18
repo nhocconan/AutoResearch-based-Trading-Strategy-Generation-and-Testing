@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -48,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for enough data
+    start_idx = 60  # Wait for enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
@@ -72,11 +72,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Donchian breakout above upper band with EMA34 uptrend
             if trade_allowed and close[i] > donchian_high[i] and close[i] > ema34_1d_aligned[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Donchian breakdown below lower band with EMA34 downtrend
             elif trade_allowed and close[i] < donchian_low[i] and close[i] < ema34_1d_aligned[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -85,7 +85,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Short exit: price closes above EMA34 or Donchian upper band
@@ -93,10 +93,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRFilter"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRFilter_v2"
 timeframe = "4h"
 leverage = 1.0
