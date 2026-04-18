@@ -1,96 +1,142 @@
 #!/usr/bin/env python3
 """
-12h Vortex Trend + Volume Spike
-Hypothesis: Vortex Indicator identifies trend direction (VI+ > VI- for uptrend, VI- > VI+ for downtrend). 
-Combined with volume spikes (>2x 20-period average) to confirm institutional participation. 
-Works in bull markets via VI+ crossovers and in bear markets via VI- crossovers. 
-Low trade frequency due to requiring both trend and volume confirmation.
+4h KAMA Trend + Volume Spike + ADX Trend Filter
+Hypothesis: KAMA adapts to market efficiency, providing smooth trend direction. Combined with volume spikes (institutional interest) and ADX > 25 (trending market), it captures strong moves in both bull and bear markets. Low trade frequency due to strict multi-condition entry.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_vortex(high, low, close):
-    """Calculate Vortex Indicator: VI+ and VI-"""
-    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First TR
-    
-    vm_plus = abs(high - np.roll(low, 1))
-    vm_minus = abs(low - np.roll(high, 1))
-    
-    # Sum over period (default 14)
-    period = 14
-    vi_plus = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum() / pd.Series(tr).rolling(window=period, min_periods=period).sum()
-    vi_minus = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum() / pd.Series(tr).rolling(window=period, min_periods=period).sum()
-    
-    return vi_plus.values, vi_minus.values
+def calculate_kama(close, er_length=10, fast_ema=2, slow_ema=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # For array calculation, we need to compute ER per point
+    er = np.zeros_like(close)
+    for i in range(len(close)):
+        if i < er_length:
+            er[i] = 0
+        else:
+            change_sum = np.sum(change[i-er_length+1:i+1])
+            volatility_sum = np.sum(np.abs(np.diff(close[i-er_length+1:i+1])))
+            if volatility_sum > 0:
+                er[i] = change_sum / volatility_sum
+            else:
+                er[i] = 0
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Vortex (once before loop)
+    # Get 4h data for ADX calculation (using same timeframe for simplicity)
+    # Since we're on 4h, we'll calculate ADX on 4h data directly
+    # Get 1d data for trend filter (KAMA)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Vortex on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate KAMA on 1d for trend filter
     close_1d = df_1d['close'].values
+    kama_1d = calculate_kama(close_1d, er_length=10, fast_ema=2, slow_ema=30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    vi_plus_1d, vi_minus_1d = calculate_vortex(high_1d, low_1d, close_1d)
+    # Calculate ADX on 4h data
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align 1d Vortex to 12h timeframe
-    vi_plus_1d_aligned = align_htf_to_ltf(prices, df_1d, vi_plus_1d)
-    vi_minus_1d_aligned = align_htf_to_ltf(prices, df_1d, vi_minus_1d)
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Volume confirmation: current volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
+    # Smoothed values
+    def smooth_series(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values use Wilder smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = smooth_series(tr, 14)
+    plus_di = 100 * smooth_series(plus_dm, 14) / np.where(atr != 0, atr, 1)
+    minus_di = 100 * smooth_series(minus_dm, 14) / np.where(atr != 0, atr, 1)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = smooth_series(dx, 14)
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
+        else:
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(vi_plus_1d_aligned[i]) or np.isnan(vi_minus_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(kama_1d_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        vi_plus = vi_plus_1d_aligned[i]
-        vi_minus = vi_minus_1d_aligned[i]
-        vol_ok = vol_confirm[i]
+        kama_val = kama_1d_aligned[i]
+        adx_val = adx[i]
+        vol_ok = vol_spike[i]
         
         if position == 0:
-            # Enter long: VI+ crosses above VI- with volume confirmation
-            if vi_plus > vi_minus and vol_ok:
+            # Enter long: price above KAMA (uptrend) + ADX > 25 + volume spike
+            if (close[i] > kama_val and 
+                adx_val > 25 and 
+                vol_ok):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: VI- crosses above VI+ with volume confirmation
-            elif vi_minus > vi_plus and vol_ok:
+            # Enter short: price below KAMA (downtrend) + ADX > 25 + volume spike
+            elif (close[i] < kama_val and 
+                  adx_val > 25 and 
+                  vol_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: VI- crosses above VI+ (trend change)
-            if vi_minus > vi_plus:
+            # Exit long: price crosses below KAMA or ADX weakens
+            if close[i] < kama_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: VI+ crosses above VI- (trend change)
-            if vi_plus > vi_minus:
+            # Exit short: price crosses above KAMA or ADX weakens
+            if close[i] > kama_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Vortex_Trend_Volume_Spike"
-timeframe = "12h"
+name = "4h_KAMA_Trend_VolumeSpike_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
