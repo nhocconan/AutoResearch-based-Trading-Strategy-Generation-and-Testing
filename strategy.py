@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
-"""
-1d_Weekly_Pivot_R1S1_Breakout_Trend_Filter_v1
-Hypothesis: Weekly pivot R1/S1 levels act as strong support/resistance. Breakouts above R1 or below S1 with trend confirmation (price > weekly EMA34) capture sustained moves. Weekly timeframe reduces noise, daily provides timely entries. Designed for ~15 trades/year to minimize fee drag.
-"""
+# 6h_Chaikin_Money_Flow_12hTrend_Signal_v1
+# Hypothesis: Chaikin Money Flow (CMF) confirms institutional money flow direction.
+# Combined with 12h trend filter (EMA34) for higher timeframe bias, this strategy
+# captures sustained moves with institutional backing. Works in bull (money inflow
+# + uptrend) and bear (money outflow + downtrend). Targets 20-30 trades/year
+# to minimize fee drag while capturing high-probability moves.
 
 import numpy as np
 import pandas as pd
@@ -13,82 +14,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points and EMA
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 12h EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Weekly EMA34 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Chaikin Money Flow (20-period)
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Avoid division by zero
+    hl_range = high - low
+    mf_multiplier = np.zeros_like(close)
+    mask = hl_range != 0
+    mf_multiplier[mask] = ((close[mask] - low[mask]) - (high[mask] - close[mask])) / hl_range[mask]
     
-    # Weekly pivot points (using prior week's OHLC)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
+    # Money Flow Volume = MF Multiplier * Volume
+    mf_volume = mf_multiplier * volume
     
-    # Align weekly levels to daily
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Daily volume confirmation: >1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    # CMF = 20-period sum of MFV / 20-period sum of Volume
+    mf_volume_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
+    volume_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    cmf = np.zeros_like(close)
+    mask_vol = volume_sum != 0
+    cmf[mask_vol] = mf_volume_sum[mask_vol] / volume_sum[mask_vol]
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 40  # need enough data for EMA and volume MA
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(cmf[i])):
             signals[i] = 0.0
             continue
         
+        cmf_val = cmf[i]
+        ema_12h = ema_34_12h_aligned[i]
         price = close[i]
-        ema34 = ema34_1w_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: price breaks above R1 with trend filter (price > EMA34) and volume
-            if price > r1 and price > ema34 and vol_conf:
+            # Long: CMF > 0.05 (buying pressure) + price above 12h EMA34
+            if cmf_val > 0.05 and price > ema_12h:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with trend filter (price < EMA34) and volume
-            elif price < s1 and price < ema34 and vol_conf:
+            # Short: CMF < -0.05 (selling pressure) + price below 12h EMA34
+            elif cmf_val < -0.05 and price < ema_12h:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price falls below pivot or trend fails
-            if price < pivot_aligned[i] or price < ema34:
+            # Exit: CMF turns negative OR price crosses below EMA
+            if cmf_val < 0 or price < ema_12h:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price rises above pivot or trend fails
-            if price > pivot_aligned[i] or price > ema34:
+            # Exit: CMF turns positive OR price crosses above EMA
+            if cmf_val > 0 or price > ema_12h:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Weekly_Pivot_R1S1_Breakout_Trend_Filter_v1"
-timeframe = "1d"
+name = "6h_Chaikin_Money_Flow_12hTrend_Signal_v1"
+timeframe = "6h"
 leverage = 1.0
