@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Trend Continuation with 4h EMA filter and volume surge confirmation.
-# In strong trends (price > 4h EMA), we look for pullbacks to resume the trend.
-# Volume surge confirms institutional participation in the breakout.
-# Works in bull markets (buy pullbacks in uptrends) and bear markets (sell rallies in downtrends).
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
-name = "1h_EMA_Pullback_Volume_Surge"
-timeframe = "1h"
+# Hypothesis: 6h Williams %R with weekly trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions (above -20 = overbought, below -80 = oversold).
+# Weekly trend filter ensures we only trade in direction of higher timeframe trend.
+# Volume confirmation adds conviction to reversals.
+# Designed for low trade frequency (15-30/year) to minimize fee drag in 6h timeframe.
+# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend).
+name = "6h_WilliamsR_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,17 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA filter (ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly data for trend filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA (34-period) - trend filter
-    ema_34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Calculate Williams %R (14-period) - momentum oscillator
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    high_14 = pd.Series(high).rolling(window=14, min_periods=14).max()
+    low_14 = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = (high_14 - close) / (high_14 - low_14) * -100
+    williams_r = williams_r.values
     
-    # Calculate 1h EMA (21-period) for entry timing
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate weekly EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 20-period average volume for surge detection
+    # Align weekly EMA to 6h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08-20 UTC
@@ -41,11 +49,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(ema_21[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -56,39 +65,40 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume surge: current volume 1.5x above average (institutional interest)
-        volume_surge = volume[i] > vol_ma_20[i] * 1.5
+        # Volume confirmation: current volume above average
+        vol_confirm = volume[i] > vol_ma_20[i]
+        
+        # Weekly trend: price above/below EMA34
+        uptrend = close[i] > ema_34_1w_aligned[i]
+        downtrend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: uptrend (price > 4h EMA) + pullback to 1h EMA + volume surge
-            uptrend = close[i] > ema_34_4h_aligned[i]
-            pullback_to_ema = close[i] <= ema_21[i] * 1.02  # Allow small overshoot
-            if uptrend and pullback_to_ema and volume_surge:
-                signals[i] = 0.20
+            # Long: Williams %R oversold (< -80) AND uptrend AND volume confirmation
+            long_signal = williams_r[i] < -80
+            if vol_confirm and uptrend and long_signal:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend (price < 4h EMA) + rally to 1h EMA + volume surge
-            elif not uptrend and close[i] >= ema_21[i] * 0.98 and volume_surge:
-                signals[i] = -0.20
+            # Short: Williams %R overbought (> -20) AND downtrend AND volume confirmation
+            elif vol_confirm and downtrend and williams_r[i] > -20:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend broken (price < 4h EMA) OR overextended (price > 1h EMA + 1.5%)
-            trend_broken = close[i] < ema_34_4h_aligned[i]
-            overextended = close[i] > ema_21[i] * 1.015
-            if trend_broken or overextended:
+            # Long exit: Williams %R returns to neutral (> -50) OR trend changes
+            exit_condition = williams_r[i] > -50 or not uptrend
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend broken (price > 4h EMA) OR overextended (price < 1h EMA - 1.5%)
-            trend_broken = close[i] > ema_34_4h_aligned[i]
-            overextended = close[i] < ema_21[i] * 0.985
-            if trend_broken or overextended:
+            # Short exit: Williams %R returns to neutral (< -50) OR trend changes
+            exit_condition = williams_r[i] < -50 or not downtrend
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
