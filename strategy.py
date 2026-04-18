@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + Volume Confirmation + ATR Stop
-Hypothesis: Donchian channel breakouts capture sustained trends in BTC/ETH/SOL.
-Volume confirmation filters false breakouts. ATR-based position sizing and stop loss
-control risk. Designed for 12h timeframe to limit trades (~20-40/year) and reduce fee
-drag. Works in bull markets (breakouts up) and bear markets (breakouts down).
+4h 12h EMA + Volume Confirmation + ADX Filter
+Hypothesis: In trending markets (ADX > 20), price above/below the 12h EMA34 indicates trend direction.
+Volume confirmation (volume > 1.5x 20-period average) filters false breakouts.
+This combination works in both bull and bear markets by capturing sustained trends
+while avoiding choppy periods. Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,62 +21,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian Channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Get 12h EMA34 once before loop
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Volume moving average (20-period) for confirmation
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # ATR (14-period) for volatility-based stop and sizing
+    # ADX for trend strength (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
+    
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(adx[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        atr_val = atr[i]
+        ema_12h = ema_34_12h_aligned[i]
+        adx_val = adx[i]
+        vol_conf = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high with volume confirmation
-            if price > donchian_high[i] and vol > vol_ma[i]:
+            # Strong trend (ADX > 20) and volume confirmation
+            # Price above 12h EMA = long
+            if adx_val > 20 and price > ema_12h and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below Donchian low with volume confirmation
-            elif price < donchian_low[i] and vol > vol_ma[i]:
+            # Price below 12h EMA = short
+            elif adx_val > 20 and price < ema_12h and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Trail stop: exit if price drops 2*ATR from highest high since entry
-            # We approximate by exiting if price closes below Donchian low (breakdown)
-            if price < donchian_low[i]:
+            # Exit if trend weakens or price crosses below EMA
+            if adx_val < 15 or price < ema_12h:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Trail stop: exit if price rises 2*ATR from lowest low since entry
-            # Exit if price closes above Donchian high (breakout)
-            if price > donchian_high[i]:
+            # Exit if trend weakens or price crosses above EMA
+            if adx_val < 15 or price > ema_12h:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume"
-timeframe = "12h"
+name = "4h_12hEMA34_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
