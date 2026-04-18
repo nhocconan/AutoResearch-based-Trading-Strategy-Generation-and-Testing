@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_RSI_MeanReversion_BollingerBands_TrendFilter
-Hypothesis: In ranging markets, price reverts to mean from Bollinger Bands extremes with RSI confirmation.
-In trending markets, trade pullbacks to EMA21 in direction of 1d trend. Uses 1d trend filter to adapt
-behavior to market regime, working in both bull and bear markets.
-Target: 20-40 trades/year on 4h timeframe with disciplined entry conditions.
+12h_Pivot_R1S1_Breakout_Volume_Trend
+Hypothesis: Combines 1-day Camarilla pivot breakouts with volume confirmation and 1-week trend filter.
+Breakouts above R1 or below S1 require volume spike and alignment with weekly trend direction.
+Designed for low trade frequency (12-37/year) to minimize fee drag while capturing trending moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,93 +20,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    ma20 = close_series.rolling(window=20, min_periods=20).mean()
-    std20 = close_series.rolling(window=20, min_periods=20).std()
-    upper = ma20 + 2 * std20
-    lower = ma20 - 2 * std20
-    upper = upper.values
-    lower = lower.values
-    ma20 = ma20.values
-    
-    # Calculate RSI (14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate 1-day EMA21 trend filter
+    # Calculate 1-day Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema21_1d = np.full(len(close_1d), np.nan)
-    k = 2 / (21 + 1)
-    for i in range(21, len(close_1d)):
-        if i == 21:
-            ema21_1d[i] = np.mean(close_1d[0:22])
-        else:
-            ema21_1d[i] = close_1d[i] * k + ema21_1d[i-1] * (1 - k)
-    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
     
-    # Bollinger Band width for regime detection
-    bb_width = (upper - lower) / ma20
-    bb_width_ma = np.zeros(n)
-    for i in range(20, n):
-        bb_width_ma[i] = np.mean(bb_width[i-20:i])
+    # Pivot point and Camarilla levels (R1, S1)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1_1d = pivot_1d + range_1d * 1.1 / 12
+    s1_1d = pivot_1d - range_1d * 1.1 / 12
+    
+    # Align 1-day levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # 1-week EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema34_1w = np.full(len(close_1w), np.nan)
+    k = 2 / (34 + 1)
+    for i in range(34, len(close_1w)):
+        if i == 34:
+            ema34_1w[i] = np.mean(close_1w[0:35])
+        else:
+            ema34_1w[i] = close_1w[i] * k + ema34_1w[i-1] * (1 - k)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Volume spike: current volume > 1.5 x 24-period average (2 days of 12h data)
+    vol_ma = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(21, 20)  # Ensure all indicators ready
+    start_idx = max(34, 24)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(ma20[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(rsi[i]) or np.isnan(ema21_1d_aligned[i]) or np.isnan(bb_width_ma[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime detection: narrow BB = ranging, wide BB = trending
-        is_ranging = bb_width[i] < bb_width_ma[i]
-        
         if position == 0:
-            if is_ranging:
-                # Mean reversion in ranging market
-                if close[i] < lower[i] and rsi[i] < 30:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] > upper[i] and rsi[i] > 70:
-                    signals[i] = -0.25
-                    position = -1
-            else:
-                # Trend following in trending market
-                if close[i] > ema21_1d_aligned[i] and close[i] < ma20[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < ema21_1d_aligned[i] and close[i] > ma20[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: break above R1 with volume spike and weekly uptrend
+            if (close[i] > r1_1d_aligned[i] and vol_spike[i] and 
+                close[i] > ema34_1w_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: break below S1 with volume spike and weekly downtrend
+            elif (close[i] < s1_1d_aligned[i] and vol_spike[i] and 
+                  close[i] < ema34_1w_aligned[i]):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price reaches middle band or RSI overbought
-            if close[i] >= ma20[i] or rsi[i] > 70:
+            # Long exit: close below pivot or weekly trend turns down
+            if (close[i] < pivot_1d_aligned[i] or close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches middle band or RSI oversold
-            if close[i] <= ma20[i] or rsi[i] < 30:
+            # Short exit: close above pivot or weekly trend turns up
+            if (close[i] > pivot_1d_aligned[i] or close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_MeanReversion_BollingerBands_TrendFilter"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
