@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_WKL_Trend_Momentum
-Hypothesis: Uses weekly trend direction (via EMA34) and daily momentum (RSI14) for entries.
-Enters long when weekly trend up and RSI crosses above 50, short when weekly trend down and RSI crosses below 50.
-Uses volume confirmation (current volume > 1.5x 20-day average) to filter false signals.
-Designed for fewer trades (~15-25/year) to minimize fee drag while capturing medium-term moves.
-Works in bull markets via trend following and in bear markets via counter-trend RSI reversals at extremes.
+4h_4h1d1w_Camarilla_Pivot_R1S1_R2S2_Breakout_Volume
+Hypothesis: Uses 4h, 1d, and 1w R1/S1/R2/S2 levels as a price channel. 
+Trades breakouts of R1/S1 in the direction of the 1w trend (above/below weekly pivot) 
+with volume confirmation to reduce false signals. Designed for both bull and bear 
+markets by filtering with higher timeframe trend. Target: 20-40 trades/year.
 """
 
 import numpy as np
@@ -22,65 +21,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend bias
+    # Get 1d and 1w data for multi-timeframe analysis
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate 1d Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    rng_1d = high_1d - low_1d
+    r1_1d = close_1d + rng_1d * 1.1 / 12
+    s1_1d = close_1d - rng_1d * 1.1 / 12
+    r2_1d = close_1d + rng_1d * 1.1 / 6
+    s2_1d = close_1d - rng_1d * 1.1 / 6
+    
+    # Calculate 1w pivot for trend bias
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
     
-    # Weekly EMA34 for trend direction
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align all levels to 4h timeframe (wait for bar close)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # Daily RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: current volume > 1.5 x 20-day average
+    # Volume confirmation: current volume > 2.0 x 24-period average (more selective)
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    vol_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Need weekly EMA + RSI warmup
+    start_idx = 24
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: weekly trend up AND RSI crosses above 50 with volume
-            if (close[i] > ema_34_1w_aligned[i] and 
-                rsi[i-1] <= 50 and rsi[i] > 50 and vol_confirm[i]):
+            # Long entry: price breaks above both 1d R1 and R2, above weekly pivot, with volume
+            if (close[i] > r1_1d_aligned[i] and close[i] > r2_1d_aligned[i] and 
+                close[i] > pivot_1w_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: weekly trend down AND RSI crosses below 50 with volume
-            elif (close[i] < ema_34_1w_aligned[i] and 
-                  rsi[i-1] >= 50 and rsi[i] < 50 and vol_confirm[i]):
+            # Short entry: price breaks below both 1d S1 and S2, below weekly pivot, with volume
+            elif (close[i] < s1_1d_aligned[i] and close[i] < s2_1d_aligned[i] and 
+                  close[i] < pivot_1w_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: weekly trend turns down OR RSI crosses below 50
-            if (close[i] < ema_34_1w_aligned[i]) or (rsi[i-1] > 50 and rsi[i] < 50):
+            # Long exit: price returns to 1d pivot or breaks below 1d S1
+            pivot_1d = (high_1d + low_1d + close_1d) / 3
+            pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+            if (not np.isnan(pivot_1d_aligned[i]) and close[i] < pivot_1d_aligned[i]) or \
+               (not np.isnan(s1_1d_aligned[i]) and close[i] < s1_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly trend turns up OR RSI crosses above 50
-            if (close[i] > ema_34_1w_aligned[i]) or (rsi[i-1] < 50 and rsi[i] > 50):
+            # Short exit: price returns to 1d pivot or breaks above 1d R1
+            pivot_1d = (high_1d + low_1d + close_1d) / 3
+            pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+            if (not np.isnan(pivot_1d_aligned[i]) and close[i] > pivot_1d_aligned[i]) or \
+               (not np.isnan(r1_1d_aligned[i]) and close[i] > r1_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WKL_Trend_Momentum"
-timeframe = "1d"
+name = "4h_4h1d1w_Camarilla_Pivot_R1S1_R2S2_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
