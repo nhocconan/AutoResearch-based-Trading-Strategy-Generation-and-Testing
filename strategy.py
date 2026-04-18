@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Direction_WeeklyTrend
-Hypothesis: Uses daily KAMA direction filtered by weekly trend (EMA34) and volume confirmation.
-Trades only in direction of weekly trend to avoid counter-trend losses. Designed for low turnover
-(10-30 trades/year) with high conviction signals to minimize fee drag and perform in both bull and bear.
+6h_Donchian20_WeeklyPivotDirection_VolumeFilter
+Hypothesis: Uses 6h Donchian(20) breakouts with weekly pivot direction (from weekly pivot points) and volume confirmation to capture strong trend moves. Weekly pivot provides directional bias from higher timeframe structure, reducing false breakouts in chop. Designed for 15-35 trades/year to minimize fee drag while capturing major moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -15,86 +13,93 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = np.zeros_like(close_1w)
-    ema_34_1w[:] = np.nan
-    if len(close_1w) >= 34:
-        k = 2 / (34 + 1)
-        ema_34_1w[33] = np.mean(close_1w[:34])
-        for i in range(34, len(close_1w)):
-            ema_34_1w[i] = close_1w[i] * k + ema_34_1w[i-1] * (1 - k)
+    # Get daily data for volume context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Align weekly EMA34 to daily timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate daily KAMA (ER=10)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Use expanding window for ER calculation to avoid look-ahead
-    er = np.zeros_like(change)
-    for i in range(len(change)):
-        if i < 10:
-            er[i] = 0.0
+    weekly_pivot = np.zeros_like(close_weekly)
+    weekly_r1 = np.zeros_like(close_weekly)
+    weekly_s1 = np.zeros_like(close_weekly)
+    
+    for i in range(len(close_weekly)):
+        if i == 0:
+            weekly_pivot[i] = close_weekly[i]
+            weekly_r1[i] = close_weekly[i]
+            weekly_s1[i] = close_weekly[i]
         else:
-            price_change = np.abs(close[i] - close[i-10])
-            price_volatility = np.sum(np.abs(np.diff(close[i-10:i+1])))
-            er[i] = price_change / price_volatility if price_volatility > 0 else 0
+            pivot = (high_weekly[i-1] + low_weekly[i-1] + close_weekly[i-1]) / 3.0
+            weekly_pivot[i] = pivot
+            weekly_r1[i] = 2 * pivot - low_weekly[i-1]
+            weekly_s1[i] = 2 * pivot - high_weekly[i-1]
     
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Align weekly pivot levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
     
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
-        else:
-            vol_ma[i] = np.mean(volume[i-20+1:i+1])
+    # Calculate 6h Donchian(20) channels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for KAMA and EMA
+    start_idx = max(20, 20)  # Donchian and MA warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(kama[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: KAMA trending up, above weekly EMA34, with volume spike
-            if kama[i] > kama[i-1] and close[i] > ema_34_1w_aligned[i] and vol_spike[i]:
+            # Long: price breaks above Donchian high with volume spike and above weekly pivot
+            if close[i] > donchian_high[i] and vol_spike[i] and close[i] > weekly_pivot_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA trending down, below weekly EMA34, with volume spike
-            elif kama[i] < kama[i-1] and close[i] < ema_34_1w_aligned[i] and vol_spike[i]:
+            # Short: price breaks below Donchian low with volume spike and below weekly pivot
+            elif close[i] < donchian_low[i] and vol_spike[i] and close[i] < weekly_pivot_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: KAMA turns down or breaks below weekly EMA34
-            if kama[i] < kama[i-1] or close[i] < ema_34_1w_aligned[i]:
+            # Exit: price crosses below weekly pivot or Donchian low
+            if close[i] < weekly_pivot_aligned[i] or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: KAMA turns up or breaks above weekly EMA34
-            if kama[i] > kama[i-1] or close[i] > ema_34_1w_aligned[i]:
+            # Exit: price crosses above weekly pivot or Donchian high
+            if close[i] > weekly_pivot_aligned[i] or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_KAMA_Direction_WeeklyTrend"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivotDirection_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
