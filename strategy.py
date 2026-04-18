@@ -1,87 +1,103 @@
 #!/usr/bin/env python3
 """
-1d Bollinger Band Squeeze + Volume Spike + 1w Trend Filter
-Hypothesis: Bollinger Band squeeze indicates low volatility and impending breakout.
-Combined with volume spike (institutional interest) and 1-week trend filter (KAMA),
-we capture explosive moves after consolidation periods. Works in both bull and bear
-markets by trading breakouts in direction of higher timeframe trend.
-Low trade frequency due to strict squeeze + volume + trend confluence.
+4h Williams Alligator + Volume Spike + ADX Filter
+Hypothesis: Williams Alligator (Jaw, Teeth, Lips) identifies market trends and convergence/divergence.
+In strong trends, lines diverge; in consolidation, they converge or intertwine.
+Combined with volume spikes (institutional participation) and ADX > 25 (trending market),
+we capture strong trending moves while avoiding chop. Works in both bull and bear markets
+by following the trend direction indicated by the Alligator alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_length=10, fast_ema=2, slow_ema=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    er = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < er_length:
-            er[i] = 0
-        else:
-            change_sum = np.sum(change[i-er_length+1:i+1])
-            volatility_sum = np.sum(np.abs(np.diff(close[i-er_length+1:i+1])))
-            if volatility_sum > 0:
-                er[i] = change_sum / volatility_sum
-            else:
-                er[i] = 0
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
+def calculate_alligator(close, jaw_period=13, teeth_period=8, lips_period=5):
+    """Calculate Williams Alligator: SMMA of median price"""
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2  # Will be set later
+    
+    # Smoothed Moving Average (SMMA) - similar to Wilder smoothing
+    def smma(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: (prev * (period-1) + current) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    jaw = smma(median_price, jaw_period)
+    teeth = smma(median_price, teeth_period)
+    lips = smma(median_price, lips_period)
+    
+    return jaw, teeth, lips
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on 1w for trend filter
-    close_1w = df_1w['close'].values
-    kama_1w = calculate_kama(close_1w, er_length=10, fast_ema=2, slow_ema=30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Calculate Williams Alligator on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    median_price_1d = (high_1d + low_1d) / 2
     
-    # Bollinger Bands (20, 2.0)
-    bb_length = 20
-    bb_mult = 2.0
-    basis = np.zeros_like(close)
-    dev = np.zeros_like(close)
-    upper = np.zeros_like(close)
-    lower = np.zeros_like(close)
+    jaw_1d, teeth_1d, lips_1d = calculate_alligator(close_1d, 13, 8, 5)
     
-    for i in range(n):
-        if i < bb_length - 1:
-            basis[i] = np.nan
-            dev[i] = np.nan
-        else:
-            basis[i] = np.mean(close[i-bb_length+1:i+1])
-            dev[i] = bb_mult * np.std(close[i-bb_length+1:i+1])
-            upper[i] = basis[i] + dev[i]
-            lower[i] = basis[i] - dev[i]
+    # Align to lower timeframe
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
-    # Bollinger Band Width (normalized)
-    bb_width = np.where(basis != 0, (upper - lower) / basis, 0)
+    # Calculate ADX on 4h data
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Bollinger Squeeze: BB width < 20-period average of BB width
-    bb_width_ma = np.zeros_like(bb_width)
-    for i in range(len(bb_width)):
-        if i < 20:
-            bb_width_ma[i] = np.mean(bb_width[max(0, i-19):i+1]) if i >= 0 else bb_width[i]
-        else:
-            bb_width_ma[i] = np.mean(bb_width[i-19:i+1])
-    squeeze = bb_width < bb_width_ma
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values with Wilder smoothing
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / np.where(atr != 0, atr, 1)
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / np.where(atr != 0, atr, 1)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma = np.zeros_like(volume)
@@ -98,35 +114,51 @@ def generate_signals(prices):
     start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(bb_width[i]) or np.isnan(vol_ma[i]):
+        # Check for NaN values
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        kama_val = kama_1w_aligned[i]
-        sqz = squeeze[i]
+        jaw_val = jaw_1d_aligned[i]
+        teeth_val = teeth_1d_aligned[i]
+        lips_val = lips_1d_aligned[i]
+        adx_val = adx[i]
         vol_ok = vol_spike[i]
         
+        # Alligator alignment check
+        # Bullish alignment: Lips > Teeth > Jaw (all diverging upward)
+        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
+        # Bearish alignment: Lips < Teeth < Jaw (all diverging downward)
+        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
+        
         if position == 0:
-            # Enter long: squeeze + volume spike + price above 1w KAMA (uptrend)
-            if sqz and vol_ok and close[i] > kama_val:
+            # Enter long: Bullish alignment + ADX > 25 + volume spike
+            if bullish_alignment and adx_val > 25 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: squeeze + volume spike + price below 1w KAMA (downtrend)
-            elif sqz and vol_ok and close[i] < kama_val:
+            # Enter short: Bearish alignment + ADX > 25 + volume spike
+            elif bearish_alignment and adx_val > 25 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price closes below Bollinger middle band
-            if close[i] < basis[i]:
+            # Exit long: Alligator lines converge or ADX weakens
+            # Convergence: Lips crosses below Teeth OR Teeth crosses below Jaw
+            lips_below_teeth = lips_val < teeth_val
+            teeth_below_jaw = teeth_val < jaw_val
+            if lips_below_teeth or teeth_below_jaw or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price closes above Bollinger middle band
-            if close[i] > basis[i]:
+            # Exit short: Alligator lines converge or ADX weakens
+            # Convergence: Lips crosses above Teeth OR Teeth crosses above Jaw
+            lips_above_teeth = lips_val > teeth_val
+            teeth_above_jaw = teeth_val > jaw_val
+            if lips_above_teeth or teeth_above_jaw or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -134,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_BollingerSqueeze_VolumeSpike_1wKAMATrend"
-timeframe = "1d"
+name = "4h_Williams_Alligator_VolumeSpike_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
