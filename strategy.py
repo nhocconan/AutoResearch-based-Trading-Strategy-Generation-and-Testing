@@ -1,81 +1,107 @@
 #!/usr/bin/env python3
 """
-4h_RSI2_Trend_Refined
-4h strategy using ultra-short RSI(2) for mean reversion with trend filter.
-- Long: RSI(2) < 10 + price > EMA(50) (trend filter)
-- Short: RSI(2) > 90 + price < EMA(50)
-- Exit: RSI(2) crosses back above 50 (long) or below 50 (short)
-Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
-Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
+4h_DonchianBreakout_VolumeTrend
+4h strategy using Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+- Long: Close breaks above Donchian Upper (20-period high) + 1d EMA50 > EMA200 + Volume > 1.5x 20-period average
+- Short: Close breaks below Donchian Lower (20-period low) + 1d EMA50 < EMA200 + Volume > 1.5x 20-period average
+- Exit: Opposite breakout
+Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # RSI(2) - ultra short for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Wilder's smoothing (alpha = 1/period)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    close_1d = df_1d['close'].values
     
-    # EMA(50) for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Donchian Channels (20-period)
+    lookback = 20
+    donchian_upper = np.full(n, np.nan)
+    donchian_lower = np.full(n, np.nan)
+    
+    for i in range(n):
+        if i >= lookback - 1:
+            donchian_upper[i] = np.max(high[i - lookback + 1:i + 1])
+            donchian_lower[i] = np.min(low[i - lookback + 1:i + 1])
+    
+    # Volume average (20-period)
+    vol_avg = np.full(n, np.nan)
+    for i in range(n):
+        if i >= lookback - 1:
+            vol_avg[i] = np.mean(volume[i - lookback + 1:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA50
+    start_idx = max(50, lookback - 1)  # need enough for EMA200 and Donchian
     
     for i in range(start_idx, n):
-        # Skip if RSI not ready (first values unstable)
-        if np.isnan(rsi[i]) or np.isnan(ema_50[i]):
+        # Skip if any required data is not available
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0
             continue
         
-        rsi_val = rsi[i]
-        price = close[i]
-        ema_val = ema_50[i]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        
+        # Breakout conditions
+        breakout_up = close[i] > donchian_upper[i]
+        breakdown_down = close[i] < donchian_lower[i]
         
         if position == 0:
-            # Long: oversold in uptrend
-            if rsi_val < 10 and price > ema_val:
+            # Long: uptrend + breakout above Donchian Upper + volume confirmation
+            if uptrend and breakout_up and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought in downtrend
-            elif rsi_val > 90 and price < ema_val:
+            # Short: downtrend + breakdown below Donchian Lower + volume confirmation
+            elif downtrend and breakdown_down and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI crosses above 50 (mean reversion complete)
-            if rsi_val > 50:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: breakdown below Donchian Lower
+            if breakdown_down:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI crosses below 50 (mean reversion complete)
-            if rsi_val < 50:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: breakout above Donchian Upper
+            if breakout_up:
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_RSI2_Trend_Refined"
+name = "4h_DonchianBreakout_VolumeTrend"
 timeframe = "4h"
 leverage = 1.0
