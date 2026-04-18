@@ -1,115 +1,68 @@
-#!/usr/bin/env python3
-"""
-4h Williams Alligator + Volume Spike + ADX Trend Filter
-Hypothesis: Williams Alligator identifies trend phases (jaw/teeth/lips alignment) 
-with smoothing to reduce whipsaw. Combined with volume spikes (institutional interest) 
-and ADX > 25 (trending market), it captures strong directional moves in both bull 
-and bear markets. Uses Williams Alligator's smoothed SMAs with built-in lag to avoid 
-noise. Low trade frequency due to strict multi-condition entry targeting strong trends.
-"""
+# 6h_Pivot_Reversal_12hTrend_Filter
+# Hypothesis: Daily pivot reversals during trending 12h markets capture short-term mean reversion within larger trends.
+# Works in bull/bear by using 12h trend direction (via EMA34) to filter pivot reversals (fade at R1/S1, breakout at R4/S4).
+# Volume confirmation ensures institutional participation. Targets 15-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_alligator(close, jaw_period=13, teeth_period=8, lips_period=5):
-    """Calculate Williams Alligator lines (smoothed SMAs)"""
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    jaw = np.zeros_like(close)
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    teeth = np.zeros_like(close)
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    lips = np.zeros_like(close)
-    
-    # Calculate SMMA (Smoothed Moving Average) - similar to Wilder's smoothing
-    def smma(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: (prev * (period-1) + current) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    jaw_raw = smma(close, jaw_period)
-    teeth_raw = smma(close, teeth_period)
-    lips_raw = smma(close, lips_period)
-    
-    # Apply shifts (Alligator lines are shifted forward)
-    jaw[8:] = jaw_raw[:-8] if len(jaw_raw) > 8 else np.nan
-    teeth[5:] = teeth_raw[:-5] if len(teeth_raw) > 5 else np.nan
-    lips[3:] = lips_raw[:-3] if len(lips_raw) > 3 else np.nan
-    
-    return jaw, teeth, lips
+def calculate_pivots(high, low, close):
+    """Calculate standard pivot points and support/resistance levels"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = 3 * pivot - 2 * low
+    s4 = 3 * pivot - 2 * high
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (Alligator)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for trend filter and pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate Alligator on 1d for trend filter
-    close_1d = df_1d['close'].values
-    jaw, teeth, lips = calculate_alligator(close_1d, jaw_period=13, teeth_period=8, lips_period=5)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Calculate EMA34 on 12h for trend filter
+    close_12h = df_12h['close'].values
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Calculate ADX on 4h data (same timeframe)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values with Wilder smoothing
-    def smooth_series(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values use Wilder smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = smooth_series(tr, 14)
-    plus_di = 100 * smooth_series(plus_dm, 14) / np.where(atr != 0, atr, 1)
-    minus_di = 100 * smooth_series(minus_dm, 14) / np.where(atr != 0, atr, 1)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = smooth_series(dx, 14)
+    # Calculate pivots on 12h using previous bar's data (standard pivot calculation)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    pivot_12h, r1_12h, r2_12h, r3_12h, r4_12h, s1_12h, s2_12h, s3_12h, s4_12h = calculate_pivots(
+        high_12h[:-1], low_12h[:-1], close_12h[:-1]  # Use previous bar for today's pivot
+    )
+    # Align pivot levels to 6h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
     # Volume spike: current volume > 2.0x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
+    vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
-            if i >= 0:
-                vol_ma[i] = np.mean(volume[max(0, i-19):i+1])
-            else:
-                vol_ma[i] = volume[i]
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
     vol_spike = volume > (vol_ma * 2.0)
@@ -117,52 +70,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 34  # Warmup for EMA34
     
     for i in range(start_idx, n):
-        # Skip if any required values are NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) 
-            or np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema34_12h_aligned[i]) or np.isnan(pivot_12h_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        adx_val = adx[i]
+        # Trend filter: price relative to 12h EMA34
+        uptrend = close[i] > ema34_12h_aligned[i]
+        downtrend = close[i] < ema34_12h_aligned[i]
         vol_ok = vol_spike[i]
         
-        # Alligator alignment: 
-        # Uptrend: Lips > Teeth > Jaw (green alignment)
-        # Downtrend: Lips < Teeth < Jaw (red alignment)
-        lips_above_teeth = lips_val > teeth_val
-        teeth_above_jaw = teeth_val > jaw_val
-        lips_below_teeth = lips_val < teeth_val
-        teeth_below_jaw = teeth_val < jaw_val
-        
         if position == 0:
-            # Enter long: Lips > Teeth > Jaw (bullish alignment) + ADX > 25 + volume spike
-            if (lips_above_teeth and teeth_above_jaw and 
-                adx_val > 25 and vol_ok):
-                signals[i] = 0.25
-                position = 1
-            # Enter short: Lips < Teeth < Jaw (bearish alignment) + ADX > 25 + volume spike
-            elif (lips_below_teeth and teeth_below_jaw and 
-                  adx_val > 25 and vol_ok):
-                signals[i] = -0.25
-                position = -1
+            # Long setup: 
+            # 1. In uptrend (price > EMA34) AND price crosses above S1 (bounce from support)
+            # 2. OR in downtrend (price < EMA34) AND price breaks above R4 (strong breakout)
+            if (uptrend and close[i] > s1_12h_aligned[i] and close[i-1] <= s1_12h_aligned[i]) or \
+               (downtrend and close[i] > r4_12h_aligned[i] and close[i-1] <= r4_12h_aligned[i]):
+                if vol_ok:
+                    signals[i] = 0.25
+                    position = 1
+            
+            # Short setup:
+            # 1. In downtrend (price < EMA34) AND price crosses below R1 (rejection at resistance)
+            # 2. OR in uptrend (price > EMA34) AND price breaks below S4 (strong breakdown)
+            elif (downtrend and close[i] < r1_12h_aligned[i] and close[i-1] >= r1_12h_aligned[i]) or \
+                 (uptrend and close[i] < s4_12h_aligned[i] and close[i-1] >= s4_12h_aligned[i]):
+                if vol_ok:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: Alligator alignment breaks (lips crosses below teeth) or ADX weakens
-            if lips_val < teeth_val or adx_val < 20:
+            # Exit long: price crosses below pivot (mean reversion) or trend breaks down
+            if close[i] < pivot_12h_aligned[i] or (downtrend and close[i] < ema34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator alignment breaks (lips crosses above teeth) or ADX weakens
-            if lips_val > teeth_val or adx_val < 20:
+            # Exit short: price crosses above pivot (mean reversion) or trend breaks up
+            if close[i] > pivot_12h_aligned[i] or (uptrend and close[i] > ema34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -170,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Williams_Alligator_VolumeSpike_ADXFilter"
-timeframe = "4h"
+name = "6h_Pivot_Reversal_12hTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
