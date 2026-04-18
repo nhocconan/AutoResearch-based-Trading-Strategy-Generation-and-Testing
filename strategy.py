@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter
-Hypothesis: KAMA adapts to market efficiency, reducing whipsaw in choppy markets. 
-Combined with RSI for momentum confirmation and volatility filter for regime detection, 
-this strategy aims to capture trends in both bull and bear markets while avoiding 
-false signals during low-volatility periods. Designed for low trade frequency on daily timeframe.
+12h_Camarilla_R1S1_Breakout_Volume_Spike_ADXFilter
+Hypothesis: Breakout above/below daily Camarilla R1/S1 with volume spike and ADX>25 confirms strong momentum.
+Exit when price crosses back below/above S1/R1 or ADX weakens (<20). Designed for low trade frequency 
+to avoid fee drag while capturing strong trending moves in both bull and bear markets.
+Target: 12h timeframe with 1d HTF for institutional-level structure.
 """
 
 import numpy as np
@@ -13,116 +13,92 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    fast_ema = 2
-    slow_ema = 30
+    # Daily high, low, close for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    abs_sum = np.zeros_like(close)
-    for i in range(10, len(close)):
-        abs_sum[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
-    er = np.zeros_like(close)
-    er[10:] = change[10:] / np.where(abs_sum[10:] == 0, 1, abs_sum[10:])
+    # Calculate Camarilla levels for each day
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Align daily Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[np.nan], rsi])  # align with close
+    # ADX(14) trend strength filter
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - low[:-1]), np.absolute(low[1:] - high[:-1]))
     
-    # ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - low[:-1])
-    tr3 = np.abs(low[1:] - high[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     tr = np.concatenate([[0], tr])
+    
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # ATR ratio: current ATR vs 50-period average (volatility regime filter)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / np.where(atr_ma == 0, 1, atr_ma)
-    
-    # Weekly trend filter (1w close > 20-period EMA)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 14, 20)  # Warmup for indicators
+    start_idx = max(30, 20, 14*2)  # Need warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or
-            np.isnan(atr_ratio[i]) or
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        vol_ratio = atr_ratio[i]
-        weekly_ema = ema_20_1w_aligned[i]
-        
-        # Volatility filter: only trade when volatility is elevated (avoid chop)
-        if vol_ratio < 0.8 or vol_ratio > 2.5:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        vol_spike = volume_spike[i]
+        adx_val = adx[i]
         
         if position == 0:
-            # Long: price > KAMA AND RSI > 50 AND weekly uptrend
-            if price > kama_val and rsi_val > 50 and close_1w[i//7] > weekly_ema if i//7 < len(close_1w) else False:
+            # Long: price > Camarilla R1 with volume spike and strong trend (ADX>25)
+            if price > r1 and vol_spike and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA AND RSI < 50 AND weekly downtrend
-            elif price < kama_val and rsi_val < 50 and close_1w[i//7] < weekly_ema if i//7 < len(close_1w) else False:
+            # Short: price < Camarilla S1 with volume spike and strong trend (ADX>25)
+            elif price < s1 and vol_spike and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < KAMA OR RSI < 40
-            if price < kama_val or rsi_val < 40:
+            # Exit: price < Camarilla S1 OR ADX weakens (<20)
+            if price < s1 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > KAMA OR RSI > 60
-            if price > kama_val or rsi_val > 60:
+            # Exit: price > Camarilla R1 OR ADX weakens (<20)
+            if price > r1 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_Volume_Spike_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
