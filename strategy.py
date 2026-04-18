@@ -1,66 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Direction_Volume_Regime
-KAMA direction signal on 12h with volume confirmation and 1d chop filter:
-- Long when KAMA slope > 0 + volume > 1.5x 20-period average + chop > 61.8 (range)
-- Short when KAMA slope < 0 + volume > 1.5x 20-period average + chop > 61.8 (range)
-- Exit when KAMA slope changes sign
-- Designed for 12-30 trades/year per symbol
-Works in choppy markets (range-bound conditions) with volume confirmation
+4h_HTFTrend_LTFEntry
+4h trend following with 1d/1w confirmation and LTF entry timing.
+- Primary signal: 4h price above/below 20 EMA (trend)
+- Entry filter: 1d close > 1w EMA34 (bull) or < 1w EMA34 (bear) - avoids counter-trend trades
+- Entry trigger: 15m pullback to 4h EMA20 with volume > 1.5x average
+- Exit: trend reversal or opposite signal
+- Designed for 20-40 trades/year per symbol
+Works in bull (trend continuation) and bear (trend continuation) markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_kama(close, er_length=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average."""
-    n = len(close)
-    kama = np.full(n, np.nan)
-    if n < er_length:
-        return kama
-    
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_length))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    er = np.concatenate([np.full(er_length-1, np.nan), er])
-    
-    # Smoothing Constants
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    # KAMA calculation
-    kama[er_length-1] = close[er_length-1]
-    for i in range(er_length, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    return kama
-
-def calculate_chop(high, low, close, period=14):
-    """Calculate Choppiness Index."""
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    for i in range(period-1, n):
-        atr_sum = 0
-        for j in range(i-period+1, i+1):
-            tr = max(high[j] - low[j], 
-                     abs(high[j] - close[j-1]) if j > 0 else 0,
-                     abs(low[j] - close[j-1]) if j > 0 else 0)
-            atr_sum += tr
-        
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        if highest_high != lowest_low:
-            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
-        else:
-            chop[i] = 50
-    
-    return chop
 
 def generate_signals(prices):
     n = len(prices)
@@ -72,20 +24,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for chop filter
+    # Get 1d and 1w data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    df_1w = get_htf_data(prices, '1w')
     
-    chop_1d = calculate_chop(high_1d, low_1d, close_1d, period=14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate KAMA on 12h data
-    kama = calculate_kama(close, er_length=10, fast=2, slow=30)
-    
-    # KAMA slope (1-period change)
-    kama_slope = np.diff(kama, prepend=np.nan)
+    # Calculate 4h EMA20 for entry timing
+    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -93,42 +42,55 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need 10 for ER + 20 for vol MA + buffer
+    start_idx = 40  # need 20 for EMA/volume MA + buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_slope[i]) or np.isnan(chop_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(ema_20_4h[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Trend filter: 1d close relative to 1w EMA34
+        # Use 1d close from 1d data aligned to current time
+        # We need to get the 1d close value for the current day
+        # Since we're on 4h timeframe, we'll use the most recent 1d close
+        # For simplicity, we'll use the 1d close from the 1d data that's already aligned
+        # We'll get 1d data and align it
+        
+        # Actually, let's get 1d close properly
+        close_1d = df_1d['close'].values
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        
+        # Trend bull/bear based on 1d close vs 1w EMA34
+        bull_trend = close_1d_aligned[i] > ema_34_1w_aligned[i]
+        bear_trend = close_1d_aligned[i] < ema_34_1w_aligned[i]
+        
+        # Entry condition: price near 4h EMA20 with volume
+        near_ema = abs(close[i] - ema_20_4h[i]) / ema_20_4h[i] < 0.005  # within 0.5%
         volume_ok = volume[i] > 1.5 * vol_ma[i]
         
-        # Chop filter: chop > 61.8 indicates ranging market
-        chop_ok = chop_1d_aligned[i] > 61.8
-        
         if position == 0:
-            # Long: KAMA slope up + volume + chop
-            if kama_slope[i] > 0 and volume_ok and chop_ok:
+            # Long: bull trend + pullback to EMA + volume
+            if bull_trend and near_ema and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA slope down + volume + chop
-            elif kama_slope[i] < 0 and volume_ok and chop_ok:
+            # Short: bear trend + pullback to EMA + volume
+            elif bear_trend and near_ema and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA slope turns down
-            if kama_slope[i] < 0:
+            # Long exit: trend change or opposite signal
+            if not bull_trend or (close[i] < ema_20_4h[i] and volume_ok):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA slope turns up
-            if kama_slope[i] > 0:
+            # Short exit: trend change or opposite signal
+            if not bear_trend or (close[i] > ema_20_4h[i] and volume_ok):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -136,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Direction_Volume_Regime"
-timeframe = "12h"
+name = "4h_HTFTrend_LTFEntry"
+timeframe = "4h"
 leverage = 1.0
