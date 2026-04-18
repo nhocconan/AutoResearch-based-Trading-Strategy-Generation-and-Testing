@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d KAMA Direction + RSI + Chop Filter
-Uses KAMA (Kaufman Adaptive Moving Average) to capture trend direction,
-combined with RSI for overbought/oversold conditions and Choppiness Index
-to filter for trending markets. Designed for low trade frequency with
-strong edge in both bull and bear markets by trading with the trend in
-trending conditions and avoiding chop.
+4h Williams Alligator + Volume Spike + RSI Filter
+Based on Bill Williams' Alligator indicator (Jaw/Teeth/Lips) to detect trends.
+Only takes trades when all three lines are aligned in same direction (trending market).
+Adds volume confirmation to avoid false breakouts and RSI filter to avoid overbought/oversold extremes.
+Designed for low trade frequency with strong edge in both bull and bear markets by
+focusing on strong trending moves only.
 """
 
 import numpy as np
@@ -22,158 +22,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 4h data for Williams Alligator (using SMAs as per Williams)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1d
-    # Efficiency Ratio: ER = |Close - Close[10]| / Sum(|Close - Close[1]|) over 10 periods
-    change = np.abs(close_1d[10:] - close_1d[:-10])
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # temporary fix, will compute properly below
+    # Williams Alligator lines (all SMAs)
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    jaw_4h = pd.Series(close_4h).rolling(window=13, min_periods=13).mean()
+    jaw_4h = jaw_4h.shift(8)  # shift forward 8 bars
     
-    # Proper ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        direction = np.abs(close_1d[i] - close_1d[i-10])
-        volatility_sum = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
-        if volatility_sum > 0:
-            er[i] = direction / volatility_sum
-        else:
-            er[i] = 0
+    # Teeth: 8-period SMMA, shifted 5 bars forward
+    teeth_4h = pd.Series(close_4h).rolling(window=8, min_periods=8).mean()
+    teeth_4h = teeth_4h.shift(5)  # shift forward 5 bars
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    lips_4h = pd.Series(close_4h).rolling(window=5, min_periods=5).mean()
+    lips_4h = lips_4h.shift(3)  # shift forward 3 bars
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[9] = close_1d[9]  # start with close
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Align Alligator lines to 4h timeframe (no additional delay needed as Williams uses SMAs)
+    jaw_4h_aligned = align_htf_to_ltf(prices, df_4h, jaw_4h.values)
+    teeth_4h_aligned = align_htf_to_ltf(prices, df_4h, teeth_4h.values)
+    lips_4h_aligned = align_htf_to_ltf(prices, df_4h, lips_4h.values)
     
-    # Get 1w data for trend filter (optional, but we can use it for extra confirmation)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Volume spike detection (2x 4-period average)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Calculate weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # RSI calculation (14-period)
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close_prices)
-        avg_loss = np.zeros_like(close_prices)
-        
-        # First average
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        
-        # Wilder's smoothing
-        for i in range(period+1, len(close_prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi = calculate_rsi(close_1d, 14)
-    
-    # Choppiness Index calculation (14-period)
-    def calculate_choppiness(high_prices, low_prices, close_prices, period=14):
-        # True Range
-        tr1 = high_prices[1:] - low_prices[1:]
-        tr2 = np.abs(high_prices[1:] - close_prices[:-1])
-        tr3 = np.abs(low_prices[1:] - close_prices[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.max(tr[:3]) if len(tr) >= 3 else 0], tr])  # align length
-        
-        # Sum of True Range over period
-        atr_sum = np.zeros_like(close_prices)
-        for i in range(period, len(close_prices)):
-            atr_sum[i] = np.sum(tr[i-period+1:i+1])
-        
-        # Highest high and lowest low over period
-        highest_high = np.zeros_like(close_prices)
-        lowest_low = np.zeros_like(close_prices)
-        for i in range(period-1, len(close_prices)):
-            highest_high[i] = np.max(high_prices[i-period+1:i+1])
-            lowest_low[i] = np.min(low_prices[i-period+1:i+1])
-        
-        # Chop = 100 * log10(ATRsum / (HH - LL)) / log10(period)
-        hh_ll = highest_high - lowest_low
-        chop = np.zeros_like(close_prices)
-        for i in range(period, len(close_prices)):
-            if hh_ll[i] > 0 and atr_sum[i] > 0:
-                chop[i] = 100 * np.log10(atr_sum[i] / hh_ll[i]) / np.log10(period)
-            else:
-                chop[i] = 50  # neutral
-        return chop
-    
-    chop = calculate_choppiness(df_1d['high'].values, df_1d['low'].values, close_1d, 14)
-    
-    # Align all indicators to lower timeframe (1d is already our base, but we align for consistency)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # RSI filter (14-period)
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(30, 14, 10)  # enough for all indicators
+    start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(jaw_4h_aligned[i]) or np.isnan(teeth_4h_aligned[i]) or 
+            np.isnan(lips_4h_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = chop_aligned[i]
-        ema_trend = ema_34_1w_aligned[i]
+        jaw = jaw_4h_aligned[i]
+        teeth = teeth_4h_aligned[i]
+        lips = lips_4h_aligned[i]
         
-        # Only trade in trending markets (Chop < 61.8)
-        if chop_val > 61.8:
-            # In chop, go flat
-            signals[i] = 0.0
-            position = 0
-            continue
+        # Alligator alignment: all three lines in same order
+        # Bullish alignment: Lips > Teeth > Jaw (green)
+        bullish_align = lips > teeth and teeth > jaw
+        # Bearish alignment: Lips < Teeth < Jaw (red)
+        bearish_align = lips < teeth and teeth < jaw
         
         if position == 0:
-            # Long: price above KAMA and RSI not overbought
-            if price > kama_val and rsi_val < 70:
+            # Long: Bullish alignment + volume spike + RSI not overbought
+            if (bullish_align and 
+                volume_spike[i] and 
+                rsi[i] < 70):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and RSI not oversold
-            elif price < kama_val and rsi_val > 30:
+            # Short: Bearish alignment + volume spike + RSI not oversold
+            elif (bearish_align and 
+                  volume_spike[i] and 
+                  rsi[i] > 30):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long position management
+            # Long position: maintain until alignment breaks
             signals[i] = 0.25
-            # Exit: price crosses below KAMA or RSI overbought
-            if price < kama_val or rsi_val > 70:
+            # Exit: Bullish alignment breaks
+            if not bullish_align:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position management
+            # Short position: maintain until alignment breaks
             signals[i] = -0.25
-            # Exit: price crosses above KAMA or RSI oversold
-            if price > kama_val or rsi_val < 30:
+            # Exit: Bearish alignment breaks
+            if not bearish_align:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_RSI_Chop_Filter"
-timeframe = "1d"
+name = "4h_Williams_Alligator_Volume_RSI"
+timeframe = "4h"
 leverage = 1.0
