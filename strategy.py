@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_HTF_Camarilla_Pivot_S1S4_Breakout_Volume_Trend
-Hypothesis: Combines 12h Camarilla pivot levels (S1/S4) with volume confirmation and 4h EMA trend filter.
-Uses higher timeframe structure (12h) for signal direction to reduce false breakouts and
-improve performance in both bull and bear markets. Targets 20-35 trades/year.
+1h_4h1d_Trend_Follow_With_Volume
+Hypothesis: Use 4h EMA trend and 1d RSI filter for direction, with volume confirmation on 1h for entry.
+Aims to capture trending moves while avoiding chop, targeting 15-30 trades/year.
 """
 
 import numpy as np
@@ -12,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,38 +19,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 4h data for EMA trend
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h Camarilla pivot levels (S1, S4, R1, R4)
-    pivot = np.full(len(close_12h), np.nan)
-    s1 = np.full(len(close_12h), np.nan)
-    s4 = np.full(len(close_12h), np.nan)
-    r1 = np.full(len(close_12h), np.nan)
-    r4 = np.full(len(close_12h), np.nan)
+    # Calculate 4h EMA(34)
+    ema34_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 34:
+        ema34_4h[33] = np.mean(close_4h[0:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_4h)):
+            ema34_4h[i] = close_4h[i] * alpha + ema34_4h[i-1] * (1 - alpha)
     
-    for i in range(2, len(close_12h)):
-        high_prev = high_12h[i-1]
-        low_prev = low_12h[i-1]
-        close_prev = close_12h[i-1]
-        range_val = high_prev - low_prev
-        
-        pivot[i] = (high_prev + low_prev + close_prev) / 3.0
-        s1[i] = pivot[i] - (range_val * 1.0 / 6.0)
-        s4[i] = pivot[i] - (range_val * 2.0 / 3.0)
-        r1[i] = pivot[i] + (range_val * 1.0 / 6.0)
-        r4[i] = pivot[i] + (range_val * 2.0 / 3.0)
+    # Get 1d data for RSI filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Get 4h data for EMA trend filter (20-period)
-    ema20 = np.full(n, np.nan)
-    if n >= 20:
-        ema20[19] = np.mean(close[0:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, n):
-            ema20[i] = close[i] * alpha + ema20[i-1] * (1 - alpha)
+    # Calculate 1d RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(len(close_1d), np.nan)
+    avg_loss = np.full(len(close_1d), np.nan)
+    
+    for i in range(14, len(close_1d)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:15])
+            avg_loss[i] = np.mean(loss[0:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
     # Volume spike: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -59,54 +60,51 @@ def generate_signals(prices):
         vol_ma[i] = np.mean(volume[i-20:i])
     vol_spike = volume > (vol_ma * 1.5)
     
-    # Align 12h Camarilla levels to 4h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    # Align HTF indicators
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(s1_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(ema20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above S1 with volume spike and 4h uptrend
-            if (close[i] > s1_aligned[i] and vol_spike[i] and 
-                close[i] > ema20[i]):
-                signals[i] = 0.25
+            # Long: 4h uptrend, 1d RSI not overbought, volume spike
+            if (close[i] > ema34_4h_aligned[i] and 
+                rsi_1d_aligned[i] < 70 and vol_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: break below R1 with volume spike and 4h downtrend
-            elif (close[i] < r1_aligned[i] and vol_spike[i] and 
-                  close[i] < ema20[i]):
-                signals[i] = -0.25
+            # Short: 4h downtrend, 1d RSI not oversold, volume spike
+            elif (close[i] < ema34_4h_aligned[i] and 
+                  rsi_1d_aligned[i] > 30 and vol_spike[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: close below S4 or 4h trend turns down
-            if (close[i] < s4_aligned[i] or close[i] < ema20[i]):
+            # Long exit: 4h trend turns down or RSI overbought
+            if (close[i] < ema34_4h_aligned[i] or rsi_1d_aligned[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: close above R4 or 4h trend turns up
-            if (close[i] > r4_aligned[i] or close[i] > ema20[i]):
+            # Short exit: 4h trend turns up or RSI oversold
+            if (close[i] > ema34_4h_aligned[i] or rsi_1d_aligned[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_HTF_Camarilla_Pivot_S1S4_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1h_4h1d_Trend_Follow_With_Volume"
+timeframe = "1h"
 leverage = 1.0
