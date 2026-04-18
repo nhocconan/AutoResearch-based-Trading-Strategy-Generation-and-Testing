@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian breakout with volume confirmation and 1d ADX trend filter.
+Hypothesis: 1d Donchian channel breakout with volume confirmation and 1w ADX trend filter.
 Breakouts of the 20-period high/low capture momentum, while volume confirms institutional participation.
-The ADX filter avoids false breakouts in ranging markets. Designed for 20-30 trades/year to minimize fee drag.
+The ADX filter avoids false breakouts in ranging markets. Designed for 10-25 trades/year to minimize fee drag.
 Works in bull markets (buy breakouts) and bear markets (sell breakdowns).
 """
 
@@ -84,17 +84,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ADX(14) on 1d data
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate ADX(14) on 1w data
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w_1d = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Calculate Donchian channels (20-period)
+    # Calculate Donchian channels (20-period) on 1d data
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     # Calculate volume moving average (20-period)
@@ -109,7 +109,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_1d_4h[i]) or np.isnan(donchian_upper[i]) or 
+        if (np.isnan(adx_1w_1d[i]) or np.isnan(donchian_upper[i]) or 
             np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -118,7 +118,7 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         # Trend filter: ADX threshold
-        trending = adx_1d_4h[i] >= 25
+        trending = adx_1w_1d[i] >= 25
         
         if position == 0:
             # Only trade in trending markets
@@ -152,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_ADX_Volume"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_ADX_Volume"
+timeframe = "1d"
 leverage = 1.0
