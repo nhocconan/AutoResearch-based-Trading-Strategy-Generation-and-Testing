@@ -3,17 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX trend filter.
-# Donchian breakouts capture breakouts from consolidation, which are strong in both bull and bear markets.
-# Volume confirmation ensures breakouts have conviction. Weekly ADX ensures we only trade in strong trends,
-# avoiding whipsaws in ranging markets. Designed for low trade frequency (20-50/year) to minimize fee drag.
-name = "4h_Donchian20_1dVolume_1wADX_Trend"
-timeframe = "4h"
+# Hypothesis: 1d Camarilla Pivot + Volume Spike + Weekly ADX Trend Filter
+# Camarilla pivot levels provide high-probability reversal zones (H3/L3).
+# Volume spike confirms breakout/breakdown conviction.
+# Weekly ADX ensures we only trade in strong trends, avoiding whipsaws.
+# Designed for low trade frequency (10-25/year) to minimize fee drag in 1d timeframe.
+# Works in bull markets (long at L3 breakout with volume + rising ADX) and bear markets 
+# (short at H3 breakdown with volume + rising ADX).
+name = "1d_Camarilla_H3L3_Volume_Spike_WeeklyADX"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,19 +24,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume confirmation (ONCE before loop)
+    # Get daily data for Camarilla calculation (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     # Get weekly data for ADX filter (ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Donchian channels (20-period high/low) on 4h data
-    # Using rolling window with min_periods to avoid look-ahead
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate Camarilla pivot levels using previous day's OHLC
+    # Pivot point (PP) = (High + Low + Close) / 3
+    pp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Range = High - Low
+    rng = df_1d['high'] - df_1d['low']
     
-    # Calculate daily average volume for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().shift(1).values
+    # Resistance levels
+    r1 = pp + (rng * 1.0833)  # H3 equivalent
+    r2 = pp + (rng * 1.1666)  # H4
+    r3 = pp + (rng * 1.2500)  # H5
+    r4 = pp + (rng * 1.3333)  # H6
+    
+    # Support levels
+    s1 = pp - (rng * 1.0833)  # L3 equivalent
+    s2 = pp - (rng * 1.1666)  # L4
+    s3 = pp - (rng * 1.2500)  # L5
+    s4 = pp - (rng * 1.3333)  # L6
+    
+    # Focus on H3 (r1) and L3 (s1) as primary reversal zones
+    h3 = r1.values
+    l3 = s1.values
+    
+    # Shift by 1 to use previous day's levels (no look-ahead)
+    h3 = np.roll(h3, 1)
+    l3 = np.roll(l3, 1)
+    h3[0] = np.nan
+    l3[0] = np.nan
     
     # Calculate weekly ADX for trend strength
     high_w = df_1w['high'].values
@@ -54,7 +76,7 @@ def generate_signals(prices):
     dm_plus = np.concatenate([[np.nan], dm_plus])
     dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    # Wilder's smoothing function
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) >= period:
@@ -81,14 +103,14 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, atr_period)  # ADX is smoothed DX
     
-    # Align indicators to 4h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high}), high_20)
-    low_20_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low}), low_20)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align weekly ADX to daily timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Session filter: 08-20 UTC
-    hour_index = pd.DatetimeIndex(prices['open_time']).hour
+    # Calculate 20-period average volume for spike detection
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Volume spike: current volume > 1.5 * 20-period average
+    vol_spike = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -97,46 +119,48 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        hour = hour_index[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            signals[i] = 0.0
+        # Volume spike confirmation
+        if not vol_spike[i]:
+            # No volume spike, maintain current position or flat
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above daily average
-        vol_confirm = volume[i] > vol_ma_20_1d_aligned[i]
-        
-        # Donchian breakout levels
-        upper_band = high_20_aligned[i]
-        lower_band = low_20_aligned[i]
+        # Strong trend filter: ADX > 25
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above upper band AND volume confirmation AND strong trend (ADX > 25)
-            if (close[i] > upper_band) and vol_confirm and (adx_aligned[i] > 25):
+            # Long: Close breaks above H3 with volume spike and strong trend
+            if close[i] > h3[i] and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band AND volume confirmation AND strong trend (ADX > 25)
-            elif (close[i] < lower_band) and vol_confirm and (adx_aligned[i] > 25):
+            # Short: Close breaks below L3 with volume spike and strong trend
+            elif close[i] < l3[i] and strong_trend:
                 signals[i] = -0.25
                 position = -1
+            else:
+                signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price falls below lower band (breakdown) OR ADX weakens (< 20)
-            if (close[i] < lower_band) or (adx_aligned[i] < 20):
+            # Long exit: Close breaks below L3 (reversal signal)
+            if close[i] < l3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above upper band (breakout) OR ADX weakens (< 20)
-            if (close[i] > upper_band) or (adx_aligned[i] < 20):
+            # Short exit: Close breaks above H3 (reversal signal)
+            if close[i] > h3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
