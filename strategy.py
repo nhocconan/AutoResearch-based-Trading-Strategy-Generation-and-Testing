@@ -13,19 +13,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 34-period EMA on weekly for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 34-period EMA on 1d for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align weekly EMA to daily
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align 1d EMA to 4h
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily ATR (14-period)
+    # Calculate 4h ATR (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -34,57 +34,67 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily volume spike (volume > 2.0x 30-period average)
+    # Calculate 4h volume spike (volume > 2.0x 30-period average)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # Calculate 4h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 30, 14) + 1
+    start_idx = max(34, 30, 14, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr[i]) or
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA34
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation
         vol_confirmed = volume_spike[i]
         
+        # Entry conditions: breakout of Donchian channel with trend and volume
+        long_breakout = close[i] > donchian_high[i-1]
+        short_breakout = close[i] < donchian_low[i-1]
+        
         if position == 0:
-            # Long: price above weekly EMA34 with volume spike
-            if uptrend and vol_confirmed:
+            # Long: price breaks above Donchian high with uptrend and volume
+            if long_breakout and uptrend and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly EMA34 with volume spike
-            elif downtrend and vol_confirmed:
+            # Short: price breaks below Donchian low with downtrend and volume
+            elif short_breakout and downtrend and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly EMA34
-            if close[i] < ema_34_1w_aligned[i]:
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long exit: price crosses below Donchian low or trend reverses
+            if close[i] < donchian_low[i] or not uptrend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly EMA34
-            if close[i] > ema_34_1w_aligned[i]:
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short exit: price crosses above Donchian high or trend reverses
+            if close[i] > donchian_high[i] or not downtrend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "1d_weeklyEMA34_VolumeSpike_v1"
-timeframe = "1d"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
