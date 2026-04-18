@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-6h Weekly Opening Gap Fill with Volume Confirmation
-Trade gaps between weekly open and Friday close, expecting mean reversion to weekly open.
-Works in both bull and bear markets as gaps often fill regardless of trend direction.
+6h Daily Close Reversion with 1-day Trend Filter and Volume Confirmation
+Mean reversion strategy: enter long when price closes below previous day's low with volume confirmation and above daily EMA20 (uptrend), short when price closes above previous day's high with volume confirmation and below daily EMA20 (downtrend)
+Designed to work in both bull and bear markets by capturing short-term reversals within the prevailing daily trend
 """
 
 import numpy as np
@@ -11,66 +11,73 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for gap detection
-    df_1w = get_htf_data(prices, '1w')
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for daily levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly gap (weekly open - previous weekly close)
-    weekly_gap = open_1w - close_1w
+    # Calculate daily EMA20 for trend filter
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align weekly data to 6h timeframe
-    weekly_gap_aligned = align_htf_to_ltf(prices, df_1w, weekly_gap)
-    weekly_open_aligned = align_htf_to_ltf(prices, df_1w, open_1w)
+    # Align daily data to 6h
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Volume confirmation: 2x 50-period average (~12.5 days)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Volume spike detection (1.5x 24-period average - 4 days worth)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # need enough history
+    start_idx = 30  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_gap_aligned[i]) or np.isnan(weekly_open_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        gap = weekly_gap_aligned[i]
-        weekly_open = weekly_open_aligned[i]
+        prev_high = high_1d_aligned[i]
+        prev_low = low_1d_aligned[i]
+        ema_trend = ema_20_1d_aligned[i]
         
         if position == 0:
-            # Long: negative gap (week open < prev week close) + price below weekly open + volume spike
-            if gap < 0 and price < weekly_open and volume_spike[i]:
+            # Long: close below previous day's low + volume spike + above daily EMA20 (uptrend)
+            if (price < prev_low and 
+                volume_spike[i] and 
+                price > ema_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: positive gap (week open > prev week close) + price above weekly open + volume spike
-            elif gap > 0 and price > weekly_open and volume_spike[i]:
+            # Short: close above previous day's high + volume spike + below daily EMA20 (downtrend)
+            elif (price > prev_high and 
+                  volume_spike[i] and 
+                  price < ema_trend):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches weekly open or gap closes
-            if price >= weekly_open or gap >= 0:
+            # Long exit: price closes back above previous day's low or trend reversal
+            if price > prev_low or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches weekly open or gap closes
-            if price <= weekly_open or gap <= 0:
+            # Short exit: price closes back below previous day's high or trend reversal
+            if price < prev_high or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -78,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyGapFill_Volume"
+name = "6h_DailyCloseReversion_TrendFilter_Volume"
 timeframe = "6h"
 leverage = 1.0
