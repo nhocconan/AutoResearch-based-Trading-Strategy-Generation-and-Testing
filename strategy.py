@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_RSI_and_Chop_Regime
-Hypothesis: KAMA(14) trend direction filtered by RSI(14) extremes and Choppiness Index(14) regime.
-Long when KAMA trending up, RSI < 40 (mean-reversion opportunity in uptrend), and choppy market (CHOP > 61.8).
-Short when KAMA trending down, RSI > 60, and choppy market.
-Uses mean-reversion within trending markets to capture swings in both bull and bear regimes.
-Designed for low trade frequency with multiple filters to avoid overtrading.
+6h_Donchian20_Breakout_WeeklyTrend_Confirmation
+Hypothesis: 6h Donchian(20) breakouts confirmed by weekly trend direction (weekly EMA50).
+Breakouts above upper band in weekly uptrend go long; breakdowns below lower band in weekly downtrend go short.
+Weekly trend filter reduces false breakouts in sideways markets, improving win rate during BTC/ETH bear/range phases.
+Target: 50-150 trades over 4 years (12-37/year) with discrete sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
@@ -17,104 +16,64 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # KAMA calculation
-    def kama(close, length=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=length))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        # Smoothing constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))**2
-        # KAMA
-        kama = np.full_like(close, np.nan)
-        kama[length-1] = close[length-1]
-        for i in range(length, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Choppiness Index
-    def chop(high, low, close, length=14):
-        atr = np.zeros_like(close)
-        tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-        tr[0] = high[0] - low[0]
-        for i in range(1, len(close)):
-            atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
-        sum_atr = np.nancumsum(atr)
-        hh = np.maximum.accumulate(high)
-        ll = np.minimum.accumulate(low)
-        range_hl = hh - ll
-        chop = 100 * np.log10(sum_atr / range_hl) / np.log10(length)
-        return chop
+    # Weekly EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate indicators
-    kama_val = kama(close, 10, 2, 30)
-    rsi_input = pd.Series(close)
-    delta = rsi_input.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    chop_val = chop(high, low, close, 14)
+    # Donchian(20) channels on 6h
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup
+    start_idx = max(50, 20)  # Wait for weekly EMA and Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_val[i]) or 
-            np.isnan(rsi[i]) or
-            np.isnan(chop_val[i])):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_now = kama_val[i]
-        kama_prev = kama_val[i-1]
-        rsi_now = rsi[i]
-        chop_now = chop_val[i]
-        
-        # KAMA trend direction
-        kama_up = kama_now > kama_prev
-        kama_down = kama_now < kama_prev
-        
-        # Choppy market condition (range-bound)
-        choppy = chop_now > 61.8
+        upper = high_roll[i]
+        lower = low_roll[i]
+        weekly_trend_up = price > ema_50_1w_aligned[i]  # Proxy: price above weekly EMA50 = uptrend
+        weekly_trend_down = price < ema_50_1w_aligned[i]  # Price below weekly EMA50 = downtrend
         
         if position == 0:
-            # Long: KAMA up, RSI oversold, choppy market
-            if kama_up and rsi_now < 40 and choppy:
+            # Long: break above upper band in weekly uptrend
+            if price > upper and weekly_trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down, RSI overbought, choppy market
-            elif kama_down and rsi_now > 60 and choppy:
+            # Short: break below lower band in weekly downtrend
+            elif price < lower and weekly_trend_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: KAMA turns down OR RSI overbought
-            if kama_down or rsi_now > 70:
+            # Exit: price returns below upper band OR weekly trend turns down
+            if price < upper or not weekly_trend_up:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: KAMA turns up OR RSI oversold
-            if kama_up or rsi_now < 30:
+            # Exit: price returns above lower band OR weekly trend turns up
+            if price > lower or not weekly_trend_down:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_KAMA_Trend_With_RSI_and_Chop_Regime"
-timeframe = "4h"
+name = "6h_Donchian20_Breakout_WeeklyTrend_Confirmation"
+timeframe = "6h"
 leverage = 1.0
