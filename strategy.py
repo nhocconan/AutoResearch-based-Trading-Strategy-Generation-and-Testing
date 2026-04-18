@@ -1,11 +1,8 @@
-# 2024-06-08 19:32:32
 #!/usr/bin/env python3
 """
-4h RSI(14) Extreme + 1-day Volume Confirmation
-Hypothesis: RSI extremes (overbought/oversold) signal mean reversion opportunities.
-Volume confirmation ensures institutional participation. 1-day trend filter prevents
-trading against strong trends. Works in both bull and bear markets by fading extremes
-with volume confirmation.
+6h Daily Close Reversion with Volume Confirmation
+Hypothesis: Price tends to revert to the daily close after 6h extremes, especially when accompanied by volume spikes.
+Works in both bull and bear markets as it captures mean reversion within the daily context, avoiding trend-following whipsaws.
 """
 
 import numpy as np
@@ -22,28 +19,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume
+    # Get daily data for reference (once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Daily close as mean reversion target
+    daily_close = df_1d['close'].values
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
     
-    # 1d average volume for confirmation
-    avg_vol_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Volume spike detection: current volume > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Price deviation from daily close: how far price has moved from daily close
+    price_deviation = (close - daily_close_aligned) / daily_close_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,38 +41,34 @@ def generate_signals(prices):
     start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or np.isnan(rsi[i]):
+        if np.isnan(daily_close_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        vol_confirm = volume[i] > avg_vol_1d_aligned[i] * 1.5
-        price_above_ema = close[i] > ema50_1d_aligned[i]
-        price_below_ema = close[i] < ema50_1d_aligned[i]
+        dev = price_deviation[i]
+        vol_ok = vol_spike[i]
         
         if position == 0:
-            # Enter long on RSI oversold + volume confirmation + price above EMA (not in strong downtrend)
-            if rsi_oversold and vol_confirm and price_above_ema:
+            # Enter long when price is significantly below daily close with volume confirmation
+            if dev < -0.015 and vol_ok:  # 1.5% below daily close
                 signals[i] = 0.25
                 position = 1
-            # Enter short on RSI overbought + volume confirmation + price below EMA (not in strong uptrend)
-            elif rsi_overbought and vol_confirm and price_below_ema:
+            # Enter short when price is significantly above daily close with volume confirmation
+            elif dev > 0.015 and vol_ok:  # 1.5% above daily close
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long on RSI recovery or price below EMA
-            if rsi[i] > 50 or close[i] < ema50_1d_aligned[i]:
+            # Exit long when price returns to daily close or moves further away
+            if dev >= -0.005:  # Within 0.5% of daily close
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short on RSI decline or price above EMA
-            if rsi[i] < 50 or close[i] > ema50_1d_aligned[i]:
+            # Exit short when price returns to daily close or moves further away
+            if dev <= 0.005:  # Within 0.5% of daily close
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +76,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Extreme_Volume_Confirmation_1dTrend"
-timeframe = "4h"
+name = "6h_Daily_Close_Reversion_Volume"
+timeframe = "6h"
 leverage = 1.0
