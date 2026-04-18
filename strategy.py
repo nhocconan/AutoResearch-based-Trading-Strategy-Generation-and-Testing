@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
-"""
-Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-- Uses Donchian breakout (20-bar high/low) for momentum capture
-- Weekly pivot (from 1w data) determines long/short bias: only long above weekly pivot, short below
-- Volume confirmation (1.5x 20-period average) filters false breakouts
-- Designed for 6h timeframe: targets 50-150 total trades over 4 years (12-37/year)
-- Works in bull markets (breakouts with upward bias) and bear markets (breakdowns with downward bias)
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,74 +13,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for price channel and filters
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) == 0:
-        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily Donchian channels (20-period)
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly pivot point: P = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Daily ATR (14-period) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]  # first period
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly pivot to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Donchian channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align all daily data to 12h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20)  # need enough for Donchian and volume MA
+    start_idx = 50  # need enough for EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Bias from weekly pivot
-        bullish_bias = close[i] > pivot_1w_aligned[i]
-        bearish_bias = close[i] < pivot_1w_aligned[i]
+        # Trend filter
+        uptrend = ema_50_aligned[i] > ema_50_aligned[i-1]  # rising EMA
+        downtrend = ema_50_aligned[i] < ema_50_aligned[i-1]  # falling EMA
+        
+        # Volatility filter: avoid low volatility periods
+        vol_filter = atr_14_aligned[i] > 0.5 * np.mean(atr_14_aligned[max(0, i-20):i+1])
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_confirm = volume[i] > 1.3 * vol_ma_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_high[i]
-        breakdown_down = close[i] < lowest_low[i]
+        # Breakout conditions
+        breakout_up = close[i] > upper_20_aligned[i]
+        breakdown_down = close[i] < lower_20_aligned[i]
         
         if position == 0:
-            # Long: bullish bias + volume + upward breakout
-            if bullish_bias and vol_confirm and breakout_up:
+            # Long: uptrend + volume + volatility + breakout above upper channel
+            if uptrend and vol_confirm and vol_filter and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish bias + volume + downward breakdown
-            elif bearish_bias and vol_confirm and breakdown_down:
+            # Short: downtrend + volume + volatility + breakdown below lower channel
+            elif downtrend and vol_confirm and vol_filter and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish bias or volume-confirmed breakdown
-            if bearish_bias or (vol_confirm and breakdown_down):
+            # Long exit: trend reversal, volatility drop, or breakdown
+            if not uptrend or not vol_filter or breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish bias or volume-confirmed breakout
-            if bullish_bias or (vol_confirm and breakout_up):
+            # Short exit: trend reversal, volatility drop, or breakout
+            if not downtrend or not vol_filter or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -97,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_EMA50_Volume_Volatility"
+timeframe = "12h"
 leverage = 1.0
