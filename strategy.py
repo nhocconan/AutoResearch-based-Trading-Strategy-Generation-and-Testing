@@ -1,12 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_WeeklyBreakout_VolumeTrend
-1d strategy using weekly support/resistance breakouts with volume confirmation and weekly trend filter.
-- Long: Close breaks above weekly high + volume > 1.5x weekly avg + weekly EMA10 > EMA20
-- Short: Close breaks below weekly low + volume > 1.5x weekly avg + weekly EMA10 < EMA20
-- Exit: Opposite breakout or trend reversal
-Designed for ~5-10 trades/year per symbol (20-40 total over 4 years)
+4h_Keltner_Breakout_VolumeTrend
+4h strategy using Keltner Channel breakouts with volume confirmation and trend filter.
+- Long: Close breaks above upper Keltner band + volume > 1.5x 20-period avg + EMA34 > EMA200
+- Short: Close breaks below lower Keltner band + volume > 1.5x 20-period avg + EMA34 < EMA200
+- Exit: Opposite breakout or trend reversal (EMA34 crosses EMA200)
+Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
 Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
@@ -24,69 +23,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Support/Resistance levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate ATR for Keltner Channels
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.zeros(n)
+    atr[0] = tr[0]
+    for i in range(1, n):
+        atr[i] = (atr[i-1] * 19 + tr[i]) / 20  # 20-period ATR
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 20-period EMA for Keltner middle line
+    ema20 = np.zeros(n)
+    ema20[0] = close[0]
+    for i in range(1, n):
+        ema20[i] = (close[i] * 0.1) + (ema20[i-1] * 0.9)
     
-    # Weekly High and Low (resistance/support)
-    weekly_high = high_1w
-    weekly_low = low_1w
+    # Keltner Channels (20, 2.0)
+    keltner_upper = ema20 + (2.0 * atr)
+    keltner_lower = ema20 - (2.0 * atr)
     
-    # Align weekly S/R levels to daily
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    # Get daily data for trend filter and volume average
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA10 and EMA20 for trend filter
-    ema_10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    ema_10_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Daily EMA34 and EMA200 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Weekly volume average (10-period)
-    vol_ma_10 = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_10)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need enough for EMA20
+    start_idx = 200  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(ema_10_aligned[i]) or np.isnan(ema_20_aligned[i]) or
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(ema_200_aligned[i]) or
             np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend conditions
-        uptrend = ema_10_aligned[i] > ema_20_aligned[i]
-        downtrend = ema_10_aligned[i] < ema_20_aligned[i]
+        uptrend = ema_34_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_34_aligned[i] < ema_200_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > weekly_high_aligned[i]
-        breakdown_down = close[i] < weekly_low_aligned[i]
+        breakout_up = close[i] > keltner_upper[i]
+        breakdown_down = close[i] < keltner_lower[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above weekly high
+            # Long: uptrend + volume + breakout above upper Keltner band
             if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below weekly low
+            # Short: downtrend + volume + breakdown below lower Keltner band
             elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below weekly low
+            # Long exit: trend change, volume confirmation, or breakdown below lower band
             if not uptrend or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
@@ -94,7 +105,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above weekly high
+            # Short exit: trend change, volume confirmation, or breakout above upper band
             if not downtrend or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
@@ -103,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyBreakout_VolumeTrend"
-timeframe = "1d"
+name = "4h_Keltner_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
