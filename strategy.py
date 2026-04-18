@@ -3,19 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot R1/S1 breakout with volume confirmation and ATR filter.
-# Long when price breaks above 12h R1 with volume > 2.0x 48-period average and ATR > 0.
-# Short when price breaks below 12h S1 with volume > 2.0x 48-period average and ATR > 0.
-# Exit when price crosses back below R1 (long) or above S1 (short).
-# Uses 1d Camarilla pivot levels for structure, volume surge for conviction, ATR for volatility.
-# Designed for ~12-25 trades/year per symbol.
-name = "12h_1dPivot_R1S1_Breakout_VolumeATRFilter_v1"
-timeframe = "12h"
+# Hypothesis: 1d Williams %R with 1w trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) and price above 1w EMA(50) with volume > 1.5x 20-day average.
+# Short when Williams %R > -20 (overbought) and price below 1w EMA(50) with volume > 1.5x 20-day average.
+# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short).
+# Williams %R identifies mean-reversion opportunities in ranging markets.
+# 1w EMA(50) filters trades to align with higher timeframe trend.
+# Volume surge confirms conviction behind the move.
+# Designed for ~10-20 trades/year per symbol to minimize fee drag.
+name = "1d_WilliamsR_1wEMA50_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,76 +25,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Camarilla formulas
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    # EMA(50) on 1w close
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align pivot levels to 12h timeframe (wait for daily bar to close)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # ATR(14) on 12h for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume filter: current volume > 2.0 * 48-period average (48 * 12h = 24 days)
-    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
-    volume_filter = volume > (2.0 * vol_ma_48)
+    # Volume filter: current volume > 1.5 * 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(atr_12h[i]) or np.isnan(vol_ma_48[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r1_val = r1_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
-        atr_val = atr_12h[i]
+        wr_val = williams_r[i]
+        ema_val = ema_50_1w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume surge and volatility
-            if close_val > r1_val and vol_filter and atr_val > 0:
+            # Long: oversold + above 1w EMA + volume surge
+            if wr_val < -80 and close_val > ema_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume surge and volatility
-            elif close_val < s1_val and vol_filter and atr_val > 0:
+            # Short: overbought + below 1w EMA + volume surge
+            elif wr_val > -20 and close_val < ema_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below R1
-            if close_val < r1_val:
+            # Long exit: Williams %R crosses back above -50
+            if wr_val > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above S1
-            if close_val > s1_val:
+            # Short exit: Williams %R crosses back below -50
+            if wr_val < -50:
                 signals[i] = 0.0
                 position = 0
             else:
