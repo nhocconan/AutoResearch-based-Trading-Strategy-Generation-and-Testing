@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_4D1D_Combined_Breakout_Volume_Trend
-Hypothesis: Combine 4h and 1d timeframe breakouts for institutional momentum. 
-Long when price breaks above 4h high AND 1d high with volume confirmation and 1d uptrend.
-Short when price breaks below 4h low AND 1d low with volume confirmation and 1d downtrend.
-Uses 1h timeframe for precise entry timing, 4h/1d for signal direction to reduce trade frequency.
-Session filter (08-20 UTC) avoids low-liquidity periods. Target: 15-30 trades/year per symbol.
+12h_Pivot_R1_S1_Breakout_Volume_Trend
+Hypothesis: Camarilla pivot levels R1/S1 from daily timeframe act as strong support/resistance.
+Breakouts above R1 or below S1 with volume confirmation and daily EMA trend filter capture
+institutional move initiation. Works in bull/bear by following institutional flow.
+Target: 12-37 trades/year (48-150 total over 4 years) to balance opportunity and fee drag.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,89 +21,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h data for structure
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    # 1d data for trend and higher timeframe structure
+    # 1-day data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h structure: recent high/low for breakout
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Previous day's OHLC for Camarilla
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # 1d structure: daily high/low for breakout confirmation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align 4h structure to 1h
-    high_4h_aligned = align_htf_to_ltf(prices, df_4h, high_4h)
-    low_4h_aligned = align_htf_to_ltf(prices, df_4h, low_4h)
+    # Align to 12h timeframe (waits for 1-day bar to close)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Align 1d structure to 1h
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    
-    # Volume filter: >1.8x 20-period average to avoid noise
+    # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
-    # 1d EMA trend filter (34-period)
+    # 1-day EMA trend filter
     ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
+    bars_since_entry = 0
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        # Skip if any data is not ready
-        if (np.isnan(high_4h_aligned[i]) or np.isnan(low_4h_aligned[i]) or
-            np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
         price = close[i]
-        high_4h_val = high_4h_aligned[i]
-        low_4h_val = low_4h_aligned[i]
-        high_1d_val = high_1d_aligned[i]
-        low_1d_val = low_1d_aligned[i]
+        r1_val = r1_12h[i]
+        s1_val = s1_12h[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_1d_aligned[i]
+        ema_trend = ema_1d_12h[i]
         
         if position == 0:
-            # Long: break above both 4h high AND 1d high with volume in uptrend
-            if price > high_4h_val and price > high_1d_val and vol_ok and price > ema_trend:
-                signals[i] = 0.20
+            # Long: break above R1 with volume in uptrend
+            if price > r1_val and vol_ok and price > ema_trend:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below both 4h low AND 1d low with volume in downtrend
-            elif price < low_4h_val and price < low_1d_val and vol_ok and price < ema_trend:
-                signals[i] = -0.20
+                bars_since_entry = 0
+            # Short: break below S1 with volume in downtrend
+            elif price < s1_val and vol_ok and price < ema_trend:
+                signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Long position: hold until breakdown below 4h low OR trend reversal
-            if price < low_4h_val or price < ema_trend:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding period: 4 bars (2 days)
+            if bars_since_entry < 4:
+                signals[i] = 0.25
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
+                # Exit: price returns to S1 or trend reverses
+                if price < s1_val or price < ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
         
         elif position == -1:
-            # Short position: hold until breakout above 4h high OR trend reversal
-            if price > high_4h_val or price > ema_trend:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding period: 4 bars (2 days)
+            if bars_since_entry < 4:
+                signals[i] = -0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
+                # Exit: price returns to R1 or trend reverses
+                if price > r1_val or price > ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
     
     return signals
 
-name = "1h_4D1D_Combined_Breakout_Volume_Trend"
-timeframe = "1h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
