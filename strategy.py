@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,28 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly EMA200 and weekly RSI(14)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 4h and 1d data for multi-timeframe analysis
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA200 (trend filter)
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 4h EMA34 for trend direction
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # Calculate weekly RSI(14)
-    delta_1w = np.diff(close_1w, prepend=close_1w[0])
-    gain_1w = np.where(delta_1w > 0, delta_1w, 0)
-    loss_1w = np.where(delta_1w < 0, -delta_1w, 0)
-    avg_gain_1w = pd.Series(gain_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1w = pd.Series(loss_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1w = np.divide(avg_gain_1w, avg_loss_1w, out=np.zeros_like(avg_gain_1w), where=avg_loss_1w!=0)
-    rsi_1w = 100 - (100 / (1 + rs_1w))
+    # Calculate 1d EMA200 for long-term trend filter
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Align weekly indicators to 4h timeframe
-    ema200_4h = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    rsi_1w_4h = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate 1h ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 4h RSI(14) for momentum
+    # Calculate 1h RSI for overbought/oversold
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -43,62 +43,73 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Calculate volume moving average (20-period)
+    # Calculate 1h volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # need weekly EMA200 and volume MA
+    start_idx = max(34, 200, 20)  # need EMA34, EMA200, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema200_4h[i]) or np.isnan(rsi_1w_4h[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3 * 20-period average
+        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
+        
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Trend alignment: 4h EMA34 direction and price vs 1d EMA200
+        ema34_rising = ema34_4h_aligned[i] > ema34_4h_aligned[i-1]
+        ema34_falling = ema34_4h_aligned[i] < ema34_4h_aligned[i-1]
+        price_above_long = close[i] > ema200_1d_aligned[i]
+        price_below_long = close[i] < ema200_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price above weekly EMA200, weekly RSI not oversold, RSI not overbought, with volume
-            if (close[i] > ema200_4h[i] and 
-                rsi_1w_4h[i] > 30 and 
-                rsi[i] < 70 and 
-                vol_confirmed):
-                signals[i] = 0.25
+            # Long entry: price above long-term EMA, 4h EMA trending up, RSI not overbought, with volume
+            if (price_above_long and ema34_rising and 
+                rsi[i] < 60 and vol_confirmed):
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price below weekly EMA200, weekly RSI not overbought, RSI not oversold, with volume
-            elif (close[i] < ema200_4h[i] and 
-                  rsi_1w_4h[i] < 70 and 
-                  rsi[i] > 30 and 
-                  vol_confirmed):
-                signals[i] = -0.25
+            # Short entry: price below long-term EMA, 4h EMA trending down, RSI not oversold, with volume
+            elif (price_below_long and ema34_falling and 
+                  rsi[i] > 40 and vol_confirmed):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses below weekly EMA200 or RSI overbought
-            if close[i] < ema200_4h[i] or rsi[i] > 75:
+            # Long exit: price crosses below 4h EMA34 or RSI overbought
+            if close[i] < ema34_4h_aligned[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price crosses above weekly EMA200 or RSI oversold
-            if close[i] > ema200_4h[i] or rsi[i] < 25:
+            # Short exit: price crosses above 4h EMA34 or RSI oversold
+            if close[i] > ema34_4h_aligned[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_WeeklyEMA200_WeeklyRSI_RSI_Volume_Filter"
-timeframe = "4h"
+name = "1h_4hEMA34_1dEMA200_RSI_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
