@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_Follow_With_Volume_Confirmation
-12h strategy using KAMA (Kaufman Adaptive Moving Average) for trend direction with volume confirmation.
-- Long: Price above KAMA(14,2,30) + volume > 1.3x 20-period volume average
-- Short: Price below KAMA(14,2,30) + volume > 1.3x 20-period volume average
-- Exit: Opposite signal or volume drops below average
-Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
-Works in trending markets (both bull and bear) by following adaptive trend
+4h_PriceChannel_Trend_With_Volume
+4h strategy using Donchian breakout with volume confirmation and 12h trend filter.
+Long: Close breaks above Donchian(20) high + volume > 1.5x 12h avg + 12h EMA50 > EMA200
+Short: Close breaks below Donchian(20) low + volume > 1.5x 12h avg + 12h EMA50 < EMA200
+Exit: Opposite breakout or trend reversal
+Designed for 20-40 trades/year per symbol (80-160 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -18,88 +18,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA calculation and volume average
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate Donchian channels (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for trend filter and volume average
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily data
-    # KAMA parameters: ER period=10, Fast EMA=2, Slow EMA=30
-    def calculate_kama(close_array, er_period=10, fast_ema=2, slow_ema=30):
-        kama = np.full_like(close_array, np.nan, dtype=np.float64)
-        if len(close_array) < er_period:
-            return kama
-        
-        # Calculate Efficiency Ratio (ER)
-        change = np.abs(np.diff(close_array, n=er_period))
-        volatility = np.sum(np.abs(np.diff(close_array)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        
-        # Calculate Smoothing Constant (SC)
-        sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-        
-        # Calculate KAMA
-        kama[er_period-1] = close_array[er_period-1]  # Initialize
-        for i in range(er_period, len(close_array)):
-            kama[i] = kama[i-1] + sc[i] * (close_array[i] - kama[i-1])
-        
-        return kama
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    kama_1d = calculate_kama(close_1d)
+    # 12h EMA50 and EMA200 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align KAMA to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_200_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
     
-    # Calculate 20-period volume average on daily data
-    vol_ma_20 = np.full_like(volume_1d, np.nan, dtype=np.float64)
-    for i in range(19, len(volume_1d)):
-        vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
-    
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # 12h volume average (20-period)
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need enough for KAMA initialization
+    start_idx = 50  # need enough for 12h EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        price_above_kama = close[i] > kama_aligned[i]
-        price_below_kama = close[i] < kama_aligned[i]
+        # Trend conditions from 12h
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        
+        # Breakout conditions
+        breakout_up = close[i] > highest_high[i]
+        breakdown_down = close[i] < lowest_low[i]
         
         if position == 0:
-            # Long: price above KAMA + volume confirmation
-            if price_above_kama and vol_confirm:
+            # Long: uptrend + volume + breakout above Donchian high
+            if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + volume confirmation
-            elif price_below_kama and vol_confirm:
+            # Short: downtrend + volume + breakdown below Donchian low
+            elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below KAMA or volume drops below average
-            if price_below_kama or not vol_confirm:
+            # Long exit: trend change, volume confirmation, or breakdown below Donchian low
+            if not uptrend or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above KAMA or volume drops below average
-            if price_above_kama or not vol_confirm:
+            # Short exit: trend change, volume confirmation, or breakout above Donchian high
+            if not downtrend or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -107,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_Follow_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_PriceChannel_Trend_With_Volume"
+timeframe = "4h"
 leverage = 1.0
