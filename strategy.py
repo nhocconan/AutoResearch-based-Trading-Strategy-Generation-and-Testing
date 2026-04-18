@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_RSI_Trend_Pullback
-1h strategy using 4h trend filter with RSI pullback entries.
-- Long: 4h EMA34 up + RSI(14) pullback to 40-45 in uptrend
-- Short: 4h EMA34 down + RSI(14) pullback to 55-60 in downtrend
-- Exit: Opposite RSI extreme or trend change
-Designed for ~15-30 trades/year per symbol (60-120 total over 4 years)
-Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend)
+6h_Ichimoku_Cloud_TK_Cross_WeeklyTrend
+6h strategy using Ichimoku cloud with Tenkan-Kijun cross and weekly trend filter.
+- Long: Price above Ichimoku cloud + TK cross bullish + weekly trend up
+- Short: Price below Ichimoku cloud + TK cross bearish + weekly trend down
+- Exit: Opposite conditions
+Ichimoku provides dynamic support/resistance and trend strength.
+Works in both bull and bear markets by following higher timeframe trend.
 """
 
 import numpy as np
@@ -15,83 +15,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    close_4h = df_4h['close'].values
+    # Weekly EMA25 for trend filter
+    ema_25_1w = pd.Series(close_1w).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema_25_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_25_1w)
     
-    # 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Ichimoku components (9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # RSI(14) on 1h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
+    
+    # Align Ichimoku components to current timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, prices, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, prices, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, prices, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, prices, senkou_b)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # need enough for EMA34
+    start_idx = 52  # need enough for Senkou B
     
     for i in range(start_idx, n):
-        # Skip if 4h EMA not available
-        if np.isnan(ema_34_4h_aligned[i]):
+        # Skip if any required data is not available
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(ema_25_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1]  # rising EMA
-        downtrend = ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1]  # falling EMA
+        # Weekly trend
+        weekly_up = close[i] > ema_25_1w_aligned[i]
+        weekly_down = close[i] < ema_25_1w_aligned[i]
         
-        # RSI conditions
-        rsi_now = rsi_values[i]
-        rsi_pullback_long = 40 <= rsi_now <= 45
-        rsi_pullback_short = 55 <= rsi_now <= 60
-        rsi_overbought = rsi_now >= 70
-        rsi_oversold = rsi_now <= 30
+        # Ichimoku conditions
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
+        tk_bullish = tenkan_aligned[i] > kijun_aligned[i]
+        tk_bearish = tenkan_aligned[i] < kijun_aligned[i]
         
         if position == 0:
-            # Long: uptrend + RSI pullback to 40-45
-            if uptrend and rsi_pullback_long:
-                signals[i] = 0.20
+            # Long: price above cloud + TK bullish + weekly up
+            if price_above_cloud and tk_bullish and weekly_up:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + RSI pullback to 55-60
-            elif downtrend and rsi_pullback_short:
-                signals[i] = -0.20
+            # Short: price below cloud + TK bearish + weekly down
+            elif price_below_cloud and tk_bearish and weekly_down:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI overbought or trend change to down
-            if rsi_overbought or downtrend:
-                signals[i] = 0.0  # exit to flat
-                position = 0
+            # Long exit: price below cloud or TK bearish or weekly down
+            if price_below_cloud or not tk_bullish or not weekly_up:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI oversold or trend change to up
-            if rsi_oversold or uptrend:
-                signals[i] = 0.0  # exit to flat
-                position = 0
+            # Short exit: price above cloud or TK bullish or weekly up
+            if price_above_cloud or tk_bullish or weekly_up:
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI_Trend_Pullback"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_TK_Cross_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
