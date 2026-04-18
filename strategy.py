@@ -1,100 +1,94 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h KAMA direction + RSI(14) + Chop(14) regime filter.
-- Long: KAMA rising, RSI(14) < 30 (oversold), Chop(14) > 61.8 (ranging market)
-- Short: KAMA falling, RSI(14) > 70 (overbought), Chop(14) > 61.8 (ranging market)
-- Exit: Opposite RSI condition (RSI > 50 for longs, RSI < 50 for shorts) or Chop < 38.2 (trending)
-- Uses 1d Chop for regime filter to avoid whipsaws in strong trends.
-- Designed for mean-reversion in ranging markets with controlled trade frequency.
+Hypothesis: 4h Williams %R overbought/oversold with 1d ADX trend filter and volume confirmation.
+- Long: Williams %R < -80 (oversold), ADX > 25 (trending), volume > 1.5x average
+- Short: Williams %R > -20 (overbought), ADX > 25, volume > 1.5x average
+- Exit: Williams %R crosses above -50 (long) or below -50 (short) or ADX < 20
+- Williams %R identifies reversals in trends; ADX filters for trending markets only.
+Designed for 20-50 trades/year (80-200 total) to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
-    """Calculate Kaufman Adaptive Moving Average."""
-    n = len(close)
-    if n < er_period:
-        return np.full(n, np.nan)
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R."""
+    if len(high) < period:
+        return np.full(len(high), np.nan)
     
-    # Efficiency Ratio
-    change = np.abs(close[er_period:] - close[:-er_period])
-    volatility = np.sum(np.abs(np.diff(close[:er_period+1])))
-    er = np.zeros(n)
-    er[er_period:] = change / volatility
-    er[er == 0] = 0  # avoid division by zero
+    highest_high = np.full(len(high), np.nan)
+    lowest_low = np.full(len(high), np.nan)
     
-    # Smoothing Constants
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    for i in range(period - 1, len(high)):
+        highest_high[i] = np.max(high[i - period + 1:i + 1])
+        lowest_low[i] = np.min(low[i - period + 1:i + 1])
     
-    # KAMA
-    kama = np.full(n, np.nan)
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    wr = np.full(len(high), np.nan)
+    for i in range(period - 1, len(high)):
+        if highest_high[i] != lowest_low[i]:
+            wr[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
+        else:
+            wr[i] = -50  # avoid division by zero
     
-    return kama
+    return wr
 
-def calculate_rsi(close, period):
-    """Calculate Relative Strength Index."""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+def calculate_adx(high, low, close, period):
+    """Calculate Average Directional Index."""
+    if len(high) < period * 2:
+        return np.full(len(high), np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    
-    rs = np.full(n, np.nan)
-    rs[period:] = avg_gain[period:] / np.where(avg_loss[period:] == 0, 1e-10, avg_loss[period:])
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
-
-def calculate_chop(high, low, close, period):
-    """Calculate Choppiness Index."""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    atr = np.zeros(n)
+    # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR calculation
-    atr[period-1] = np.nanmean(tr[1:period])
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    # Calculate Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Highest high and lowest low over period
-    hh = np.full(n, np.nan)
-    ll = np.full(n, np.nan)
-    for i in range(period-1, n):
-        hh[i] = np.max(high[i-period+1:i+1])
-        ll[i] = np.min(low[i-period+1:i+1])
+    # Smooth TR and DM
+    atr = np.full(len(tr), np.nan)
+    if len(tr) >= period:
+        atr[period-1] = np.nanmean(tr[1:period])
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
     
-    # Chop calculation
-    chop = np.full(n, np.nan)
-    for i in range(period-1, n):
-        if hh[i] - ll[i] != 0:
-            chop[i] = 100 * np.log10(np.sum(atr[i-period+1:i+1]) / np.log10(2) / (hh[i] - ll[i]))
-        else:
-            chop[i] = 50  # neutral when no range
+    dm_plus_smooth = np.full(len(dm_plus), np.nan)
+    dm_minus_smooth = np.full(len(dm_minus), np.nan)
+    if len(dm_plus) >= period:
+        dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period])
+        dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period])
+        for i in range(period, len(dm_plus)):
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
     
-    return chop
+    # Calculate Directional Indicators
+    plus_di = np.full(len(dm_plus), np.nan)
+    minus_di = np.full(len(dm_minus), np.nan)
+    for i in range(period, len(atr)):
+        if atr[i] != 0:
+            plus_di[i] = 100 * dm_plus_smooth[i] / atr[i]
+            minus_di[i] = 100 * dm_minus_smooth[i] / atr[i]
+    
+    # Calculate DX and ADX
+    dx = np.full(len(plus_di), np.nan)
+    for i in range(period, len(plus_di)):
+        if (plus_di[i] + minus_di[i]) != 0:
+            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    
+    adx = np.full(len(dx), np.nan)
+    if len(dx) >= 2 * period - 1:
+        adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
+        for i in range(2*period-1, len(dx)):
+            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -104,65 +98,65 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Chop regime filter
+    # Get 1d data for Williams %R and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Chop (14-period) on 1d
-    chop_14_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
+    # Calculate Williams %R (14-period) on 1d
+    williams_r_14_1d = calculate_williams_r(high_1d, low_1d, close_1d, 14)
     
-    # Align Chop to 4h timeframe
-    chop_14_1d_4h = align_htf_to_ltf(prices, df_1d, chop_14_1d)
+    # Calculate ADX (14-period) on 1d
+    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Calculate KAMA (10,2,30) on 4h
-    kama = calculate_kama(close, 10, 2, 30)
+    # Align to 4h timeframe
+    williams_r_14_1d_4h = align_htf_to_ltf(prices, df_1d, williams_r_14_1d)
+    adx_14_1d_4h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
-    # Calculate RSI (14-period) on 4h
-    rsi = calculate_rsi(close, 14)
+    # Calculate volume moving average (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need KAMA, RSI, and Chop
+    start_idx = 35  # need Williams %R, ADX, and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop_14_1d_4h[i])):
+        if (np.isnan(williams_r_14_1d_4h[i]) or np.isnan(adx_14_1d_4h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA direction: rising if current > previous, falling if current < previous
-        kama_rising = kama[i] > kama[i-1]
-        kama_falling = kama[i] < kama[i-1]
-        
-        # Chop regime: > 61.8 = ranging (good for mean reversion), < 38.2 = trending
-        chop_ranging = chop_14_1d_4h[i] > 61.8
-        chop_trending = chop_14_1d_4h[i] < 38.2
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: KAMA rising, RSI oversold, Chop ranging
-            if kama_rising and rsi[i] < 30 and chop_ranging:
+            # Long: Williams %R < -80 (oversold), ADX > 25, volume confirmation
+            if williams_r_14_1d_4h[i] < -80 and adx_14_1d_4h[i] > 25 and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling, RSI overbought, Chop ranging
-            elif kama_falling and rsi[i] > 70 and chop_ranging:
+            # Short: Williams %R > -20 (overbought), ADX > 25, volume confirmation
+            elif williams_r_14_1d_4h[i] > -20 and adx_14_1d_4h[i] > 25 and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI > 50 or Chop trending
-            if rsi[i] > 50 or chop_trending:
+            # Long exit: Williams %R crosses above -50 or ADX < 20 (trend weakening)
+            if williams_r_14_1d_4h[i] > -50 or adx_14_1d_4h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI < 50 or Chop trending
-            if rsi[i] < 50 or chop_trending:
+            # Short exit: Williams %R crosses below -50 or ADX < 20 (trend weakening)
+            if williams_r_14_1d_4h[i] < -50 or adx_14_1d_4h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -170,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_RSI_Chop"
+name = "4h_WilliamsR_ADX14_Volume"
 timeframe = "4h"
 leverage = 1.0
