@@ -1,98 +1,79 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_TRIX_VolumeSpike_TrendFilter
-Long: KAMA rising + TRIX crosses above zero + volume spike
-Short: KAMA falling + TRIX crosses below zero + volume spike
-Exit: Opposite TRIX cross
-Uses KAMA for adaptive trend, TRIX for momentum, volume spike for confirmation.
-Designed to capture trend momentum with low trade frequency in both bull and bear markets.
-Target: 80-160 total trades over 4 years (20-40/year)
+1d Donchian Breakout with Weekly Trend Filter
+Long: Close breaks above Donchian(20) high + weekly EMA200 rising
+Short: Close breaks below Donchian(20) low + weekly EMA200 falling
+Exit: Opposite break or price crosses Donchian midpoint
+Designed to capture trend continuations in both bull and bear markets.
+Target: 30-100 total trades over 4 years (7-25/year)
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_kama(close, er_length=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, n=er_length))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
-    kama = np.full_like(close, np.nan, dtype=float)
-    kama[er_length] = close[er_length]
-    for i in range(er_length + 1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
-
-def calculate_trix(close, length=12):
-    """Calculate TRIX indicator"""
-    ema1 = pd.Series(close).ewm(span=length, adjust=False).mean()
-    ema2 = ema1.ewm(span=length, adjust=False).mean()
-    ema3 = ema2.ewm(span=length, adjust=False).mean()
-    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    return trix.values
+from mf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # KAMA on 4h
-    kama = calculate_kama(close, er_length=10, fast=2, slow=30)
-    kama_rising = np.diff(kama, prepend=kama[0]) > 0
+    # Donchian(20) channels
+    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_high = period20_high.values
+    donchian_low = period20_low.values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # TRIX on 4h
-    trix = calculate_trix(close, length=12)
-    trix_cross_up = (trix > 0) & (np.roll(trix, 1) <= 0)
-    trix_cross_down = (trix < 0) & (np.roll(trix, 1) >= 0)
+    # Get weekly data for trend filter (EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Volume spike (2x 20-period average)
-    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_spike = volume > 2 * vol_ma
+    # Calculate weekly EMA200
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Get 12h data for trend filter (EMA34)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema12_34 = pd.Series(close_12h).ewm(span=34, adjust=False).mean().values
-    ema12_34_aligned = align_htf_to_ltf(prices, df_12h, ema12_34)
-    ema12_34_rising = np.diff(ema12_34_aligned, prepend=ema12_34_aligned[0]) > 0
+    # Align weekly EMA200 to daily
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Calculate weekly EMA200 slope (1-period change) for trend filter
+    ema200_slope = np.diff(ema200_1w_aligned, prepend=ema200_1w_aligned[0])
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 30  # need warmup for indicators
+    start_idx = 20  # need Donchian calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(trix[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema12_34_aligned[i])):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema200_1w_aligned[i]) or np.isnan(ema200_slope[i]):
             signals[i] = 0.0
             continue
         
+        price = close[i]
+        
         if position == 0:
-            # Long: KAMA rising + TRIX crosses up + volume spike + 12h EMA rising
-            if kama_rising[i] and trix_cross_up[i] and vol_spike[i] and ema12_34_rising[i]:
+            # Long: break above Donchian high + rising weekly EMA200
+            if price > donchian_high[i] and ema200_slope[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling + TRIX crosses down + volume spike + 12h EMA falling
-            elif not kama_rising[i] and trix_cross_down[i] and vol_spike[i] and not ema12_34_rising[i]:
+            # Short: break below Donchian low + falling weekly EMA200
+            elif price < donchian_low[i] and ema200_slope[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: TRIX crosses down
-            if trix_cross_down[i]:
+            # Long exit: break below Donchian low OR price crosses below midpoint
+            if price < donchian_low[i] or price < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TRIX crosses up
-            if trix_cross_up[i]:
+            # Short exit: break above Donchian high OR price crosses above midpoint
+            if price > donchian_high[i] or price > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_TRIX_VolumeSpike_TrendFilter"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
