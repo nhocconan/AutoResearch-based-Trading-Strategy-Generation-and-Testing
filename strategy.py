@@ -1,16 +1,20 @@
+# USING SINGLE TIMEFRAME 4H - NO MULTI-TIMEFRAME
+
 #!/usr/bin/env python3
 """
-12h_Trix_Volume_WMR_Reversal
-Hypothesis: Use TRIX (15-period) momentum reversal with Williams %R oversold/overbought conditions and volume confirmation on 12h timeframe. TRIX filters noise and identifies momentum shifts, while Williams %R identifies overextended conditions. Volume confirmation ensures institutional participation. Works in bull markets by buying oversold dips in uptrend, and in bear markets by selling overbought rallies in downtrend. Targets 15-25 trades/year by requiring TRIX crossover, Williams %R extreme, and volume > 1.5x average.
+4h_RangeBound_MeanReversion
+Hypothesis: In ranging markets (2025-2026 mean-reversion regime), price oscillates between Bollinger Bands.
+Enter long at lower band with RSI<30, short at upper band with RSI>70. Exit at opposite band or when RSI reaches 50.
+Volume filter avoids false breakouts. Works in both bull (buy dips) and bear (sell rallies) by fading extremes.
+Target: 20-30 trades/year via strict entry conditions (BB touch + RSI extreme + volume filter).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,75 +22,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for TRIX and Williams %R
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    bb_mid = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
     
-    # Calculate TRIX (15-period)
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1 period percent change
-    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False).mean()
-    ema2 = ema1.ewm(span=15, adjust=False).mean()
-    ema3 = ema2.ewm(span=15, adjust=False).mean()
-    trix_raw = ema3.pct_change() * 100  # percentage change
+    # RSI (14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Williams %R (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align TRIX and Williams %R to 12h timeframe (no additional delay needed as they are based on current bar)
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix_raw.values)
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r.values)
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation: current volume > 1.5 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Volume filter: current volume > 1.3 x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # need TRIX and Williams %R warmup
+    start_idx = 20  # need BB and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(trix_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: TRIX crosses above zero (bullish momentum), Williams %R oversold (< -80), with volume
-            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and 
-                williams_r_aligned[i] < -80 and vol_confirm[i]):
+            # Long entry: price at lower BB, RSI oversold, volume confirmation
+            if (close[i] <= bb_lower[i] and rsi[i] < 30 and vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: TRIX crosses below zero (bearish momentum), Williams %R overbought (> -20), with volume
-            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and 
-                  williams_r_aligned[i] > -20 and vol_confirm[i]):
+            # Short entry: price at upper BB, RSI overbought, volume confirmation
+            elif (close[i] >= bb_upper[i] and rsi[i] > 70 and vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: TRIX crosses below zero or Williams %R becomes overbought
-            if (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0) or \
-               williams_r_aligned[i] > -20:
+            # Long exit: price reaches middle BB or RSI reaches 50
+            if (close[i] >= bb_mid[i] or rsi[i] >= 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TRIX crosses above zero or Williams %R becomes oversold
-            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0) or \
-               williams_r_aligned[i] < -80:
+            # Short exit: price reaches middle BB or RSI reaches 50
+            if (close[i] <= bb_mid[i] or rsi[i] <= 50):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Trix_Volume_WMR_Reversal"
-timeframe = "12h"
+name = "4h_RangeBound_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
