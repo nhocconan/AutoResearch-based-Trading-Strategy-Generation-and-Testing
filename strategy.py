@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with daily ADX trend filter and volume confirmation.
-# Donchian breakouts capture breakout moves in trending markets.
-# Daily ADX ensures we only trade in strong trends (ADX > 25), avoiding whipsaws in ranging markets.
-# Volume confirmation adds conviction to breakouts.
-# Designed for low trade frequency (12-37/year) to minimize fee drag in 12h timeframe.
-# Works in bull markets (breakout above upper band with rising ADX) and bear markets 
-# (breakdown below lower band with rising ADX).
-name = "12h_Donchian20_DailyADX_Volume"
-timeframe = "12h"
+# Hypothesis: 4-hour 20-period Donchian breakout with daily volume confirmation and daily ADX trend filter.
+# Donchian channels provide clear breakout levels based on recent price extremes.
+# Daily volume confirmation ensures breakouts are supported by increased participation.
+# Daily ADX > 25 filters for trending markets, avoiding false breakouts in ranges.
+# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
+# Works in bull markets (breakouts above upper band with rising ADX) and bear markets 
+# (breakdowns below lower band with rising ADX).
+name = "4h_Donchian20_DailyVolume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,14 +24,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian and ADX calculation (ONCE before loop)
+    # Get daily data for volume and ADX (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels (20-period high/low) using previous day's data
+    # Calculate 20-period Donchian bands using previous day's data to avoid look-ahead
     high_20 = df_1d['high'].rolling(window=20, min_periods=20).max().shift(1).values
     low_20 = df_1d['low'].rolling(window=20, min_periods=20).min().shift(1).values
+    donchian_high = high_20
+    donchian_low = low_20
     
-    # Calculate ADX for trend strength (14-period)
+    # Calculate daily ADX for trend strength
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
@@ -77,13 +79,14 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, atr_period)  # ADX is smoothed DX
     
-    # Align Donchian and ADX to 12h timeframe
-    upper_band = align_htf_to_ltf(prices, df_1d, high_20)
-    lower_band = align_htf_to_ltf(prices, df_1d, low_20)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 20-period average daily volume for confirmation
+    vol_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Donchian bands, ADX, and volume MA to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -95,8 +98,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -107,35 +110,37 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_20[i]
+        # Volume confirmation: current daily volume above average
+        vol_confirm = df_1d['volume'].iloc[-1] > vol_ma_20_aligned[i] if len(df_1d) > 0 else False
+        # For simplicity, use the aligned volume MA directly - current volume > MA
+        vol_confirm = volume[i] > vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper band AND strong trend (ADX > 25) AND volume
-            breakout_up = close[i] > upper_band[i]
+            # Long: price breaks above upper Donchian band AND volume confirmation AND ADX > 25
+            long_breakout = close[i] > donchian_high_aligned[i]
             strong_trend = adx_aligned[i] > 25
             
-            if vol_confirm and breakout_up and strong_trend:
+            if vol_confirm and long_breakout and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band AND strong trend (ADX > 25) AND volume
+            # Short: price breaks below lower Donchian band AND volume confirmation AND ADX > 25
             elif (vol_confirm and 
-                  close[i] < lower_band[i] and 
+                  close[i] < donchian_low_aligned[i] and 
                   adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below lower band (reversal signal)
-            if close[i] < lower_band[i]:
+            # Long exit: price falls below lower Donchian band
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above upper band (reversal signal)
-            if close[i] > upper_band[i]:
+            # Short exit: price rises above upper Donchian band
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
