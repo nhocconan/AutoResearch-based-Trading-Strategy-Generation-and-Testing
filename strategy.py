@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_4HTrend_RSI20_80_1DVolume
-Hypothesis: In both bull and bear markets, 4h EMA50 trend provides directional bias.
-On 1h timeframe, we wait for RSI extremes (20 oversold, 80 overbought) to enter
-in direction of 4h trend, confirmed by 1d volume spike. Designed for 15-30 trades/year
-on 1h timeframe with low frequency to minimize fee drag.
+6h_WeeklyPivot_R3S3_Reversal_S4S4_Breakout
+Hypothesis: On 6h timeframe, weekly pivot levels act as strong support/resistance.
+- Mean reversion: Price touching weekly R3/S3 with rejection (close back inside R2/S2) signals reversal.
+- Breakout: Price breaking weekly S4/R4 with volume and trend continuation signals strong momentum.
+Works in both bull and bear markets by combining mean reversion at extremes and breakout continuation.
+Uses weekly pivots calculated from prior week's OHLC to avoid look-ahead.
+Target: 20-40 trades/year on 6h (~80-160 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -21,78 +23,112 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA trend (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close']
+    # Get weekly data for pivot calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 4h EMA50 trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly pivot points using prior week's data
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    # R4 = R3 + (H - L), S4 = S3 - (H - L)
+    high_1w = df_1w['high']
+    low_1w = df_1w['low']
+    close_1w = df_1w['close']
     
-    # Get 1d data for volume spike filter
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume']
+    pivot = (high_1w + low_1w + close_1w) / 3
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
+    r3 = high_1w + 2 * (pivot - low_1w)
+    s3 = low_1w - 2 * (high_1w - pivot)
+    r4 = r3 + (high_1w - low_1w)
+    s4 = s3 - (high_1w - low_1w)
     
-    # 1d volume spike: 2x 20-period average
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Shift by 1 to use previous week's levels only (avoid look-ahead)
+    r1_prev = r1.shift(1).values
+    s1_prev = s1.shift(1).values
+    r2_prev = r2.shift(1).values
+    s2_prev = s2.shift(1).values
+    r3_prev = r3.shift(1).values
+    s3_prev = s3.shift(1).values
+    r4_prev = r4.shift(1).values
+    s4_prev = s4.shift(1).values
     
-    # 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align to 6h timeframe
+    r1_a = align_htf_to_ltf(prices, df_1w, r1_prev)
+    s1_a = align_htf_to_ltf(prices, df_1w, s1_prev)
+    r2_a = align_htf_to_ltf(prices, df_1w, r2_prev)
+    s2_a = align_htf_to_ltf(prices, df_1w, s2_prev)
+    r3_a = align_htf_to_ltf(prices, df_1w, r3_prev)
+    s3_a = align_htf_to_ltf(prices, df_1w, s3_prev)
+    r4_a = align_htf_to_ltf(prices, df_1w, r4_prev)
+    s4_a = align_htf_to_ltf(prices, df_1w, s4_prev)
+    
+    # 60-period EMA for trend filter (on 6h close)
+    close_series = pd.Series(close)
+    ema60 = close_series.ewm(span=60, adjust=False, min_periods=60).mean().values
+    
+    # Volume spike: 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50
+    start_idx = 60  # need EMA60
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(volume_spike_1d_aligned[i]) or
-            np.isnan(rsi_values[i])):
+        # Skip if any weekly pivot level is NaN
+        if (np.isnan(r1_a[i]) or np.isnan(s1_a[i]) or
+            np.isnan(r2_a[i]) or np.isnan(s2_a[i]) or
+            np.isnan(r3_a[i]) or np.isnan(s3_a[i]) or
+            np.isnan(r4_a[i]) or np.isnan(s4_a[i]) or
+            np.isnan(ema60[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend = ema_50_4h_aligned[i]
-        vol_spike = volume_spike_1d_aligned[i]
-        rsi_val = rsi_values[i]
+        vol_spike = volume_spike[i]
+        ema_trend = ema60[i]
         
         if position == 0:
-            # Long: 4h uptrend + RSI oversold + 1d volume spike
-            if price > ema_trend and rsi_val < 20 and vol_spike:
-                signals[i] = 0.20
+            # Mean reversion long: price touches S3 but closes back above S2
+            if price <= s3_a[i] and close[i] > s2_a[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + RSI overbought + 1d volume spike
-            elif price < ema_trend and rsi_val > 80 and vol_spike:
-                signals[i] = -0.20
+            # Mean reversion short: price touches R3 but closes back below R2
+            elif price >= r3_a[i] and close[i] < r2_a[i]:
+                signals[i] = -0.25
+                position = -1
+            # Breakout long: price breaks above R4 with volume and uptrend
+            elif price > r4_a[i] and vol_spike and price > ema_trend:
+                signals[i] = 0.25
+                position = 1
+            # Breakout short: price breaks below S4 with volume and downtrend
+            elif price < s4_a[i] and vol_spike and price < ema_trend:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
-            signals[i] = 0.20
-            # Exit: RSI returns to neutral or trend breaks
-            if rsi_val >= 50 or price < ema_trend:
+            signals[i] = 0.25
+            # Exit: mean reversion at R1 or break below S2 (failed breakout)
+            if price >= r1_a[i] or price < s2_a[i]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
-            signals[i] = -0.20
-            # Exit: RSI returns to neutral or trend breaks
-            if rsi_val <= 50 or price > ema_trend:
+            signals[i] = -0.25
+            # Exit: mean reversion at S1 or break above R2 (failed breakdown)
+            if price <= s1_a[i] or price > r2_a[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_4HTrend_RSI20_80_1DVolume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R3S3_Reversal_S4S4_Breakout"
+timeframe = "6h"
 leverage = 1.0
