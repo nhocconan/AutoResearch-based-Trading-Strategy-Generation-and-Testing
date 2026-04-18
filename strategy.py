@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Pivot_R1S1_Breakout_WeeklyEMA_Filter_v1
-Hypothesis: Use daily Camarilla pivot R1/S1 breakouts with volume confirmation and weekly EMA trend filter. In bull markets, buy R1 breakouts above weekly EMA; in bear markets, short S1 breakdowns below weekly EMA. This structure works in both regimes by following the higher timeframe trend. Weekly EMA ensures we only take trades aligned with the major trend, reducing whipsaws. Target: 10-25 trades/year to minimize fee drag.
+4h_PriceChannel_Breakout_Volume_Regime_v1
+Hypothesis: Use price channel breakouts (Donchian upper/lower) combined with volume spikes and regime filtering (Choppiness Index) to capture strong directional moves in both bull and bear markets. Donchian channels provide objective breakout levels, volume confirms institutional participation, and Choppiness Index filters out choppy regimes where breakouts fail. Designed for low trade frequency (~25-35/year) to minimize fee decay while maintaining edge in trending markets.
 """
 
 import numpy as np
@@ -13,79 +13,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla pivot levels (using previous day's HLC)
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
-    # We need previous day's data, so shift by 1
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # fill first value
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Donchian channel (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    pivot_range = prev_high - prev_low
-    R1 = prev_close + 1.1 * pivot_range / 12
-    S1 = prev_close - 1.1 * pivot_range / 12
-    
-    # Weekly EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation: >1.5x 20-day average
+    # Volume confirmation: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Choppiness Index regime filter (14-period)
+    # High CHOP (>61.8) = range/chop (avoid breakouts)
+    # Low CHOP (<38.2) = trending (favor breakouts)
+    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # avoid div/0
+    chop[np.isnan(chop)] = 50
+    chop_low = chop < 38.2  # trending regime
+    
+    # 1d EMA trend filter (higher timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 21  # Need EMA warmup
+    start_idx = 30  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(volume_spike[i]) or
-            np.isnan(R1[i]) or
-            np.isnan(S1[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(chop_low[i]) or
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_1w_val = ema_1w_aligned[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
         vol_spike = volume_spike[i]
+        is_trending = chop_low[i]
+        ema_1d_val = ema_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume and above weekly EMA
-            if price > R1[i] and vol_spike and price > ema_1w_val:
+            # Long: break above Donchian high with volume, in trending regime, above daily EMA
+            if price > donch_high_val and vol_spike and is_trending and price > ema_1d_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and below weekly EMA
-            elif price < S1[i] and vol_spike and price < ema_1w_val:
+            # Short: break below Donchian low with volume, in trending regime, below daily EMA
+            elif price < donch_low_val and vol_spike and is_trending and price < ema_1d_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price breaks below S1 (reversal) or below weekly EMA
-            if price < S1[i] or price < ema_1w_val:
+            # Exit: break below Donchian low or loss of momentum (below daily EMA)
+            if price < donch_low_val or price < ema_1d_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price breaks above R1 (reversal) or above weekly EMA
-            if price > R1[i] or price > ema_1w_val:
+            # Exit: break above Donchian high or loss of momentum (above daily EMA)
+            if price > donch_high_val or price > ema_1d_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Pivot_R1S1_Breakout_WeeklyEMA_Filter_v1"
-timeframe = "1d"
+name = "4h_PriceChannel_Breakout_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
