@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_1D_RSI_Filter
-Hypothesis: On 12h timeframe, use Kaufman's Adaptive Moving Average (KAMA) to capture trend direction, filtered by 1D RSI to avoid counter-trend extremes. Long when KAMA > close and RSI < 60; short when KAMA < close and RSI > 40. Exit on opposite KAMA cross. This adapts to volatility, reducing whipsaws in 2022 crash and avoiding overextended entries. Targets 15-25 trades/year with position size 0.25, suitable for 12h timeframe.
+1d_1w_Kelly_Fractional_Kelly_Strategy
+Hypothesis: Use 1D price action with 1W trend filter and Kelly criterion position sizing.
+Long when price > 1W EMA50 and RSI(14) < 40 (oversold in uptrend).
+Short when price < 1W EMA50 and RSI(14) > 60 (overbought in downtrend).
+Position size scaled by Kelly fraction: f = (bp - q)/b where b=win/loss ratio, p=win probability.
+Uses 10-period win/loss tracking to estimate p and b. Max position 0.30.
+Designed for low trade frequency (<25/year) with asymmetric risk control.
+Works in bull via trend-following oversold bounces, in bear via trend-following overbought fades.
 """
 
 import numpy as np
@@ -10,94 +16,105 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate KAMA (10,2,30) on 12h data
-    kama = np.full(n, np.nan)
-    if n >= 30:
-        # Efficiency ratio
-        change = np.abs(np.diff(close, n=9))  # 10-period change
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-        er = np.zeros(n)
-        er[9:] = change[9:] / np.where(volatility[9:] != 0, volatility[9:], 1)
-        # Smoothing constants
-        sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-        # Initialize KAMA
-        kama[9] = close[9]
-        for i in range(10, n):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Get 1W data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Get 1D data for RSI filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate EMA50 on 1W
+    ema50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema50_1w[i] = (close_1w[i] * 2/51) + (ema50_1w[i-1] * (1 - 2/51))
+    
+    # Align 1W EMA50 to 1D (wait for weekly close)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Calculate RSI(14) on 1D
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
     
-    for i in range(14, len(close_1d)):
+    for i in range(14, n):
         if i == 14:
-            avg_gain[i] = np.mean(gain[0:14])
-            avg_loss[i] = np.mean(loss[0:14])
+            avg_gain[i] = np.mean(gain[0:15])
+            avg_loss[i] = np.mean(loss[0:15])
         else:
             avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
             avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align RSI to 12h timeframe (wait for bar close)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Track trade performance for Kelly sizing
+    win_count = 0
+    loss_count = 0
+    total_return = 0.0
+    last_position = 0
+    entry_price = 0.0
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need KAMA
+    start_idx = max(50, 14)  # need EMA50 and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        if position == 0:
-            # Long entry: KAMA > close and RSI not overbought (<60)
-            if (kama[i] > close[i] and rsi_1d_aligned[i] < 60):
-                signals[i] = 0.25
-                position = 1
-            # Short entry: KAMA < close and RSI not oversold (>40)
-            elif (kama[i] < close[i] and rsi_1d_aligned[i] > 40):
-                signals[i] = -0.25
-                position = -1
+        # Calculate Kelly fraction from historical performance
+        if win_count + loss_count >= 10:
+            win_prob = win_count / (win_count + loss_count)
+            if loss_count > 0:
+                avg_win = total_return / win_count if win_count > 0 else 0
+                avg_loss = abs(total_return) / loss_count if loss_count > 0 else 0
+                if avg_loss > 0:
+                    b = avg_win / avg_loss  # win/loss ratio
+                    kelly = (b * win_prob - (1 - win_prob)) / b if b > 0 else 0
+                    kelly = max(0, min(kelly, 0.30))  # cap at 30%, no negative
+                else:
+                    kelly = 0.30
             else:
-                signals[i] = 0.0
+                kelly = 0.30
+        else:
+            kelly = 0.15  # reduced size until sufficient data
         
-        elif position == 1:
-            # Long exit: KAMA crosses below close
-            if kama[i] < close[i]:
-                signals[i] = 0.0
-                position = 0
+        # Determine signal based on trend and RSI extremes
+        if ema50_1w_aligned[i] > 0:  # trend filter available
+            if close[i] > ema50_1w_aligned[i] and rsi[i] < 40:
+                # Oversold in uptrend - long
+                target_size = kelly
+            elif close[i] < ema50_1w_aligned[i] and rsi[i] > 60:
+                # Overbought in downtrend - short
+                target_size = -kelly
             else:
-                signals[i] = 0.25
+                target_size = 0.0
+        else:
+            target_size = 0.0
         
-        elif position == -1:
-            # Short exit: KAMA crosses above close
-            if kama[i] > close[i]:
-                signals[i] = 0.0
-                position = 0
+        # Change signal only if different from previous (reduce churn)
+        if i == start_idx:
+            signals[i] = target_size
+        else:
+            # Only change if significant difference (>0.05) to reduce churn
+            if abs(target_size - signals[i-1]) > 0.05:
+                signals[i] = target_size
             else:
-                signals[i] = -0.25
+                signals[i] = signals[i-1]
     
     return signals
 
-name = "12h_KAMA_Trend_With_1D_RSI_Filter"
-timeframe = "12h"
+name = "1d_1w_Kelly_Fractional_Kelly_Strategy"
+timeframe = "1d"
 leverage = 1.0
