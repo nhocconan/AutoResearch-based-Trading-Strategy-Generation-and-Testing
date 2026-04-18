@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power with Volume Confirmation and ATR Filter
-Hypothesis: Elder Ray Bull/Bear Power (EMA13 minus High/Low) indicates institutional buying/selling pressure.
-Combined with volume confirmation (>1.5x average) and ATR filter (>0.5% of price) to avoid chop.
-Works in bull markets (buy power > 0) and bear markets (bear power < 0) by fading extremes.
-Target: 15-30 trades/year to minimize fee drain.
+4h RSI Divergence with Volume Confirmation and EMA Trend Filter
+Hypothesis: Bullish/bearish RSI divergence on 4h, confirmed by volume > 1.5x EMA volume and price > EMA34, captures reversals in both bull and bear markets. RSI divergence is a leading indicator of trend exhaustion, effective in ranging and trending conditions.
 """
 
 import numpy as np
@@ -21,34 +18,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # RSI calculation (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Elder Ray components on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # EMA13 of close for 1d
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high_1d - ema13_1d
-    bear_power = ema13_1d - low_1d
-    
-    # Align to 6h timeframe with proper delay (use previous day's values)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # ATR for volatility filter (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # EMA34 for trend filter
+    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -57,44 +37,51 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators (max of 13,20,14)
+    start_idx = 34  # Warmup for RSI and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ratio[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema34[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        bull = bull_power_aligned[i]
-        bear = bear_power_aligned[i]
-        atr_val = atr[i]
+        rsi_val = rsi[i]
+        ema_val = ema34[i]
         vol_conf = vol_ratio[i] > 1.5
         
-        # Volatility filter: avoid choppy markets (ATR > 0.5% of price)
-        vol_filter = atr_val > 0.005 * price
+        # Detect RSI divergence: look back 3 bars for swing high/low
+        if i >= 3:
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            if (low[i] < low[i-1] < low[i-2] and 
+                rsi[i] > rsi[i-1] > rsi[i-2] and
+                price > ema_val and vol_conf):
+                if position == 0:
+                    signals[i] = 0.25
+                    position = 1
+                elif position == -1:
+                    signals[i] = 0.25  # close short, go long
+                    position = 1
+            
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            elif (high[i] > high[i-1] > high[i-2] and 
+                  rsi[i] < rsi[i-1] < rsi[i-2] and
+                  price < ema_val and vol_conf):
+                if position == 0:
+                    signals[i] = -0.25
+                    position = -1
+                elif position == 1:
+                    signals[i] = -0.25  # close long, go short
+                    position = -1
         
-        if position == 0:
-            # Strong bull power with volume and volatility confirmation = long
-            if bull > 0 and vol_conf and vol_filter:
-                signals[i] = 0.25
-                position = 1
-            # Strong bear power with volume and volatility confirmation = short
-            elif bear > 0 and vol_conf and vol_filter:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Exit if bull power turns negative or volatility drops
-            if bull <= 0 or not vol_filter:
+        # Exit conditions: RSI returns to neutral zone or trend breaks
+        if position == 1:
+            if rsi_val > 70 or price < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Exit if bear power turns negative or volatility drops
-            if bear <= 0 or not vol_filter:
+            if rsi_val < 30 or price > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Elder_Ray_Power_Volume_ATR"
-timeframe = "6h"
+name = "4h_RSI_Divergence_Volume_EMA34"
+timeframe = "4h"
 leverage = 1.0
