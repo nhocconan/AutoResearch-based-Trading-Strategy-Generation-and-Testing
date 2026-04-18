@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_MeanReversion_ZScore
-Hypothesis: Weekly mean reversion of daily price deviations works across bull and bear markets.
-When daily price deviates significantly from weekly mean (Z-score > 2 or < -2), price tends to revert.
-Volume confirmation reduces false signals. Works on BTC/ETH with low trade frequency.
+6h_Ichimoku_TK_Cross_CloudFilter
+Hypothesis: Ichimoku cloud with TK cross and daily trend filter works across bull/bear markets.
+- Uses 1d cloud (Senkou Span A/B) for trend filter and support/resistance
+- TK cross (Tenkan/Kijun) on 6h for entry timing
+- Only trade when price is above/below cloud with TK cross confirmation
+- Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
 """
 
 import numpy as np
@@ -12,74 +14,119 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get weekly data (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # Weekly mean and standard deviation (20-period)
-    weekly_mean = np.full(len(close_1w), np.nan)
-    weekly_std = np.full(len(close_1w), np.nan)
+    # Calculate Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    tenkan_sen = np.full(n, np.nan)
+    for i in range(tenkan_period - 1, n):
+        tenkan_sen[i] = (np.max(high[i-tenkan_period+1:i+1]) + np.min(low[i-tenkan_period+1:i+1])) / 2
     
-    for i in range(20, len(close_1w)):
-        weekly_mean[i] = np.mean(close_1w[i-20:i])
-        weekly_std[i] = np.std(close_1w[i-20:i])
+    # Calculate Kijun-sen (Base Line): (26-period high + low) / 2
+    kijun_sen = np.full(n, np.nan)
+    for i in range(kijun_period - 1, n):
+        kijun_sen[i] = (np.max(high[i-kijun_period+1:i+1]) + np.min(low[i-kijun_period+1:i+1])) / 2
     
-    # Z-score of current daily close relative to weekly distribution
-    zscore = np.full(len(close_1w), np.nan)
-    for i in range(20, len(close_1w)):
-        if weekly_std[i] > 0:
-            zscore[i] = (close_1w[i] - weekly_mean[i]) / weekly_std[i]
+    # Calculate Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_span_a = np.full(n, np.nan)
+    valid_idx = ~(np.isnan(tenkan_sen) | np.isnan(kijun_sen))
+    senkou_span_a[valid_idx] = (tenkan_sen[valid_idx] + kijun_sen[valid_idx]) / 2
     
-    # Align weekly Z-score to daily timeframe
-    zscore_aligned = align_htf_to_ltf(prices, df_1w, zscore)
+    # Calculate Senkou Span B (Leading Span B): (52-period high + low) / 2
+    senkou_span_b = np.full(n, np.nan)
+    for i in range(senkou_span_b_period - 1, n):
+        senkou_span_b[i] = (np.max(high[i-senkou_span_b_period+1:i+1]) + np.min(low[i-senkou_span_b_period+1:i+1])) / 2
     
-    # Volume spike: current volume > 2.0 x 20-day average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    # Get 1-day data for cloud filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate 1-day Ichimoku components
+    tenkan_1d = np.full(len(high_1d), np.nan)
+    kijun_1d = np.full(len(high_1d), np.nan)
+    senkou_span_a_1d = np.full(len(high_1d), np.nan)
+    senkou_span_b_1d = np.full(len(high_1d), np.nan)
+    
+    for i in range(tenkan_period - 1, len(high_1d)):
+        tenkan_1d[i] = (np.max(high_1d[i-tenkan_period+1:i+1]) + np.min(low_1d[i-tenkan_period+1:i+1])) / 2
+    
+    for i in range(kijun_period - 1, len(high_1d)):
+        kijun_1d[i] = (np.max(high_1d[i-kijun_period+1:i+1]) + np.min(low_1d[i-kijun_period+1:i+1])) / 2
+    
+    valid_1d = ~(np.isnan(tenkan_1d) | np.isnan(kijun_1d))
+    senkou_span_a_1d[valid_1d] = (tenkan_1d[valid_1d] + kijun_1d[valid_1d]) / 2
+    
+    for i in range(senkou_span_b_period - 1, len(high_1d)):
+        senkou_span_b_1d[i] = (np.max(high_1d[i-senkou_span_b_period+1:i+1]) + np.min(low_1d[i-senkou_span_b_period+1:i+1])) / 2
+    
+    # Align 1-day Ichimoku components to 6h
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_span_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d)
+    senkou_span_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d)
+    
+    # Cloud boundaries from 1d (shifted forward by 26 periods)
+    # Senkou Span A and B are plotted 26 periods ahead
+    senkou_span_a_1d_shifted = np.full_like(senkou_span_a_1d_aligned, np.nan)
+    senkou_span_b_1d_shifted = np.full_like(senkou_span_b_1d_aligned, np.nan)
+    
+    if len(senkou_span_a_1d_aligned) > 26:
+        senkou_span_a_1d_shifted[26:] = senkou_span_a_1d_aligned[:-26]
+        senkou_span_b_1d_shifted[26:] = senkou_span_b_1d_aligned[:-26]
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_span_a_1d_shifted, senkou_span_b_1d_shifted)
+    cloud_bottom = np.minimum(senkou_span_a_1d_shifted, senkou_span_b_1d_shifted)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure weekly indicators ready
+    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period) + 26
     
     for i in range(start_idx, n):
-        if np.isnan(zscore_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # TK cross signals
+        tk_cross_up = tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1]
+        tk_cross_down = tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1]
+        
         if position == 0:
-            # Long: price significantly below weekly mean (Z < -2) with volume spike
-            if zscore_aligned[i] < -2.0 and vol_spike[i]:
+            # Long: price above cloud + TK cross up + 1-day bullish (Tenkan > Kijun)
+            if (close[i] > cloud_top[i] and tk_cross_up and 
+                tenkan_1d_aligned[i] > kijun_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price significantly above weekly mean (Z > 2) with volume spike
-            elif zscore_aligned[i] > 2.0 and vol_spike[i]:
+            # Short: price below cloud + TK cross down + 1-day bearish (Tenkan < Kijun)
+            elif (close[i] < cloud_bottom[i] and tk_cross_down and 
+                  tenkan_1d_aligned[i] < kijun_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to weekly mean (Z > -0.5) or extreme reversal
-            if zscore_aligned[i] > -0.5:
+            # Long exit: price falls below cloud or TK cross down
+            if close[i] < cloud_bottom[i] or tk_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to weekly mean (Z < 0.5) or extreme reversal
-            if zscore_aligned[i] < 0.5:
+            # Short exit: price rises above cloud or TK cross up
+            if close[i] > cloud_top[i] or tk_cross_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_MeanReversion_ZScore"
-timeframe = "1d"
+name = "6h_Ichimoku_TK_Cross_CloudFilter"
+timeframe = "6h"
 leverage = 1.0
