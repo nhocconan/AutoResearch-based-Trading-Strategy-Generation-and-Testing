@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_WeeklyEMA34_RSI25_75
-Hypothesis: Trade long when price crosses above daily close while above weekly EMA34 and RSI < 25 (oversold), short when price crosses below daily close while below weekly EMA34 and RSI > 75 (overbought). Uses weekly trend filter to avoid counter-trend trades and RSI extremes for mean reversion within trend. Position size 0.25 targeting ~15-20 trades/year to minimize fee drag. Works in bull/bear by trading with trend and mean reversion at extremes.
+12h_1d_Weekly_EMA34_Filter_Support_Resistance_Breakout
+Hypothesis: Trade 12h breakouts above 1d resistance (previous day high) or below 1d support (previous day low) only when aligned with weekly EMA(34) trend and confirmed by volume > 2x 24-period average. This captures institutional breakout attempts while filtering false signals. Weekly trend ensures directional bias, volume confirms institutional participation. Designed for low trade frequency (<25/year) to minimize fee drag in ranging markets like 2025 BTC/ETH.
 """
 
 import numpy as np
@@ -13,37 +13,24 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get daily data for RSI calculation
+    # Get 1d data for support/resistance levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Get weekly data for EMA trend filter
+    # Get 1w data for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Daily RSI (14-period)
-    delta = np.diff(df_1d['close'].values, prepend=df_1d['close'].values[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Previous 1d high/low for support/resistance (completed day)
+    prev_high_1d = np.roll(df_1d['high'].values, 1)
+    prev_low_1d = np.roll(df_1d['low'].values, 1)
+    prev_high_1d[0] = df_1d['high'].values[0]
+    prev_low_1d[0] = df_1d['low'].values[0]
     
-    # Wilder's smoothing
-    rsi_period = 14
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    
-    if len(gain) >= rsi_period:
-        avg_gain[rsi_period - 1] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period - 1] = np.mean(loss[:rsi_period])
-        for i in range(rsi_period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Weekly EMA (34-period)
+    # Weekly EMA(34) trend filter
     close_1w = df_1w['close'].values
     ema_period = 34
     ema_1w = np.full_like(close_1w, np.nan)
@@ -53,51 +40,62 @@ def generate_signals(prices):
         for i in range(ema_period, len(close_1w)):
             ema_1w[i] = (close_1w[i] * 2 / (ema_period + 1)) + (ema_1w[i-1] * (ema_period - 1) / (ema_period + 1))
     
-    # Align daily RSI to 1d timeframe (already aligned)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Align weekly EMA to 1d timeframe
+    # Align 1d support/resistance and weekly EMA to 12h timeframe
+    resistance = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    support = align_htf_to_ltf(prices, df_1d, prev_low_1d)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation: volume > 2x 24-period average (strict filter for low frequency)
+    vol_ma = np.full_like(volume, np.nan)
+    vol_period = 24
+    
+    if len(volume) >= vol_period:
+        for i in range(vol_period, len(volume)):
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, rsi_period, ema_period)
+    start_idx = max(50, vol_period)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(resistance[i]) or np.isnan(support[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation (>2x average for institutional participation)
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
+        
         if position == 0:
-            # Long: price above weekly EMA and RSI oversold (<25)
-            if close[i] > ema_1w_aligned[i] and rsi_1d_aligned[i] < 25:
+            # Long: break above resistance with volume and above weekly EMA
+            if close[i] > resistance[i] and vol_confirm and close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly EMA and RSI overbought (>75)
-            elif close[i] < ema_1w_aligned[i] and rsi_1d_aligned[i] > 75:
+            # Short: break below support with volume and below weekly EMA
+            elif close[i] < support[i] and vol_confirm and close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly EMA or RSI overbought (>70)
-            if close[i] < ema_1w_aligned[i] or rsi_1d_aligned[i] > 70:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price closes back below support or below weekly EMA
+            if close[i] < support[i] or close[i] < ema_1w_aligned[i]:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly EMA or RSI oversold (<30)
-            if close[i] > ema_1w_aligned[i] or rsi_1d_aligned[i] < 30:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price closes back above resistance or above weekly EMA
+            if close[i] > resistance[i] or close[i] > ema_1w_aligned[i]:
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "1d_1w_WeeklyEMA34_RSI25_75"
-timeframe = "1d"
+name = "12h_1d_Weekly_EMA34_Filter_Support_Resistance_Breakout"
+timeframe = "12h"
 leverage = 1.0
