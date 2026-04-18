@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Stochastic_Bollinger_Bands_Squeeze_Breakout
-Hypothesis: Bollinger Bands squeeze (low volatility) followed by breakout with Stochastic momentum confirmation works across market regimes. 
-- Bollinger Bands width < 20th percentile indicates volatility contraction (squeeze)
-- Breakout occurs when price closes outside Bollinger Bands
-- Stochastic oscillator > 80 confirms bullish momentum, < 20 confirms bearish momentum
-- Works in both bull and breakout markets by capturing volatility expansion after consolidation
-- Uses 1d timeframe for Bollinger Bands and Stochastic to avoid noise, 6s for execution
-Target: 15-25 trades/year by requiring squeeze + breakout + momentum confluence
+12h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v3
+Hypothesis: In range-bound markets (ADX < 20), price reverts to the mean at Camarilla pivot levels.
+Long when price crosses above S1 with volume confirmation in low volatility regime.
+Short when price crosses below R1 with volume confirmation in low volatility regime.
+Exit when price reaches opposite pivot level or volatility increases (ADX > 25).
+Uses daily pivots for key levels, 12h for execution. Target: 15-25 trades/year.
+Works in both bull and bear markets by avoiding strong trends (ADX filter) and fading extremes in ranges.
 """
 
 import numpy as np
@@ -22,108 +21,146 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Bollinger Bands and Stochastic
+    # Get daily data for Camarilla pivots and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
+    # Calculate Camarilla levels (based on previous day)
+    R1 = np.full_like(high_1d, np.nan)
+    S1 = np.full_like(low_1d, np.nan)
     
-    sma = np.full_like(close_1d, np.nan)
-    bb_upper = np.full_like(close_1d, np.nan)
-    bb_lower = np.full_like(close_1d, np.nan)
-    bb_width = np.full_like(close_1d, np.nan)
-    
-    if len(close_1d) >= bb_period:
-        for i in range(bb_period-1, len(close_1d)):
-            sma[i] = np.mean(close_1d[i-bb_period+1:i+1])
-            std = np.std(close_1d[i-bb_period+1:i+1])
-            bb_upper[i] = sma[i] + bb_std * std
-            bb_lower[i] = sma[i] - bb_std * std
-            bb_width[i] = (bb_upper[i] - bb_lower[i]) / sma[i] if sma[i] != 0 else np.nan
-    
-    # Calculate Stochastic Oscillator (14, 3, 3)
-    stoch_k = np.full_like(close_1d, np.nan)
-    stoch_d = np.full_like(close_1d, np.nan)
-    
-    stoch_period = 14
-    k_smooth = 3
-    d_smooth = 3
-    
-    if len(close_1d) >= stoch_period:
-        for i in range(stoch_period-1, len(close_1d)):
-            highest_high = np.max(high_1d[i-stoch_period+1:i+1])
-            lowest_low = np.min(low_1d[i-stoch_period+1:i+1])
-            if highest_high != lowest_low:
-                stoch_k[i] = 100 * (close_1d[i] - lowest_low) / (highest_high - lowest_low)
-            else:
-                stoch_k[i] = 50.0
+    for i in range(1, len(close_1d)):
+        # Use previous day's range
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_ = prev_high - prev_low
         
-        # Smooth %K to get slow %K
-        if len(close_1d) >= stoch_period + k_smooth - 1:
-            for i in range(stoch_period + k_smooth - 2, len(close_1d)):
-                stoch_k[i] = np.mean(stoch_k[i-k_smooth+1:i+1])
+        if range_ > 0:
+            R1[i] = prev_close + 1.1 * range_ / 12
+            S1[i] = prev_close - 1.1 * range_ / 12
+    
+    # Calculate 14-period ADX for regime filtering
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
         
-        # Smooth slow %K to get slow %D
-        if len(close_1d) >= stoch_period + k_smooth + d_smooth - 2:
-            for i in range(stoch_period + k_smooth + d_smooth - 2, len(close_1d)):
-                stoch_d[i] = np.mean(stoch_k[i-d_smooth+1:i+1])
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[np.nan], dm_plus])
+        dm_minus = np.concatenate([[np.nan], dm_minus])
+        
+        # Smooth TR, DM+
+        atr = np.full_like(tr, np.nan)
+        dm_plus_smooth = np.full_like(dm_plus, np.nan)
+        dm_minus_smooth = np.full_like(dm_minus, np.nan)
+        
+        if len(tr) >= period:
+            # Initial values
+            atr[period] = np.nanmean(tr[1:period+1])
+            dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
+            dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
+            
+            # Wilder smoothing
+            for i in range(period+1, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+        
+        # DI+ and DI-
+        di_plus = np.full_like(dm_plus_smooth, np.nan)
+        di_minus = np.full_like(dm_minus_smooth, np.nan)
+        valid = ~np.isnan(atr) & (atr != 0)
+        di_plus[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
+        di_minus[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
+        
+        # DX and ADX
+        dx = np.full_like(di_plus, np.nan)
+        dx_valid = ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
+        dx[dx_valid] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
+        
+        adx = np.full_like(dx, np.nan)
+        if len(dx) >= period:
+            # Initial ADX
+            adx[2*period-1] = np.nanmean(dx[period:2*period])
+            # Wilder smoothing for ADX
+            for i in range(2*period, len(dx)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Calculate Bollinger Band width percentile (20-period lookback)
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    lookback = 20
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    if len(bb_width) >= lookback:
-        for i in range(lookback-1, len(bb_width)):
-            if not np.isnan(bb_width[i]):
-                valid_widths = bb_width[i-lookback+1:i+1]
-                valid_widths = valid_widths[~np.isnan(valid_widths)]
-                if len(valid_widths) > 0:
-                    bb_width_percentile[i] = (np.sum(valid_widths <= bb_width[i]) / len(valid_widths)) * 100
+    # Align all 1d data to 12h timeframe
+    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Align all 1d data to 6h timeframe
-    bb_width_percentile_6h = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
-    bb_upper_6h = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_6h = align_htf_to_ltf(prices, df_1d, bb_lower)
-    stoch_k_6h = align_htf_to_ltf(prices, df_1d, stoch_k)
-    stoch_d_6h = align_htf_to_ltf(prices, df_1d, stoch_d)
+    # Volume confirmation: volume > 1.3x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    vol_period = 20
+    
+    if len(volume) >= vol_period:
+        for i in range(vol_period, len(volume)):
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, stoch_period + k_smooth + d_smooth, lookback) + 5
+    start_idx = max(20, 14) + 1  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bb_width_percentile_6h[i]) or np.isnan(bb_upper_6h[i]) or 
-            np.isnan(bb_lower_6h[i]) or np.isnan(stoch_k_6h[i]) or np.isnan(stoch_d_6h[i])):
+        if (np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or 
+            np.isnan(adx_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Bollinger Band squeeze condition: width < 20th percentile
-        squeeze = bb_width_percentile_6h[i] < 20
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > bb_upper_6h[i]
-        breakout_down = close[i] < bb_lower_6h[i]
+        # Regime filter: daily ADX < 20 (strong range)
+        range_regime = adx_12h[i] < 20
         
-        # Stochastic momentum confirmation
-        stoch_bullish = stoch_k_6h[i] > 50 and stoch_d_6h[i] > 50 and stoch_k_6h[i] > stoch_d_6h[i]
-        stoch_bearish = stoch_k_6h[i] < 50 and stoch_d_6h[i] < 50 and stoch_k_6h[i] < stoch_d_6h[i]
+        if position == 0:
+            # Long: price crosses above S1 with volume in range regime
+            if close[i] > S1_12h[i] and close[i-1] <= S1_12h[i-1] and vol_confirm and range_regime:
+                signals[i] = 0.25
+                position = 1
+            # Short: price crosses below R1 with volume in range regime
+            elif close[i] < R1_12h[i] and close[i-1] >= R1_12h[i-1] and vol_confirm and range_regime:
+                signals[i] = -0.25
+                position = -1
         
-        # Entry signals
-        if squeeze and breakout_up and stoch_bullish:
-            signals[i] = 0.25
-        elif squeeze and breakout_down and stoch_bearish:
-            signals[i] = -0.25
-        else:
-            signals[i] = 0.0
+        elif position == 1:
+            # Long exit: price reaches R1 or volatility increases (ADX > 25)
+            if close[i] >= R1_12h[i] or adx_12h[i] > 25:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price reaches S1 or volatility increases (ADX > 25)
+            if close[i] <= S1_12h[i] or adx_12h[i] > 25:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_Stochastic_Bollinger_Bands_Squeeze_Breakout"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v3"
+timeframe = "12h"
 leverage = 1.0
