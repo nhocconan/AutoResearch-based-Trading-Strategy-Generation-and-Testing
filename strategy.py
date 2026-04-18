@@ -3,14 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and volume confirmation
-# Uses 4h EMA50 for trend direction, 1h RSI(14) for momentum, and volume spike for confirmation
-# Designed to work in both bull and bear markets by following higher timeframe trend
-# Target: 15-37 trades/year (60-150 total over 4 years) with session filter (08-20 UTC)
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,85 +13,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get 1d data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 14-period ATR on 1d for volatility regime
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1h RSI(14) for momentum
+    # Calculate 50-period SMA on 1d for trend filter
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    
+    # Align 1d indicators to 12h
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    
+    # Calculate 12-period RSI on 12h for momentum
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
+    avg_gain = pd.Series(gain).rolling(window=12, min_periods=12).mean().values
+    avg_loss = pd.Series(loss).rolling(window=12, min_periods=12).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 1h volume spike (volume > 1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Calculate 12h volume spike (volume > 1.8x 24-period average)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    start_idx = max(50, 14, 20) + 1
+    start_idx = max(50, 14, 12, 24) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_4h_aligned[i]) or 
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(sma_50_1d_aligned[i]) or
             np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade between 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        # Regime filter: volatility expansion (ATR > 1.2x its 50-period MA)
+        atr_ma = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=50).mean().values
+        vol_expansion = atr_1d_aligned[i] > (1.2 * atr_ma[i])
         
-        # Trend filter: price above/below 4h EMA50
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # Trend filter: price above/below 1d SMA50
+        uptrend = close[i] > sma_50_1d_aligned[i]
+        downtrend = close[i] < sma_50_1d_aligned[i]
         
-        # Momentum and volume confirmation
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Momentum filter: RSI in favorable territory
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        
+        # Volume confirmation
         vol_confirmed = volume_spike[i]
         
         if position == 0:
-            # Long: uptrend + RSI oversold + volume spike
-            if uptrend and rsi_oversold and vol_confirmed:
-                signals[i] = 0.20
+            # Long: uptrend + bullish momentum + vol expansion + volume spike
+            if uptrend and rsi_bullish and vol_expansion and vol_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + RSI overbought + volume spike
-            elif downtrend and rsi_overbought and vol_confirmed:
-                signals[i] = -0.20
+            # Short: downtrend + bearish momentum + vol expansion + volume spike
+            elif downtrend and rsi_bearish and vol_expansion and vol_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI overbought or trend breakdown
-            if rsi[i] > 70 or close[i] < ema_50_4h_aligned[i]:
-                signals[i] = -0.20  # reverse to short
+            # Long exit: trend reversal or momentum deterioration
+            if not uptrend or not rsi_bullish:
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI oversold or trend reversal
-            if rsi[i] < 30 or close[i] > ema_50_4h_aligned[i]:
-                signals[i] = 0.20  # reverse to long
+            # Short exit: trend reversal or momentum deterioration
+            if not downtrend or not rsi_bearish:
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4hEMA50_RSI_VolumeSpike_v1"
-timeframe = "1h"
+name = "12h_1dSMA50_ATRRegime_RSI_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
