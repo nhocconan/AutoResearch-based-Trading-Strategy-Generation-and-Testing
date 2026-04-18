@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter
-Hypothesis: Use weekly Camarilla pivot levels (R4/S4) on 1d timeframe for breakout signals.
-Go long when price closes above weekly S4 with volume confirmation, short when closes below weekly R4.
-Uses weekly structure for trend context and daily volume for confirmation. Designed to capture
-strong momentum moves in both bull and bear markets. Targets 10-20 trades/year with position size 0.25.
+4h_Daily_RSI_MeanReversion_With_Volume_Spike
+Hypothesis: In mean-reverting markets (chop regime), daily RSI extremes combined with volume spikes signal reversals. Uses 1D RSI(14) for overbought/oversold detection and 4H volume > 2x 20-period average for confirmation. Works in both bull and bear markets by fading extremes during consolidation periods. Targets 20-30 trades/year with position size 0.25.
 """
 
 import numpy as np
@@ -21,21 +18,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1D data for RSI calculation
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla levels
-    # R4 = Close + 1.5 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
-    camarilla_r4 = close_1w + 1.5 * (high_1w - low_1w)
-    camarilla_s4 = close_1w - 1.5 * (high_1w - low_1w)
+    # Calculate 1D RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align weekly Camarilla levels to daily timeframe (wait for weekly bar close)
-    r4_1d = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    s4_1d = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
+    
+    # Wilder's smoothing
+    for i in range(len(close_1d)):
+        if i < 14:
+            if i == 0:
+                avg_gain[i] = gain[i]
+                avg_loss[i] = loss[i]
+            else:
+                avg_gain[i] = (avg_gain[i-1] * i + gain[i]) / (i + 1)
+                avg_loss[i] = (avg_loss[i-1] * i + loss[i]) / (i + 1)
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Align RSI to 4h timeframe (wait for daily bar close)
+    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Calculate volume average (20-period) for confirmation
     vol_ma = np.full(n, np.nan)
@@ -49,37 +61,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 2.0 * 20-period average
+        vol_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price closes above weekly S4 with volume confirmation
-            if close[i] > s4_1d[i] and vol_confirmed:
+            # Long entry: RSI < 30 (oversold) with volume spike
+            if rsi_4h[i] < 30 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price closes below weekly R4 with volume confirmation
-            elif close[i] < r4_1d[i] and vol_confirmed:
+            # Short entry: RSI > 70 (overbought) with volume spike
+            elif rsi_4h[i] > 70 and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price closes back below weekly S4
-            if close[i] < s4_1d[i]:
+            # Long exit: RSI crosses above 50 (mean reversion complete)
+            if rsi_4h[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes back above weekly R4
-            if close[i] > r4_1d[i]:
+            # Short exit: RSI crosses below 50 (mean reversion complete)
+            if rsi_4h[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter"
-timeframe = "1d"
+name = "4h_Daily_RSI_MeanReversion_With_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
