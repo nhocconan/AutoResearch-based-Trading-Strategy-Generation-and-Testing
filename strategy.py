@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Bollinger_Bands_Breakout_With_Volume_and_Trend_v1
-Hypothesis: Buy when price breaks above upper Bollinger Band (20,2) with volume spike and above 12h EMA34 trend; sell when price breaks below lower band with volume spike and below 12h EMA34. Bollinger Bands capture volatility expansion, volume confirms institutional interest, and 12h EMA34 ensures alignment with medium-term trend. Designed for low trade frequency (<30/year) to minimize fee drift while capturing explosive moves in both bull and bear markets.
+1d_KAMA_Trend_With_RSI_Filter_V3
+Hypothesis: Use daily Kaufman Adaptive Moving Average (KAMA) for trend direction, filtered by daily RSI(14) for momentum confirmation, with volume spike to confirm institutional participation. KAMA adapts to market noise, reducing whipsaws in chop while capturing trends. RSI filters extreme conditions to avoid counter-trend trades. Designed for low trade frequency (<15/year) to minimize fee drag while capturing sustained moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,70 +18,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    ma = close_series.rolling(window=20, min_periods=20).mean()
-    std = close_series.rolling(window=20, min_periods=20).std()
-    upper = ma + 2 * std
-    lower = ma - 2 * std
-    upper_band = upper.values
-    lower_band = lower.values
+    # KAMA parameters
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Volume spike: >2.0x 20-period average
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    dir = np.abs(np.subtract(close, np.roll(close, er_length)))
+    vol = np.cumsum(change) - np.roll(np.cumsum(change), er_length)
+    vol[vol == 0] = 1e-10  # avoid division by zero
+    er = dir / vol
+    
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume spike: >1.8x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # 12h EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 40  # Need BB and volume MA
+    start_idx = max(30, 20)  # Need KAMA warmup and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_12h_aligned[i]) or 
-            np.isnan(volume_spike[i]) or
-            np.isnan(upper_band[i]) or
-            np.isnan(lower_band[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_12h_val = ema_12h_aligned[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
         vol_spike = volume_spike[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
         
         if position == 0:
-            # Long: price > upper BB with volume spike and above 12h EMA34
-            if price > upper and vol_spike and price > ema_12h_val:
+            # Long: price above KAMA, RSI > 50 (bullish momentum), volume spike
+            if price > kama_val and rsi_val > 50 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < lower BB with volume spike and below 12h EMA34
-            elif price < lower and vol_spike and price < ema_12h_val:
+            # Short: price below KAMA, RSI < 50 (bearish momentum), volume spike
+            elif price < kama_val and rsi_val < 50 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < middle band (mean reversion) or below 12h EMA34
-            if price < ma.values[i] or price < ema_12h_val:
+            # Exit: price crosses below KAMA or RSI becomes overextended
+            if price < kama_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > middle band or above 12h EMA34
-            if price > ma.values[i] or price > ema_12h_val:
+            # Exit: price crosses above KAMA or RSI becomes oversold
+            if price > kama_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Bollinger_Bands_Breakout_With_Volume_and_Trend_v1"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_RSI_Filter_V3"
+timeframe = "1d"
 leverage = 1.0
