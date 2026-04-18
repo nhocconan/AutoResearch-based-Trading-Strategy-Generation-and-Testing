@@ -1,30 +1,62 @@
-#!/usr/bin/env python3
-"""
-12h Williams Alligator + Volume Spike + ADX Trend Filter
-Hypothesis: Williams Alligator identifies market trends (jaws-teeth-lips alignment).
-Long when lips > teeth > jaws with volume spike, short when lips < teeth < jaws.
-Volume spike confirms institutional participation. ADX filter ensures trending market.
-Works in bull/bear by following trend direction. Targets 12h timeframe for lower frequency.
-"""
+# 1d KAMA + RSI + Chop Regime Strategy
+# Hypothesis: KAMA adapts to market noise, reducing whipsaws. Combined with RSI extremes
+# and chop regime filter, it captures trends while avoiding sideways chop. Works in bull
+# and bear markets by following adaptive trend direction with momentum confirmation.
+# Timeframe: 1d (lower trade frequency for better generalization)
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_williams_alligator(high, low, close):
-    """Williams Alligator: Jaws (13,8), Teeth (8,5), Lips (5,3) SMAs of median price"""
-    median = (high + low) / 2
-    if len(median) < 13:
-        return np.full_like(median, np.nan), np.full_like(median, np.nan), np.full_like(median, np.nan)
+def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
+    """Kaufman Adaptive Moving Average"""
+    if len(close) < er_length:
+        return np.full_like(close, np.nan)
     
-    jaws = pd.Series(median).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median).rolling(window=5, min_periods=5).mean().shift(3).values
-    return jaws, teeth, lips
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
+    # Vectorized volatility calculation
+    volatility = np.array([np.sum(np.abs(np.diff(close[max(0, i-er_length+1):i+1]))) 
+                          for i in range(len(close))])
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index"""
-    if len(high) < period + 1:
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    if len(close) < period + 1:
+        return np.full_like(close, np.nan)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    for i in range(period + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index: 0-100, >61.8 = choppy, <38.2 = trending"""
+    if len(high) < period:
         return np.full_like(high, np.nan)
     
     # True Range
@@ -32,56 +64,34 @@ def calculate_adx(high, low, close, period=14):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = high[0] - low[0]
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    atr = np.zeros_like(high)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    plus_di = np.zeros_like(high)
-    minus_di = np.zeros_like(high)
-    
-    # Smooth DM
-    plus_dm_smooth = np.zeros_like(high)
-    minus_dm_smooth = np.zeros_like(high)
-    plus_dm_smooth[0] = plus_dm[0]
-    minus_dm_smooth[0] = minus_dm[0]
-    
-    for i in range(1, len(high)):
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-    
-    # Calculate DI
-    for i in range(period, len(high)):
-        if atr[i] != 0:
-            plus_di[i] = 100 * (plus_dm_smooth[i] / atr[i])
-            minus_di[i] = 100 * (minus_dm_smooth[i] / atr[i])
+    # Sum of True Range over period
+    sum_tr = np.zeros_like(high)
+    for i in range(len(sum_tr)):
+        if i < period:
+            sum_tr[i] = np.sum(tr[max(0, i-period+1):i+1])
         else:
-            plus_di[i] = 0
-            minus_di[i] = 0
+            sum_tr[i] = np.sum(tr[i-period+1:i+1])
     
-    # Calculate DX and ADX
-    dx = np.zeros_like(high)
-    for i in range(period, len(high)):
-        if (plus_di[i] + minus_di[i]) != 0:
-            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    # Highest high and lowest low over period
+    highest_high = np.zeros_like(high)
+    lowest_low = np.zeros_like(low)
+    for i in range(len(high_high)):
+        if i < period:
+            highest_high[i] = np.max(high[max(0, i-period+1):i+1])
+            lowest_low[i] = np.min(low[max(0, i-period+1):i+1])
         else:
-            dx[i] = 0
+            highest_high[i] = np.max(high[i-period+1:i+1])
+            lowest_low[i] = np.min(low[i-period+1:i+1])
     
-    adx = np.zeros_like(high)
-    adx[period] = np.mean(dx[period:2*period]) if len(dx) >= 2*period else 0
-    for i in range(2*period, len(high)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    # Avoid division by zero
+    range_hl = highest_high - lowest_low
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
     
-    return adx
+    # Choppiness formula
+    chop = 100 * np.log10(sum_tr / range_hl) / np.log10(period)
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
@@ -93,74 +103,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams Alligator
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate KAMA on weekly close for trend direction
+    wk_close = df_1w['close'].values
+    wk_kama = calculate_kama(wk_close, er_length=10, fast_sc=2, slow_sc=30)
+    wk_kama_trend = wk_kama > np.roll(wk_kama, 1)  # Rising KAMA = uptrend
+    wk_kama_trend[0] = False  # First value has no previous
+    wk_kama_trend_aligned = align_htf_to_ltf(prices, df_1w, wk_kama_trend.astype(float))
     
-    jaws_1d, teeth_1d, lips_1d = calculate_williams_alligator(high_1d, low_1d, close_1d)
+    # Calculate daily indicators
+    # KAMA for entry signal
+    kama = calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30)
+    kama_slope = kama > np.roll(kama, 1)  # Rising KAMA
+    kama_slope[0] = False
     
-    # Align to 12h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws_1d)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    # RSI for momentum confirmation
+    rsi = calculate_rsi(close, period=14)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Choppiness filter for regime
+    chop = calculate_choppiness(high, low, close, period=14)
+    trending_market = chop < 38.2  # Strong trending regime
+    
+    # Volume confirmation: above average volume
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1])
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 2.0)
-    
-    # ADX trend filter on 12h data
-    adx = calculate_adx(high, low, close, 14)
-    trending = adx > 25  # Strong trend
+    vol_confirm = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup
+    start_idx = 30  # Warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(adx[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(wk_kama_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaws (bullish alignment) + volume spike + trend
-            if (lips_aligned[i] > teeth_aligned[i] and 
-                teeth_aligned[i] > jaws_aligned[i] and 
-                vol_spike[i] and 
-                trending[i]):
+            # Long entry: KAMA rising + RSI > 50 (bullish momentum) + 
+            # weekly trend up + trending market + volume confirmation
+            if (kama_slope[i] and rsi[i] > 50 and 
+                wk_kama_trend_aligned[i] > 0.5 and 
+                trending_market[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaws (bearish alignment) + volume spike + trend
-            elif (lips_aligned[i] < teeth_aligned[i] and 
-                  teeth_aligned[i] < jaws_aligned[i] and 
-                  vol_spike[i] and 
-                  trending[i]):
+            # Short entry: KAMA falling + RSI < 50 (bearish momentum) + 
+            # weekly trend down + trending market + volume confirmation
+            elif (not kama_slope[i] and rsi[i] < 50 and 
+                  wk_kama_trend_aligned[i] < 0.5 and 
+                  trending_market[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: alignment breaks or volume drops
-            if not (lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaws_aligned[i]) or not vol_spike[i]:
+            # Exit long: KAMA turns down OR RSI < 40 (losing momentum)
+            if not kama_slope[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: alignment breaks or volume drops
-            if not (lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaws_aligned[i]) or not vol_spike[i]:
+            # Exit short: KAMA turns up OR RSI > 60 (losing momentum)
+            if kama_slope[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -168,6 +183,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_VolumeSpike_ADXFilter"
-timeframe = "12h"
+name = "1d_KAMA_RSI_ChopRegime"
+timeframe = "1d"
 leverage = 1.0
