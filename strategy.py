@@ -41,11 +41,11 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align indicators to 4h timeframe
+    # Align indicators to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 4h RSI (14-period)
+    # Calculate 12h RSI (14-period)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -54,7 +54,7 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 4h SMA (50-period) for trend filter
+    # Calculate 12h SMA (50-period) for trend filter
     sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     # Session filter: 08-20 UTC
@@ -122,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_SMA50_ATR_ADX_Filter_v1"
-timeframe = "4h"
+name = "12h_RSI_SMA50_ATR_ADX_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
