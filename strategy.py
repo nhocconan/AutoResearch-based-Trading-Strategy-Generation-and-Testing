@@ -1,10 +1,11 @@
+# Your turn. Make it count.
 #!/usr/bin/env python3
 """
-12h_WeeklyPivot_R1S1_Breakout_1dTrend
-Hypothesis: Weekly Pivot R1/S1 breakout with daily EMA34 trend filter and volume confirmation.
-Trades breakouts from key weekly levels only when aligned with daily trend and accompanied by volume,
-avoiding false breakouts in ranging conditions. Designed for low frequency (12-37 trades/year) with 
-strong performance across market regimes by combining short-term trend (daily) with long-term structure (weekly).
+4h_RSI_Divergence_Volume_Pattern
+Hypothesis: RSI divergence with volume pattern on 4h chart identifies trend exhaustion and reversals.
+Works in both bull and bear markets by capturing exhaustion moves. Uses RSI(14) for divergence detection,
+volume confirmation for conviction, and avoids overtrading through strict divergence criteria.
+Target: 20-40 trades/year per symbol with strong risk-adjusted returns.
 """
 
 import numpy as np
@@ -21,82 +22,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # RSI calculation with proper smoothing
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Use Wilder's smoothing (alpha = 1/period)
+        avg_gain = np.full_like(prices, np.nan)
+        avg_loss = np.full_like(prices, np.nan)
+        
+        if len(prices) > period:
+            avg_gain[period] = np.mean(gain[:period])
+            avg_loss[period] = np.mean(loss[:period])
+            
+            alpha = 1.0 / period
+            for i in range(period + 1, len(prices)):
+                avg_gain[i] = alpha * gain[i-1] + (1 - alpha) * avg_gain[i-1]
+                avg_loss[i] = alpha * loss[i-1] + (1 - alpha) * avg_loss[i-1]
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Calculate daily EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = close_1d[i] * alpha + ema34_1d[i-1] * (1 - alpha)
+    # Calculate RSI
+    rsi = calculate_rsi(close, 14)
     
-    # Get weekly data for Pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly Pivot levels (R1/S1 from prior week)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    r1 = np.full(len(close_1w), np.nan)  # R1 level
-    s1 = np.full(len(close_1w), np.nan)  # S1 level
-    
-    for i in range(1, len(close_1w)):
-        ph = high_1w[i-1]
-        pl = low_1w[i-1]
-        pc = close_1w[i-1]
-        pp = (ph + pl + pc) / 3.0  # Pivot Point
-        r1[i] = pp + (ph - pl)     # R1 = PP + (High - Low)
-        s1[i] = pp - (ph - pl)     # S1 = PP - (High - Low)
-    
-    # Align daily EMA and weekly levels to 12h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Volume spike: current volume > 2.0 x 20-period average
+    # Volume spike detection: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.5)
+    
+    # Price action patterns for divergence confirmation
+    # Higher high in price with lower high in RSI = bearish divergence
+    # Lower low in price with higher low in RSI = bullish divergence
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(30, 20)  # Need enough data for RSI and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
+            
+        # Look back for divergence patterns (check last 10 bars for efficiency)
+        lookback = min(10, i)
+        bullish_div = False
+        bearish_div = False
+        
+        if i >= lookback:
+            # Check for bullish divergence: lower low in price, higher low in RSI
+            price_lows = []
+            rsi_lows = []
+            for j in range(i - lookback + 1, i + 1):
+                if j > 0 and low[j] <= low[j-1] and low[j] <= low[j+1 if j+1 < i else j]:
+                    price_lows.append((j, low[j]))
+                    rsi_lows.append((j, rsi[j]))
+            
+            if len(price_lows) >= 2:
+                # Check last two lows for divergence
+                if (price_lows[-1][1] < price_lows[-2][1] and 
+                    rsi_lows[-1][1] > rsi_lows[-2][1]):
+                    bullish_div = True
+            
+            # Check for bearish divergence: higher high in price, lower high in RSI
+            price_highs = []
+            rsi_highs = []
+            for j in range(i - lookback + 1, i + 1):
+                if j > 0 and high[j] >= high[j-1] and high[j] >= high[j+1 if j+1 < i else j]:
+                    price_highs.append((j, high[j]))
+                    rsi_highs.append((j, rsi[j]))
+            
+            if len(price_highs) >= 2:
+                # Check last two highs for divergence
+                if (price_highs[-1][1] > price_highs[-2][1] and 
+                    rsi_highs[-1][1] < rsi_highs[-2][1]):
+                    bearish_div = True
         
         if position == 0:
-            # Long: break above weekly R1 with volume spike and daily uptrend
-            if (close[i] > r1_aligned[i] and vol_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # Enter long on bullish divergence with volume spike
+            if bullish_div and vol_spike[i] and rsi[i] < 40:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S1 with volume spike and daily downtrend
-            elif (close[i] < s1_aligned[i] and vol_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # Enter short on bearish divergence with volume spike
+            elif bearish_div and vol_spike[i] and rsi[i] > 60:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below weekly S1 or daily trend turns down
-            if (close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]):
+            # Exit long on bearish divergence or RSI overbought
+            if bearish_div or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above weekly R1 or daily trend turns up
-            if (close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]):
+            # Exit short on bullish divergence or RSI oversold
+            if bullish_div or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R1S1_Breakout_1dTrend"
-timeframe = "12h"
+name = "4h_RSI_Divergence_Volume_Pattern"
+timeframe = "4h"
 leverage = 1.0
