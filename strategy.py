@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Volume_Spike_Regime
-Uses 1d Camarilla pivot levels (R1/S1) with volume spike confirmation and 12h trend filter.
-- Long: Price breaks above R1 + volume > 2x average + 12h close > EMA34
-- Short: Price breaks below S1 + volume > 2x average + 12h close < EMA34
-- Exit: Opposite signal or price crosses EMA34
-- Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
+12h_Pivot_R1_S1_Breakout_Volume_Regime
+12h strategy using daily Camarilla pivot levels (R1/S1) with volume spike confirmation.
+- Long: Price breaks above R1 + volume > 2x average + daily close > daily EMA34 (bull regime)
+- Short: Price breaks below S1 + volume > 2x average + daily close < daily EMA34 (bear regime)
+- Exit: Opposite signal or price crosses daily EMA34
+Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
 Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d Camarilla levels (R1, S1)
@@ -47,11 +47,9 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Get 12h data for trend filter (EMA34)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Daily EMA34 for regime filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike filter (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,13 +62,13 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 12h EMA34
-        bull_trend = close[i] > ema_34_12h_aligned[i]
-        bear_trend = close[i] < ema_34_12h_aligned[i]
+        # Regime filter: daily EMA34
+        bull_regime = close[i] > ema_34_1d_aligned[i]
+        bear_regime = close[i] < ema_34_1d_aligned[i]
         
         # Breakout conditions
         breakout_up = close[i] > r1_aligned[i]
@@ -80,26 +78,26 @@ def generate_signals(prices):
         volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: bull trend + breakout above R1 + volume spike
-            if bull_trend and breakout_up and volume_spike:
+            # Long: bull regime + breakout above R1 + volume spike
+            if bull_regime and breakout_up and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: bear trend + breakdown below S1 + volume spike
-            elif bear_trend and breakdown_down and volume_spike:
+            # Short: bear regime + breakdown below S1 + volume spike
+            elif bear_regime and breakdown_down and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change or price breaks below S1
-            if not bull_trend or breakdown_down:
+            # Long exit: regime change or price breaks below S1
+            if not bull_regime or breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change or price breaks above R1
-            if not bear_trend or breakout_up:
+            # Short exit: regime change or price breaks above R1
+            if not bear_regime or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -107,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Volume_Spike_Regime"
-timeframe = "4h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
