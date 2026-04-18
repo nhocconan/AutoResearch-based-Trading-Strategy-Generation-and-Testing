@@ -1,130 +1,152 @@
 #!/usr/bin/env python3
 """
-1d_1w_Kelly_Fractional_Kelly_Strategy
-Hypothesis: Use weekly price action to determine market regime (bull/bear/range) and apply fractional Kelly criterion for position sizing on daily timeframe. In bull regime (price > weekly SMA50), go long with Kelly size based on daily RSI mean reversion. In bear regime (price < weekly SMA50), go short with Kelly size. In range (price near weekly SMA50), stay flat. This adapts position size to edge strength, reducing exposure in uncertain markets and maximizing growth in trending ones. Targets 10-20 trades/year with proper risk control.
+6h_Pivot_R1S1_Breakout_With_12H_EMA34_Filter
+Hypothesis: On 6h timeframe, break above/below daily Camarilla R1/S1 with volume confirmation, filtered by 12h EMA34 trend. Uses discrete position sizing (0.25) to limit risk. Targets 15-25 trades/year by requiring pivot break + volume + EMA filter, avoiding overtrading. Works in bull/bear via EMA trend filter and pivot structure as dynamic support/resistance.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close"""
+    range_val = high - low
+    if range_val == 0:
+        return close, close, close, close, close, close, close, close
+    c = close
+    h = high
+    l = low
+    r4 = c + ((h - l) * 1.1 / 2)
+    r3 = c + ((h - l) * 1.1 / 4)
+    r2 = c + ((h - l) * 1.1 / 6)
+    r1 = c + ((h - l) * 1.1 / 12)
+    s1 = c - ((h - l) * 1.1 / 12)
+    s2 = c - ((h - l) * 1.1 / 6)
+    s3 = c - ((h - l) * 1.1 / 4)
+    s4 = c - ((h - l) * 1.1 / 2)
+    return r4, r3, r2, r1, s1, s2, s3, s4
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for regime determination
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
-        return np.zeros(n)
+    # Get 1D data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    weekly_close = df_weekly['close'].values
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    # Calculate Camarilla levels for each 1D bar
+    r4_1d = np.full_like(close_1d, np.nan)
+    r3_1d = np.full_like(close_1d, np.nan)
+    r2_1d = np.full_like(close_1d, np.nan)
+    r1_1d = np.full_like(close_1d, np.nan)
+    s1_1d = np.full_like(close_1d, np.nan)
+    s2_1d = np.full_like(close_1d, np.nan)
+    s3_1d = np.full_like(close_1d, np.nan)
+    s4_1d = np.full_like(close_1d, np.nan)
     
-    # Calculate weekly SMA50 for regime
-    weekly_sma50 = np.full_like(weekly_close, np.nan)
-    for i in range(50, len(weekly_close)):
-        weekly_sma50[i] = np.mean(weekly_close[i-50:i])
+    for i in range(len(close_1d)):
+        r4, r3, r2, r1, s1, s2, s3, s4 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
+        r4_1d[i] = r4
+        r3_1d[i] = r3
+        r2_1d[i] = r2
+        r1_1d[i] = r1
+        s1_1d[i] = s1
+        s2_1d[i] = s2
+        s3_1d[i] = s3
+        s4_1d[i] = s4
     
-    # Align weekly SMA50 to daily
-    weekly_sma50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_sma50)
+    # Align Camarilla levels to 6h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Calculate daily RSI(14) for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get 12h data for EMA34 filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
+    # Calculate EMA34 on 12h
+    if len(close_12h) >= 34:
+        ema_12h = np.full_like(close_12h, np.nan)
+        multiplier = 2 / (34 + 1)
+        ema_12h[33] = np.mean(close_12h[0:34])
+        for i in range(34, len(close_12h)):
+            ema_12h[i] = (close_12h[i] - ema_12h[i-1]) * multiplier + ema_12h[i-1]
+    else:
+        ema_12h = np.full_like(close_12h, np.nan)
     
-    for i in range(14, len(close)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[0:14])
-            avg_loss[i] = np.mean(loss[0:14])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Align EMA34 to 6h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Kelly fraction components
-    # Win probability based on RSI extremes (oversold/overbought)
-    # In bull regime: long when RSI < 30 (oversold)
-    # In bear regime: short when RSI > 70 (overbought)
-    # Win rate assumed 60% for extreme RSI readings
-    win_prob = 0.60
-    # Average win/loss ratio based on ATR
-    # Calculate daily ATR(14)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = np.full_like(close, np.nan)
-    for i in range(14, len(tr)):
-        if i == 14:
-            atr[i] = np.mean(tr[0:14])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Use ATR as proxy for average win/loss
-    # In mean reversion, target 1x ATR profit, 0.5x ATR loss
-    avg_win = atr
-    avg_loss = 0.5 * atr
-    win_loss_ratio = np.where(avg_loss != 0, avg_win / avg_loss, 2.0)
-    
-    # Kelly fraction: f = (bp - q) / b where b = win/loss ratio, p = win prob, q = loss prob
-    kelly_fraction = (win_loss_ratio * win_prob - (1 - win_prob)) / win_loss_ratio
-    kelly_fraction = np.clip(kelly_fraction, 0, 0.5)  # Cap at 50%, use half-Kelly for safety
+    # Calculate average volume for volume filter
+    avg_volume = np.full(n, np.nan)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)  # need weekly SMA50 and daily RSI
+    start_idx = max(34, 20)  # need EMA34 and volume average
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_sma50_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or
+            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(avg_volume[i]) or
+            volume[i] == 0):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        weekly_sma = weekly_sma50_aligned[i]
-        
-        # Determine regime: bull if price > weekly SMA50, bear if price < weekly SMA50
-        # Add hysteresis to prevent whipsaw: 1% buffer
-        bull_threshold = weekly_sma * 1.01
-        bear_threshold = weekly_sma * 0.99
-        
-        if price > bull_threshold:
-            # Bull regime: look for long opportunities on RSI oversold
-            if rsi[i] < 30:
-                kelly = kelly_fraction[i]
-                signals[i] = min(kelly, 0.30)  # Cap position size at 30%
+        if position == 0:
+            # Long entry: close > R1 and volume > average and price > EMA34(12h)
+            if (close[i] > r1_1d_aligned[i] and 
+                volume[i] > avg_volume[i] and 
+                close[i] > ema_12h_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short entry: close < S1 and volume > average and price < EMA34(12h)
+            elif (close[i] < s1_1d_aligned[i] and 
+                  volume[i] > avg_volume[i] and 
+                  close[i] < ema_12h_aligned[i]):
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
-        elif price < bear_threshold:
-            # Bear regime: look for short opportunities on RSI overbought
-            if rsi[i] > 70:
-                kelly = kelly_fraction[i]
-                signals[i] = -min(kelly, 0.30)  # Cap position size at 30%
-            else:
+        
+        elif position == 1:
+            # Long exit: close < S1 or price < EMA34(12h)
+            if (close[i] < s1_1d_aligned[i] or 
+                close[i] < ema_12h_aligned[i]):
                 signals[i] = 0.0
-        else:
-            # Range regime: stay flat
-            signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: close > R1 or price > EMA34(12h)
+            if (close[i] > r1_1d_aligned[i] or 
+                close[i] > ema_12h_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_1w_Kelly_Fractional_Kelly_Strategy"
-timeframe = "1d"
+name = "6h_Pivot_R1S1_Breakout_With_12H_EMA34_Filter"
+timeframe = "6h"
 leverage = 1.0
