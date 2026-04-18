@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Fade_Trend
-Hypothesis: Fade at R3/S3 levels of daily Camarilla pivots on 6h timeframe with 12h EMA trend filter.
-In ranging markets, price often reverses at R3/S3 (strong support/resistance). In trending markets,
-only take fades that align with the 12h trend (EMA50) to avoid counter-trend trades.
-Designed to work in both bull and bear markets by combining mean reversion with trend filtering.
+4h_MultiTF_Structure_Breakout_V1
+Hypothesis: Combine daily price structure (higher highs/lows) with 4h breakouts and volume confirmation. 
+Works in bull markets via upward structure breaks and in bear markets via breakdowns of downward structure.
+Uses daily swing points to filter 4h breakouts, reducing false signals and trade frequency.
 """
 
 import numpy as np
@@ -21,63 +20,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Camarilla pivot levels
+    # Daily swing high/low (pivot points) for structure
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point and Camarilla levels (R3, S3)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3_1d = pivot_1d + range_1d * 1.1 / 4
-    s3_1d = pivot_1d - range_1d * 1.1 / 4
+    # Daily swing points: swing high = higher high, swing low = lower low
+    swing_high = np.full(len(high_1d), np.nan)
+    swing_low = np.full(len(low_1d), np.nan)
     
-    # Align 1-day levels to 6h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    for i in range(2, len(high_1d)):
+        # Swing high: higher than previous and next bar's high
+        if high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i+1] if i+1 < len(high_1d) else high_1d[i] > high_1d[i-1]:
+            swing_high[i] = high_1d[i]
+        # Swing low: lower than previous and next bar's low
+        if low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i+1] if i+1 < len(low_1d) else low_1d[i] < low_1d[i-1]:
+            swing_low[i] = low_1d[i]
     
-    # 12-hour EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = np.full(len(close_12h), np.nan)
-    # Use pandas EMA for better performance and accuracy
-    close_series = pd.Series(close_12h)
-    ema50_12h = close_series.ewm(span=50, adjust=False, min_periods=50).values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Forward fill swing points to get structure levels
+    swing_high_ff = pd.Series(swing_high).ffill().values
+    swing_low_ff = pd.Series(swing_low).ffill().values
+    
+    # Align daily structure to 4h
+    swing_high_aligned = align_htf_to_ltf(prices, df_1d, swing_high_ff)
+    swing_low_aligned = align_htf_to_ltf(prices, df_1d, swing_low_ff)
+    
+    # 4h 20-period Donchian channel for breakouts
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # Volume confirmation: current volume > 1.5 x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure EMA ready
+    start_idx = max(20, 2)  # Ensure indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(swing_high_aligned[i]) or np.isnan(swing_low_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long fade: price at S3 with 12h uptrend
-            if (close[i] <= s3_1d_aligned[i] and close[i] > ema50_12h_aligned[i]):
+            # Long: 4h breaks above Donchian high with volume and above daily swing low (bullish structure)
+            if (high[i] > donchian_high[i] and vol_confirm[i] and 
+                close[i] > swing_low_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short fade: price at R3 with 12h downtrend
-            elif (close[i] >= r3_1d_aligned[i] and close[i] < ema50_12h_aligned[i]):
+            # Short: 4h breaks below Donchian low with volume and below daily swing high (bearish structure)
+            elif (low[i] < donchian_low[i] and vol_confirm[i] and 
+                  close[i] < swing_high_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back above S3 or trend changes
-            if (close[i] > s3_1d_aligned[i] or close[i] < ema50_12h_aligned[i]):
+            # Long exit: break below Donchian low or structure breaks down
+            if (low[i] < donchian_low[i] or close[i] < swing_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back below R3 or trend changes
-            if (close[i] < r3_1d_aligned[i] or close[i] > ema50_12h_aligned[i]):
+            # Short exit: break above Donchian high or structure breaks up
+            if (high[i] > donchian_high[i] or close[i] > swing_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Fade_Trend"
-timeframe = "6h"
+name = "4h_MultiTF_Structure_Breakout_V1"
+timeframe = "4h"
 leverage = 1.0
