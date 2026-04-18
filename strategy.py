@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_Spike_ADXFilter
-Hypothesis: Breakout above/below Camarilla R1/S1 with volume spike and ADX>25 confirms strong momentum. 
-Exit when price crosses back below/above S1/R1 or ADX weakens (<20). Designed for low trade frequency 
+4h_Donchian_20_Breakout_Volume_Trend_ADXFilter
+Hypothesis: Breakout above/below 4h Donchian(20) with volume spike and ADX>25 confirms strong momentum. 
+Exit when price crosses back below/above the 4h 10-period EMA or ADX weakens (<20). Designed for low trade frequency 
 to avoid fee drag while capturing strong trending moves in both bull and bear markets.
 """
 
@@ -20,19 +20,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily high, low, close for Camarilla calculation
+    # Daily EMA(34) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels for each day
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align daily Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # 4h Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,51 +49,58 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
+    # 4h EMA(10) for exit
+    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(30, 20, 14*2)  # Need warmup for indicators
+    start_idx = max(34, 20, 20, 14*2)  # Need warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(adx[i])):
+            np.isnan(adx[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(ema_10[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         vol_spike = volume_spike[i]
         adx_val = adx[i]
+        ema_1d = ema_34_1d_aligned[i]
+        ema_10_val = ema_10[i]
         
         if position == 0:
-            # Long: price > Camarilla R1 with volume spike and strong trend (ADX>25)
-            if price > r1 and vol_spike and adx_val > 25:
+            # Long: price > Donchian upper with volume spike, strong trend (ADX>25), and above daily EMA34
+            if price > upper and vol_spike and adx_val > 25 and price > ema_1d:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Camarilla S1 with volume spike and strong trend (ADX>25)
-            elif price < s1 and vol_spike and adx_val > 25:
+            # Short: price < Donchian lower with volume spike, strong trend (ADX>25), and below daily EMA34
+            elif price < lower and vol_spike and adx_val > 25 and price < ema_1d:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < Camarilla S1 OR ADX weakens (<20)
-            if price < s1 or adx_val < 20:
+            # Exit: price < EMA10 OR ADX weakens (<20)
+            if price < ema_10_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > Camarilla R1 OR ADX weakens (<20)
-            if price > r1 or adx_val < 20:
+            # Exit: price > EMA10 OR ADX weakens (<20)
+            if price > ema_10_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Spike_ADXFilter"
+name = "4h_Donchian_20_Breakout_Volume_Trend_ADXFilter"
 timeframe = "4h"
 leverage = 1.0
