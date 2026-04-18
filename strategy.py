@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Reversal
-Hypothesis: Price often reverses at weekly pivot levels (R1/S1) during low volatility periods.
-We use weekly pivot points calculated from prior week's OHLC, confirmed by Bollinger Band squeeze
-(indicating low volatility) and mean-reversion signals when price touches pivot levels.
-This strategy works in both bull and bear markets by capturing mean-reversion at key levels
-while avoiding trending periods via volatility filter. Target: 20-30 trades/year.
+4h 1D Pivot Point Breakout with Volume Confirmation
+Hypothesis: Price breaking above/below daily pivot levels (R1, S1) with volume confirmation
+captures breakout moves in both bull and bear markets. Uses 1d R1/S1 pivot levels
+from previous day, volume > 1.5x 20-period average, and ADX > 20 for trend strength.
+Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,49 +21,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) == 0:
+    # Get 1d data for pivot calculation (previous day's OHLC)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate daily pivot points from previous day's OHLC
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    prev_high = df_1d['high'].shift(1).values  # Previous day's high
+    prev_low = df_1d['low'].shift(1).values    # Previous day's low
+    prev_close = df_1d['close'].shift(1).values # Previous day's close
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
+    # Calculate pivot levels for each 1d bar
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
     
-    # Align weekly pivots to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    # Align pivot levels to 4h timeframe (use previous day's levels)
+    pivot_aligned = align_ltf_to_htf(prices, df_1d, pivot)
+    r1_aligned = align_ltf_to_htf(prices, df_1d, r1)
+    s1_aligned = align_ltf_to_htf(prices, df_1d, s1)
     
-    # Bollinger Bands (20-period, 2 std) for volatility regime
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle  # Normalized width
+    # ADX for trend strength (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Bollinger Band squeeze: low volatility when width < 20th percentile
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    low_volatility = bb_width_percentile < 0.2  # Bottom 20% = squeeze
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Mean reversion signal: price touching pivot levels with rejection
-    # Use 2-period RSI for short-term exhaustion
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).rolling(window=2, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).rolling(window=2, min_periods=2).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi_2 = 100 - (100 / (1 + rs))
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
+    
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,8 +79,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(bb_width[i]) or
-            np.isnan(rsi_2[i])):
+            np.isnan(s1_aligned[i]) or np.isnan(adx[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -82,31 +88,30 @@ def generate_signals(prices):
         pivot_val = pivot_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        low_vol = low_volatility[i]
-        rsi_val = rsi_2[i]
+        adx_val = adx[i]
+        vol_conf = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Look for mean reversion at pivot levels during low volatility
-            # Near S1 with oversold RSI = long
-            if low_vol and price <= s1_val * 1.002 and rsi_val < 30:
+            # Breakout above R1 with volume and trend strength
+            if adx_val > 20 and price > r1_val and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Near R1 with overbought RSI = short
-            elif low_vol and price >= r1_val * 0.998 and rsi_val > 70:
+            # Breakdown below S1 with volume and trend strength
+            elif adx_val > 20 and price < s1_val and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price reaches pivot or RSI normalizes
-            if price >= pivot_val or rsi_val > 50:
+            # Exit if price returns below pivot or trend weakens
+            if price < pivot_val or adx_val < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price reaches pivot or RSI normalizes
-            if price <= pivot_val or rsi_val < 50:
+            # Exit if price returns above pivot or trend weakens
+            if price > pivot_val or adx_val < 15:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Weekly_Pivot_Reversal"
-timeframe = "6h"
+name = "4h_1D_Pivot_R1S1_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
