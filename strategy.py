@@ -1,7 +1,13 @@
-# Hyperscale: 6h 1D/1W Confluence Breakout Strategy
-# Hypothesis: 6-hour breakouts aligned with daily trend (EMA34) and weekly momentum (RSI>50) capture sustained moves
-# while avoiding counter-trend noise. Weekly RSI filter ensures we only trade with higher timeframe momentum.
-# Volume confirmation filters low-quality breakouts. Designed for 12-30 trades/year to minimize fee drag.
+#!/usr/bin/env python3
+"""
+4h Bollinger Band Breakout with Volume Confirmation and ATR Filter
+Hypothesis: In BTC/ETH, Bollinger Band breakouts combined with volume spikes and 
+ATR-based volatility filtering capture genuine momentum moves while avoiding 
+false breakouts in low-volatility periods. The strategy is designed to work in 
+both bull and bear markets by using volatility expansion as a signal of 
+increased participation, which often precedes sustained moves. 
+Target: 20-40 trades/year to minimize fee drag.
+"""
 
 import numpy as np
 import pandas as pd
@@ -17,76 +23,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and weekly for momentum filter
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    # Bollinger Bands (20, 2) on close
+    close_series = pd.Series(close)
+    basis = close_series.rolling(window=20, min_periods=20).mean()
+    dev = close_series.rolling(window=20, min_periods=20).std()
+    upper = basis + 2 * dev
+    lower = basis - 2 * dev
     
-    if len(df_1d) < 2 or len(df_1w) < 2:
-        return np.zeros(n)
+    # ATR for volatility filter (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily EMA34 trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Weekly RSI momentum filter (14-period)
-    close_1w = pd.Series(df_1w['close'].values)
-    delta = close_1w.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = rsi_1w.values
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w, additional_delay_bars=0)
-    
-    # 6-hour Donchian breakout channels (20-period)
-    high_6h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_6h = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: 1.5x 20-period average
+    # Volume filter: 1.8x 20-period average (higher threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup for Donchian and volume MA
+    start_idx = 30  # Warmup for BB and ATR
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(high_6h[i]) or np.isnan(low_6h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend = ema_1d_aligned[i]
-        rsi_momentum = rsi_1w_aligned[i]
-        upper_channel = high_6h[i]
-        lower_channel = low_6h[i]
+        bb_upper = upper[i]
+        bb_lower = lower[i]
+        atr_val = atr[i]
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: break above upper channel with daily uptrend and weekly momentum
-            if price > upper_channel and vol_ok and price > ema_trend and rsi_momentum > 50:
+            # Long: break above upper BB with volume and sufficient volatility
+            if price > bb_upper and vol_ok and atr_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower channel with daily downtrend and weekly weakness
-            elif price < lower_channel and vol_ok and price < ema_trend and rsi_momentum < 50:
+            # Short: break below lower BB with volume and sufficient volatility
+            elif price < bb_lower and vol_ok and atr_val > 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price returns below daily EMA or weekly momentum fades
-            if price < ema_trend or rsi_momentum < 45:
+            # Exit long if price returns to middle band or volatility drops
+            if price < basis[i] or atr_val < 0.5 * atr[i-1]:  # Volatility contraction
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns above daily EMA or weekly momentum recovers
-            if price > ema_trend or rsi_momentum > 55:
+            # Exit short if price returns to middle band or volatility drops
+            if price > basis[i] or atr_val < 0.5 * atr[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1D_1W_Confluence_Breakout"
-timeframe = "6h"
+name = "4h_Bollinger_Breakout_Volume_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
