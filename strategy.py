@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_Volatility_Squeeze_Breakout_1wTrend
-Hypothesis: In both bull and bear markets, volatility contractions (low ATR ratio) followed by breakouts with volume capture explosive moves. 
-Weekly trend filter ensures we only trade in the direction of the higher timeframe trend, reducing false signals during chop.
-Target: 20-30 trades/year on 1d timeframe with strict entry conditions.
+12h_ParabolicSAR_Volume_Trend
+Hypothesis: Parabolic SAR combined with volume spike and 1-day EMA50 trend filter captures 
+breakouts from strong trends while filtering out false signals. Works in both bull and bear 
+markets by following the trend direction. Target: 20-40 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,134 +20,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-week ATR for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Parabolic SAR
+    # Parameters: af_start=0.02, af_increment=0.02, af_max=0.2
+    psar = np.zeros(n)
+    psar_up = np.zeros(n)  # SAR in uptrend (below price)
+    psar_down = np.zeros(n)  # SAR in downtrend (above price)
     
-    # True Range and ATR(20) on weekly
-    tr_1w = np.maximum(
-        high_1w[1:] - low_1w[1:],
-        np.maximum(
-            np.abs(high_1w[1:] - close_1w[:-1]),
-            np.abs(low_1w[1:] - close_1w[:-1])
-        )
-    )
-    tr_1w = np.concatenate([[np.nan], tr_1w])  # align with index
-    atr_20_1w = np.full(len(close_1w), np.nan)
-    for i in range(20, len(tr_1w)):
-        if np.isnan(tr_1w[i-19:i+1]).any():
-            atr_20_1w[i] = np.nan
+    # Initialize
+    psar[0] = low[0]
+    psar_up[0] = low[0]
+    psar_down[0] = high[0]
+    
+    # Trend: 1 for uptrend, -1 for downtrend
+    trend = np.ones(n)
+    # Acceleration factor
+    af = np.zeros(n)
+    af[0] = 0.02
+    # Extreme point
+    ep = np.zeros(n)
+    ep[0] = high[0]
+    
+    for i in range(1, n):
+        if trend[i-1] == 1:  # was uptrend
+            psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
+            # Check for reversal
+            if low[i] < psar[i]:
+                trend[i] = -1
+                psar[i] = ep[i-1]  # SAR becomes previous EP
+                ep[i] = low[i]
+                af[i] = 0.02
+            else:
+                trend[i] = 1
+                if high[i] > ep[i-1]:
+                    ep[i] = high[i]
+                    af[i] = min(af[i-1] + 0.02, 0.2)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+        else:  # was downtrend
+            psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
+            # Check for reversal
+            if high[i] > psar[i]:
+                trend[i] = 1
+                psar[i] = ep[i-1]  # SAR becomes previous EP
+                ep[i] = high[i]
+                af[i] = 0.02
+            else:
+                trend[i] = -1
+                if low[i] < ep[i-1]:
+                    ep[i] = low[i]
+                    af[i] = min(af[i-1] + 0.02, 0.2)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+        
+        # Store SAR values for plotting (not used in logic)
+        psar_up[i] = psar[i] if trend[i] == 1 else np.nan
+        psar_down[i] = psar[i] if trend[i] == -1 else np.nan
+    
+    # 1-day EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    k = 2 / (50 + 1)
+    for i in range(50, len(close_1d)):
+        if i == 50:
+            ema50_1d[i] = np.mean(close_1d[0:51])
         else:
-            atr_20_1w[i] = np.mean(tr_1w[i-19:i+1])
-    atr_20_1w = np.where(np.isnan(atr_20_1w), 0, atr_20_1w)  # avoid propagation
+            ema50_1d[i] = close_1d[i] * k + ema50_1d[i-1] * (1 - k)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Weekly trend: close above/below EMA20 of ATR-adjusted close
-    ema20_1w = np.full(len(close_1w), np.nan)
-    k = 2 / (20 + 1)
-    for i in range(20, len(close_1w)):
-        if i == 20:
-            ema20_1w[i] = np.mean(close_1w[0:21])
-        else:
-            ema20_1w[i] = close_1w[i] * k + ema20_1w[i-1] * (1 - k)
-    ema20_1w = np.where(np.isnan(ema20_1w), 0, ema20_1w)
-    weekly_up = close_1w > ema20_1w
-    weekly_down = close_1w < ema20_1w
-    
-    weekly_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_up.astype(float))
-    weekly_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_down.astype(float))
-    
-    # Daily ATR ratio for volatility squeeze: ATR(7) / ATR(30)
-    tr_daily = np.maximum(
-        high[1:] - low[1:],
-        np.maximum(
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-    )
-    tr_daily = np.concatenate([[np.nan], tr_daily])
-    atr_7 = np.full(n, np.nan)
-    atr_30 = np.full(n, np.nan)
-    for i in range(7, n):
-        if np.isnan(tr_daily[i-6:i+1]).any():
-            atr_7[i] = np.nan
-        else:
-            atr_7[i] = np.mean(tr_daily[i-6:i+1])
-    for i in range(30, n):
-        if np.isnan(tr_daily[i-29:i+1]).any():
-            atr_30[i] = np.nan
-        else:
-            atr_30[i] = np.mean(tr_daily[i-29:i+1])
-    atr_ratio = np.where((atr_30 != 0) & ~np.isnan(atr_30), atr_7 / atr_30, np.nan)
-    
-    # Bollinger Band width for squeeze confirmation: (upper - lower) / middle
-    sma_20 = np.full(n, np.nan)
+    # Volume spike: current volume > 2.0 x 20-period average
+    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        sma_20[i] = np.mean(close[i-20:i+1])
-    std_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        if np.isnan(sma_20[i]):
-            std_20[i] = np.nan
-        else:
-            std_20[i] = np.std(close[i-20:i+1])
-    bb_width = np.where(sma_20 != 0, (4 * std_20) / sma_20, np.nan)  # 2*std each side
-    
-    # Volatility squeeze: low ATR ratio AND low BB width
-    vol_squeeze = (atr_ratio < 0.3) & (bb_width < 0.05)  # thresholds tuned for daily
-    
-    # Donchian breakout: 20-day high/low
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i+1])
-        donch_low[i] = np.min(low[i-20:i+1])
-    
-    # Volume confirmation: current volume > 2 x 20-day average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i+1])
-    vol_confirm = volume > (2 * vol_ma_20)
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure indicators ready
+    start_idx = max(50, 20)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_up_aligned[i]) or np.isnan(weekly_down_aligned[i]) or
-            np.isnan(vol_squeeze[i]) or np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: volatility squeeze breakout above Donchian high with weekly uptrend
-            if (vol_squeeze[i-1] and  # squeeze was present just before breakout
-                close[i] > donch_high[i] and 
-                weekly_up_aligned[i] and
-                vol_confirm[i]):
+            # Long: price above PSAR (uptrend signal) with volume spike and 1-day uptrend
+            if (close[i] > psar[i] and vol_spike[i] and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: volatility squeeze breakout below Donchian low with weekly downtrend
-            elif (vol_squeeze[i-1] and
-                  close[i] < donch_low[i] and
-                  weekly_down_aligned[i] and
-                  vol_confirm[i]):
+            # Short: price below PSAR (downtrend signal) with volume spike and 1-day downtrend
+            elif (close[i] < psar[i] and vol_spike[i] and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below Donchian low or weekly trend turns down
-            if (close[i] < donch_low[i] or not weekly_up_aligned[i]):
+            # Long exit: price crosses below PSAR or 1-day trend turns down
+            if (close[i] < psar[i] or close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above Donchian high or weekly trend turns up
-            if (close[i] > donch_high[i] or not weekly_down_aligned[i]):
+            # Short exit: price crosses above PSAR or 1-day trend turns up
+            if (close[i] > psar[i] or close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -155,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Volatility_Squeeze_Breakout_1wTrend"
-timeframe = "1d"
+name = "12h_ParabolicSAR_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
