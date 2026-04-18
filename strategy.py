@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_H3L3_1wEMA34_VolumeSpike
-Hypothesis: Weekly H3/L3 Camarilla levels on 1d timeframe act as strong support/resistance. 
-Breakouts with volume spike and weekly EMA(34) trend filter capture momentum in both bull and bear markets.
-Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag.
+4h_Pivot_S1R1_Breakout_VolumeSpike_1dTrend_v4
+Hypothesis: Daily pivot S1/R1 levels act as strong support/resistance. Breakouts with volume spike and daily EMA(34) trend filter capture momentum. Added tighter volume requirement (3.0x) and volume confirmation (2-bar confirmation) to reduce trade frequency and improve quality. Target: 10-20 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -12,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,44 +18,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation (once before loop)
+    # Get daily data for pivot calculation and EMA (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels using standard formula
+    # Calculate daily pivot points using standard formula
     high_1d = df_1d['high']
     low_1d = df_1d['low']
     close_1d = df_1d['close']
     
-    range_1d = high_1d - low_1d
-    close_prev = close_1d.shift(1)
-    
-    # Camarilla levels based on previous day
-    H3 = close_prev + (range_1d * 1.1 / 6)
-    L3 = close_prev - (range_1d * 1.1 / 6)
-    H4 = close_prev + (range_1d * 1.1 / 2)
-    L4 = close_prev - (range_1d * 1.1 / 2)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
     # Shift by 1 to use previous day's levels only
-    H3_prev = H3.shift(1).values
-    L3_prev = L3.shift(1).values
-    H4_prev = H4.shift(1).values
-    L4_prev = L4.shift(1).values
+    r1_prev = r1.shift(1).values
+    s1_prev = s1.shift(1).values
     
-    # Align to 1d timeframe (already aligned since we're using daily data)
-    H3_aligned = H3_prev  # Already aligned to daily
-    L3_aligned = L3_prev
-    H4_aligned = H4_prev
-    L4_aligned = L4_prev
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
     
-    # Get weekly data for EMA trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close']
+    # Get daily data for EMA trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate weekly EMA(34)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # ATR for volatility filter (14-period on 1d)
+    # ATR for volatility filter (14-period)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -69,20 +54,24 @@ def generate_signals(prices):
     atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     volatility_filter = atr > atr_ma
     
-    # Volume spike: 2.0x 20-period average on 1d
+    # Volume spike: 3.0x 20-period average on 4h (tighter than before)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (3.0 * vol_ma)
+    
+    # Volume confirmation: current and previous bar both show volume spike
+    volume_confirm = volume_spike & np.roll(volume_spike, 1)
+    volume_confirm[0] = False  # first bar has no previous
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     bars_since_entry = 0  # track holding period
     
-    start_idx = 50  # enough for EMA34 and other indicators
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(H3_aligned[i]) or 
-            np.isnan(L3_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(atr[i]) or
             np.isnan(atr_ma[i])):
@@ -91,53 +80,51 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        H3_val = H3_aligned[i]
-        L3_val = L3_aligned[i]
-        H4_val = H4_aligned[i]
-        L4_val = L4_aligned[i]
-        ema_trend = ema_34_1w_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_filter = volatility_filter[i]
-        vol_spike = volume_spike[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
             bars_since_entry = 0
-            # Long: break above H3 with volume spike, price above weekly EMA, and sufficient volatility
-            if price > H3_val and vol_spike and price > ema_trend and vol_filter:
+            # Long: break above R1 with volume confirmation, price above daily EMA, and sufficient volatility
+            if price > r1_val and vol_conf and price > ema_trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below L3 with volume spike, price below weekly EMA, and sufficient volatility
-            elif price < L3_val and vol_spike and price < ema_trend and vol_filter:
+            # Short: break below S1 with volume confirmation, price below daily EMA, and sufficient volatility
+            elif price < s1_val and vol_conf and price < ema_trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Minimum holding period: 2 days
-            if bars_since_entry < 2:
+            # Minimum holding period: 6 bars (24 hours for 4h)
+            if bars_since_entry < 6:
                 signals[i] = 0.25
                 bars_since_entry += 1
             else:
                 signals[i] = 0.25
-                # Exit: price returns to L3 or breaks below weekly EMA
-                if price <= L3_val or price < ema_trend:
+                # Exit: price returns to S1 or breaks below daily EMA
+                if price <= s1_val or price < ema_trend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
         
         elif position == -1:
-            # Minimum holding period: 2 days
-            if bars_since_entry < 2:
+            # Minimum holding period: 6 bars (24 hours for 4h)
+            if bars_since_entry < 6:
                 signals[i] = -0.25
                 bars_since_entry += 1
             else:
                 signals[i] = -0.25
-                # Exit: price returns to H3 or breaks above weekly EMA
-                if price >= H3_val or price > ema_trend:
+                # Exit: price returns to R1 or breaks above daily EMA
+                if price >= r1_val or price > ema_trend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
     
     return signals
 
-name = "1d_Camarilla_H3L3_1wEMA34_VolumeSpike"
-timeframe = "1d"
+name = "4h_Pivot_S1R1_Breakout_VolumeSpike_1dTrend_v4"
+timeframe = "4h"
 leverage = 1.0
