@@ -1,16 +1,17 @@
+# Solution
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot R1/S1 breakout with weekly EMA34 filter and volume confirmation.
-# Camarilla levels from daily data provide institutional support/resistance.
-# Weekly EMA34 ensures alignment with longer-term trend, avoiding counter-trend trades.
-# Volume confirmation filters breakouts with low participation.
-# Designed for low trade frequency (15-35/year) to minimize fee drag in 12h timeframe.
+# Hypothesis: 4-hour Donchian breakout with 1-day ATR volatility filter and volume confirmation.
+# Donchian channels identify breakouts in the direction of momentum.
+# Daily ATR filter ensures trades occur during sufficient volatility, avoiding low-volatility chop.
+# Volume confirmation ensures breakouts have institutional participation.
+# Designed for low trade frequency (20-40/year) to minimize fee drag in 4-hour timeframe.
 # Works in bull markets (breakouts continue with trend) and bear markets (breakdowns continue with trend).
-name = "12h_Camarilla_R1_S1_Breakout_WeeklyEMA34_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dATR_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation (ONCE before loop)
+    # Get daily data for ATR calculation (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    # Get weekly data for EMA34 filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels from previous day
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Using previous day's OHLC to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate daily ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Calculate Donchian channels (20-period) on 4-hour data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,13 +55,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for volume MA calculation
+    start_idx = 20  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
+        if (np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
+            np.isnan(atr_14_1d_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -70,30 +73,34 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Volatility filter: ATR above its 50-period average (ensures sufficient volatility)
+        atr_ma_50 = pd.Series(atr_14_1d_aligned).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr_14_1d_aligned[i] > atr_ma_50[i]
+        
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above R1 with weekly uptrend and volume
-            if vol_confirm and close[i] > camarilla_r1_aligned[i] and close[i] > ema_34_1w_aligned[i]:
+            # Long: price breaks above Donchian high with volatility and volume
+            if vol_filter and vol_confirm and close[i] > highest_high[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with weekly downtrend and volume
-            elif vol_confirm and close[i] < camarilla_s1_aligned[i] and close[i] < ema_34_1w_aligned[i]:
+            # Short: price breaks below Donchian low with volatility and volume
+            elif vol_filter and vol_confirm and close[i] < lowest_low[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 (reversal signal)
-            if close[i] < camarilla_s1_aligned[i]:
+            # Long exit: price breaks below Donchian low (reversal signal)
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 (reversal signal)
-            if close[i] > camarilla_r1_aligned[i]:
+            # Short exit: price breaks above Donchian high (reversal signal)
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
