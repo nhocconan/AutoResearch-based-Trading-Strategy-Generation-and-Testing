@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeTrend_1dTrend
-Hypothesis: Donchian channel (20-period) breakouts on 4h with volume confirmation and 1-day EMA50 trend filter. 
-This structure-based approach works in both bull and bear markets by capturing breakouts in trending phases. 
-Target: 20-50 trades/year on 4h timeframe with disciplined entry conditions.
+4h_RSI_MeanReversion_BollingerBands_TrendFilter
+Hypothesis: In ranging markets, price reverts to mean from Bollinger Bands extremes with RSI confirmation.
+In trending markets, trade pullbacks to EMA21 in direction of 1d trend. Uses 1d trend filter to adapt
+behavior to market regime, working in both bull and bear markets.
+Target: 20-40 trades/year on 4h timeframe with disciplined entry conditions.
 """
 
 import numpy as np
@@ -20,61 +21,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period high/low)
-    high_20 = np.full(n, np.nan)
-    low_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        high_20[i] = np.max(high[i-20:i])
-        low_20[i] = np.min(low[i-20:i])
+    # Calculate Bollinger Bands (20, 2)
+    close_series = pd.Series(close)
+    ma20 = close_series.rolling(window=20, min_periods=20).mean()
+    std20 = close_series.rolling(window=20, min_periods=20).std()
+    upper = ma20 + 2 * std20
+    lower = ma20 - 2 * std20
+    upper = upper.values
+    lower = lower.values
+    ma20 = ma20.values
     
-    # 1-day EMA50 trend filter
+    # Calculate RSI (14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate 1-day EMA21 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    for i in range(50, len(close_1d)):
-        if i == 50:
-            ema50_1d[i] = np.mean(close_1d[0:51])
+    ema21_1d = np.full(len(close_1d), np.nan)
+    k = 2 / (21 + 1)
+    for i in range(21, len(close_1d)):
+        if i == 21:
+            ema21_1d[i] = np.mean(close_1d[0:22])
         else:
-            ema50_1d[i] = close_1d[i] * 0.0377 + ema50_1d[i-1] * (1 - 0.0377)  # alpha = 2/(50+1)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+            ema21_1d[i] = close_1d[i] * k + ema21_1d[i-1] * (1 - k)
+    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
     
-    # Volume confirmation: current volume > 1.5 x 20-period average
-    vol_ma20 = np.full(n, np.nan)
+    # Bollinger Band width for regime detection
+    bb_width = (upper - lower) / ma20
+    bb_width_ma = np.zeros(n)
     for i in range(20, n):
-        vol_ma20[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma20 * 1.5)
+        bb_width_ma[i] = np.mean(bb_width[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20, 50)  # Donchian high/low, volume MA, EMA50
+    start_idx = max(21, 20)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i]):
+        if (np.isnan(ma20[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(rsi[i]) or np.isnan(ema21_1d_aligned[i]) or np.isnan(bb_width_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Regime detection: narrow BB = ranging, wide BB = trending
+        is_ranging = bb_width[i] < bb_width_ma[i]
+        
         if position == 0:
-            # Long: break above 20-period high with volume confirmation and 1-day uptrend
-            if (close[i] > high_20[i] and vol_confirm[i] and close[i] > ema50_1d_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: break below 20-period low with volume confirmation and 1-day downtrend
-            elif (close[i] < low_20[i] and vol_confirm[i] and close[i] < ema50_1d_aligned[i]):
-                signals[i] = -0.25
-                position = -1
+            if is_ranging:
+                # Mean reversion in ranging market
+                if close[i] < lower[i] and rsi[i] < 30:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] > upper[i] and rsi[i] > 70:
+                    signals[i] = -0.25
+                    position = -1
+            else:
+                # Trend following in trending market
+                if close[i] > ema21_1d_aligned[i] and close[i] < ma20[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < ema21_1d_aligned[i] and close[i] > ma20[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: close below 20-period low or 1-day trend turns down
-            if close[i] < low_20[i] or close[i] < ema50_1d_aligned[i]:
+            # Long exit: price reaches middle band or RSI overbought
+            if close[i] >= ma20[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above 20-period high or 1-day trend turns up
-            if close[i] > high_20[i] or close[i] > ema50_1d_aligned[i]:
+            # Short exit: price reaches middle band or RSI oversold
+            if close[i] <= ma20[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeTrend_1dTrend"
+name = "4h_RSI_MeanReversion_BollingerBands_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
