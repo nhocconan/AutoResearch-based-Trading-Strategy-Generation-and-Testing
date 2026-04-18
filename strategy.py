@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_1w_Kelly_Fractional_Kelly_Strategy
-Hypothesis: Use 1D price action with 1W trend filter and Kelly criterion position sizing.
-Long when price > 1W EMA50 and RSI(14) < 40 (oversold in uptrend).
-Short when price < 1W EMA50 and RSI(14) > 60 (overbought in downtrend).
-Position size scaled by Kelly fraction: f = (bp - q)/b where b=win/loss ratio, p=win probability.
-Uses 10-period win/loss tracking to estimate p and b. Max position 0.30.
-Designed for low trade frequency (<25/year) with asymmetric risk control.
-Works in bull via trend-following oversold bounces, in bear via trend-following overbought fades.
+12h_1D_Choppiness_Regime_Donchian_Breakout
+Hypothesis: On 12h timeframe, trade breakouts of Donchian(20) channels filtered by daily Choppiness Index regime.
+In trending regimes (CHOP < 38.2), trade breakouts in direction of trend (price > SMA50 for long, < SMA50 for short).
+In ranging regimes (CHOP > 61.8), fade extremes at Donchian bands with smaller size.
+Uses volume confirmation to avoid false breakouts. Position sizing 0.25 for trend breakouts, 0.15 for mean reversion.
+Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing trends and range reversals.
+Works in bull markets via trend breaks and in bear/ranging via mean reversion at extremes.
 """
 
 import numpy as np
@@ -22,99 +21,134 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1W data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Donchian channels (20-period)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Calculate EMA50 on 1W
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = (close_1w[i] * 2/51) + (ema50_1w[i-1] * (1 - 2/51))
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
     
-    # Align 1W EMA50 to 1D (wait for weekly close)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # SMA50 for trend filter
+    sma50 = np.full(n, np.nan)
+    for i in range(50, n):
+        sma50[i] = np.mean(close[i-50:i])
     
-    # Calculate RSI(14) on 1D
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Volume average (20-period) for confirmation
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
+    # Get 1D data for Choppiness Index
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    for i in range(14, n):
+    # True Range for 1D
+    tr = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr = np.concatenate([[high_1d[0] - low_1d[0]], tr])
+    
+    # ATR(14) for Choppiness denominator
+    atr = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
         if i == 14:
-            avg_gain[i] = np.mean(gain[0:15])
-            avg_loss[i] = np.mean(loss[0:15])
+            atr[i] = np.mean(tr[0:14])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Sum of ATR over 14 periods
+    atr_sum = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        if i == 14:
+            atr_sum[i] = np.sum(atr[0:14])
+        else:
+            atr_sum[i] = atr_sum[i-1] - atr[i-14] + atr[i]
     
-    # Track trade performance for Kelly sizing
-    win_count = 0
-    loss_count = 0
-    total_return = 0.0
-    last_position = 0
-    entry_price = 0.0
+    # Max(high) - Min(low) over 14 periods
+    max_high = np.full(len(close_1d), np.nan)
+    min_low = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        max_high[i] = np.max(high_1d[i-14:i])
+        min_low[i] = np.min(low_1d[i-14:i])
+    
+    # Choppiness Index: 100 * log10(atr_sum / (max_high - min_low)) / log10(14)
+    chop = np.full(len(close_1d), 50.0)  # default to middle
+    for i in range(14, len(close_1d)):
+        if max_high[i] > min_low[i] and atr_sum[i] > 0:
+            chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
+    
+    # Align Choppiness to 12h timeframe (wait for bar close)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)  # need EMA50 and RSI
+    start_idx = 50  # need SMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(sma50[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Kelly fraction from historical performance
-        if win_count + loss_count >= 10:
-            win_prob = win_count / (win_count + loss_count)
-            if loss_count > 0:
-                avg_win = total_return / win_count if win_count > 0 else 0
-                avg_loss = abs(total_return) / loss_count if loss_count > 0 else 0
-                if avg_loss > 0:
-                    b = avg_win / avg_loss  # win/loss ratio
-                    kelly = (b * win_prob - (1 - win_prob)) / b if b > 0 else 0
-                    kelly = max(0, min(kelly, 0.30))  # cap at 30%, no negative
-                else:
-                    kelly = 0.30
-            else:
-                kelly = 0.30
-        else:
-            kelly = 0.15  # reduced size until sufficient data
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Determine signal based on trend and RSI extremes
-        if ema50_1w_aligned[i] > 0:  # trend filter available
-            if close[i] > ema50_1w_aligned[i] and rsi[i] < 40:
-                # Oversold in uptrend - long
-                target_size = kelly
-            elif close[i] < ema50_1w_aligned[i] and rsi[i] > 60:
-                # Overbought in downtrend - short
-                target_size = -kelly
-            else:
-                target_size = 0.0
-        else:
-            target_size = 0.0
+        if position == 0:
+            # Determine regime
+            if chop_aligned[i] < 38.2:  # Trending regime
+                # Long breakout: price > Donchian high + volume + above SMA50
+                if close[i] > highest_high[i] and vol_confirm and close[i] > sma50[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short breakout: price < Donchian low + volume + below SMA50
+                elif close[i] < lowest_low[i] and vol_confirm and close[i] < sma50[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif chop_aligned[i] > 61.8:  # Ranging regime
+                # Fade at Donchian bands with smaller size
+                if close[i] > highest_high[i] and vol_confirm:
+                    signals[i] = -0.15  # Short at upper band
+                    position = -1
+                elif close[i] < lowest_low[i] and vol_confirm:
+                    signals[i] = 0.15   # Long at lower band
+                    position = 1
         
-        # Change signal only if different from previous (reduce churn)
-        if i == start_idx:
-            signals[i] = target_size
-        else:
-            # Only change if significant difference (>0.05) to reduce churn
-            if abs(target_size - signals[i-1]) > 0.05:
-                signals[i] = target_size
+        elif position == 1:
+            # Long exit: price < Donchian low OR reverse signal in ranging
+            if close[i] < lowest_low[i]:
+                signals[i] = 0.0
+                position = 0
+            elif chop_aligned[i] > 61.8 and close[i] < sma50[i]:  # Exit long in range if below SMA50
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = signals[i-1]
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price > Donchian high OR reverse signal in ranging
+            if close[i] > highest_high[i]:
+                signals[i] = 0.0
+                position = 0
+            elif chop_aligned[i] > 61.8 and close[i] > sma50[i]:  # Exit short in range if above SMA50
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.15
     
     return signals
 
-name = "1d_1w_Kelly_Fractional_Kelly_Strategy"
-timeframe = "1d"
+name = "12h_1D_Choppiness_Regime_Donchian_Breakout"
+timeframe = "12h"
 leverage = 1.0
