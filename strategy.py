@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 """
-12h 48-bar Donchian Breakout with Volume Spike and ADX Trend Filter
-Strategy: Enter long when price breaks above 48-bar (24-day) Donchian high with volume spike and ADX > 25,
-          short when price breaks below 48-bar Donchian low with volume spike and ADX > 25.
-          Exit on opposite Donchian break or ADX drop below 20.
-          Designed for 12h timeframe to capture multi-day trends with volume confirmation.
-          Uses daily ADX for trend strength to avoid choppy markets.
+6h Weekly Pivot Direction + Daily Volume Spike
+Hypothesis: Weekly pivot points act as strong support/resistance. Price breaking
+above/below weekly pivot levels with daily volume confirmation indicates
+institutional participation. Weekly trend filter (price vs weekly EMA20) avoids
+counter-trend trades. Designed for low frequency with high conviction entries.
+Works in bull (breakouts above pivot) and bear (breakdowns below pivot) markets.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
+
+def calculate_pivot_points(high, low, close):
+    """Calculate standard pivot points: P = (H+L+C)/3, R1=2P-L, S1=2P-H, etc."""
+    p = (high + low + close) / 3.0
+    r1 = 2 * p - low
+    s1 = 2 * p - high
+    r2 = p + (high - low)
+    s2 = p - (high - low)
+    r3 = high + 2 * (p - low)
+    s3 = low - 2 * (high - p)
+    return p, r1, r2, r3, s1, s2, s3
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,87 +33,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX trend filter (once before loop)
+    # Get weekly data for pivot points and trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly pivot points
+    wp, wr1, wr2, wr3, ws1, ws2, ws3 = calculate_pivot_points(
+        df_1w['high'].values,
+        df_1w['low'].values,
+        df_1w['close'].values
+    )
+    
+    # Calculate weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Get daily data for volume spike
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily ADX (14-period)
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    # Align weekly levels to 6h timeframe
+    wp_aligned = align_ltf_to_htf(prices, df_1w, wp)
+    wr1_aligned = align_ltf_to_htf(prices, df_1w, wr1)
+    wr2_aligned = align_ltf_to_htf(prices, df_1w, wr2)
+    wr3_aligned = align_ltf_to_htf(prices, df_1w, wr3)
+    ws1_aligned = align_ltf_to_htf(prices, df_1w, ws1)
+    ws2_aligned = align_ltf_to_htf(prices, df_1w, ws2)
+    ws3_aligned = align_ltf_to_htf(prices, df_1w, ws3)
+    ema_20_1w_aligned = align_ltf_to_htf(prices, df_1w, ema_20_1w)
     
-    # Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align daily ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 48-bar Donchian channels (24 days at 12h = 48 periods)
-    lookback = 48
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Volume spike detection (2x 20-period average)
+    # Daily volume spike (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(100, lookback)  # need enough history
+    start_idx = 100  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(wp_aligned[i]) or np.isnan(wr1_aligned[i]) or np.isnan(ws1_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        donchian_high = highest_high[i]
-        donchian_low = lowest_low[i]
-        adx_val = adx_aligned[i]
+        weekly_pivot = wp_aligned[i]
+        weekly_r1 = wr1_aligned[i]
+        weekly_s1 = ws1_aligned[i]
+        weekly_ema20 = ema_20_1w_aligned[i]
         
         if position == 0:
-            # Long: break above Donchian high with volume spike and strong trend (ADX > 25)
-            if (price > donchian_high and volume_spike[i] and adx_val > 25):
+            # Long: break above weekly R1 with volume spike and above weekly EMA20
+            if (price > weekly_r1 and volume_spike[i] and price > weekly_ema20):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume spike and strong trend (ADX > 25)
-            elif (price < donchian_low and volume_spike[i] and adx_val > 25):
+            # Short: break below weekly S1 with volume spike and below weekly EMA20
+            elif (price < weekly_s1 and volume_spike[i] and price < weekly_ema20):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: price breaks below Donchian low OR trend weakens (ADX < 20)
-            if price < donchian_low or adx_val < 20:
+            # Exit: price breaks below weekly pivot or below weekly EMA20
+            if price < weekly_pivot or price < weekly_ema20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: price breaks above Donchian high OR trend weakens (ADX < 20)
-            if price > donchian_high or adx_val < 20:
+            # Exit: price breaks above weekly pivot or above weekly EMA20
+            if price > weekly_pivot or price > weekly_ema20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Donchian48_VolumeSpike_ADXFilter"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Direction_Volume_Spike"
+timeframe = "6h"
 leverage = 1.0
