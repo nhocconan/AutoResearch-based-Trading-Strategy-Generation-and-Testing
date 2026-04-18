@@ -1,143 +1,122 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1h_4h_1d_MultiTF_Trend_Follow_With_Pullback
-Hypothesis: Combine 4h EMA trend filter and 1d ADX trend strength with 1h pullback entries.
-In bull markets (4h EMA20 rising + 1d ADX>25), buy pullbacks to 1h EMA20.
-In bear markets (4h EMA20 falling + 1d ADX>25), sell rallies to 1h EMA20.
-Uses multi-timeframe alignment to avoid whipsaws and capture trend moves with controlled frequency.
-Designed for 15-30 trades/year to minimize fee drag while maintaining edge in both bull and bear regimes.
+6h_WeeklyPivotDirection_DonchianBreakout_VolumeFilter
+Hypothesis: Combine weekly pivot trend direction (from 1w) with Donchian(20) breakout and volume confirmation on 6h.
+In bull markets (price > weekly pivot), go long on upper band breakouts with volume.
+In bear markets (price < weekly pivot), go short on lower band breakouts with volume.
+This captures breakout moves aligned with higher timeframe trend, reducing whipsaw in sideways markets.
+Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    def smooth(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) >= period:
-            result[period-1] = np.nansum(x[:period])
-            for i in range(period, len(x)):
-                result[i] = result[i-1] - (result[i-1] / period) + x[i]
-        return result
-    
-    tr_smooth = smooth(tr, period)
-    dm_plus_smooth = smooth(dm_plus, period)
-    dm_minus_smooth = smooth(dm_minus, period)
-    
-    # Directional Indicators
-    plus_di = 100 * dm_plus_smooth / tr_smooth
-    minus_di = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = smooth(dx, period)
-    
-    return adx
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot point: P = (H + L + C) / 3"""
+    return (high + low + close) / 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_prev = np.roll(ema_20_4h, 1)
-    ema_20_4h_prev[0] = np.nan
-    ema_20_4h_slope = ema_20_4h - ema_20_4h_prev  # Rising if >0, falling if <0
-    ema_20_4h_slope_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h_slope)
+    # Get 1w data for weekly pivot trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
     
-    # Get 1d data for ADX trend strength filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, period=14)
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d, additional_delay_bars=0)
+    # Weekly pivot: P = (H + L + C) / 3
+    weekly_pivot = calculate_weekly_pivot(
+        df_1w['high'].values,
+        df_1w['low'].values,
+        df_1w['close'].values
+    )
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Get 1h EMA20 for pullback entries
-    ema_20_1h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get 6d data for Donchian channels (20-period high/low)
+    df_6d = get_htf_data(prices, '6d')  # ~20 periods of 6h = ~5 days, use 6d for stability
+    if len(df_6d) == 0:
+        # Fallback to 1d if 6d not available
+        df_6d = get_htf_data(prices, '1d')
+        if len(df_6d) == 0:
+            return np.zeros(n)
+    
+    # Donchian(20) on 6d/1d
+    donchian_high = pd.Series(df_6d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_6d['low'].values).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_6d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_6d, donchian_low)
+    
+    # Volume confirmation: >1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient warmup for all indicators
-    start_idx = max(50, 30)  # ADX and EMA warmups
+    # Start after warmup periods
+    start_idx = max(20, 20)  # Donchian and volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(ema_20_4h_slope_aligned[i]) or 
-            np.isnan(adx_14_1d_aligned[i]) or
-            np.isnan(ema_20_1h[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema4h_slope = ema_20_4h_slope_aligned[i]
-        adx1d = adx_14_1d_aligned[i]
-        ema1h = ema_20_1h[i]
+        weekly_pivot_val = weekly_pivot_aligned[i]
+        upper_band = donchian_high_aligned[i]
+        lower_band = donchian_low_aligned[i]
+        vol_confirm = volume_confirm[i]
         
-        # Trend regime: need strong trend (ADX > 25) on daily
-        is_strong_trend = adx1d > 25
+        # Determine market regime from weekly pivot
+        is_bullish = price > weekly_pivot_val
+        is_bearish = price < weekly_pivot_val
         
         if position == 0:
-            # Enter long: bullish trend (4h EMA20 rising) + pullback to 1h EMA20
-            if is_strong_trend and ema4h_slope > 0 and price <= ema1h * 1.005:  # Within 0.5% of EMA
-                signals[i] = 0.20
+            # Long: bullish regime + price breaks above upper band + volume confirmation
+            if is_bullish and price > upper_band and vol_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: bearish trend (4h EMA20 falling) + rally to 1h EMA20
-            elif is_strong_trend and ema4h_slope < 0 and price >= ema1h * 0.995:  # Within 0.5% of EMA
-                signals[i] = -0.20
+            # Short: bearish regime + price breaks below lower band + volume confirmation
+            elif is_bearish and price < lower_band and vol_confirm:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            signals[i] = 0.20
-            # Exit: trend weakness or opposite signal
-            if not (is_strong_trend and ema4h_slope > 0):
+            # Maintain long position
+            signals[i] = 0.25
+            # Exit: price breaks below lower band (reversal) OR bearish regime shift
+            if price < lower_band:
                 signals[i] = 0.0
                 position = 0
-            # Optional: exit on strong adverse move
-            elif price < ema1h * 0.98:  # 2% below EMA
+            elif not is_bullish:  # regime changed to bearish
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            signals[i] = -0.20
-            # Exit: trend weakness or opposite signal
-            if not (is_strong_trend and ema4h_slope < 0):
+            # Maintain short position
+            signals[i] = -0.25
+            # Exit: price breaks above upper band (reversal) OR bullish regime shift
+            if price > upper_band:
                 signals[i] = 0.0
                 position = 0
-            # Optional: exit on strong adverse move
-            elif price > ema1h * 1.02:  # 2% above EMA
+            elif not is_bearish:  # regime changed to bullish
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_4h_1d_MultiTF_Trend_Follow_With_Pullback"
-timeframe = "1h"
+name = "6h_WeeklyPivotDirection_DonchianBreakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
