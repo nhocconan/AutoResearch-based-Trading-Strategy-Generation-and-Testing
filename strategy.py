@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_ATR_Stop_v1
-Hypothesis: Donchian channel breakouts with volume confirmation and ATR-based stops capture medium-term trends in BTC/ETH.
-Works in bull markets via breakout follow-through and in bear markets via short breakdowns.
-Volume filter reduces false breakouts. ATR stop manages risk during reversals.
-Target: 25-40 trades/year by requiring high/low breaks + volume surge.
+1d_RSI_Reversal_Volume_TrendFilter_V1
+Hypothesis: Daily RSI extremes (oversold/overbought) provide high-probability reversal points when confirmed by volume spikes and aligned with weekly trend. 
+Long when RSI(14) < 30, volume > 2x average, and price above weekly EMA(50). 
+Short when RSI(14) > 70, volume > 2x average, and price below weekly EMA(50).
+Exit when RSI returns to neutral zone (40-60) or trend reverses.
+Designed for low frequency (10-25 trades/year) with high win rate in both bull and bear markets by fading extremes only when volume confirms institutional interest.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,100 +22,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) - calculated on close prices for breakouts
-    lookback = 20
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    
-    for i in range(lookback, len(high)):
-        highest_high[i] = np.max(high[i-lookback:i])
-        lowest_low[i] = np.min(low[i-lookback:i])
-    
-    # Daily ATR for volatility filter and stop calculation
+    # Get daily data for RSI calculation
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    def calculate_atr(high, low, close, period=14):
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
+    # Calculate RSI(14) on daily data
+    def calculate_rsi(close_prices, period=14):
+        delta = np.diff(close_prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
         
-        atr = np.full_like(tr, np.nan)
-        if len(tr) >= period:
-            atr[period] = np.nanmean(tr[1:period+1])
-            for i in range(period+1, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+        avg_gain = np.full_like(close_prices, np.nan)
+        avg_loss = np.full_like(close_prices, np.nan)
+        
+        if len(close_prices) >= period:
+            # Initial average
+            avg_gain[period] = np.mean(gain[:period])
+            avg_loss[period] = np.mean(loss[:period])
+            
+            # Wilder smoothing
+            for i in range(period+1, len(close_prices)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    rsi_1d = calculate_rsi(close_1d, 14)
     
-    # Daily volume average for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full_like(vol_1d, np.nan)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA(50) for trend filter
+    if len(close_1w) >= 50:
+        ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    else:
+        ema_1w = np.full_like(close_1w, np.nan)
+    
+    # Align all data to daily timeframe (since we're using 1d timeframe)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation: volume > 2x 20-day average
+    vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
-    if len(vol_1d) >= vol_period:
-        for i in range(vol_period, len(vol_1d)):
-            vol_ma_1d[i] = np.mean(vol_1d[i-vol_period:i])
     
-    # Align all daily data to 4h timeframe
-    highest_high_4h = align_htf_to_ltf(prices, df_1d, highest_high)
-    lowest_low_4h = align_htf_to_ltf(prices, df_1d, lowest_low)
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    vol_ma_4h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # 4h volume confirmation: volume > 2x 20-period average
-    vol_ma_4h_local = np.full_like(volume, np.nan)
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
-            vol_ma_4h_local[i] = np.mean(volume[i-vol_period:i])
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, vol_period, 14) + 1
+    start_idx = max(14, 50, 20) + 1  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high_4h[i]) or np.isnan(lowest_low_4h[i]) or 
-            np.isnan(atr_4h[i]) or np.isnan(vol_ma_4h_local[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2x 20-period average
-        vol_confirm = volume[i] > 2.0 * vol_ma_4h_local[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
+        
+        # Trend filter: price relative to weekly EMA
+        above_weekly_ema = close[i] > ema_1w_aligned[i]
+        below_weekly_ema = close[i] < ema_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above 20-period high with volume confirmation
-            if close[i] > highest_high_4h[i] and vol_confirm:
-                signals[i] = 0.30
+            # Long: RSI oversold + volume spike + bullish trend bias
+            if rsi_aligned[i] < 30 and vol_confirm and above_weekly_ema:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low with volume confirmation
-            elif close[i] < lowest_low_4h[i] and vol_confirm:
-                signals[i] = -0.30
+            # Short: RSI overbought + volume spike + bearish trend bias
+            elif rsi_aligned[i] > 70 and vol_confirm and below_weekly_ema:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below 20-period low OR ATR-based stop hit
-            if close[i] < lowest_low_4h[i] or close[i] < (highest_high_4h[i] - 2.0 * atr_4h[i]):
-                signals[i] = -0.30  # reverse to short
-                position = -1
+            # Long exit: RSI returns to neutral or trend turns bearish
+            if rsi_aligned[i] > 40 or close[i] < ema_1w_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above 20-period high OR ATR-based stop hit
-            if close[i] > highest_high_4h[i] or close[i] > (lowest_low_4h[i] + 2.0 * atr_4h[i]):
-                signals[i] = 0.30  # reverse to long
-                position = 1
+            # Short exit: RSI returns to neutral or trend turns bullish
+            if rsi_aligned[i] < 60 or close[i] > ema_1w_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ATR_Stop_v1"
-timeframe = "4h"
+name = "1d_RSI_Reversal_Volume_TrendFilter_V1"
+timeframe = "1d"
 leverage = 1.0
