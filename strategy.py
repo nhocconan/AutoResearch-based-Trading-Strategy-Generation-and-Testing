@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,110 +13,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA and RSI
+    # Get 1w data for weekly pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly pivot points (standard)
+    pivot_1w = np.full_like(close_1w, np.nan)
+    r1_1w = np.full_like(close_1w, np.nan)
+    s1_1w = np.full_like(close_1w, np.nan)
+    r2_1w = np.full_like(close_1w, np.nan)
+    s2_1w = np.full_like(close_1w, np.nan)
+    
+    for i in range(len(close_1w)):
+        if i > 0 and not (np.isnan(high_1w[i-1]) or np.isnan(low_1w[i-1]) or np.isnan(close_1w[i-1])):
+            pivot_1w[i] = (high_1w[i-1] + low_1w[i-1] + close_1w[i-1]) / 3.0
+            r1_1w[i] = 2 * pivot_1w[i] - low_1w[i-1]
+            s1_1w[i] = 2 * pivot_1w[i] - high_1w[i-1]
+            r2_1w[i] = pivot_1w[i] + (high_1w[i-1] - low_1w[i-1])
+            s2_1w[i] = pivot_1w[i] - (high_1w[i-1] - low_1w[i-1])
+    
+    # Calculate 20-period EMA on 1w for trend filter
+    if len(close_1w) >= 20:
+        ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    else:
+        ema_20_1w = np.full_like(close_1w, np.nan)
+    
+    # Calculate 14-period ATR on 1w for volatility filter
+    def calculate_atr(high, low, close, period=14):
+        if len(high) < period + 1:
+            return np.full_like(high, np.nan)
+        
+        tr = np.zeros(len(high))
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = np.full_like(high, np.nan)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        return atr
+    
+    atr_1w = calculate_atr(high_1w, low_1w, close_1w, 14)
+    
+    # Get 1d data for volume average
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 50-period EMA on 1d
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 14-period RSI on 1d
-    def calculate_rsi(close, period=14):
-        if len(close) < period + 1:
-            return np.full_like(close, np.nan)
-        
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(close, np.nan)
-        avg_loss = np.full_like(close, np.nan)
-        
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        
-        for i in range(period + 1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.inf)
-        rsi = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
-        return rsi
-    
-    rsi_1d = calculate_rsi(close_1d, 14)
-    
-    # Get 4h data for volume
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate 20-period volume average on 4h
-    vol_ma_4h = np.full_like(volume_4h, np.nan)
+    # Calculate 20-period volume average on 1d
+    vol_ma_1d = np.full_like(volume_1d, np.nan)
     vol_period = 20
     
-    if len(volume_4h) >= vol_period:
-        for i in range(vol_period, len(volume_4h)):
-            vol_ma_4h[i] = np.mean(volume_4h[i-vol_period:i])
+    if len(volume_1d) >= vol_period:
+        for i in range(vol_period, len(volume_1d)):
+            vol_ma_1d[i] = np.mean(volume_1d[i-vol_period:i])
     
-    # Align all data to 1h timeframe
-    ema_1d_1h = align_htf_to_ltf(prices, df_1d, ema_1d)
-    rsi_1d_1h = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    vol_ma_4h_1h = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align all data to 6h timeframe (primary)
+    pivot_1w_6h = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_6h = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_6h = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_6h = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_6h = align_htf_to_ltf(prices, df_1w, s2_1w)
+    ema_20_1w_6h = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    atr_1w_6h = align_htf_to_ltf(prices, df_1w, atr_1w)
+    vol_ma_1d_6h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14, 20) + 1
+    start_idx = max(1, 20, 14, 20) + 1
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available or outside session
-        if (np.isnan(ema_1d_1h[i]) or np.isnan(rsi_1d_1h[i]) or 
-            np.isnan(vol_ma_4h_1h[i]) or not session_filter[i]):
+        # Skip if any required data is not available
+        if (np.isnan(pivot_1w_6h[i]) or np.isnan(r1_1w_6h[i]) or np.isnan(s1_1w_6h[i]) or 
+            np.isnan(r2_1w_6h[i]) or np.isnan(s2_1w_6h[i]) or np.isnan(ema_20_1w_6h[i]) or 
+            np.isnan(atr_1w_6h[i]) or np.isnan(vol_ma_1d_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average (4h)
-        vol_confirm = volume[i] > 1.5 * vol_ma_4h_1h[i]
+        # Volume confirmation: current volume > 1.5x 20-period average (1d)
+        vol_confirm = volume[i] > 1.5 * vol_ma_1d_6h[i]
         
-        # Trend filter: price above/below 50-day EMA
-        uptrend = close[i] > ema_1d_1h[i]
-        downtrend = close[i] < ema_1d_1h[i]
+        # Trend filter: price above/below EMA
+        uptrend = close[i] > ema_20_1w_6h[i]
+        downtrend = close[i] < ema_20_1w_6h[i]
         
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_not_overbought = rsi_1d_1h[i] < 70
-        rsi_not_oversold = rsi_1d_1h[i] > 30
+        # Volatility filter: avoid extremely low volatility
+        vol_filter = atr_1w_6h[i] > 0.005 * close[i]  # ATR > 0.5% of price
         
         if position == 0:
-            # Long: price above EMA, RSI not overbought, volume confirmation
-            if uptrend and rsi_not_overbought and vol_confirm:
-                signals[i] = 0.20
+            # Long: price breaks above weekly R2 with uptrend and volume
+            if close[i] > r2_1w_6h[i] and uptrend and vol_confirm and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below EMA, RSI not oversold, volume confirmation
-            elif downtrend and rsi_not_oversold and vol_confirm:
-                signals[i] = -0.20
+            # Short: price breaks below weekly S2 with downtrend and volume
+            elif close[i] < s2_1w_6h[i] and downtrend and vol_confirm and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below EMA OR RSI overbought
-            if not uptrend or rsi_1d_1h[i] >= 70:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price crosses below weekly S1 OR trend reverses
+            if close[i] < s1_1w_6h[i] or not uptrend:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA OR RSI oversold
-            if not downtrend or rsi_1d_1h[i] <= 30:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price crosses above weekly R1 OR trend reverses
+            if close[i] > r1_1w_6h[i] or not downtrend:
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA50_RSI14_Volume_Session"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R2S2_Breakout_EMA20_Volume"
+timeframe = "6h"
 leverage = 1.0
