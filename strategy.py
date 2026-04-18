@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with daily ATR filter and volume confirmation.
-# Donchian channels provide clear breakout levels based on price extremes.
-# Daily ATR filter ensures we only trade when volatility is sufficient to avoid chop.
+# Hypothesis: 1d weekly pivot resistance/support breakout with volume confirmation and weekly ATR filter.
+# Uses weekly pivot levels (R1, S1) from prior week as breakout levels.
+# Weekly ATR filter ensures sufficient volatility to avoid choppy markets.
 # Volume confirmation adds conviction to breakouts.
-# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
-# Works in bull markets (breakouts above upper band) and bear markets (breakouts below lower band).
-# Uses stricter conditions to reduce trades and avoid overtrading.
-name = "4h_Donchian20_DailyATR_Volume_Filter_v2"
-timeframe = "4h"
+# Designed for very low trade frequency (<10/year) to minimize fee drag in 1d timeframe.
+# Works in bull markets (breakouts above R1) and bear markets (breakouts below S1).
+name = "1d_WeeklyPivot_R1S1_Breakout_Volume_ATRFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,89 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR filter (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot and ATR calculation (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    upper_band = high_20
-    lower_band = low_20
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Calculate daily ATR (14-period)
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
+    pivot = (high_w + low_w + close_w) / 3
+    r1 = 2 * pivot - low_w
+    s1 = 2 * pivot - high_w
     
-    # True Range calculation
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate weekly ATR (14-period) using Wilder's smoothing
+    tr1 = high_w[1:] - low_w[1:]
+    tr2 = np.abs(high_w[1:] - close_w[:-1])
+    tr3 = np.abs(low_w[1:] - close_w[:-1])
+    tr_w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR using Wilder's smoothing (EMA with alpha=1/14)
     atr_period = 14
-    atr = np.full_like(tr, np.nan)
-    if len(tr) >= atr_period:
-        atr[atr_period-1] = np.nanmean(tr[:atr_period])
-        for i in range(atr_period, len(tr)):
-            if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
-                atr[i] = atr[i-1] * (1 - 1/atr_period) + tr[i] * (1/atr_period)
+    atr_w = np.full_like(tr_w, np.nan)
+    if len(tr_w) >= atr_period:
+        atr_w[atr_period-1] = np.nanmean(tr_w[:atr_period])
+        for i in range(atr_period, len(tr_w)):
+            if not np.isnan(atr_w[i-1]) and not np.isnan(tr_w[i]):
+                atr_w[i] = atr_w[i-1] * (1 - 1/atr_period) + tr_w[i] * (1/atr_period)
             else:
-                atr[i] = np.nan
+                atr_w[i] = np.nan
     
-    # ATR multiplier for volatility filter (increased threshold to reduce trades)
-    atr_mult = 2.0  # Increased from 1.5 to reduce trade frequency
-    atr_threshold = atr * atr_mult
+    # ATR multiplier for volatility filter
+    atr_mult = 1.5
+    atr_threshold_w = atr_w * atr_mult
     
-    # Align daily ATR threshold to 4h timeframe
-    atr_threshold_aligned = align_htf_to_ltf(prices, df_1d, atr_threshold)
+    # Align weekly pivot levels and ATR threshold to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    atr_threshold_aligned = align_htf_to_ltf(prices, df_1w, atr_threshold_w)
     
-    # Calculate 20-period average volume for confirmation
+    # Calculate 20-period average volume for confirmation (using daily data)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hour_index = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 30  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(atr_threshold_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        hour = hour_index[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: current volume above average (increased threshold)
-        vol_confirm = volume[i] > vol_ma_20[i] * 1.5  # Increased from 1.0 to 1.5
+        # Volume confirmation: current volume above average
+        vol_confirm = volume[i] > vol_ma_20[i]
         
         # Volatility filter: current ATR threshold must be positive (sufficient volatility)
         vol_filter = not np.isnan(atr_threshold_aligned[i]) and atr_threshold_aligned[i] > 0
         
         if position == 0:
-            # Long: price breaks above upper band AND volume confirmation AND volatility filter
-            long_breakout = close[i] > upper_band[i]
+            # Long: price breaks above R1 AND volume confirmation AND volatility filter
+            long_breakout = close[i] > r1_aligned[i]
             if vol_confirm and vol_filter and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band AND volume confirmation AND volatility filter
-            elif vol_confirm and vol_filter and close[i] < lower_band[i]:
+            # Short: price breaks below S1 AND volume confirmation AND volatility filter
+            elif vol_confirm and vol_filter and close[i] < s1_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below lower band OR ATR drops below threshold (volatility collapse)
-            exit_condition = close[i] < lower_band[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Long exit: price falls below S1 OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] < s1_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -114,8 +105,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above upper band OR ATR drops below threshold (volatility collapse)
-            exit_condition = close[i] > upper_band[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Short exit: price rises above R1 OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] > r1_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
