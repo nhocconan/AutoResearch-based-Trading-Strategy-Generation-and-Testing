@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_Weekly_Pullback_Long_Short
-Hypothesis: Trade pullbacks in weekly trend using 1d price action. In bull markets (price above weekly EMA20), go long on 1d pullbacks to EMA20 with volume confirmation. In bear markets (price below weekly EMA20), go short on 1d bounces to EMA20 with volume confirmation. Uses weekly EMA for trend filter and 1d EMA20 for pullback target, reducing whipsaws. Targets 10-20 trades/year by requiring trend alignment and pullback to EMA20 with volume > 1.5x 20-day average. Works in bull markets by buying dips in uptrend, and in bear markets by selling rallies in downtrend.
+6h_1d_MACD_Signal_Crossover_Volume
+Hypothesis: Use MACD signal line crossover on 1d timeframe for primary trend direction, combined with 6h price action confirmation and volume filter. MACD provides clear trend signals with reduced whipsaws, while volume confirmation ensures institutional participation. Works in bull markets by taking longs on MACD bullish crossovers above zero, and in bear markets by taking shorts on bearish crossovers below zero. Targets 15-25 trades/year by requiring alignment of MACD crossover, price confirmation in direction of trend, and volume > 1.3x 20-period average.
 """
 
 import numpy as np
@@ -18,63 +18,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for MACD (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA20
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False).values
+    # Calculate MACD on 1d close
+    # EMA12
+    ema12 = np.full_like(close_1d, np.nan)
+    k = 2 / (12 + 1)
+    ema12[11] = np.mean(close_1d[:12])
+    for i in range(12, len(close_1d)):
+        ema12[i] = close_1d[i] * k + ema12[i-1] * (1 - k)
     
-    # Align weekly EMA to daily
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # EMA26
+    ema26 = np.full_like(close_1d, np.nan)
+    k = 2 / (26 + 1)
+    ema26[25] = np.mean(close_1d[:26])
+    for i in range(26, len(close_1d)):
+        ema26[i] = close_1d[i] * k + ema26[i-1] * (1 - k)
     
-    # Calculate daily EMA20 for pullback target
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False).values
+    # MACD line
+    macd_line = ema12 - ema26
     
-    # Volume confirmation: current volume > 1.5 x 20-day average
+    # Signal line (EMA9 of MACD)
+    signal_line = np.full_like(macd_line, np.nan)
+    k = 2 / (9 + 1)
+    # Find first valid MACD value
+    first_valid = np.where(~np.isnan(macd_line))[0]
+    if len(first_valid) > 0:
+        start_idx = first_valid[0]
+        signal_line[start_idx] = macd_line[start_idx]
+        for i in range(start_idx + 1, len(macd_line)):
+            signal_line[i] = macd_line[i] * k + signal_line[i-1] * (1 - k)
+    
+    # MACD histogram (for crossover detection)
+    macd_hist = macd_line - signal_line
+    
+    # Align MACD components to 6h timeframe
+    macd_line_aligned = align_htf_to_ltf(prices, df_1d, macd_line)
+    signal_line_aligned = align_htf_to_ltf(prices, df_1d, signal_line)
+    macd_hist_aligned = align_htf_to_ltf(prices, df_1d, macd_hist)
+    
+    # Volume confirmation: current volume > 1.3 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need EMA20 and volume MA
+    start_idx = max(26, 20)  # need MACD warmup and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(macd_line_aligned[i]) or np.isnan(signal_line_aligned[i]) or 
+            np.isnan(macd_hist_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: bullish trend (price > weekly EMA20) and pullback to daily EMA20 with volume
-            if (close[i] > ema_1w_aligned[i] and 
-                low[i] <= ema_20[i] <= high[i] and  # price touches EMA20
-                vol_confirm[i]):
+            # Long entry: MACD bullish crossover (hist crosses above zero) with volume confirmation
+            if (macd_hist_aligned[i] > 0 and macd_hist_aligned[i-1] <= 0 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish trend (price < weekly EMA20) and bounce to daily EMA20 with volume
-            elif (close[i] < ema_1w_aligned[i] and 
-                  low[i] <= ema_20[i] <= high[i] and  # price touches EMA20
-                  vol_confirm[i]):
+            # Short entry: MACD bearish crossover (hist crosses below zero) with volume confirmation
+            elif (macd_hist_aligned[i] < 0 and macd_hist_aligned[i-1] >= 0 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price closes below EMA20 or trend turns bearish
-            if close[i] < ema_20[i] or close[i] < ema_1w_aligned[i]:
+            # Long exit: MACD bearish crossover or loss of momentum
+            if macd_hist_aligned[i] < 0 and macd_hist_aligned[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above EMA20 or trend turns bullish
-            if close[i] > ema_20[i] or close[i] > ema_1w_aligned[i]:
+            # Short exit: MACD bullish crossover or loss of momentum
+            if macd_hist_aligned[i] > 0 and macd_hist_aligned[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Weekly_Pullback_Long_Short"
-timeframe = "1d"
+name = "6h_1d_MACD_Signal_Crossover_Volume"
+timeframe = "6h"
 leverage = 1.0
