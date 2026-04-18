@@ -1,57 +1,16 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume Spike + ADX Trend Filter
-Hypothesis: Donchian breakouts capture strong momentum moves. Volume spikes confirm institutional participation, and ADX > 25 ensures trending markets. This combination works in both bull and bear markets by catching breakout moves. Using 12h timeframe with 1d trend filter reduces trade frequency to avoid fee drag while capturing significant moves.
+1d 200-day EMA Trend + RSI Mean Reversion + Volume Spike
+Hypothesis: In trending markets (price > 200EMA), pullbacks to RSI oversold/overbought levels with volume confirmation offer high-probability reversals. Works in both bull (buy dips) and bear (sell rallies) by following the 200EMA trend. Low frequency due to strict 200EMA filter and RSI extremes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values using Wilder smoothing
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilders_smoothing(tr, period)
-    plus_di = 100 * wilders_smoothing(plus_dm, period) / np.where(atr != 0, atr, 1)
-    minus_di = 100 * wilders_smoothing(minus_dm, period) / np.where(atr != 0, atr, 1)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smoothing(dx, period)
-    return adx
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -59,49 +18,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for higher timeframe context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter (more robust than daily)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels for trend context
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 200-period EMA on weekly close
+    close_1w = df_1w['close'].values
+    ema_200 = np.zeros_like(close_1w)
+    ema_200[0] = close_1w[0]
+    alpha = 2.0 / (200 + 1)
+    for i in range(1, len(close_1w)):
+        ema_200[i] = ema_200[i-1] + alpha * (close_1w[i] - ema_200[i-1])
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
-    # Upper and lower bands for 20-period Donchian on 1d
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                result[i] = np.nan
-            else:
-                result[i] = np.max(arr[i-window+1:i+1])
-        return result
+    # Calculate RSI(14) on daily close
+    def calculate_rsi(close_prices, period=14):
+        delta = np.diff(close_prices, prepend=close_prices[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(gain)
+        avg_loss = np.zeros_like(loss)
+        
+        # First average
+        avg_gain[period-1] = np.mean(gain[:period])
+        avg_loss[period-1] = np.mean(loss[:period])
+        
+        # Wilder smoothing
+        for i in range(period, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                result[i] = np.nan
-            else:
-                result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    donch_high_1d = rolling_max(high_1d, 20)
-    donch_low_1d = rolling_min(low_1d, 20)
-    
-    # Align 1d Donchian levels to 12h timeframe
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    
-    # Calculate ADX on 12h data for trend strength
-    adx = calculate_adx(high, low, close, period=14)
+    rsi = calculate_rsi(close, 14)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1])
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
     vol_spike = volume > (vol_ma * 2.0)
@@ -109,40 +68,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 200  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or np.isnan(adx[i]):
+        if np.isnan(ema_200_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_high = close[i] > donch_high_1d_aligned[i]
-        breakout_low = close[i] < donch_low_1d_aligned[i]
-        adx_strong = adx[i] > 25
+        ema_val = ema_200_aligned[i]
+        rsi_val = rsi[i]
         vol_ok = vol_spike[i]
         
         if position == 0:
-            # Enter long: break above upper Donchian + strong trend + volume spike
-            if breakout_high and adx_strong and vol_ok:
+            # Enter long: price above weekly 200EMA (uptrend) + RSI oversold + volume spike
+            if (close[i] > ema_val and 
+                rsi_val < 30 and 
+                vol_ok):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower Donchian + strong trend + volume spike
-            elif breakout_low and adx_strong and vol_ok:
+            # Enter short: price below weekly 200EMA (downtrend) + RSI overbought + volume spike
+            elif (close[i] < ema_val and 
+                  rsi_val > 70 and 
+                  vol_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below lower Donchian or trend weakens
-            if close[i] < donch_low_1d_aligned[i] or adx[i] < 20:
+            # Exit long: RSI overbought or price crosses below weekly 200EMA
+            if rsi_val > 70 or close[i] < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above upper Donchian or trend weakens
-            if close[i] > donch_high_1d_aligned[i] or adx[i] < 20:
+            # Exit short: RSI oversold or price crosses above weekly 200EMA
+            if rsi_val < 30 or close[i] > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -150,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_VolumeSpike_ADXFilter"
-timeframe = "12h"
+name = "1d_200EMA_RSI_MeanReversion_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
