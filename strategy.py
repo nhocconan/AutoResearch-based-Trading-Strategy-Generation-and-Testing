@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Rebound_v1
-Hypothesis: In BTC/ETH, price often rebounds from weekly pivot support/resistance levels during ranging markets.
-Go long when price touches weekly S1/S2 and shows bullish rejection (close > open) with volume confirmation.
-Go short when price touches weekly R1/R2 and shows bearish rejection (close < open) with volume confirmation.
-Use 1d trend filter (price vs EMA50) to avoid counter-trend trades. Designed for low-frequency, high-conviction trades.
+12h_Pivot_R1_S1_Breakout_Volume_RangeFilter_Strict
+Strategy: 12h Camarilla pivot R1/S1 breakout with volume confirmation and range filter.
+Long: Price breaks above R1 in uptrend with volume spike and non-range market.
+Short: Price breaks below S1 in downtrend with volume spike and non-range market.
+Designed for 12h timeframe: ~15-25 trades/year per symbol (60-100 total over 4 years).
+Works in bull/bear via trend filter and range avoidance.
 """
 
 import numpy as np
@@ -19,94 +20,94 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot points (using prior week's OHLC)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
-    
-    # Weekly pivot: P = (H + L + C) / 3
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    # Support/resistance levels
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
-    r2_w = pivot_w + (high_w - low_w)
-    s2_w = pivot_w - (high_w - low_w)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
-    r2_w_aligned = align_htf_to_ltf(prices, df_1w, r2_w)
-    s2_w_aligned = align_htf_to_ltf(prices, df_1w, s2_w)
-    
-    # Daily trend filter: EMA50
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate Camarilla pivot levels for previous day
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Daily range for range filter (ATR-based)
+    atr_14 = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).mean().values
+    # Range filter: avoid trading when ATR is too low (choppy market)
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    
+    # Align all daily data to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA50
+    start_idx = 50  # need enough for EMA200 and ATR MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
-            np.isnan(s1_w_aligned[i]) or np.isnan(r2_w_aligned[i]) or
-            np.isnan(s2_w_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(atr_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade in direction of daily trend
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Price action rejection signals
-        bullish_rejection = close[i] > open_price[i]  # bullish candle
-        bearish_rejection = close[i] < open_price[i]  # bearish candle
+        # Range filter: only trade when volatility is sufficient (not choppy)
+        vol_filter = atr_14[i] > 0.5 * atr_ma_aligned[i]  # ATR > 50% of its MA
         
-        # Proximity to weekly support/resistance (within 0.5% of level)
-        proximity_threshold = 0.005
-        near_s1 = abs(low[i] - s1_w_aligned[i]) / s1_w_aligned[i] < proximity_threshold
-        near_s2 = abs(low[i] - s2_w_aligned[i]) / s2_w_aligned[i] < proximity_threshold
-        near_r1 = abs(high[i] - r1_w_aligned[i]) / r1_w_aligned[i] < proximity_threshold
-        near_r2 = abs(high[i] - r2_w_aligned[i]) / r2_w_aligned[i] < proximity_threshold
+        # Camarilla breakout conditions
+        # Long: price breaks above R1
+        breakout_long = close[i] > r1_aligned[i]
+        # Short: price breaks below S1
+        breakout_short = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: price near weekly support, bullish rejection, uptrend, volume
-            if ((near_s1 or near_s2) and bullish_rejection and uptrend and vol_confirm):
+            # Long: uptrend + volume + volatility filter + breakout above R1
+            if uptrend and vol_confirm and vol_filter and breakout_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: price near weekly resistance, bearish rejection, downtrend, volume
-            elif ((near_r1 or near_r2) and bearish_rejection and downtrend and vol_confirm):
+            # Short: downtrend + volume + volatility filter + breakout below S1
+            elif downtrend and vol_confirm and vol_filter and breakout_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, or price reaches weekly pivot/resistance
-            if not uptrend or close[i] > pivot_w_aligned[i]:
+            # Long exit: trend change, volatility collapse, or break below S1 (reversal)
+            if not uptrend or not vol_filter or close[i] < s1_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, or price reaches weekly pivot/support
-            if not downtrend or close[i] < pivot_w_aligned[i]:
+            # Short exit: trend change, volatility collapse, or break above R1 (reversal)
+            if not downtrend or not vol_filter or close[i] > r1_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -114,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Rebound_v1"
-timeframe = "6h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_RangeFilter_Strict"
+timeframe = "12h"
 leverage = 1.0
