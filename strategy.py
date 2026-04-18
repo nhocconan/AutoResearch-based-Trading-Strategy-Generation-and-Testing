@@ -1,13 +1,7 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h Camarilla pivot level S1/R1 bounce with volume confirmation and 1d EMA200 trend filter
-# Works in bull market: price respects pivot support/resistance with volume confirmation
-# Works in bear market: EMA200 filter prevents counter-trend trades, pivots act as magnet levels for mean reversion
-# Low trade frequency expected due to strict pivot level requirements + volume + trend filter
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,31 +13,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla pivot calculation and EMA200
+    # Get 1D data for daily pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each day
-    # Pivot = (H + L + C) / 3
-    # S1 = C - (H - L) * 1.1 / 12
-    # R1 = C + (H - L) * 1.1 / 12
+    # Calculate daily pivots (standard)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
+    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
     
-    # Align daily pivot levels to 12h timeframe (no extra delay needed for pivot levels)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    # Align pivots to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Calculate EMA200 on daily data for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate 60-period EMA on 6h for trend filter
+    close_series = pd.Series(close)
+    ema60_6h = close_series.ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # Calculate volume moving average (20-period)
+    # Calculate volume moving average (20-period) for confirmation
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -51,12 +53,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 200)  # need volume MA and EMA200
+    start_idx = max(60, 20)  # need EMA60 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(r1_12h[i]) or 
-            np.isnan(ema200_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or 
+            np.isnan(s3_6h[i]) or np.isnan(ema60_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -64,32 +67,32 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price near S1 support (> S1 * 0.998 and < S1 * 1.002) with volume and above EMA200
-            s1_lower = s1_12h[i] * 0.998
-            s1_upper = s1_12h[i] * 1.002
-            near_s1 = (close[i] >= s1_lower) and (close[i] <= s1_upper)
-            
-            if near_s1 and vol_confirmed and (close[i] > ema200_12h[i]):
+            # Long entry: price breaks above R2 with volume, above 60 EMA
+            if (close[i] > r2_6h[i] and 
+                close[i] > ema60_6h[i] and 
+                vol_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price near R1 resistance (> R1 * 0.998 and < R1 * 1.002) with volume and below EMA200
-            elif (close[i] >= r1_12h[i] * 0.998) and (close[i] <= r1_12h[i] * 1.002) and vol_confirmed and (close[i] < ema200_12h[i]):
+            # Short entry: price breaks below S2 with volume, below 60 EMA
+            elif (close[i] < s2_6h[i] and 
+                  close[i] < ema60_6h[i] and 
+                  vol_confirmed):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price moves above pivot or below S1
-            if (close[i] > pivot_12h[i]) or (close[i] < s1_12h[i]):
+            # Long exit: price falls back below R1 or below 60 EMA
+            if close[i] < r1_6h[i] or close[i] < ema60_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price moves below pivot or above R1
-            if (close[i] < pivot_12h[i]) or (close[i] > r1_12h[i]):
+            # Short exit: price rises back above S1 or above 60 EMA
+            if close[i] > s1_6h[i] or close[i] > ema60_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_S1R1_Volume_EMA200"
-timeframe = "12h"
+name = "6h_Pivot_R2_S2_Breakout_EMA60_Volume"
+timeframe = "6h"
 leverage = 1.0
