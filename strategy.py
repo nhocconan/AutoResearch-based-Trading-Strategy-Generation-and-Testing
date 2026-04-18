@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_4h_1D_Camarilla_R1S1_Breakout_Volume_Selective_v2
-Hypothesis: Use daily and 4h Camarilla R1/S1 for directional bias with 1h entry, requiring volume > 1.5x 20-period average and session filter (08-20 UTC). Add 4h ADX > 20 to avoid chop and ensure trending conditions. This reduces whipsaw and increases win rate while keeping trade frequency low (target 15-35 trades/year). Works in bull/bear via volatility regime filter using 4h ADX.
+4h_Wick_Reversal_V1
+Hypothesis: Identify rejection at daily support/resistance via long upper/lower wicks. 
+Long when price closes in lower 25% of daily range with long upper wick (bearish rejection fails). 
+Short when price closes in upper 25% of daily range with long lower wick (bullish rejection fails). 
+Requires volume > 1.5x 20-period average and 4h ADX > 20 to avoid chop. 
+Targets 20-40 trades/year with discrete sizing (0.25) to minimize fee drag. 
+Works in bull/bear via rejection logic that captures failed breakouts in any regime.
 """
 
 import numpy as np
@@ -18,29 +23,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for primary directional bias
+    # Get daily data for support/resistance and wick analysis
     df_1d = get_htf_data(prices, '1d')
     
-    # Get 4h data for ADX filter and volatility context
+    # Get 4h data for ADX filter
     df_4h = get_htf_data(prices, '4h')
     
-    # Daily calculations for bias
-    close_1d = df_1d['close'].values
+    # Daily calculations
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Daily range and position
+    daily_range = high_1d - low_1d
+    close_position = (close_1d - low_1d) / daily_range  # 0 = low, 1 = high
     
-    # Daily Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    range_1d = prev_high - prev_low
-    r1_1d = prev_close + range_1d * 1.1 / 12
-    s1_1d = prev_close - range_1d * 1.1 / 12
+    # Wick calculations: upper wick = high - close, lower wick = close - low
+    upper_wick = high_1d - close_1d
+    lower_wick = close_1d - low_1d
+    
+    # Long wick conditions: wick > 60% of daily range
+    long_upper_wick = upper_wick > 0.6 * daily_range
+    long_lower_wick = lower_wick > 0.6 * daily_range
+    
+    # Reversal signals: 
+    # Long setup: price rejected from high (long upper wick) but closed in lower 25% of range
+    long_setup = long_upper_wick & (close_position < 0.25)
+    # Short setup: price rejected from low (long lower wick) but closed in upper 25% of range
+    short_setup = long_lower_wick & (close_position > 0.75)
     
     # 4h ADX for trend strength filter (avoid chop)
     high_4h = df_4h['high'].values
@@ -59,17 +69,17 @@ def generate_signals(prices):
     up_move[0] = 0
     down_move[0] = 0
     
-    # Smoothed values
+    # Smoothed values with proper smoothing
     tr_period = 14
     tr_smooth = np.zeros_like(tr)
-    tr_smooth[tr_period] = np.nansum(tr[1:tr_period+1]) if not np.isnan(tr).all() else 0
+    tr_smooth[tr_period] = np.nansum(tr[1:tr_period+1]) if tr_period < len(tr) else 0
     for i in range(tr_period + 1, len(tr)):
         tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / tr_period) + tr[i]
     
     up_smooth = np.zeros_like(up_move)
     down_smooth = np.zeros_like(down_move)
-    up_smooth[tr_period] = np.nansum(up_move[1:tr_period+1]) if not np.isnan(up_move).all() else 0
-    down_smooth[tr_period] = np.nansum(down_move[1:tr_period+1]) if not np.isnan(down_move).all() else 0
+    up_smooth[tr_period] = np.nansum(up_move[1:tr_period+1]) if tr_period < len(up_move) else 0
+    down_smooth[tr_period] = np.nansum(down_move[1:tr_period+1]) if tr_period < len(down_move) else 0
     for i in range(tr_period + 1, len(up_move)):
         up_smooth[i] = up_smooth[i-1] - (up_smooth[i-1] / tr_period) + up_move[i]
         down_smooth[i] = down_smooth[i-1] - (down_smooth[i-1] / tr_period) + down_move[i]
@@ -82,18 +92,16 @@ def generate_signals(prices):
     # ADX
     adx_period = 14
     adx = np.zeros_like(dx)
-    adx[2*adx_period] = np.nanmean(dx[adx_period:2*adx_period+1]) if not np.isnan(dx).all() else 0
-    for i in range(2*adx_period + 1, len(dx)):
-        adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
+    if 2*adx_period < len(dx):
+        adx[2*adx_period] = np.nanmean(dx[adx_period:2*adx_period+1]) if not np.isnan(dx[adx_period:2*adx_period+1]).all() else 0
+        for i in range(2*adx_period + 1, len(dx)):
+            adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
     
-    # Align all higher timeframe data to 1h
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align all higher timeframe data to 4h
+    long_setup_aligned = align_htf_to_ltf(prices, df_1d, long_setup.astype(float))
+    short_setup_aligned = align_htf_to_ltf(prices, df_1d, short_setup.astype(float))
     adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    volume_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -102,49 +110,45 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(adx_4h_aligned[i])):
+        if (np.isnan(long_setup_aligned[i]) or np.isnan(short_setup_aligned[i]) or 
+            np.isnan(adx_4h_aligned[i]) or np.isnan(volume_ma_4h[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        vol_confirm = volume[i] > 1.5 * volume_ma_4h[i]
         
         # Trend filter: ADX > 20 to avoid chop
-        trend_filter = adx_4h_aligned[i] > 20 if not np.isnan(adx_4h_aligned[i]) else False
-        
-        # Only trade during active session
-        in_session = session_mask[i]
+        trend_filter = adx_4h_aligned[i] > 20
         
         if position == 0:
-            # Long: price breaks above daily R1 with volume and trend filter during session
-            if close[i] > r1_1d_aligned[i] and vol_confirm and trend_filter and in_session:
-                signals[i] = 0.20
+            # Long: long upper wick rejection + close in lower 25% + volume + trend
+            if long_setup_aligned[i] and vol_confirm and trend_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily S1 with volume and trend filter during session
-            elif close[i] < s1_1d_aligned[i] and vol_confirm and trend_filter and in_session:
-                signals[i] = -0.20
+            # Short: long lower wick rejection + close in upper 25% + volume + trend
+            elif short_setup_aligned[i] and vol_confirm and trend_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below daily R1 or trend filter fails or outside session
-            if close[i] < r1_1d_aligned[i] or not trend_filter or not in_session:
-                signals[i] = -0.20  # reverse to short
+            # Long exit: reverse signal appears or trend fails
+            if short_setup_aligned[i] or not trend_filter:
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above daily S1 or trend filter fails or outside session
-            if close[i] > s1_1d_aligned[i] or not trend_filter or not in_session:
-                signals[i] = 0.20  # reverse to long
+            # Short exit: reverse signal appears or trend fails
+            if long_setup_aligned[i] or not trend_filter:
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_1D_Camarilla_R1S1_Breakout_Volume_Selective_v2"
-timeframe = "1h"
+name = "4h_Wick_Reversal_V1"
+timeframe = "4h"
 leverage = 1.0
