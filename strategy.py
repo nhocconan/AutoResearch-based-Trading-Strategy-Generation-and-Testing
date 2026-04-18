@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1_S1_Breakout_Volume_Trend
-Hypothesis: Camarilla pivot levels R1/S1 from daily timeframe act as strong support/resistance.
-Breakouts above R1 or below S1 with volume confirmation and daily EMA trend filter capture
-institutional move initiation. Works in bull/bear by following institutional flow.
-Target: 12-37 trades/year (48-150 total over 4 years) to balance opportunity and fee drag.
+1d_Weekly_Camarilla_R1_S1_Breakout
+Hypothesis: Weekly Camarilla pivot levels (R1, S1) from the previous week act as key support/resistance.
+Breakouts above weekly R1 or below weekly S1 on daily close with volume confirmation and weekly trend filter
+capture institutional moves. Works in bull/bear by following smart money. Target: 10-25 trades/year (40-100 total over 4 years).
 """
 
 import numpy as np
@@ -21,31 +20,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Previous week's OHLC for Camarilla
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Weekly Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align to 12h timeframe (waits for 1-day bar to close)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to daily timeframe (waits for weekly bar to close)
+    r1_1d = align_htf_to_ltf(prices, df_1w, r1)
+    s1_1d = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Volume filter: >1.5x 20-period average
+    # Volume filter: >1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
-    # 1-day EMA trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Weekly EMA trend filter
+    ema_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_1d = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0
@@ -54,17 +53,17 @@ def generate_signals(prices):
     start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
+        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_1w_1d[i])):
             signals[i] = 0.0
             bars_since_entry = 0
             continue
         
         price = close[i]
-        r1_val = r1_12h[i]
-        s1_val = s1_12h[i]
+        r1_val = r1_1d[i]
+        s1_val = s1_1d[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_1d_12h[i]
+        ema_trend = ema_1w_1d[i]
         
         if position == 0:
             # Long: break above R1 with volume in uptrend
@@ -80,8 +79,8 @@ def generate_signals(prices):
         
         elif position == 1:
             bars_since_entry += 1
-            # Minimum holding period: 4 bars (2 days)
-            if bars_since_entry < 4:
+            # Minimum holding period: 3 days
+            if bars_since_entry < 3:
                 signals[i] = 0.25
             else:
                 signals[i] = 0.25
@@ -93,8 +92,8 @@ def generate_signals(prices):
         
         elif position == -1:
             bars_since_entry += 1
-            # Minimum holding period: 4 bars (2 days)
-            if bars_since_entry < 4:
+            # Minimum holding period: 3 days
+            if bars_since_entry < 3:
                 signals[i] = -0.25
             else:
                 signals[i] = -0.25
@@ -106,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "1d_Weekly_Camarilla_R1_S1_Breakout"
+timeframe = "1d"
 leverage = 1.0
