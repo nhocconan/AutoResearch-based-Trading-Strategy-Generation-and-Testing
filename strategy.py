@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot Breakout with Volume and ADX Filter
-Hypothesis: Price breaking above/below weekly pivot levels (R1/S1) on 6h with volume confirmation
-(volume > 1.5x 20-period EMA) and trend strength (ADX > 20) indicates strong momentum.
-Weekly pivots derived from weekly OHLC provide institutional support/resistance.
-Target: 15-30 trades/year to minimize fee drain.
+4h Fibonacci Pivot Breakout with Volume Spike and Trend Filter
+Hypothesis: Price breaking above/below Fibonacci pivot levels (R1/S1) on 4h with volume confirmation
+(volume > 2x average) and trend strength (ADX > 25) indicates strong momentum.
+Fibonacci pivots derived from 1d OHLC provide institutional support/resistance.
+Target: 20-30 trades/year to minimize fee drain and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,24 +21,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (once before loop)
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Get 1d data for Fibonacci pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot levels from previous week's OHLC
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Calculate Fibonacci pivot levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Standard pivot formulas: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    pivot_w = (high_w + low_w + close_w) / 3
-    weekly_r1 = 2 * pivot_w - low_w
-    weekly_s1 = 2 * pivot_w - high_w
+    # Fibonacci pivot formulas: R1 = C + (H-L)*0.382, S1 = C - (H-L)*0.382
+    fib_r1 = close_1d + (high_1d - low_1d) * 0.382
+    fib_s1 = close_1d - (high_1d - low_1d) * 0.382
     
-    # Align to 6h timeframe with proper delay (use previous week's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_w, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_w, weekly_s1)
+    # Align to 4h timeframe with proper delay (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, fib_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, fib_s1)
     
     # EMA20 for trend filter
     ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -67,7 +66,7 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    # Volume confirmation: volume > 2x 20-period EMA (stricter for fewer trades)
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_ratio = volume / vol_ema
     
@@ -87,22 +86,22 @@ def generate_signals(prices):
         s1 = s1_aligned[i]
         ema_val = ema20[i]
         adx_val = adx[i]
-        vol_conf = vol_ratio[i] > 1.5
+        vol_conf = vol_ratio[i] > 2.0  # Stricter volume filter
         
         if position == 0:
-            # Strong trend (ADX > 20) and volume confirmation
+            # Strong trend (ADX > 25) and volume confirmation
             # Price breaks above R1 = long
-            if adx_val > 20 and price > r1 and vol_conf:
+            if adx_val > 25 and price > r1 and vol_conf:
                 signals[i] = 0.25
                 position = 1
             # Price breaks below S1 = short
-            elif adx_val > 20 and price < s1 and vol_conf:
+            elif adx_val > 25 and price < s1 and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit if trend weakens or price returns below EMA20
-            if adx_val < 15 or price < ema_val:
+            if adx_val < 20 or price < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,7 +109,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit if trend weakens or price returns above EMA20
-            if adx_val < 15 or price > ema_val:
+            if adx_val < 20 or price > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Weekly_Pivot_Breakout_Volume_ADX"
-timeframe = "6h"
+name = "4h_Fibonacci_Pivot_Breakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
