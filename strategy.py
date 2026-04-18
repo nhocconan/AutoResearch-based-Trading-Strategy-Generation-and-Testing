@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_1w_Trend_Following_With_Volume_and_Weekly_Pullback
-Hypothesis: Use weekly trend (price above/below weekly EMA20) as primary filter, combined with daily price action pulling back to daily EMA20 with volume confirmation. This captures trend continuation after pullbacks in both bull and bear markets. Weekly trend filter reduces whipsaws, while daily EMA20 pullback provides precise entry. Targets 15-25 trades/year by requiring alignment of weekly trend, daily EMA20 touch/penetration, and volume > 1.3x 20-day average. Works in bull markets by buying dips in uptrend, and in bear markets by selling rallies in downtrend.
+12h_1d_KAMA_Trend_Channel_Breakout
+Hypothesis: Use 12h KAMA trend + 12h Donchian breakout with 1d volume confirmation.
+KAMA adapts to noise, reducing whipsaws. Breakout beyond 12h Donchian(10) captures momentum.
+Volume filter ensures participation. Works in bull (breakouts above upper band) and bear
+(breakdowns below lower band) by requiring KAMA alignment. Targets 15-25 trades/year.
 """
 
 import numpy as np
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,64 +21,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 12h data for KAMA and Donchian
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate weekly EMA20 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).values
+    # Calculate 12h KAMA (adaptive trend)
+    def calculate_kama(close_arr, period=10):
+        change = np.abs(np.diff(close_arr, n=period))
+        # Volatility: sum of absolute changes over 'period' periods
+        volatility = np.zeros_like(close_arr)
+        for i in range(len(close_arr)):
+            if i >= period:
+                volatility[i] = np.sum(np.abs(np.diff(close_arr[i-period+1:i+1], n=1)))
+        er = np.zeros_like(close_arr)
+        mask = volatility != 0
+        er[mask] = change[mask] / volatility[mask]
+        # Smoothing constants
+        sc = (er * (0.665 - 0.0645) + 0.0645) ** 2
+        kama = np.full_like(close_arr, np.nan)
+        if len(close_arr) > period:
+            kama[period-1] = close_arr[period-1]
+            for i in range(period, len(close_arr)):
+                kama[i] = kama[i-1] + sc[i] * (close_arr[i] - kama[i-1])
+        return kama
     
-    # Align weekly EMA20 to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    kama_12h = calculate_kama(close_12h, 10)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
     
-    # Get daily EMA20 for pullback entries
-    close_series = pd.Series(close)
-    ema20_daily = close_series.ewm(span=20, adjust=False, min_periods=20).values
+    # Calculate 12h Donchian channels (10-period)
+    def calculate_donchian(high_arr, low_arr, period=10):
+        upper = np.full_like(high_arr, np.nan)
+        lower = np.full_like(low_arr, np.nan)
+        for i in range(len(high_arr)):
+            if i >= period - 1:
+                upper[i] = np.max(high_arr[i-period+1:i+1])
+                lower[i] = np.min(low_arr[i-period+1:i+1])
+        return upper, lower
     
-    # Volume confirmation: current volume > 1.3 x 20-day average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.3)
+    donch_up_12h, donch_dn_12h = calculate_donchian(high_12h, low_12h, 10)
+    donch_up_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_up_12h)
+    donch_dn_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_dn_12h)
+    
+    # Get 1d volume for confirmation
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    # 1d volume MA (20-period)
+    vol_ma_1d = np.full_like(volume_1d, np.nan)
+    for i in range(len(volume_1d)):
+        if i >= 19:
+            vol_ma_1d[i] = np.mean(volume_1d[i-19:i+1])
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need EMA and volume MA
+    start_idx = 20  # need sufficient history
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(ema20_daily[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama_12h_aligned[i]) or 
+            np.isnan(donch_up_12h_aligned[i]) or 
+            np.isnan(donch_dn_12h_aligned[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        vol_confirm = volume[i] > vol_ma_1d_aligned[i]  # current 12h volume > 1d avg volume
+        
         if position == 0:
-            # Long entry: weekly uptrend (price > weekly EMA20) AND price touches/below daily EMA20 with volume
-            if (close[i] > ema20_1w_aligned[i] and low[i] <= ema20_daily[i] and vol_confirm[i]):
+            # Long: price breaks above Donchian upper, with volume, and KAMA uptrend
+            if (close[i] > donch_up_12h_aligned[i] and 
+                vol_confirm and 
+                close[i] > kama_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: weekly downtrend (price < weekly EMA20) AND price touches/above daily EMA20 with volume
-            elif (close[i] < ema20_1w_aligned[i] and high[i] >= ema20_daily[i] and vol_confirm[i]):
+            # Short: price breaks below Donchian lower, with volume, and KAMA downtrend
+            elif (close[i] < donch_dn_12h_aligned[i] and 
+                  vol_confirm and 
+                  close[i] < kama_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: weekly trend turns down OR price breaks above weekly EMA20 by too much (extended)
-            if (close[i] < ema20_1w_aligned[i] or 
-                close[i] > ema20_1w_aligned[i] * 1.05):  # 5% above weekly EMA20 = extended
+            # Long exit: price returns below KAMA or breaks below Donchian lower
+            if (close[i] < kama_12h_aligned[i] or 
+                close[i] < donch_dn_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly trend turns up OR price breaks below weekly EMA20 by too much (extended)
-            if (close[i] > ema20_1w_aligned[i] or 
-                close[i] < ema20_1w_aligned[i] * 0.95):  # 5% below weekly EMA20 = extended
+            # Short exit: price returns above KAMA or breaks above Donchian upper
+            if (close[i] > kama_12h_aligned[i] or 
+                close[i] > donch_up_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Trend_Following_With_Volume_and_Weekly_Pullback"
-timeframe = "1d"
+name = "12h_1d_KAMA_Trend_Channel_Breakout"
+timeframe = "12h"
 leverage = 1.0
