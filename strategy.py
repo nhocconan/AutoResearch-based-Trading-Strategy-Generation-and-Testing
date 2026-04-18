@@ -33,13 +33,13 @@ def generate_signals(prices):
     # Align daily ATR14 to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 12-period SMA on daily close (trend filter)
-    sma_12_1d = np.full(len(close_1d), np.nan)
-    for i in range(12, len(close_1d)):
-        sma_12_1d[i] = np.mean(close_1d[i-12:i])
+    # Calculate 20-period SMA on daily close (trend filter)
+    sma_20_1d = np.full(len(close_1d), np.nan)
+    for i in range(20, len(close_1d)):
+        sma_20_1d[i] = np.mean(close_1d[i-20:i])
     
-    # Align daily SMA12 to 12h timeframe
-    sma_12_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_12_1d)
+    # Align daily SMA20 to 12h timeframe
+    sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
     
     # Calculate 12h ATR for stop loss
     tr_12h_1 = high - low
@@ -51,39 +51,39 @@ def generate_signals(prices):
     tr_12h = np.maximum(tr_12h_1, np.maximum(tr_12h_2, tr_12h_3))
     atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate volume moving average (12-period)
+    # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
-    for i in range(12, n):
-        vol_ma[i] = np.mean(volume[i-12:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 12)  # need daily ATR, daily SMA, volume MA
+    start_idx = max(20, 20)  # need daily ATR, daily SMA, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(sma_12_1d_aligned[i]) or 
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(sma_20_1d_aligned[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(atr_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.2 * 12-period average
-        vol_confirmed = volume[i] > 1.2 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3 * 20-period average
+        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
         
-        # Trend filter: price above daily SMA12 (uptrend) or below (downtrend)
-        trend_up = close[i] > sma_12_1d_aligned[i]
-        trend_down = close[i] < sma_12_1d_aligned[i]
+        # Trend filter: price above daily SMA20 (uptrend) or below (downtrend)
+        trend_up = close[i] > sma_20_1d_aligned[i]
+        trend_down = close[i] < sma_20_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price above 12h open + 0.5*ATR, with volume and trend filter
-            if (close[i] > open_price[i] + 0.5 * atr_12h[i] and 
+            # Long entry: price above 12h open + 0.7*ATR, with volume and trend filter
+            if (close[i] > open_price[i] + 0.7 * atr_12h[i] and 
                 vol_confirmed and 
                 trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below 12h open - 0.5*ATR, with volume and trend filter
-            elif (close[i] < open_price[i] - 0.5 * atr_12h[i] and 
+            # Short entry: price below 12h open - 0.7*ATR, with volume and trend filter
+            elif (close[i] < open_price[i] - 0.7 * atr_12h[i] and 
                   vol_confirmed and 
                   trend_down):
                 signals[i] = -0.25
@@ -93,7 +93,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Long exit: price crosses below 12h open or ATR-based stop
-            if close[i] < open_price[i] - 1.5 * atr_12h[i]:
+            if close[i] < open_price[i] - 2.0 * atr_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,7 +101,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price crosses above 12h open or ATR-based stop
-            if close[i] > open_price[i] + 1.5 * atr_12h[i]:
+            if close[i] > open_price[i] + 2.0 * atr_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ATR14Daily_SMA12Daily_VolumeFilter"
+name = "12h_ATR14Daily_SMA20Daily_VolumeFilter"
 timeframe = "12h"
 leverage = 1.0
