@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_Reverse_Entry
-Hypothesis: In ranging or choppy markets (common in 2025-2026), price often reverts to the KAMA trend after short-term extremes. 
-We enter long when price crosses below KAMA (oversold in downtrend) and short when price crosses above KAMA (overbought in uptrend), 
-using 1-day trend filter to avoid counter-trend trades. Volume spike confirms momentum. 
-Designed for low trade frequency (<30/year) to minimize fee decay in sideways markets.
+1d_RSI_Extremes_WeeklyTrend_Filtered
+Hypothesis: RSI extremes (<30 for long, >70 for short) combined with weekly trend filter (price above/below weekly EMA50) 
+provides high-probability mean-reversion entries in ranging markets while avoiding counter-trend trades in strong trends.
+Volume confirmation filters out low-conviction moves. Designed for 1d timeframe to work in both bull and bear markets.
+Target: 10-25 trades/year with disciplined entry conditions.
 """
 
 import numpy as np
@@ -21,73 +21,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day KAMA trend
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Efficiency Ratio (ER) over 10 periods
-    change_10 = np.abs(np.subtract(close_1d[10:], close_1d[:-10]))
-    abs_change = np.sum(np.abs(np.diff(close_1d, axis=0))[:len(close_1d)-10:], axis=0) if len(close_1d) > 10 else np.array([])
-    er = np.full(len(close_1d), np.nan)
-    if len(change_10) > 0:
-        er[10:] = change_10 / np.maximum(abs_change, 1e-10)
+    # Weekly EMA50
+    ema50_1w = np.full(len(close_1w), np.nan)
+    k = 2 / (50 + 1)
+    for i in range(50, len(close_1w)):
+        if i == 50:
+            ema50_1w[i] = np.mean(close_1w[0:51])
+        else:
+            ema50_1w[i] = close_1w[i] * k + ema50_1w[i-1] * (1 - k)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Daily RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # KAMA calculation
-    kama = np.full(len(close_1d), np.nan)
-    if len(close_1d) > 10:
-        kama[10] = close_1d[10]  # seed
-        for i in range(11, len(close_1d)):
-            if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-                kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:15])
+            avg_loss[i] = np.mean(loss[0:15])
+        else:
+            avg_gain[i] = (gain[i] + 13 * avg_gain[i-1]) / 14
+            avg_loss[i] = (loss[i] + 13 * avg_loss[i-1]) / 14
     
-    # Align 1-day KAMA to 12h timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 1-day trend filter: price > KAMA = uptrend, price < KAMA = downtrend
-    # We'll use this to filter entries only
-    
-    # Volume spike: current volume > 2.0 x 24-period average (more selective)
+    # Volume spike: current volume > 1.5 x 20-day average
     vol_ma = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 10)  # Ensure indicators ready
+    start_idx = max(50, 20, 14)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price crosses below KAMA (oversold) in 1-day uptrend with volume spike
-            if (close[i] <= kama_1d_aligned[i] and close[i-1] > kama_1d_aligned[i-1] and 
-                close[i] > kama_1d_aligned[i] and vol_spike[i]):  # Wait for confirmation bar
+            # Long: RSI oversold (<30) with volume spike and weekly uptrend (price > weekly EMA50)
+            if (rsi[i] < 30 and vol_spike[i] and 
+                close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses above KAMA (overbought) in 1-day downtrend with volume spike
-            elif (close[i] >= kama_1d_aligned[i] and close[i-1] < kama_1d_aligned[i-1] and 
-                  close[i] < kama_1d_aligned[i] and vol_spike[i]):
+            # Short: RSI overbought (>70) with volume spike and weekly downtrend (price < weekly EMA50)
+            elif (rsi[i] > 70 and vol_spike[i] and 
+                  close[i] < ema50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back above KAMA (mean reversion complete) or trend fails
-            if (close[i] >= kama_1d_aligned[i] and close[i-1] < kama_1d_aligned[i-1]) or close[i] < kama_1d_aligned[i]:
+            # Long exit: RSI returns to neutral (50) or weekly trend turns down
+            if (rsi[i] >= 50 or close[i] < ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back below KAMA or trend fails
-            if (close[i] <= kama_1d_aligned[i] and close[i-1] > kama_1d_aligned[i-1]) or close[i] > kama_1d_aligned[i]:
+            # Short exit: RSI returns to neutral (50) or weekly trend turns up
+            if (rsi[i] <= 50 or close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_Reverse_Entry"
-timeframe = "12h"
+name = "1d_RSI_Extremes_WeeklyTrend_Filtered"
+timeframe = "1d"
 leverage = 1.0
