@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_PriceChannel_Breakout_VolumeTrend
-Hypothesis: Use 4h Donchian channels for trend direction and 1h price action with volume confirmation for precise entries. In bull markets, buy breakouts above 4h upper channel; in bear markets, sell breakdowns below 4h lower channel. Volume filter ensures institutional participation. Designed for low trade frequency (15-25/year) to minimize fee drift while capturing strong trends. Works in both bull and bear regimes by following the 4h trend.
+4h_KAMA_Trend_With_RSI_Filter
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets. 
+Combined with RSI for momentum confirmation and volume filter to avoid false signals, this should work in both bull and bear markets.
+Low trade frequency expected due to multiple confirmation requirements.
 """
 
 import numpy as np
@@ -10,76 +12,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period) for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # KAMA trend filter (10-period efficiency ratio)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.zeros(n)
+    for i in range(10, n):
+        price_change = np.abs(close[i] - close[i-10])
+        sum_volatility = np.sum(volatility[i-9:i+1])
+        if sum_volatility > 0:
+            er[i] = price_change / sum_volatility
+        else:
+            er[i] = 0
+    # Smooth ER with smoothing constants
+    sc = (er * (0.66 - 0.06) + 0.06) ** 2
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate 20-period Donchian channels on 4h
-    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align to 1h timeframe
-    upper_20 = align_htf_to_ltf(prices, df_4h, high_20)
-    lower_20 = align_htf_to_ltf(prices, df_4h, low_20)
-    
-    # 1h volume spike (>1.5x 24-period average)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Volume filter: above 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Need Donchian and volume MA
+    start_idx = max(20, 14)  # Ensure we have enough data
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_20[i]) or 
-            np.isnan(lower_20[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_20[i]
-        lower = lower_20[i]
-        vol_spike = volume_spike[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above 4h upper channel with volume spike
-            if price > upper and vol_spike:
-                signals[i] = 0.20
+            # Long: price above KAMA, RSI > 50, volume confirmation
+            if price > kama_val and rsi_val > 50 and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h lower channel with volume spike
-            elif price < lower and vol_spike:
-                signals[i] = -0.20
+            # Short: price below KAMA, RSI < 50, volume confirmation
+            elif price < kama_val and rsi_val < 50 and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            signals[i] = 0.20
-            # Exit: price returns to 4h midpoint or volume dies
-            midpoint = (upper + lower) / 2
-            if price < midpoint:
+            signals[i] = 0.25
+            # Exit: price below KAMA or RSI < 40
+            if price < kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            signals[i] = -0.20
-            # Exit: price returns to 4h midpoint or volume dies
-            midpoint = (upper + lower) / 2
-            if price > midpoint:
+            signals[i] = -0.25
+            # Exit: price above KAMA or RSI > 60
+            if price > kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_PriceChannel_Breakout_VolumeTrend"
-timeframe = "1h"
+name = "4h_KAMA_Trend_With_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
