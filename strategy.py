@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,34 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate 20-day Donchian channels
-    high_20d = np.full(len(high_1d), np.nan)
-    low_20d = np.full(len(low_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        high_20d[i] = np.max(high_1d[i-20:i])
-        low_20d[i] = np.min(low_1d[i-20:i])
-    
-    # Align Donchian channels to 12h timeframe
-    high_20d_12h = align_htf_to_ltf(prices, df_1d, high_20d)
-    low_20d_12h = align_htf_to_ltf(prices, df_1d, low_20d)
-    
-    # Get 1W data for trend filter
+    # Get daily data for weekly EMA200 and weekly RSI(14)
     df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly EMA200 (trend filter)
     close_1w = df_1w['close'].values
-    
-    # Calculate 34-week EMA for trend filter
     close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align weekly EMA34 to 12h timeframe
-    ema34_1w_12h = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate weekly RSI(14)
+    delta_1w = np.diff(close_1w, prepend=close_1w[0])
+    gain_1w = np.where(delta_1w > 0, delta_1w, 0)
+    loss_1w = np.where(delta_1w < 0, -delta_1w, 0)
+    avg_gain_1w = pd.Series(gain_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_1w = pd.Series(loss_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_1w = np.divide(avg_gain_1w, avg_loss_1w, out=np.zeros_like(avg_gain_1w), where=avg_loss_1w!=0)
+    rsi_1w = 100 - (100 / (1 + rs_1w))
     
-    # Calculate 12h RSI(14)
+    # Align weekly indicators to 4h timeframe
+    ema200_4h = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    rsi_1w_4h = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Calculate 4h RSI(14) for momentum
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -57,12 +51,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 20)  # need Donchian, EMA34, RSI, volume MA
+    start_idx = max(200, 20)  # need weekly EMA200 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20d_12h[i]) or np.isnan(low_20d_12h[i]) or 
-            np.isnan(ema34_1w_12h[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema200_4h[i]) or np.isnan(rsi_1w_4h[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -70,16 +64,16 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above 20-day high, weekly trend up, RSI not overbought, with volume
-            if (close[i] > high_20d_12h[i] and 
-                ema34_1w_12h[i] > ema34_1w_12h[i-1] and 
+            # Long entry: price above weekly EMA200, weekly RSI not oversold, RSI not overbought, with volume
+            if (close[i] > ema200_4h[i] and 
+                rsi_1w_4h[i] > 30 and 
                 rsi[i] < 70 and 
                 vol_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below 20-day low, weekly trend down, RSI not oversold, with volume
-            elif (close[i] < low_20d_12h[i] and 
-                  ema34_1w_12h[i] < ema34_1w_12h[i-1] and 
+            # Short entry: price below weekly EMA200, weekly RSI not overbought, RSI not oversold, with volume
+            elif (close[i] < ema200_4h[i] and 
+                  rsi_1w_4h[i] < 70 and 
                   rsi[i] > 30 and 
                   vol_confirmed):
                 signals[i] = -0.25
@@ -88,16 +82,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price breaks below 20-day low or RSI overbought
-            if close[i] < low_20d_12h[i] or rsi[i] > 75:
+            # Long exit: price crosses below weekly EMA200 or RSI overbought
+            if close[i] < ema200_4h[i] or rsi[i] > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 20-day high or RSI oversold
-            if close[i] > high_20d_12h[i] or rsi[i] < 25:
+            # Short exit: price crosses above weekly EMA200 or RSI oversold
+            if close[i] > ema200_4h[i] or rsi[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_WeeklyEMA34_RSI_Volume"
-timeframe = "12h"
+name = "4h_WeeklyEMA200_WeeklyRSI_RSI_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
