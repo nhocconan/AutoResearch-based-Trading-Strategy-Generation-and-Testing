@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot Breakout with 12h Trend Filter and Volume Confirmation
-Hypothesis: Price tends to revert to or break from key intraday support/resistance levels
-(Camarilla pivots). In trending markets, breaks of R1/S1 levels with volume and
-trend alignment (12h EMA) yield sustainable moves. This strategy targets 25-35
-trades/year to minimize fee drag while capturing directional moves in both bull
-and bear markets. Uses discrete position sizing (0.25) to reduce churn.
+1h Volume Spike Reversion with 4h Trend Filter
+Hypothesis: After extreme volume spikes, price often reverts to the mean. 
+We use 4h EMA50 as trend filter to avoid counter-trend trades, and enter on 1h 
+when price deviates significantly from VWAP with volume confirmation (>2x avg volume).
+This strategy targets 15-30 trades/year by requiring multiple confirmations,
+reducing fee drag while capturing mean reversion moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -22,73 +22,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 12h EMA34 for trend filter
-    ema34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # 4h EMA50 for trend filter
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Calculate prior day's Camarilla levels using prior 6 bars (6*4h = 24h)
-    high_prior = pd.Series(high).rolling(window=6, min_periods=6).max().shift(1).values
-    low_prior = pd.Series(low).rolling(window=6, min_periods=6).min().shift(1).values
-    close_prior = pd.Series(close).rolling(window=6, min_periods=6).last().shift(1).values
+    # Calculate VWAP for 1h
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
     
-    # Camarilla levels
-    R1 = close_prior + 1.1 * (high_prior - low_prior) / 12
-    S1 = close_prior - 1.1 * (high_prior - low_prior) / 12
+    # Rolling VWAP (24 periods = 1 day)
+    vwap = pd.Series(vwap_numerator).rolling(window=24, min_periods=12).sum().values / \
+           pd.Series(vwap_denominator).rolling(window=24, min_periods=12).sum().values
     
-    # Volume filter: current volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
+    # VWAP deviation in ATR units
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    vwap_dev = (close - vwap) / atr  # Deviation in ATR multiples
+    
+    # Volume filter: current volume > 2x 24-period volume average
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_filter = volume > (vol_ma * 2.0)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(vwap_dev[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vdev = vwap_dev[i]
         vol_ok = vol_filter[i]
-        trend = ema34_12h_aligned[i]
+        sess_ok = session_filter[i]
+        trend = ema50_4h_aligned[i]
         
         if position == 0:
-            # Long: break above R1 with volume, in uptrend
-            if price > R1[i] and vol_ok and price > trend:
-                signals[i] = 0.25
+            # Long: price below VWAP with high volume, in uptrend (mean reversion long)
+            if vdev < -1.0 and vol_ok and sess_ok and price > trend:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S1 with volume, in downtrend
-            elif price < S1[i] and vol_ok and price < trend:
-                signals[i] = -0.25
+            # Short: price above VWAP with high volume, in downtrend (mean reversion short)
+            elif vdev > 1.0 and vol_ok and sess_ok and price < trend:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit if price returns to midpoint or trend weakens
-            midpoint = (R1[i] + S1[i]) / 2
-            if price < midpoint or price < trend:
+            # Exit if price returns to VWAP or trend weakens
+            if vdev > -0.2 or price < trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit if price returns to midpoint or trend weakens
-            midpoint = (R1[i] + S1[i]) / 2
-            if price > midpoint or price > trend:
+            # Exit if price returns to VWAP or trend weakens
+            if vdev < 0.2 or price > trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_Pivot_Breakout_Volume_12hTrend"
-timeframe = "4h"
+name = "1h_Volume_Spike_Reversion_4hTrend"
+timeframe = "1h"
 leverage = 1.0
