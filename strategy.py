@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_MonthlyVWAP_Deviation_Reversion_v1
-Hypothesis: Mean reversion to monthly VWAP with volume confirmation and ATR filter. 
-In both bull and bear markets, price tends to revert to monthly VWAP after extended deviations. 
-Enter long when price deviates >1.5σ below monthly VWAP with volume >1.5x average and ATR contraction.
-Enter short when price deviates >1.5σ above monthly VWAP with volume >1.5x average and ATR contraction.
-Exit when price returns to monthly VWAP or ATR expands indicating trend resumption.
-Uses 1d VWAP calculated from intraday data (approximated via typical price * volume) and resampled to monthly.
-Target: 15-25 trades/year via strict deviation threshold and volume/ATR filters.
+12h_RVOL_Donchian20_RSI_Confirmation_v1
+Hypothesis: Trade Donchian(20) breakouts on 12h with RVOL and RSI confirmation for breakout strength.
+RVOL (relative volume) > 1.5 confirms institutional interest, while RSI(14) avoids overextended entries.
+Works in bull/bear by capturing strong momentum moves with volume confirmation. Targets 15-30 trades/year.
 """
 
 import numpy as np
@@ -23,131 +19,98 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    typical = (high + low + close) / 3.0
     
-    # Get 1d data for monthly VWAP calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily typical price and volume
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    typical_1d = (high_1d + low_1d + close_1d) / 3.0
+    # 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate VWAP components: cumulative typical price * volume and cumulative volume
-    tpv = typical_1d * volume_1d
-    cum_tpv = np.cumsum(tpv)
-    cum_vol = np.cumsum(volume_1d)
+    # Donchian(20) channels
+    donchian_period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # Calculate daily VWAP (avoid division by zero)
-    vwap_1d = np.where(cum_vol > 0, cum_tpv / cum_vol, typical_1d)
+    for i in range(donchian_period - 1, n):
+        upper[i] = np.max(high[i - donchian_period + 1:i + 1])
+        lower[i] = np.min(low[i - donchian_period + 1:i + 1])
     
-    # Resample to monthly: take last VWAP of each month
-    # Create date index for 1d data
-    if len(df_1d) > 0:
-        dates_1d = pd.to_datetime(df_1d['open_time'])
-        # Find month ends
-        month_ends = (dates_1d.to_series().dt.to_period('M') != 
-                     dates_1d.to_series().shift(1).dt.to_period('M'))
-        month_ends.iloc[0] = True  # First day is always a month start
+    # RVOL: volume / average volume of last 20 periods
+    rvol_period = 20
+    rvol = np.full(n, np.nan)
+    if n >= rvol_period:
+        vol_ma = np.convolve(volume, np.ones(rvol_period)/rvol_period, mode='same')
+        # Handle edges
+        for i in range(rvol_period):
+            vol_ma[i] = np.mean(volume[:i+1]) if i+1 > 0 else np.nan
+        for i in range(n - rvol_period + 1, n):
+            vol_ma[i] = np.mean(volume[i-rvol_period+1:i+1]) if i-rvol_period+1 >= 0 else np.nan
+        rvol = volume / vol_ma
+        rvol[vol_ma == 0] = np.nan
+    
+    # RSI(14) for overextension filter
+    rsi_period = 14
+    rsi = np.full(n, np.nan)
+    if n >= rsi_period + 1:
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
         
-        # Get monthly VWAP values (last VWAP of each month)
-        monthly_vwap_raw = vwap_1d[month_ends.values]
-        monthly_dates = dates_1d[month_ends.values]
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
         
-        # Create monthly series and forward fill to daily
-        if len(monthly_vwap_raw) > 0:
-            monthly_series = pd.Series(monthly_vwap_raw, index=monthly_dates)
-            # Reindex to daily frequency and forward fill
-            daily_index = pd.date_range(start=dates_1d.iloc[0], 
-                                       end=dates_1d.iloc[-1], 
-                                       freq='D')
-            monthly_vwap_daily = monthly_series.reindex(daily_index, method='ffill')
-            # Align back to original daily index
-            vwap_monthly = np.interp(np.arange(len(dates_1d)), 
-                                   np.arange(len(daily_index)),
-                                   monthly_vwap_daily.values)
-        else:
-            vwap_monthly = vwap_1d.copy()
-    else:
-        vwap_monthly = typical_1d.copy()
-    
-    # Align monthly VWAP to 6h timeframe
-    vwap_monthly_aligned = align_htf_to_ltf(prices, df_1d, vwap_monthly)
-    
-    # Calculate deviation from monthly VWAP in ATR units
-    # First calculate ATR(14) on 6h data
-    atr_period = 14
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                   abs(high[i] - close[i-1]), 
-                   abs(low[i] - close[i-1]))
-    
-    atr = np.full(n, np.nan)
-    if n >= atr_period:
-        atr[atr_period-1] = np.mean(tr[:atr_period])
-        for i in range(atr_period, n):
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-    
-    # Calculate price deviation from monthly VWAP
-    deviation = close - vwap_monthly_aligned
-    deviation_atr = np.where(atr > 0, deviation / atr, 0)
-    
-    # Volume confirmation: volume > 1.5x 24-period average
-    vol_ma = np.full(n, np.nan)
-    vol_period = 24
-    if n >= vol_period:
-        for i in range(vol_period, n):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
-    
-    # ATR contraction filter: current ATR < 0.8 * ATR(50) average
-    atr_ma = np.full(n, np.nan)
-    atr_ma_period = 50
-    if n >= atr_ma_period:
-        for i in range(atr_ma_period, n):
-            atr_ma[i] = np.mean(atr[i - atr_ma_period:i])
-    
-    atr_contraction = (atr < 0.8 * atr_ma)
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+        
+        for i in range(rsi_period + 1, n):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(atr_period, vol_period, atr_ma_period) + 1
+    start_idx = max(donchian_period, rvol_period, rsi_period + 1)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vwap_monthly_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(rvol[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        atr_contract = atr_contraction[i]
+        # Trend filter: price above/below weekly EMA50
+        trend_filter_long = close[i] > ema_50_1w_aligned[i]
+        trend_filter_short = close[i] < ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: price >1.5σ below monthly VWAP + volume + ATR contraction
-            if deviation_atr[i] < -1.5 and vol_confirm and atr_contract:
+            # Long: break above upper band + RVOL > 1.5 + RSI < 70 (not overbought) + uptrend
+            if (close[i] > upper[i] and rvol[i] > 1.5 and rsi[i] < 70 and trend_filter_long):
                 signals[i] = 0.25
                 position = 1
-            # Short: price >1.5σ above monthly VWAP + volume + ATR contraction
-            elif deviation_atr[i] > 1.5 and vol_confirm and atr_contract:
+            # Short: break below lower band + RVOL > 1.5 + RSI > 30 (not oversold) + downtrend
+            elif (close[i] < lower[i] and rvol[i] > 1.5 and rsi[i] > 30 and trend_filter_short):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to VWAP or ATR expansion (trend resumption)
-            if deviation_atr[i] > -0.5 or not atr_contract:
+            # Long exit: break below lower band or RSI > 75 (overbought)
+            if close[i] < lower[i] or rsi[i] > 75:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to VWAP or ATR expansion (trend resumption)
-            if deviation_atr[i] < 0.5 or not atr_contract:
+            # Short exit: break above upper band or RSI < 25 (oversold)
+            if close[i] > upper[i] or rsi[i] < 25:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -155,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_MonthlyVWAP_Deviation_Reversion_v1"
-timeframe = "6h"
+name = "12h_RVOL_Donchian20_RSI_Confirmation_v1"
+timeframe = "12h"
 leverage = 1.0
