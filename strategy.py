@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need enough data for 6h and 1d calculations
+    if n < 100:  # Need enough data for calculations
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly calculations
+    # Get 1d data for weekly calculations (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -21,7 +21,6 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     
     # Calculate weekly high, low, close using previous 5 trading days (approximation)
-    # We use a rolling window of 5 days to get the weekly values
     weekly_high = np.full_like(high_1d, np.nan)
     weekly_low = np.full_like(low_1d, np.nan)
     weekly_close = np.full_like(close_1d, np.nan)
