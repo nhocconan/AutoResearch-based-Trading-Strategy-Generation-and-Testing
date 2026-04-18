@@ -1,35 +1,12 @@
 #!/usr/bin/env python3
 """
-12h Pivot Point Reversal + Volume Spike + 1d Trend Filter
-Hypothesis: At key pivot levels (R1/S1), price often reverses. Combined with volume spike (institutional interest) and 1d trend filter (price vs EMA34), it captures high-probability reversals in both bull and bear markets. Low trade frequency due to strict entry conditions.
+4h Camarilla Pivot Breakout with Volume and ADX Filter
+Hypothesis: Camarilla pivot levels (especially H3/L3) act as strong support/resistance. A breakout above H3 or below L3 with volume confirmation and ADX > 25 indicates a strong trend. This strategy targets trending moves while avoiding whipsaws in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
-
-def calculate_ema(data, span):
-    """Calculate EMA with proper handling of NaN"""
-    result = np.full_like(data, np.nan, dtype=float)
-    if len(data) == 0:
-        return result
-    alpha = 2 / (span + 1)
-    result[0] = data[0]
-    for i in range(1, len(data)):
-        if np.isnan(data[i]):
-            result[i] = result[i-1]
-        else:
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-    return result
-
-def calculate_pivot_points(high, low, close):
-    """Calculate classic pivot points: P, R1, S1, R2, S2"""
-    p = (high + low + close) / 3.0
-    r1 = 2 * p - low
-    s1 = 2 * p - high
-    r2 = p + (high - low)
-    s2 = p - (high - low)
-    return p, r1, s1, r2, s2
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -41,83 +18,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for pivot points (our trading timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # Calculate pivot points on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate pivot points for each 12h bar
-    p_vals, r1_vals, s1_vals, r2_vals, s2_vals = calculate_pivot_points(high_12h, low_12h, close_12h)
-    
-    # Align pivot levels to lower timeframe (15m equivalent, but we'll use close alignment)
-    p_aligned = align_ltf_to_htf(prices, df_12h, p_vals)
-    r1_aligned = align_ltf_to_htf(prices, df_12h, r1_vals)
-    s1_aligned = align_ltf_to_htf(prices, df_12h, s1_vals)
-    
-    # Get 1d data for trend filter (EMA34)
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = calculate_ema(close_1d, 34)
-    ema_34_1d_aligned = align_ltf_to_htf(prices, df_1d, ema_34_1d)
+    # Calculate Camarilla pivot levels on 1d data
+    # Camarilla formulas:
+    # H4 = close + 1.5*(high-low)
+    # H3 = close + 1.1*(high-low)
+    # H2 = close + 0.55*(high-low)
+    # H1 = close + 0.275*(high-low)
+    # L1 = close - 0.275*(high-low)
+    # L2 = close - 0.55*(high-low)
+    # L3 = close - 1.1*(high-low)
+    # L4 = close - 1.5*(high-low)
     
-    # Volume spike: current volume > 2.5x 24-period average (24*12h = 12 days)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate pivot levels for each day
+    H3 = close_1d + 1.1 * (high_1d - low_1d)
+    L3 = close_1d - 1.1 * (high_1d - low_1d)
+    
+    # Align H3 and L3 to 4h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Calculate ADX on 4h data for trend strength
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Wilder smoothing (using alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        # Initial value: simple average
+        result[period-1] = np.mean(data[:period])
+        # Wilder smoothing: new = (old * (period-1) + new) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / np.where(atr != 0, atr, 1)
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / np.where(atr != 0, atr, 1)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
+    
+    # Volume spike: current volume > 1.8x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i < 24:
-            vol_ma[i] = np.mean(volume[max(0, i-23):i+1]) if i >= 0 else volume[i]
+        if i < 20:
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1])
         else:
-            vol_ma[i] = np.mean(volume[i-23:i+1])
-    vol_spike = volume > (vol_ma * 2.5)
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(p_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]):
+        if np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        p_val = p_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_34 = ema_34_1d_aligned[i]
+        h3_val = H3_aligned[i]
+        l3_val = L3_aligned[i]
+        adx_val = adx[i]
         vol_ok = vol_spike[i]
         
         if position == 0:
-            # Enter long: price at or below S1 with bullish bias (price > EMA34) + volume spike
-            if (close[i] <= s1_val * 1.002 and  # Allow small buffer
-                close[i] > ema_34 and
+            # Enter long: price breaks above H3 with volume and trend
+            if (close[i] > h3_val and 
+                adx_val > 25 and 
                 vol_ok):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price at or above R1 with bearish bias (price < EMA34) + volume spike
-            elif (close[i] >= r1_val * 0.998 and  # Allow small buffer
-                  close[i] < ema_34 and
+            # Enter short: price breaks below L3 with volume and trend
+            elif (close[i] < l3_val and 
+                  adx_val > 25 and 
                   vol_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above R1 or trend turns bearish
-            if close[i] >= r1_val or close[i] < ema_34:
+            # Exit long: price falls back below H3 or trend weakens
+            if close[i] < h3_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses below S1 or trend turns bullish
-            if close[i] <= s1_val or close[i] > ema_34:
+            # Exit short: price rises back above L3 or trend weakens
+            if close[i] > l3_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_PivotPoint_Reversal_VolumeSpike_1dTrendFilter"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
