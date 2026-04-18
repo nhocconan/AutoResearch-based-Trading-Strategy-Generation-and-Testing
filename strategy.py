@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_Confirmation_v3
-Hypothesis: Tighten entry conditions by requiring consecutive volume confirmation and stricter price breakout to reduce trade frequency (~25-35/year) while maintaining edge. Uses 1d Camarilla R1/S1 levels, volume spike (2x 20-period average), and 12h EMA trend filter. Designed to work in both bull and bear markets by following institutional breakouts with confirmation.
+1d_KAMA_Trend_With_WeeklyTrend_Filter_v1
+Hypothesis: Use KAMA to capture trend direction on 1d timeframe, filtered by weekly trend (EMA34) and volume confirmation. KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing strong trends. Weekly trend filter ensures we only trade in the direction of the higher timeframe trend, improving win rate in both bull and bear markets. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,76 +18,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day (1d timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # KAMA calculation (adaptive moving average)
+    # ER = Efficiency Ratio = abs(close - close[10]) / sum(abs(close - close[1:11]))
+    # SSC = [ER * (fastest - slowest) + slowest]^2
+    # KAMA = prevKAMA + SSC * (close - prevKAMA)
+    lookback = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    # Camarilla calculation: R1/S1 from previous day
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    camarilla_range = high_1d - low_1d
-    r1_1d = close_1d + (1.1 * camarilla_range) / 12
-    s1_1d = close_1d - (1.1 * camarilla_range) / 12
+    # Calculate change and volatility
+    change = np.abs(np.diff(close, n=lookback))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
     
-    # Align to 4h timeframe (use previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Avoid division by zero
+    volatility = np.where(volatility == 0, 1, volatility)
+    er = np.concatenate([np.full(lookback, np.nan), change / volatility])
     
-    # 12h EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate SSC
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Volume confirmation: >2.0x 20-period average (stricter than before)
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[lookback] = close[lookback]  # Initialize
+    
+    for i in range(lookback + 1, n):
+        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Weekly trend filter: EMA34 on weekly timeframe
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume confirmation: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 100
+    start_idx = 50  # Wait for KAMA initialization
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        ema_12h_val = ema_12h_aligned[i]
-        vol_spike = volume_spike[i]
+        kama_val = kama[i]
+        weekly_trend = ema_34_1w_aligned[i]
+        vol_conf = volume_confirmed[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume and above 12h EMA
-            if price > r1 and vol_spike and price > ema_12h_val:
+            # Long: price above KAMA, above weekly trend, with volume confirmation
+            if price > kama_val and price > weekly_trend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and below 12h EMA
-            elif price < s1 and vol_spike and price < ema_12h_val:
+            # Short: price below KAMA, below weekly trend, with volume confirmation
+            elif price < kama_val and price < weekly_trend and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price below S1 or below 12h EMA
-            if price < s1 or price < ema_12h_val:
+            # Exit: price below KAMA or below weekly trend
+            if price < kama_val or price < weekly_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price above R1 or above 12h EMA
-            if price > r1 or price > ema_12h_val:
+            # Exit: price above KAMA or above weekly trend
+            if price > kama_val or price > weekly_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Confirmation_v3"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_WeeklyTrend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
