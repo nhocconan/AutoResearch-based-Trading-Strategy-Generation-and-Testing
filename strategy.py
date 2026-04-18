@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_BollingerBandwidth_Breakout_Volume_Trend
-Hypothesis: Breakouts from Bollinger Bandwidth extremes with volume confirmation and EMA trend filter work in both bull and bear markets.
-In low volatility (bandwidth < 20th percentile), price often breaks out with momentum. High bandwidth (>80th) signals exhaustion.
-Uses Bollinger Bands (20,2) to define dynamic channels. Requires volume > 1.3x 20-period average and EMA20 alignment.
-Targets 20-30 trades/year (80-120 total) to avoid fee drag while capturing volatility expansion moves.
+12h_Weekly_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend
+Hypothesis: 12h price breaks above/below weekly Camarilla pivot levels (R1/S1) with volume confirmation and daily EMA34 trend filter.
+Designed to capture high-probability breakouts in both bull and bear markets by combining weekly structure, volume, and trend alignment.
+Target: 12-30 trades/year (50-120 total over 4 years) to minimize fee drift and maximize edge.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,77 +20,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # --- Weekly HTF Camarilla Pivots (from weekly high/low/close) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
     
-    # Bandwidth = (Upper - Lower) / Middle
-    bb_width = (upper_bb - lower_bb) / sma_20
+    # Calculate Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Using weekly OHLC
+    wk_high = df_1w['high'].values
+    wk_low = df_1w['low'].values
+    wk_close = df_1w['close'].values
     
-    # Percentile lookback for regime (252 days ~ 252*6=1512 bars for 4h)
-    lookback = min(1512, i if 'i' in locals() else 1512)  # Will be computed in loop
-    # We'll compute percentile in loop to avoid look-ahead
+    camarilla_width = (wk_high - wk_low) * 1.1 / 12
+    r1 = wk_close + camarilla_width
+    s1 = wk_close - camarilla_width
     
-    # Volume filter: >1.3x 20-period average
+    # Align to 12h timeframe (wait for weekly bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # --- Daily HTF EMA34 Trend Filter ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
+        return np.zeros(n)
+    
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # --- 12h Indicators ---
+    # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
-    
-    # EMA20 trend filter
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Warmup for BB and volume MA
+    start_idx = 34  # Warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(bb_width[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_bb[i]
-        lower = lower_bb[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        ema34 = ema_34_aligned[i]
         vol_ok = volume_filter[i]
-        ema20 = ema_20[i]
-        
-        # Calculate bandwidth percentile lookback (up to 252 days)
-        lb_start = max(0, i - 1512)
-        bb_width_slice = bb_width[lb_start:i+1]
-        if len(bb_width_slice) < 20:  # Need minimum for percentile
-            bandwidth_pct = 50  # neutral
-        else:
-            bandwidth_pct = (bb_width_slice <= bb_width[i]).sum() * 100.0 / len(bb_width_slice)
         
         if position == 0:
-            # Long: breakout above upper BB in low volatility (bandwidth < 20th percentile) with volume in uptrend
-            if price > upper and bandwidth_pct < 20 and vol_ok and price > ema20:
+            # Long: break above R1 with volume in uptrend (price > EMA34)
+            if price > r1_level and vol_ok and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below lower BB in low volatility with volume in downtrend
-            elif price < lower and bandwidth_pct < 20 and vol_ok and price < ema20:
+            # Short: break below S1 with volume in downtrend (price < EMA34)
+            elif price < s1_level and vol_ok and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns to middle (SMA) or volatility expands (bandwidth > 80th)
-            if price < sma_20[i] or bandwidth_pct > 80:
+            # Exit: price returns to midpoint of R1-S1 or trend reverses
+            midpoint = (r1_level + s1_level) / 2
+            if price < midpoint or price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price returns to middle (SMA) or volatility expands (bandwidth > 80th)
-            if price > sma_20[i] or bandwidth_pct > 80:
+            # Exit: price returns to midpoint of R1-S1 or trend reverses
+            midpoint = (r1_level + s1_level) / 2
+            if price > midpoint or price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_BollingerBandwidth_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "12h_Weekly_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
