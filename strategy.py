@@ -1,12 +1,8 @@
-#!/usr/bin/env python3
-"""
-4h_VWAP_Breakout_12hTrend
-Hypothesis: On 4h timeframe, price breaking above/below VWAP with 12h EMA34 trend confirmation and volume surge captures institutional flow. 
-VWAP acts as dynamic support/resistance; breakouts with volume indicate strong momentum. 
-12h EMA34 filters for higher timeframe trend to avoid counter-trend trades. 
-Designed for 20-35 trades/year with clear entry/exit rules to minimize whipsaw and fee impact.
-Works in bull/bear by following higher timeframe trend direction only.
-"""
+# 1h_MultiTF_Breakout_Momentum
+# Hypothesis: Combines 4h Donchian breakout with 1d momentum filter and volume confirmation.
+# Uses 4h for trend direction, 1d for regime filter, and 1h for precise entry timing.
+# Designed for low trade frequency (15-25/year) to avoid fee drag, works in both bull and bear markets.
+# Volume spike and momentum filter reduce false breakouts.
 
 import numpy as np
 import pandas as pd
@@ -17,73 +13,121 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # VWAP calculation (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    tpv = typical_price * volume
-    cum_tpv = np.nancumsum(tpv)
-    cum_vol = np.nancumsum(volume)
-    vwap = np.where(cum_vol != 0, cum_tpv / cum_vol, 0.0)
+    # === 4H DONCHIAN CHANNEL (20-period) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # 12h EMA34 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema34_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 34:
-        ema34_12h[33] = np.mean(close_12h[:34])
-        k = 2 / (34 + 1)
-        for i in range(34, len(close_12h)):
-            ema34_12h[i] = close_12h[i] * k + ema34_12h[i-1] * (1 - k)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Donchian channels: 20-period high/low
+    donch_high = np.full(len(high_4h), np.nan)
+    donch_low = np.full(len(low_4h), np.nan)
+    for i in range(20, len(high_4h)):
+        donch_high[i] = np.max(high_4h[i-20:i])
+        donch_low[i] = np.min(low_4h[i-20:i])
     
-    # Volume confirmation: current volume > 2.0 x 20-period average
-    vol_ma20 = np.full(n, np.nan)
+    # Breakout signals
+    breakout_up = high_4h > donch_high  # New 20-period high
+    breakout_down = low_4h < donch_low   # New 20-period low
+    
+    # Align to 1h timeframe (wait for 4h bar to close)
+    breakout_up_1h = align_htf_to_ltf(prices, df_4h, breakout_up.astype(float))
+    breakout_down_1h = align_htf_to_ltf(prices, df_4h, breakout_down.astype(float))
+    
+    # === 1D MOMENTUM FILTER (RSI > 50 for uptrend, < 50 for downtrend) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # RSI(14) on daily
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(len(close_1d), np.nan)
+    avg_loss = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:14])
+            avg_loss[i] = np.mean(loss[0:14])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    
+    rs = np.full(len(close_1d), np.nan)
+    rsi_1d = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi_1d[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi_1d[i] = 100
+    
+    # Momentum filter: RSI > 50 = bullish regime, RSI < 50 = bearish regime
+    bullish_regime = rsi_1d > 50
+    bearish_regime = rsi_1d < 50
+    
+    # Align to 1h
+    bullish_regime_1h = align_htf_to_ltf(prices, df_1d, bullish_regime.astype(float))
+    bearish_regime_1h = align_htf_to_ltf(prices, df_1d, bearish_regime.astype(float))
+    
+    # === 1H VOLUME CONFIRMATION ===
+    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma20[i] = np.mean(volume[i-20:i])
-    vol_surge = volume > (vol_ma20 * 2.0)
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 1.5)  # 50% above average
+    
+    # === SESSION FILTER (08-20 UTC) ===
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for VWAP and volume MA
+    start_idx = 50  # Warmup
     
     for i in range(start_idx, n):
-        if np.isnan(vwap[i]) or np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma20[i]):
+        if (np.isnan(breakout_up_1h[i]) or np.isnan(breakout_down_1h[i]) or 
+            np.isnan(bullish_regime_1h[i]) or np.isnan(bearish_regime_1h[i]) or
+            np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        if not session_filter[i]:
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price crosses above VWAP with uptrend and volume surge
-            if close[i] > vwap[i] and close[i-1] <= vwap[i-1] and ema34_12h_aligned[i] > ema34_12h_aligned[i-1] and vol_surge[i]:
-                signals[i] = 0.25
+            # Long: 4h bullish breakout + 1d bullish regime + volume spike
+            if breakout_up_1h[i] > 0.5 and bullish_regime_1h[i] > 0.5 and vol_spike[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price crosses below VWAP with downtrend and volume surge
-            elif close[i] < vwap[i] and close[i-1] >= vwap[i-1] and ema34_12h_aligned[i] < ema34_12h_aligned[i-1] and vol_surge[i]:
-                signals[i] = -0.25
+            # Short: 4h bearish breakout + 1d bearish regime + volume spike
+            elif breakout_down_1h[i] > 0.5 and bearish_regime_1h[i] > 0.5 and vol_spike[i]:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below VWAP or trend turns down
-            if close[i] < vwap[i] or ema34_12h_aligned[i] <= ema34_12h_aligned[i-1]:
+            # Exit: 4h bearish breakout or 1d turns bearish
+            if breakout_down_1h[i] > 0.5 or bearish_regime_1h[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: price crosses above VWAP or trend turns up
-            if close[i] > vwap[i] or ema34_12h_aligned[i] >= ema34_12h_aligned[i-1]:
+            # Exit: 4h bullish breakout or 1d turns bullish
+            if breakout_up_1h[i] > 0.5 or bullish_regime_1h[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_VWAP_Breakout_12hTrend"
-timeframe = "4h"
+name = "1h_MultiTF_Breakout_Momentum"
+timeframe = "1h"
 leverage = 1.0
