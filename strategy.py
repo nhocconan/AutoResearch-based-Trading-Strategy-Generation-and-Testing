@@ -24,7 +24,7 @@ def generate_signals(prices):
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first TR
+    tr1[0] = high_1d[0] - low_1d[0]
     tr2[0] = np.abs(high_1d[0] - close_1d[0])
     tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
