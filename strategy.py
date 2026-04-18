@@ -1,8 +1,11 @@
-# %%
 #!/usr/bin/env python3
 """
-12h_Bollinger_Band_Width_Breakout_Volume_Trend
-Hypothesis: Price breaks above/below Bollinger Bands when Bollinger Band Width is in low volatility regime (indicating compression) with volume confirmation and EMA trend filter. Uses Bollinger Band Width percentile to identify low volatility periods, then trades breakouts from the bands. Designed to capture volatility expansion moves in both bull and bear markets with tight entry conditions. Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+4h_Camarilla_R1S1_R2S2_Breakout_Volume_Trend_Filter
+Hypothesis: Price breaks above Camarilla R1/S1 or R2/S2 levels with volume confirmation and EMA trend filter.
+Camarilla levels derived from prior day's range provide institutional support/resistance.
+Works in bull markets by buying breakouts above resistance, in bear markets by selling breakdowns below support.
+Volume confirms institutional participation. EMA20 ensures trend alignment to avoid counter-trend trades.
+Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -11,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,22 +22,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_20 + bb_std * bb_std_dev
-    lower_band = sma_20 - bb_std * bb_std_dev
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Bollinger Band Width
-    bb_width = (upper_band - lower_band) / sma_20
+    # Calculate Camarilla levels from prior day's range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bollinger Band Width percentile (50-period lookback)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Camarilla multipliers
+    R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    R2 = close_1d + 1.1 * (high_1d - low_1d) / 6
+    S2 = close_1d - 1.1 * (high_1d - low_1d) / 6
+    
+    # Align to 4h timeframe (use prior day's levels)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
     
     # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,49 +54,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Warmup for BB width percentile
+    start_idx = 20  # Warmup for volume MA and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(bb_width_percentile[i]) or np.isnan(volume_filter[i]) or
-            np.isnan(ema_20[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        bb_width_pct = bb_width_percentile[i]
         vol_ok = volume_filter[i]
         ema20 = ema_20[i]
         
         if position == 0:
-            # Long: price breaks above upper band in low volatility regime (BB width < 20th percentile) with volume in uptrend
-            if price > upper and bb_width_pct < 20 and vol_ok and price > ema20:
+            # Long: price breaks above R1 or R2 with volume in uptrend
+            if ((price > R1_aligned[i] or price > R2_aligned[i]) and vol_ok and price > ema20):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band in low volatility regime (BB width < 20th percentile) with volume in downtrend
-            elif price < lower and bb_width_pct < 20 and vol_ok and price < ema20:
+            # Short: price breaks below S1 or S2 with volume in downtrend
+            elif ((price < S1_aligned[i] or price < S2_aligned[i]) and vol_ok and price < ema20):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns to middle (SMA) or trend reverses
-            if price < sma_20[i] or price < ema20:
+            # Exit: price returns to S1 or trend reverses
+            if price < S1_aligned[i] or price < ema20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price returns to middle (SMA) or trend reverses
-            if price > sma_20[i] or price > ema20:
+            # Exit: price returns to R1 or trend reverses
+            if price > R1_aligned[i] or price > ema20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Bollinger_Band_Width_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_R2S2_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
-# %%
