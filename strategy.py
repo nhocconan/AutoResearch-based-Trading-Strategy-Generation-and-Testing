@@ -1,68 +1,102 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud Breakout with Daily Trend Filter
-- Uses 6-hour Ichimoku system: TK cross + price above/below cloud
-- Confirms trend with 1-day price above/below 50 EMA
-- Volume confirmation: 6h volume > 1.5x 20-period average
-- Designed for 15-30 trades/year (60-120 total) to minimize fee drift
+12h Camarilla Pivot R1/S1 Breakout with Volume Spike and 1d ADX Filter
+- Uses 12-hour Camarilla pivot levels (R1, S1) from prior 1-day calculation
+- Confirms with 12-hour volume > 2.0x 20-period average
+- Filters by 1-day ADX > 25 to ensure trending market
+- Exits on opposite Camarilla level touch
+- Designed for 12-37 trades/year (50-150 total) to minimize fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku components: tenkan, kijun, senkou A/B, chikou."""
-    n = len(high)
-    tenkan = np.full(n, np.nan)
-    kijun = np.full(n, np.nan)
-    senkou_a = np.full(n, np.nan)
-    senkou_b = np.full(n, np.nan)
-    
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    for i in range(8, n):
-        tenkan[i] = (np.max(high[i-8:i+1]) + np.min(low[i-8:i+1])) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    for i in range(25, n):
-        kijun[i] = (np.max(high[i-25:i+1]) + np.min(low[i-25:i+1])) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    for i in range(n):
-        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
-            idx = i + 26
-            if idx < n:
-                senkou_a[idx] = (tenkan[i] + kijun[i]) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    for i in range(51, n):
-        senkou_b[i+26] = (np.max(high[i-51:i+1]) + np.min(low[i-51:i+1])) / 2
-    
-    return tenkan, kijun, senkou_a, senkou_b
-
-def calculate_ema(arr, period):
-    """Calculate Exponential Moving Average."""
-    ema = np.full(len(arr), np.nan)
-    if len(arr) < period:
-        return ema
-    multiplier = 2 / (period + 1)
-    ema[period-1] = np.mean(arr[:period])
-    for i in range(period, len(arr)):
-        ema[i] = (arr[i] - ema[i-1]) * multiplier + ema[i-1]
-    return ema
+def calculate_camarilla_pivot(high, low, close):
+    """Calculate Camarilla pivot levels for given OHLC."""
+    # Pivot point
+    pivot = (high + low + close) / 3.0
+    # Range
+    range_hl = high - low
+    # Camarilla levels
+    r1 = close + range_hl * 1.1 / 12
+    s1 = close - range_hl * 1.1 / 12
+    r2 = close + range_hl * 1.1 / 6
+    s2 = close - range_hl * 1.1 / 6
+    r3 = close + range_hl * 1.1 / 4
+    s3 = close - range_hl * 1.1 / 4
+    r4 = close + range_hl * 1.1 / 2
+    s4 = close - range_hl * 1.1 / 2
+    return r1, s1, r2, s2, r3, s3, r4, s4
 
 def calculate_sma(arr, period):
-    """Calculate Simple Moving Average."""
+    """Calculate Simple Moving Average with NaN for insufficient data."""
     sma = np.full(len(arr), np.nan)
-    if len(arr) < period:
-        return sma
-    for i in range(period-1, len(arr)):
-        sma[i] = np.mean(arr[i-period+1:i+1])
+    if len(arr) >= period:
+        for i in range(period-1, len(arr)):
+            sma[i] = np.mean(arr[i-period+1:i+1])
     return sma
+
+def calculate_adx(high, low, close, period):
+    """Calculate Average Directional Index with proper smoothing."""
+    if len(high) < period * 2:
+        return np.full(len(high), np.nan)
+    
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smooth TR and DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    atr = np.full(len(tr), np.nan)
+    if len(tr) >= period:
+        atr[period-1] = np.nanmean(tr[1:period])
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    
+    dm_plus_smooth = np.full(len(dm_plus), np.nan)
+    dm_minus_smooth = np.full(len(dm_minus), np.nan)
+    if len(dm_plus) >= period:
+        dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period])
+        dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period])
+        for i in range(period, len(dm_plus)):
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
+    
+    # Directional Indicators
+    plus_di = np.full(len(dm_plus), np.nan)
+    minus_di = np.full(len(dm_minus), np.nan)
+    for i in range(period, len(atr)):
+        if atr[i] != 0:
+            plus_di[i] = 100 * dm_plus_smooth[i] / atr[i]
+            minus_di[i] = 100 * dm_minus_smooth[i] / atr[i]
+    
+    # DX and ADX
+    dx = np.full(len(plus_di), np.nan)
+    for i in range(period, len(plus_di)):
+        if (plus_di[i] + minus_di[i]) != 0:
+            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    
+    adx = np.full(len(dx), np.nan)
+    if len(dx) >= 2 * period - 1:
+        adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
+        for i in range(2*period-1, len(dx)):
+            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -70,88 +104,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h Ichimoku data
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
-    
-    # Calculate Ichimoku components on 6h
-    tenkan_6h, kijun_6h, senkou_a_6h, senkou_b_6h = calculate_ichimoku(high_6h, low_6h, close_6h)
-    
-    # Calculate 6h volume moving average (20-period)
-    vol_ma_6h = calculate_sma(volume_6h, 20)
-    
-    # Get 1d data for trend filter (50 EMA)
+    # Get 1d data for Camarilla pivot calculation and ADX filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = calculate_ema(close_1d, 50)
     
-    # Align 6h indicators to 6h timeframe
-    tenkan_6h_aligned = align_htf_to_ltf(prices, df_6h, tenkan_6h)
-    kijun_6h_aligned = align_htf_to_ltf(prices, df_6h, kijun_6h)
-    senkou_a_6h_aligned = align_htf_to_ltf(prices, df_6h, senkou_a_6h)
-    senkou_b_6h_aligned = align_htf_to_ltf(prices, df_6h, senkou_b_6h)
-    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
+    # Calculate 1-day Camarilla pivot levels (R1, S1)
+    r1_1d, s1_1d, r2_1d, s2_1d, r3_1d, s3_1d, r4_1d, s4_1d = calculate_camarilla_pivot(high_1d, low_1d, close_1d)
     
-    # Align 1d EMA to 6h timeframe
-    ema_50_1d_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1-day ADX (14-period)
+    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    
+    # Get 12h data for price and volume
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
+    
+    # Calculate 12h volume moving average (20-period)
+    vol_ma_12h = calculate_sma(volume_12h, 20)
+    
+    # Align 1d indicators to 12h timeframe
+    r1_1d_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    adx_14_1d_12h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    
+    # Align 12h volume MA to 12h timeframe (no alignment needed)
+    vol_ma_12h_aligned = vol_ma_12h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # need sufficient data for Ichimoku (52+26) and EMA
+    start_idx = 40  # need sufficient data for volume MA and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan_6h_aligned[i]) or np.isnan(kijun_6h_aligned[i]) or 
-            np.isnan(senkou_a_6h_aligned[i]) or np.isnan(senkou_b_6h_aligned[i]) or
-            np.isnan(vol_ma_6h_aligned[i]) or np.isnan(ema_50_1d_6h[i])):
+        if (np.isnan(r1_1d_12h[i]) or np.isnan(s1_1d_12h[i]) or 
+            np.isnan(vol_ma_12h_aligned[i]) or np.isnan(adx_14_1d_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 6h volume for current 6h bar
-        vol_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_6h)
+        # Get aligned 12h volume for current 12h bar
+        vol_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
         
-        # Volume confirmation: current 6h volume > 1.5x 20-period average
-        vol_confirm = vol_6h_aligned[i] > 1.5 * vol_ma_6h_aligned[i]
-        
-        # Determine cloud boundaries (senkou A/B)
-        cloud_top = np.maximum(senkou_a_6h_aligned[i], senkou_b_6h_aligned[i])
-        cloud_bottom = np.minimum(senkou_a_6h_aligned[i], senkou_b_6h_aligned[i])
-        
-        # Ichimoku signals
-        tk_cross_bull = tenkan_6h_aligned[i] > kijun_6h_aligned[i]
-        tk_cross_bear = tenkan_6h_aligned[i] < kijun_6h_aligned[i]
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
-        # Daily trend filter
-        uptrend = close[i] > ema_50_1d_6h[i]
-        downtrend = close[i] < ema_50_1d_6h[i]
+        # Volume confirmation: current 12h volume > 2.0x 20-period average
+        vol_spike = vol_12h_aligned[i] > 2.0 * vol_ma_12h_aligned[i]
         
         if position == 0:
-            # Long: bullish TK cross + price above cloud + uptrend + volume
-            if tk_cross_bull and price_above_cloud and uptrend and vol_confirm:
+            # Long: price above R1 level, volume spike, ADX > 25
+            if close[i] > r1_1d_12h[i] and vol_spike and adx_14_1d_12h[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish TK cross + price below cloud + downtrend + volume
-            elif tk_cross_bear and price_below_cloud and downtrend and vol_confirm:
+            # Short: price below S1 level, volume spike, ADX > 25
+            elif close[i] < s1_1d_12h[i] and vol_spike and adx_14_1d_12h[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below cloud OR bearish TK cross
-            if price_below_cloud or tk_cross_bear:
+            # Long exit: price touches or goes below S1 level
+            if close[i] < s1_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above cloud OR bullish TK cross
-            if price_above_cloud or tk_cross_bull:
+            # Short exit: price touches or goes above R1 level
+            if close[i] > r1_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -159,6 +180,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_VolumeSpike_ADX14"
+timeframe = "12h"
 leverage = 1.0
