@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_1wTrend_Volume
-Hypothesis: Trade Donchian(20) breakouts on daily timeframe with weekly trend filter and volume confirmation.
-Long when price breaks above 20-day high AND weekly EMA34 trend is up (price > weekly EMA34) AND volume > 1.5x 20-day average volume.
-Short when price breaks below 20-day low AND weekly EMA34 trend is down (price < weekly EMA34) AND volume > 1.5x 20-day average volume.
-Exit when price crosses weekly EMA34 in opposite direction or volatility contraction (ATR < 0.5x 20-day ATR average).
-Designed for low frequency (~10-25 trades/year) to minimize fee drag while capturing major trends in bull/bear markets.
+12h_Camarilla_Pivot_R1_S1_Breakout_Volume_1dTrendFilter
+Hypothesis: Trade Camarilla pivot breakouts on 12h with 1d trend filter and volume confirmation. The Camarilla pivot system identifies key intraday support/resistance levels (R1, S1) based on prior day's range. In trending markets, price often breaks these levels with momentum. We filter for 1d trend using EMA34 to avoid counter-trend trades. Volume confirmation ensures breakout validity. Targets 15-30 trades/year via strict entry conditions. Works in bull/bear by following the 1d trend direction. Uses 1d EMA34 as trend filter to avoid whipsaw in sideways markets.
 """
 
 import numpy as np
@@ -22,100 +18,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA34 for trend filter
+    # 1d EMA34 for trend filter
     ema_period = 34
-    ema_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= ema_period:
-        ema_1w[ema_period-1] = np.mean(close_1w[:ema_period])
-        for i in range(ema_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 / (ema_period + 1)) + (ema_1w[i-1] * (ema_period - 1) / (ema_period + 1))
+    close_1d = df_1d['close'].values
+    ema_1d = np.full_like(close_1d, np.nan)
     
-    # Align weekly EMA to daily timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * (2 / (ema_period + 1))) + (ema_1d[i-1] * (1 - (2 / (ema_period + 1))))
     
-    # Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
+    # Align 1d EMA34 to 12h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    if len(high) >= lookback:
-        for i in range(lookback-1, len(high)):
-            highest_high[i] = np.max(high[i-lookback+1:i+1])
-            lowest_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    # Volume confirmation: volume > 1.5x 20-day average volume
-    vol_lookback = 20
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= vol_lookback:
-        for i in range(vol_lookback, len(volume)):
-            vol_ma[i] = np.mean(volume[i-vol_lookback:i])
-    
-    # ATR for volatility-based exit
-    atr_period = 14
-    tr = np.zeros_like(close)
-    atr = np.full_like(close, np.nan)
-    
-    if len(high) >= 2:
-        tr[0] = high[0] - low[0]
-        for i in range(1, len(close)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We'll calculate these for each 1d bar and align to 12h
+    if len(df_1d) >= 2:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
         
-        if len(tr) >= atr_period:
-            atr[atr_period-1] = np.mean(tr[:atr_period])
-            for i in range(atr_period, len(tr)):
-                atr[i] = (tr[i] * 2 / (atr_period + 1)) + (atr[i-1] * (atr_period - 1) / (atr_period + 1))
+        camarilla_r1 = np.full_like(close_1d, np.nan)
+        camarilla_s1 = np.full_like(close_1d, np.nan)
+        
+        for i in range(1, len(close_1d)):
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            prev_close = close_1d[i-1]
+            range_val = prev_high - prev_low
+            
+            camarilla_r1[i] = prev_close + (range_val * 1.1 / 12)
+            camarilla_s1[i] = prev_close - (range_val * 1.1 / 12)
+        
+        # Align Camarilla levels to 12h timeframe
+        r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+        s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    else:
+        r1_aligned = np.full(n, np.nan)
+        s1_aligned = np.full(n, np.nan)
     
-    # ATR average for volatility filter
-    atr_lookback = 20
-    atr_ma = np.full_like(atr, np.nan)
-    if len(atr) >= atr_lookback:
-        for i in range(atr_lookback, len(atr)):
-            atr_ma[i] = np.mean(atr[i-atr_lookback:i])
+    # Volume confirmation: volume > 1.5x 24-period average
+    vol_ma = np.full_like(volume, np.nan)
+    vol_period = 24
+    
+    if len(volume) >= vol_period:
+        for i in range(vol_period, len(volume)):
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, vol_lookback, atr_lookback, ema_period) + 1
+    start_idx = max(30, vol_period)  # Need enough data for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_1w_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Volatility filter: avoid trading in extremely low volatility
-        vol_filter = atr[i] > 0.5 * atr_ma[i]
-        
         if position == 0:
-            # Long: price breaks above 20-day high AND weekly trend up AND volume confirmation AND volatility filter
-            if close[i] > highest_high[i-1] and close[i] > ema_1w_aligned[i] and vol_confirm and vol_filter:
+            # Long: price breaks above R1 + 1d uptrend (price > EMA34) + volume
+            if close[i] > r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low AND weekly trend down AND volume confirmation AND volatility filter
-            elif close[i] < lowest_low[i-1] and close[i] < ema_1w_aligned[i] and vol_confirm and vol_filter:
+            # Short: price breaks below S1 + 1d downtrend (price < EMA34) + volume
+            elif close[i] < s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly EMA OR volatility contraction
-            if close[i] < ema_1w_aligned[i] or not vol_filter:
+            # Long exit: price breaks below S1 or 1d trend turns down
+            if close[i] < s1_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly EMA OR volatility contraction
-            if close[i] > ema_1w_aligned[i] or not vol_filter:
+            # Short exit: price breaks above R1 or 1d trend turns up
+            if close[i] > r1_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -123,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_R1_S1_Breakout_Volume_1dTrendFilter"
+timeframe = "12h"
 leverage = 1.0
