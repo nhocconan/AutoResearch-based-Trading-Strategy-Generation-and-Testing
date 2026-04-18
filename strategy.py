@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_PriceChannel_Breakout_Volume_Trend
-Hypothesis: Trade weekly Donchian channel breakouts on daily timeframe with volume confirmation and weekly trend filter. Enter long when price breaks above weekly Donchian high (20-period) with volume > 1.5x 20-day average and weekly EMA34 trending up. Enter short when price breaks below weekly Donchian low with volume confirmation and weekly EMA34 trending down. Target 10-25 trades/year via weekly breakout rarity. Works in bull/bear by following weekly trend. Uses volume confirmation to avoid false breakouts.
+4h_1d_TRIX_VolumeSpike_TrendFilter
+Hypothesis: On 4h timeframe, use TRIX (15-period) to identify momentum direction, confirmed by volume spikes (>2x 20-period average) and filtered by 1d EMA50 trend. Enter long when TRIX crosses above zero with volume spike and 1d EMA50 uptrend; short when TRIX crosses below zero with volume spike and 1d EMA50 downtrend. Exit when TRIX crosses back through zero or volume drops below average. Uses TRIX's smoothing to reduce whipsaw and volume confirmation to ensure momentum validity. Targets 20-35 trades/year per symbol via strict entry conditions. Works in bull/bear by following 1d trend filter.
 """
 
 import numpy as np
@@ -14,42 +14,51 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA(34) for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_period = 34
-    ema_weekly = np.full_like(close_weekly, np.nan)
+    # 1d EMA(50)
+    close_1d = df_1d['close'].values
+    ema_period = 50
+    ema_1d = np.full_like(close_1d, np.nan)
     
-    if len(close_weekly) >= ema_period:
-        ema_weekly[ema_period - 1] = np.mean(close_weekly[:ema_period])
-        for i in range(ema_period, len(close_weekly)):
-            ema_weekly[i] = (close_weekly[i] * 2 / (ema_period + 1)) + (ema_weekly[i-1] * (ema_period - 1) / (ema_period + 1))
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (ema_period - 1) / (ema_period + 1))
     
-    # Align weekly EMA to daily timeframe
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Weekly Donchian channels (20-period)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    donchian_period = 20
-    donchian_high = np.full_like(high_weekly, np.nan)
-    donchian_low = np.full_like(low_weekly, np.nan)
+    # TRIX (15-period triple EMA) on 4h close
+    trix_period = 15
+    ema1 = np.full_like(close, np.nan)
+    ema2 = np.full_like(close, np.nan)
+    ema3 = np.full_like(close, np.nan)
+    trix = np.full_like(close, np.nan)
     
-    for i in range(donchian_period - 1, len(high_weekly)):
-        donchian_high[i] = np.max(high_weekly[i - donchian_period + 1:i + 1])
-        donchian_low[i] = np.min(low_weekly[i - donchian_period + 1:i + 1])
+    if len(close) >= trix_period:
+        # First EMA
+        ema1[trix_period - 1] = np.mean(close[:trix_period])
+        for i in range(trix_period, len(close)):
+            ema1[i] = (close[i] * 2 / (trix_period + 1)) + (ema1[i-1] * (trix_period - 1) / (trix_period + 1))
+        
+        # Second EMA of EMA1
+        ema2[2*trix_period - 2] = np.mean(ema1[trix_period-1:2*trix_period-1])
+        for i in range(2*trix_period - 1, len(close)):
+            ema2[i] = (ema1[i] * 2 / (trix_period + 1)) + (ema2[i-1] * (trix_period - 1) / (trix_period + 1))
+        
+        # Third EMA of EMA2
+        ema3[3*trix_period - 3] = np.mean(ema2[2*trix_period-2:3*trix_period-2])
+        for i in range(3*trix_period - 2, len(close)):
+            ema3[i] = (ema2[i] * 2 / (trix_period + 1)) + (ema3[i-1] * (trix_period - 1) / (trix_period + 1))
+        
+        # TRIX = 100 * (EMA3 - previous EMA3) / previous EMA3
+        trix[trix_period:] = 100 * (ema3[trix_period:] - ema3[:-trix_period]) / ema3[:-trix_period]
     
-    # Align weekly Donchian channels to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
-    
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
     
@@ -60,41 +69,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donchian_period, vol_period, ema_period)
+    start_idx = max(trix_period, vol_period, 3*trix_period-2)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trix[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or i == 0):
             signals[i] = 0.0
             continue
         
+        # TRIX zero cross
+        trix_cross_up = trix[i] > 0 and trix[i-1] <= 0
+        trix_cross_down = trix[i] < 0 and trix[i-1] >= 0
+        
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: price > weekly Donchian high + volume + weekly EMA trending up
-            if (close[i] > donchian_high_aligned[i] and vol_confirm and 
-                i > 0 and not np.isnan(ema_weekly_aligned[i-1]) and ema_weekly_aligned[i] > ema_weekly_aligned[i-1]):
+            # Long: TRIX crosses up + volume spike + 1d EMA50 uptrend
+            if (trix_cross_up and vol_spike and 
+                i > 0 and not np.isnan(ema_1d_aligned[i-1]) and ema_1d_aligned[i] > ema_1d_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < weekly Donchian low + volume + weekly EMA trending down
-            elif (close[i] < donchian_low_aligned[i] and vol_confirm and 
-                  i > 0 and not np.isnan(ema_weekly_aligned[i-1]) and ema_weekly_aligned[i] < ema_weekly_aligned[i-1]):
+            # Short: TRIX crosses down + volume spike + 1d EMA50 downtrend
+            elif (trix_cross_down and vol_spike and 
+                  i > 0 and not np.isnan(ema_1d_aligned[i-1]) and ema_1d_aligned[i] < ema_1d_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < weekly Donchian low or weekly EMA turns down
-            if close[i] < donchian_low_aligned[i] or (i > 0 and not np.isnan(ema_weekly_aligned[i-1]) and ema_weekly_aligned[i] < ema_weekly_aligned[i-1]):
+            # Long exit: TRIX crosses down or volume drops below average
+            if trix_cross_down or volume[i] < vol_ma[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > weekly Donchian high or weekly EMA turns up
-            if close[i] > donchian_high_aligned[i] or (i > 0 and not np.isnan(ema_weekly_aligned[i-1]) and ema_weekly_aligned[i] > ema_weekly_aligned[i-1]):
+            # Short exit: TRIX crosses up or volume drops below average
+            if trix_cross_up or volume[i] < vol_ma[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -102,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_PriceChannel_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "4h_1d_TRIX_VolumeSpike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
