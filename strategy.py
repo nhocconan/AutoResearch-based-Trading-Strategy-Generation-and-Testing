@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_Trend
-Hypothesis: Price breaks above/below daily Camarilla R1/S1 with volume spike and 1d EMA34 trend filter.
-Captures breakouts in bull/bear markets using 1d EMA for trend confirmation to reduce false signals.
-Timeframe: 12h targets ~15-30 trades/year to minimize fee drag while capturing strong directional moves.
+4h_KAMA_Reversal_With_Volume_and_Trend_Filter
+Hypothesis: KAMA direction combined with RSI extremes and volume spikes provides reliable mean-reversion entries in both bull and bear markets. KAMA adapts to market noise, reducing false signals during choppy periods while capturing reversals at extremes. Trend filter (12h EMA34) ensures alignment with higher timeframe momentum. Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -20,80 +18,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot from previous day
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # KAMA (Kaufman Adaptive Moving Average)
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(10))
+    volatility = close_s.diff().abs().rolling(window=10).sum()
+    er = change / volatility.replace(0, 1e-10)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = [close_s.iloc[0]]
+    for i in range(1, len(close_s)):
+        kama.append(kama[-1] + sc.iloc[i] * (close_s.iloc[i] - kama[-1]))
+    kama = np.array(kama)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # RSI(14)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Align to 12h: previous day's levels available after 1d bar closes
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume spike: >1.8x 20-period average
+    # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Trend filter: 1d EMA34
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Trend filter: 12h EMA34
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20)  # Warmup for EMA and indicators
+    start_idx = max(35, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(ema_34_12h_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
-        ema34 = ema_34_1d_aligned[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        ema34 = ema_34_12h_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and uptrend
-            if price > r1_val and vol_spike and price > ema34:
+            # Long: price below KAMA (oversold) + RSI oversold + volume spike + uptrend
+            if price < kama_val and rsi_val < 30 and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and downtrend
-            elif price < s1_val and vol_spike and price < ema34:
+            # Short: price above KAMA (overbought) + RSI overbought + volume spike + downtrend
+            elif price > kama_val and rsi_val > 70 and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price closes below S1 OR trend turns down
-            if price < s1_val:
-                signals[i] = 0.0
-                position = 0
-            elif price < ema34:
+            # Exit: price crosses above KAMA OR RSI overbought
+            if price > kama_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price closes above R1 OR trend turns up
-            if price > r1_val:
-                signals[i] = 0.0
-                position = 0
-            elif price > ema34:
+            # Exit: price crosses below KAMA OR RSI oversold
+            if price < kama_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_KAMA_Reversal_With_Volume_and_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
