@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_HTF_Confluence_Momentum_v1
-Strategy: 4h EMA(34) trend with 1w EMA(34) filter + 1d volume spike + 1d price above 200 EMA.
-Enters long when 4h EMA34 > price, 1w EMA34 up, 1d volume > 1.5x 20-period average, and 1d close > EMA200.
-Enters short when 4h EMA34 < price, 1w EMA34 down, 1d volume spike, and 1d close < EMA200.
-Uses 1w trend filter to avoid counter-trend trades in strong trends. Volume spike confirms institutional interest.
+4h_Trend_Follow_Volume_Confirm
+Strategy: 4h trend following with volume confirmation and ATR filter.
+Long when price > EMA50 with volume confirmation and ATR volatility filter.
+Short when price < EMA50 with volume confirmation and ATR volatility filter.
 Designed for 4h timeframe: ~20-30 trades/year per symbol (80-120 total over 4 years).
-Works in bull via uptrend filter, works in bear via downtrend filter.
+Uses 1d EMA200 for trend filter to avoid counter-trend trades.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,86 +22,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_prev = np.roll(ema_34_1w, 1)
-    ema_34_1w_prev[0] = np.nan
-    ema_34_1w_up = ema_34_1w > ema_34_1w_prev
-    ema_34_1w_down = ema_34_1w < ema_34_1w_prev
-    
-    # Align weekly data to 4h timeframe
-    ema_34_1w_up_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w_up)
-    ema_34_1w_down_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w_down)
-    
-    # Get daily data for volume and trend filter
+    # Get daily data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Daily EMA200 for trend filter
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate EMA50 on 4h
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily data to 4h timeframe
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Calculate ATR(14) for volatility filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h EMA34 for entry signal
-    ema_34_4h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Volume moving average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need enough for daily EMA200
+    start_idx = 50  # need enough for EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1w_up_aligned[i]) or np.isnan(ema_34_1w_down_aligned[i]) or
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(ema_34_4h[i])):
+        if np.isnan(ema_50[i]) or np.isnan(ema_200_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # 4h EMA34 vs price
-        price_above_ema = close[i] > ema_34_4h[i]
-        price_below_ema = close[i] < ema_34_4h[i]
+        # Trend filter: EMA50 vs EMA200 (daily)
+        uptrend = ema_50[i] > ema_200_aligned[i]
+        downtrend = ema_50[i] < ema_200_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Daily trend filter
-        price_above_200ema = close[i] > ema_200_1d_aligned[i]
-        price_below_200ema = close[i] < ema_200_1d_aligned[i]
+        # Volatility filter: avoid low volatility periods
+        vol_filter = atr[i] > 0.01 * close[i]  # ATR > 1% of price
         
         if position == 0:
-            # Long: 4h price above EMA34, weekly uptrend, volume spike, daily above EMA200
-            if price_above_ema and ema_34_1w_up_aligned[i] and vol_confirm and price_above_200ema:
+            # Long: uptrend + volume + volatility filter
+            if uptrend and vol_confirm and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: 4h price below EMA34, weekly downtrend, volume spike, daily below EMA200
-            elif price_below_ema and ema_34_1w_down_aligned[i] and vol_confirm and price_below_200ema:
+            # Short: downtrend + volume + volatility filter
+            elif downtrend and vol_confirm and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below EMA34 or weekly trend change to down
-            if price_below_ema or ema_34_1w_down_aligned[i]:
+            # Long exit: trend change or volatility collapse
+            if not uptrend or not vol_filter:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above EMA34 or weekly trend change to up
-            if price_above_ema or ema_34_1w_up_aligned[i]:
+            # Short exit: trend change or volatility collapse
+            if not downtrend or not vol_filter:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -110,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_Confluence_Momentum_v1"
+name = "4h_Trend_Follow_Volume_Confirm"
 timeframe = "4h"
 leverage = 1.0
