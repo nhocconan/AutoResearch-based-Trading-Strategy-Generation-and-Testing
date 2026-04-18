@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_EMA_Retracement_With_4hTrend_and_1dVol
-Hypothesis: In trending markets (4h EMA20), price retraces to the 20 EMA on 1h and resumes trend.
-Enter long when price touches 1h EMA20 from below in 4h uptrend, short when from above in 4h downtrend.
-Use 1d volume filter to avoid low-activity periods. Works in bull/bear by following 4h trend.
-Target: 15-35 trades/year on 1h with strict entry conditions.
+6h_Williams_Alligator_ElderRay
+Hypothesis: Williams Alligator identifies trend direction, Elder Ray confirms momentum strength.
+Works in bull via Alligator bullish alignment + positive Elder Ray, in bear via bearish alignment + negative Elder Ray.
+Target: 15-30 trades/year on 6h timeframe with disciplined entry conditions.
 """
 
 import numpy as np
@@ -19,85 +18,87 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 1h EMA20 for entry
-    ema20 = np.full(n, np.nan)
-    k = 2 / (20 + 1)
-    for i in range(20, n):
-        if i == 20:
-            ema20[i] = np.mean(close[0:21])
+    # Williams Alligator (13,8,5 SMAs with 8,5,3 shifts)
+    jaw = np.full(n, np.nan)  # 13-period, 8-shift
+    teeth = np.full(n, np.nan)  # 8-period, 5-shift
+    lips = np.full(n, np.nan)   # 5-period, 3-shift
+    
+    for i in range(13, n):
+        jaw[i] = np.mean(high[i-13:i])  # Using high for jaw per Williams
+    for i in range(8, n):
+        teeth[i] = np.mean(low[i-8:i])   # Using low for teeth
+    for i in range(5, n):
+        lips[i] = np.mean(close[i-5:i])  # Using close for lips
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = np.full(n, np.nan)
+    k = 2 / (13 + 1)
+    for i in range(13, n):
+        if i == 13:
+            ema13[i] = np.mean(close[0:14])
         else:
-            ema20[i] = close[i] * k + ema20[i-1] * (1 - k)
+            ema13[i] = close[i] * k + ema13[i-1] * (1 - k)
     
-    # 4h EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema20_4h = np.full(len(close_4h), np.nan)
-    for i in range(20, len(close_4h)):
-        if i == 20:
-            ema20_4h[i] = np.mean(close_4h[0:21])
-        else:
-            ema20_4h[i] = close_4h[i] * k + ema20_4h[i-1] * (1 - k)
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # 1d volume MA filter (avoid low volume)
+    # 1d trend filter: EMA34
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    close_1d = df_1d['close'].values
+    ema34_1d = np.full(len(close_1d), np.nan)
+    k1d = 2 / (34 + 1)
+    for i in range(34, len(close_1d)):
+        if i == 34:
+            ema34_1d[i] = np.mean(close_1d[0:35])
+        else:
+            ema34_1d[i] = close_1d[i] * k1d + ema34_1d[i-1] * (1 - k1d)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # EMA20 needs 20 bars
+    start_idx = max(13, 8, 5)  # Ensure Alligator ready
     
     for i in range(start_idx, n):
-        if (np.isnan(ema20[i]) or np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        vol_filter = volume[i] > vol_ma_1d_aligned[i]  # above average 1d volume
-        
-        if position == 0 and in_session and vol_filter:
-            # Long: price touches EMA20 from below in 4h uptrend
-            if (low[i] <= ema20[i] and close[i] > ema20[i] and 
-                close[i] > ema20_4h_aligned[i]):
-                signals[i] = 0.20
+        if position == 0:
+            # Long: Alligator bullish (lips > teeth > jaw) + Bull Power > 0 + price above 1d EMA34
+            if (lips[i] > teeth[i] > jaw[i] and 
+                bull_power[i] > 0 and 
+                close[i] > ema34_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price touches EMA20 from above in 4h downtrend
-            elif (high[i] >= ema20[i] and close[i] < ema20[i] and 
-                  close[i] < ema20_4h_aligned[i]):
-                signals[i] = -0.20
+            # Short: Alligator bearish (jaw > teeth > lips) + Bear Power < 0 + price below 1d EMA34
+            elif (jaw[i] > teeth[i] > lips[i] and 
+                  bear_power[i] < 0 and 
+                  close[i] < ema34_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below EMA20 or 4h trend turns down
-            if (close[i] < ema20[i] or close[i] < ema20_4h_aligned[i]):
+            # Long exit: Alligator turns bearish OR Bull Power <= 0
+            if not (lips[i] > teeth[i] > jaw[i] and bull_power[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above EMA20 or 4h trend turns up
-            if (close[i] > ema20[i] or close[i] > ema20_4h_aligned[i]):
+            # Short exit: Alligator turns bullish OR Bear Power >= 0
+            if not (jaw[i] > teeth[i] > lips[i] and bear_power[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA_Retracement_With_4hTrend_and_1dVol"
-timeframe = "1h"
+name = "6h_Williams_Alligator_ElderRay"
+timeframe = "6h"
 leverage = 1.0
