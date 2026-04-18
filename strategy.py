@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_WeeklyPivotDirection_Volume
-Hypothesis: Donchian(20) breakouts on 6h filtered by weekly pivot direction (from 1w) and volume confirmation.
-Weekly pivot provides structural bias: long only when price > weekly pivot, short only when price < weekly pivot.
-Reduces false breakouts in sideways markets. Targets 15-30 trades/year on 6h with low frequency to avoid fee drag.
-Works in bull/bear markets by requiring volume spike and pivot directional filter.
+4h_KAMA_R1S1_Breakout_VolumeSpike_12hTrend
+Hypothesis: KAMA trend direction + 12h Camarilla (R1/S1) breakouts with volume confirmation.
+KAMA adapts to market noise, reducing whipsaw in ranging markets. Combined with 12h trend filter
+and volume spike, this should yield high-quality trades in both bull and bear markets.
+Target: 20-40 trades/year on 4h to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,25 +21,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data once
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly pivot points using prior week's data
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    close_1w = df_1w['close']
+    # Calculate 12h Camarilla pivot levels (R1, S1)
+    high_12h = df_12h['high']
+    low_12h = df_12h['low']
+    close_12h = df_12h['close']
     
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    pivot = (high_12h + low_12h + close_12h) / 3
+    r1 = 2 * pivot - low_12h
+    s1 = 2 * pivot - high_12h
     
-    # Shift by 1 to use previous week's pivot only (no look-ahead)
-    pivot_1w_prev = pivot_1w.shift(1).values
+    # Use previous 12h bar's levels to avoid look-ahead
+    r1_prev = r1.shift(1).values
+    s1_prev = s1.shift(1).values
     
-    # Align to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w_prev)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_prev)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_prev)
     
-    # Donchian(20) on 6h
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # KAMA trend on 4h price
+    def kama(close_series, er_length=10, fast_ema=2, slow_ema=30):
+        change = abs(close_series - close_series.shift(er_length))
+        volatility = abs(close_series.diff()).rolling(window=er_length).sum()
+        er = change / volatility.replace(0, np.nan)
+        sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+        kama_vals = [np.nan] * len(close_series)
+        for i in range(1, len(close_series)):
+            if np.isnan(sc.iloc[i]) or np.isnan(kama_vals[i-1]):
+                kama_vals[i] = close_series.iloc[i]
+            else:
+                kama_vals[i] = kama_vals[i-1] + sc.iloc[i] * (close_series.iloc[i] - kama_vals[i-1])
+        return np.array(kama_vals)
+    
+    kama_vals = kama(pd.Series(close))
+    kama_dir = np.where(kama_vals > np.roll(kama_vals, 1), 1, -1)
+    kama_dir[0] = 1  # initialize
     
     # Volume spike: 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,49 +66,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 20  # need Donchian(20) warmup
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1w_aligned[i]) or 
-            np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(kama_vals[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        pivot_val = pivot_1w_aligned[i]
-        upper = high_roll[i]
-        lower = low_roll[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        kama_direction = kama_dir[i]
         
         if position == 0:
-            # Long: break above Donchian upper with volume spike and price > weekly pivot (bullish bias)
-            if price > upper and volume_spike[i] and price > pivot_val:
+            # Long: price breaks above R1 with volume spike and KAMA up
+            if price > r1_val and volume_spike[i] and kama_direction > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian lower with volume spike and price < weekly pivot (bearish bias)
-            elif price < lower and volume_spike[i] and price < pivot_val:
+            # Short: price breaks below S1 with volume spike and KAMA down
+            elif price < s1_val and volume_spike[i] and kama_direction < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: price returns to Donchian lower or weekly pivot
-            if price <= lower or price <= pivot_val:
+            # Exit: price returns to S1 or KAMA turns down
+            if price <= s1_val or kama_direction < 0:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: price returns to Donchian upper or weekly pivot
-            if price >= upper or price >= pivot_val:
+            # Exit: price returns to R1 or KAMA turns up
+            if price >= r1_val or kama_direction > 0:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivotDirection_Volume"
-timeframe = "6h"
+name = "4h_KAMA_R1S1_Breakout_VolumeSpike_12hTrend"
+timeframe = "4h"
 leverage = 1.0
