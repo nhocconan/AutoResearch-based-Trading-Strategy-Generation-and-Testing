@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_Pullback
-4h strategy using daily Camarilla pivot levels (R1/S1) with volume confirmation and pullback entry.
-- Long: Pullback to S1 after breakout above R1, volume > 1.5x 20-period average
-- Short: Pullback to R1 after breakdown below S1, volume > 1.5x 20-period average
-- Exit: Opposite pullback level or intraday reversal
+6h_WeeklyVolatilityBreakout_Bias
+6h strategy using weekly volatility contraction/expansion with daily bias filter.
+- Entry: Price breaks out of weekly ATR-based range with volume surge + daily EMA alignment
+- Exit: Opposite breakout or volatility contraction signal
 Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation) by using volatility regime filter
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,70 +22,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels
+    # Get weekly data for volatility-based range
+    df_1w = get_htf_data(prices, '1w')
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly ATR(5) for dynamic range
+    tr1_w = np.maximum(high_1w, np.concatenate([[close_1w[0]], close_1w[:-1]])) - np.minimum(low_1w, np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    tr2_w = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    tr3_w = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
+    atr_5_w = pd.Series(tr_w).rolling(window=5, min_periods=5).mean().values
+    
+    # Weekly range: center ± 1.5 * ATR
+    weekly_center = (high_1w + low_1w) / 2
+    weekly_range_width = 1.5 * atr_5_w
+    weekly_high_range = weekly_center + weekly_range_width
+    weekly_low_range = weekly_center - weekly_range_width
+    
+    # Align weekly ranges to 6h
+    weekly_high_range_aligned = align_htf_to_ltf(prices, df_1w, weekly_high_range)
+    weekly_low_range_aligned = align_htf_to_ltf(prices, df_1w, weekly_low_range)
+    
+    # Get daily data for bias filter and volume average
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels for each day
-    # Based on previous day's high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Daily EMA50 for bias filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla R1 and S1 levels
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    
-    # Align daily levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need enough for volume average
+    start_idx = 50  # need enough for EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(weekly_high_range_aligned[i]) or np.isnan(weekly_low_range_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        # Bias conditions
+        bullish_bias = close[i] > ema_50_aligned[i]
+        bearish_bias = close[i] < ema_50_aligned[i]
         
-        # Pullback conditions
-        pullback_to_s1 = low[i] <= s1_aligned[i] and close[i] > s1_aligned[i]
-        pullback_to_r1 = high[i] >= r1_aligned[i] and close[i] < r1_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 2.0 * vol_ma_aligned[i]  # Higher threshold for 6h
+        
+        # Breakout conditions from weekly volatility range
+        breakout_up = close[i] > weekly_high_range_aligned[i]
+        breakdown_down = close[i] < weekly_low_range_aligned[i]
         
         if position == 0:
-            # Long: pullback to S1 with volume confirmation
-            if pullback_to_s1 and vol_confirm:
+            # Long: bullish bias + volume surge + breakout above weekly range
+            if bullish_bias and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: pullback to R1 with volume confirmation
-            elif pullback_to_r1 and vol_confirm:
+            # Short: bearish bias + volume surge + breakdown below weekly range
+            elif bearish_bias and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: pullback to R1 or intraday reversal below S1
-            if pullback_to_r1 or close[i] < s1_aligned[i]:
+            # Long exit: bearish bias, volume surge with breakdown, or volatility contraction
+            if bearish_bias or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: pullback to S1 or intraday reversal above R1
-            if pullback_to_s1 or close[i] > r1_aligned[i]:
+            # Short exit: bullish bias, volume surge with breakout, or volatility contraction
+            if bullish_bias or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -94,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Pullback"
-timeframe = "4h"
+name = "6h_WeeklyVolatilityBreakout_Bias"
+timeframe = "6h"
 leverage = 1.0
