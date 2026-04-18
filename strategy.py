@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d Daily Close Position + Volume Confirmation + ATR Filter
-Hypothesis: Daily close above/below prior day's high/low with volume confirmation provides directional bias.
+12h Daily Close Position + Volume Confirmation + ATR Filter (Revised)
+Hypothesis: Daily close above/below key levels with volume and momentum provides directional bias for 12h.
 In bull markets, price tends to close above prior day's high; in bear markets, below prior day's low.
-Volume confirms conviction. ATR filter avoids choppy markets. Designed for 7-25 trades/year on 1d.
+Volume confirms conviction. ATR filter avoids choppy markets. Designed for 15-30 trades/year.
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     prev_daily_high = df_d['high'].shift(1).values  # shift(1) for prior day
     prev_daily_low = df_d['low'].shift(1).values
     
-    # Align daily levels to 1d timeframe (already delayed by shift)
+    # Align daily levels to 12h timeframe (already delayed by shift)
     high_aligned = align_htf_to_ltf(prices, df_d, prev_daily_high)
     low_aligned = align_htf_to_ltf(prices, df_d, prev_daily_low)
     
@@ -39,7 +39,7 @@ def generate_signals(prices):
     atr_d = tr.rolling(window=14, min_periods=14).mean().values
     atr_aligned = align_htf_to_ltf(prices, df_d, atr_d)
     
-    # Volume spike detection (2x 24-period average on daily)
+    # Volume spike detection (2x 24-period average on 12h)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -61,7 +61,7 @@ def generate_signals(prices):
         prev_low = low_aligned[i]
         atr = atr_aligned[i]
         
-        # Avoid choppy markets: require ATR > 0.5% of price
+        # Avoid choppy markets: require ATR > 0.5 * price (adjust as needed)
         if atr < 0.005 * price:  # too low volatility
             signals[i] = 0.0
             continue
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DailyClose_Position_VolumeSpike_ATRFilter"
-timeframe = "1d"
+name = "12h_DailyClose_Position_VolumeSpike_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
