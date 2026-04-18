@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_VWAP_RangeReversion_BollingerBands
-Hypothesis: 12-hour VWAP mean reversion with Bollinger Bands and volume confirmation.
-Trades mean reversion from Bollinger Band extremes toward VWAP, using 1-day trend filter
-to avoid counter-trend trades. Designed for low frequency (15-35 trades/year) with
-strong performance in ranging markets by combining intraday mean reversion with
-daily trend alignment.
+4h_Vortex_Trend_Filter_V1
+Hypothesis: Uses Vortex indicator (VI+ and VI-) to determine trend direction on 1-day timeframe, 
+combined with 4-hour price action and volume confirmation. Enters long when VI+ > VI- (uptrend) 
+and price breaks above 4-hour high of prior period with volume spike; shorts when VI- > VI+ 
+(downtrend) and price breaks below 4-hour low with volume spike. Uses ATR-based stop via 
+signal=0 when trend reverses. Designed for low frequency (<40 trades/year) with strong 
+performance in trending markets while avoiding whipsaws in ranging conditions.
 """
 
 import numpy as np
@@ -22,86 +23,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for VWAP calculation
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Calculate 12h VWAP
-    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3
-    vwap_num = np.cumsum(typical_price_12h * df_12h['volume'].values)
-    vwap_den = np.cumsum(df_12h['volume'].values)
-    vwap_12h = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Vortex trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1-day EMA50 trend filter
+    # Calculate Vortex indicator (VI+ and VI-) on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[0:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = close_1d[i] * alpha + ema50_1d[i-1] * (1 - alpha)
     
-    # Calculate Bollinger Bands (20, 2) on 12h typical price
-    tp_12h = typical_price_12h
-    sma_20 = np.full(len(tp_12h), np.nan)
-    std_20 = np.full(len(tp_12h), np.nan)
+    # True Range
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(abs(high_1d[1:] - close_1d[:-1]), 
+                               abs(low_1d[1:] - close_1d[:-1])))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
     
-    for i in range(19, len(tp_12h)):
-        sma_20[i] = np.mean(tp_12h[i-19:i+1])
-        std_20[i] = np.std(tp_12h[i-19:i+1])
+    # Vortex movements
+    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])  # |current high - prior low|
+    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])  # |current low - prior high|
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
     
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Smooth over 14 periods
+    def ema_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.nanmean(arr[1:period])  # Skip index 0 (nan)
+        alpha = 2 / (period + 1)
+        for i in range(period, len(arr)):
+            if not np.isnan(arr[i]):
+                result[i] = arr[i] * alpha + result[i-1] * (1 - alpha)
+        return result
     
-    # Align all indicators to 12h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_12h, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_12h, lower_bb)
+    vi_plus = ema_smooth(vm_plus, 14)
+    vi_minus = ema_smooth(vm_minus, 14)
+    tr14 = ema_smooth(tr, 14)
     
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # Normalize to get VI+ and VI-
+    vi_plus_norm = vi_plus / tr14
+    vi_minus_norm = vi_minus / tr14
+    
+    # Get 4h data for price action and volume
+    df_4h = get_htf_data(prices, '4h')  # For reference only, we use prices directly
+    
+    # Calculate 4-period high/low for breakout detection
+    high_4 = np.full(n, np.nan)
+    low_4 = np.full(n, np.nan)
+    for i in range(4, n):
+        high_4[i] = np.max(high[i-4:i])
+        low_4[i] = np.min(low[i-4:i])
+    
+    # Volume spike: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 1.5)
+    
+    # Align 1d Vortex indicators to 4h timeframe
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus_norm)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus_norm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(30, 20)  # Ensure sufficient data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
+            np.isnan(high_4[i]) or np.isnan(low_4[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price touches lower BB with volume confirmation and above 1d EMA50
-            if (close[i] <= lower_bb_aligned[i] and vol_confirm[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long: VI+ > VI- (uptrend) + break above 4-period high + volume spike
+            if (vi_plus_aligned[i] > vi_minus_aligned[i] and 
+                close[i] > high_4[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches upper BB with volume confirmation and below 1d EMA50
-            elif (close[i] >= upper_bb_aligned[i] and vol_confirm[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: VI- > VI+ (downtrend) + break below 4-period low + volume spike
+            elif (vi_minus_aligned[i] > vi_plus_aligned[i] and 
+                  close[i] < low_4[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches VWAP or breaks below lower BB
-            if (close[i] >= vwap_aligned[i] or close[i] < lower_bb_aligned[i]):
+            # Long exit: trend turns down (VI- > VI+)
+            if vi_minus_aligned[i] > vi_plus_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches VWAP or breaks above upper BB
-            if (close[i] <= vwap_aligned[i] or close[i] > upper_bb_aligned[i]):
+            # Short exit: trend turns up (VI+ > VI-)
+            if vi_plus_aligned[i] > vi_minus_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VWAP_RangeReversion_BollingerBands"
-timeframe = "12h"
+name = "4h_Vortex_Trend_Filter_V1"
+timeframe = "4h"
 leverage = 1.0
