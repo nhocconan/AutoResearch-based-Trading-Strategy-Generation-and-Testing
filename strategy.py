@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_Volume_Trend
-Hypothesis: Price breaks above/below Camarilla R1/S1 levels on daily timeframe with volume spike and weekly EMA34 trend filter.
-Targets 1d timeframe for lower trade frequency and better trend capture in both bull and bear markets.
-Uses weekly EMA34 for trend direction to filter breakouts, reducing whipsaws.
-Volume spike confirms institutional interest. Target: 15-25 trades/year to minimize fee drag.
+4h_Donchian_Breakout_Volume_Trend_1dEMA34
+Hypothesis: Price breaks above/below Donchian channels (20-period high/low) with volume spike and daily EMA34 trend filter. Works in both bull/bear markets by only taking breakouts in the direction of the daily trend, reducing false reversals. Target: 25-40 trades/year to minimize fee drag while capturing strong directional moves.
 """
 
 import numpy as np
@@ -21,27 +18,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA34 for trend filter (loaded once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Daily EMA34 for trend filter (loaded once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily OHLC for Camarilla calculation (using previous day's values)
-    # We'll calculate daily pivot from previous day's OHLC
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # handle first bar
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    
-    # Camarilla levels: based on previous day's range
-    # R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12
-    range_prev = prev_high - prev_low
-    r1 = prev_close + range_prev * 1.1 / 12
-    s1 = prev_close - range_prev * 1.1 / 12
+    # Donchian channels: 20-period high/low
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: >1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,42 +38,44 @@ def generate_signals(prices):
     start_idx = max(35, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(r1[i]) or np.isnan(s1[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema34 = ema_34_1w_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        ema34 = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and uptrend (price > weekly EMA34)
-            if (price > r1[i] and vol_spike and price > ema34):
+            # Long: price breaks above upper Donchian band with volume spike and uptrend (price > daily EMA34)
+            if (price > upper and vol_spike and price > ema34):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and downtrend (price < weekly EMA34)
-            elif (price < s1[i] and vol_spike and price < ema34):
+            # Short: price breaks below lower Donchian band with volume spike and downtrend (price < daily EMA34)
+            elif (price < lower and vol_spike and price < ema34):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price closes below weekly EMA34 OR breaks below S1 (reversal)
-            if price < ema34 or price < s1[i]:
+            # Exit: price closes below daily EMA34 OR breaks below lower band (reversal)
+            if price < ema34 or price < lower:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price closes above weekly EMA34 OR breaks above R1 (reversal)
-            if price > ema34 or price > r1[i]:
+            # Exit: price closes above daily EMA34 OR breaks above upper band (reversal)
+            if price > ema34 or price > upper:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "4h_Donchian_Breakout_Volume_Trend_1dEMA34"
+timeframe = "4h"
 leverage = 1.0
