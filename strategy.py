@@ -1,15 +1,18 @@
+# 4h_Pivot_R1_S1_Breakout_Volume
+# Hypothesis: Breakouts above/below daily R1/S1 levels with volume confirmation capture breakouts in trending markets while avoiding false moves during consolidation. The volume filter reduces false breakouts, and the session filter focuses on active trading hours. This strategy works in both bull and bear markets because it captures directional moves regardless of overall trend, relying on price action at key pivot levels.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_Session_v2"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -30,13 +33,13 @@ def generate_signals(prices):
     R1 = pivot + (range_hl * 1.1 / 12)
     S1 = pivot - (range_hl * 1.1 / 12)
     
-    # Align R1/S1 to 12h (wait for daily close)
+    # Align R1/S1 to 4h (wait for daily close)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume filter: current volume > 1.3 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -45,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 30  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
