@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_4h200_EMA_1d_Trend_Filter_v1
-Hypothesis: On 6h timeframe, use 4h EMA200 for primary trend direction and 1d EMA200 for higher timeframe trend confirmation. 
-Enter long when price > 4h EMA200 and price > 1d EMA200, short when price < 4h EMA200 and price < 1d EMA200.
-Requires volume > 1.3x 20-period average for confirmation to avoid chop. 
-Exit when price crosses back below/above the 4h EMA200. 
-This dual-timeframe EMA filter should reduce whipsaws in ranging markets while capturing trends in both bull and bear regimes.
-Target: 20-40 trades/year by requiring alignment of two timeframes and volume filter.
+4h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v1
+Hypothesis: Use 1d Camarilla pivot levels (R1/S1) for entry, with volume confirmation and 1d Choppiness Index regime filter. 
+Go long when price breaks above 1d R1 with volume > 1.5x 20-period average and CHOP > 61.8 (range). 
+Go short when price breaks below 1d S1 with volume > 1.5x 20-period average and CHOP > 61.8. 
+Exit on opposite Camarilla level touch (S1 for long, R1 for short) or CHOP < 38.2 (trend). 
+Position size: 0.25. Target: 20-40 trades/year by combining multiple filters to reduce noise and avoid overtrading.
+Works in ranging markets via mean reversion at pivot levels and avoids trending markets via CHOP filter.
 """
 
 import numpy as np
@@ -23,41 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA200
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # 4h EMA(200)
-    ema_len = 200
-    ema_4h = np.full_like(close_4h, np.nan)
-    
-    if len(close_4h) >= ema_len:
-        # Calculate EMA using Wilder's smoothing (alpha = 1/N)
-        alpha = 1.0 / ema_len
-        ema_4h[0] = close_4h[0]
-        for i in range(1, len(close_4h)):
-            ema_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema_4h[i-1]
-    
-    # Align 4h EMA200 to 6h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Get 1d data for EMA200
+    # Get 1d data for Camarilla pivots and Choppiness Index
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA(200)
-    ema_1d = np.full_like(close_1d, np.nan)
+    # 1d Camarilla pivot levels (R1, S1)
+    # Pivot = (H + L + C) / 3
+    # R1 = Pivot + (H - L) * 1.1 / 2
+    # S1 = Pivot - (H - L) * 1.1 / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = pivot_1d + (high_1d - low_1d) * 1.1 / 2.0
+    s1_1d = pivot_1d - (high_1d - low_1d) * 1.1 / 2.0
     
-    if len(close_1d) >= ema_len:
-        alpha = 1.0 / ema_len
-        ema_1d[0] = close_1d[0]
-        for i in range(1, len(close_1d)):
-            ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
+    # Align Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Align 1d EMA200 to 6h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1d Choppiness Index (CHOP) - range: 0-100
+    # CHOP = 100 * LOG10(SUM(ATR1) / (ATR(N) * N)) / LOG10(N)
+    # We'll use a simplified version: CHOP = 100 * (ATR14 / (ATR14 * 14)) -> actually we need true range sum
+    # Proper CHOP: 100 * log10(sum(tr1) / (atr14 * 14)) / log10(14)
+    # Where tr1 = true range for 1 period
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Calculate True Range for 1d
+    tr1 = np.maximum(high_1d - low_1d, 
+                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                np.abs(low_1d - np.roll(close_1d, 1))))
+    # Handle first period
+    tr1[0] = high_1d[0] - low_1d[0]
+    
+    # ATR(14) - smoothed true range
+    atr_period = 14
+    atr_1d = np.full_like(close_1d, np.nan)
+    
+    if len(tr1) >= atr_period:
+        # First ATR is simple average of first 14 TR
+        atr_1d[atr_period-1] = np.mean(tr1[:atr_period])
+        # Wilder smoothing for subsequent values
+        for i in range(atr_period, len(tr1)):
+            atr_1d[i] = (atr_1d[i-1] * (atr_period - 1) + tr1[i]) / atr_period
+    
+    # Choppiness Index: 100 * log10(sum(tr1 over 14 periods) / (atr14 * 14)) / log10(14)
+    chop_1d = np.full_like(close_1d, np.nan)
+    log14 = np.log10(14)
+    
+    if len(tr1) >= atr_period:
+        for i in range(atr_period, len(tr1)):
+            # Sum of true range over last 14 periods
+            tr_sum = np.sum(tr1[i-atr_period+1:i+1])
+            # CHOP formula
+            if atr_1d[i] > 0 and tr_sum > 0:
+                chop_1d[i] = 100 * np.log10(tr_sum / (atr_1d[i] * atr_period)) / log14
+            else:
+                chop_1d[i] = 50.0  # neutral if calculation invalid
+    
+    # Align Choppiness Index to 4h timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
     
@@ -68,36 +93,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(ema_len, vol_period) + 1
+    start_idx = max(atr_period, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        if position == 0:
-            # Long: price above both 4h EMA200 and 1d EMA200 + volume confirmation
-            if close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i] and volume[i] > 1.3 * vol_ma[i]:
+        # Range regime filter: CHOP > 61.8 indicates ranging market (good for mean reversion)
+        range_regime = chop_1d_aligned[i] > 61.8
+        # Trend regime filter: CHOP < 38.2 indicates trending market (avoid)
+        trend_regime = chop_1d_aligned[i] < 38.2
+        
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        if position == 0 and range_regime:
+            # Long: price breaks above 1d R1 + volume + range regime
+            if close[i] > r1_1d_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below both 4h EMA200 and 1d EMA200 + volume confirmation
-            elif close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i] and volume[i] > 1.3 * vol_ma[i]:
+            # Short: price breaks below 1d S1 + volume + range regime
+            elif close[i] < s1_1d_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 4h EMA200 (trend change on lower timeframe)
-            if close[i] < ema_4h_aligned[i]:
+            # Long exit: price touches 1d S1 OR CHOP < 38.2 (trend emerging)
+            if close[i] < s1_1d_aligned[i] or chop_1d_aligned[i] < 38.2:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 4h EMA200 (trend change on lower timeframe)
-            if close[i] > ema_4h_aligned[i]:
+            # Short exit: price touches 1d R1 OR CHOP < 38.2 (trend emerging)
+            if close[i] > r1_1d_aligned[i] or chop_1d_aligned[i] < 38.2:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -105,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_4h200_EMA_1d_Trend_Filter_v1"
-timeframe = "6h"
+name = "4h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
