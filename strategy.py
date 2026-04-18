@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly EMA200 Trend + Daily KAMA Direction + Volume Spike
-# Weekly EMA200 provides robust trend filter for both bull and bear markets.
-# KAMA adapts to volatility, giving timely direction changes in choppy conditions.
-# Volume spike confirms institutional participation in the move.
-# Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
-name = "1d_KAMA_Direction_WeeklyEMA200_Volume"
-timeframe = "1d"
+# Hypothesis: 6h Williams %R Mean Reversion + 12h Trend Filter + Volume Spike
+# Williams %R identifies overbought/oversold conditions for mean reversion entries.
+# 12h EMA50 trend filter ensures trades align with higher timeframe trend.
+# Volume spike confirms institutional participation at reversal points.
+# Works in ranging markets (mean reversion) and trending markets (pullbacks to EMA).
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+name = "6h_WilliamsR_MeanReversion_12hEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,76 +23,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA200 trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA200
-    ema_200_weekly = pd.Series(df_weekly['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_200_weekly)
+    # Calculate Williams %R on 6h data (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate daily KAMA (adaptive moving average)
-    # Efficiency ratio: abs(close - close[10]) / sum(abs(diff)) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close - close[10]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of absolute changes
-    # Pad arrays for alignment
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(1, np.nan), volatility])
-    # Rolling sum of volatility
-    vol_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
-    # Efficiency ratio
-    er = np.where(vol_sum > 0, change / vol_sum, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume spike: current volume > 2.0 * 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Volume spike: current volume > 2.0 * 24-period average (4 days on 6h chart)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_200_weekly_aligned[i]) or np.isnan(kama[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        ema_val = ema_200_weekly_aligned[i]
-        kama_val = kama[i]
+        wr = williams_r[i]
+        ema_trend = ema_50_12h_aligned[i]
         
         if position == 0:
-            # Long: Price above weekly EMA200 AND close above KAMA AND volume spike
-            if close_val > ema_val and close_val > kama_val and volume_spike[i]:
+            # Long: Oversold (Williams %R < -80) + above 12h EMA50 + volume spike
+            if wr < -80 and close[i] > ema_trend and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly EMA200 AND close below KAMA AND volume spike
-            elif close_val < ema_val and close_val < kama_val and volume_spike[i]:
+            # Short: Overbought (Williams %R > -20) + below 12h EMA50 + volume spike
+            elif wr > -20 and close[i] < ema_trend and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price below weekly EMA200 OR close below KAMA
-            if close_val < ema_val or close_val < kama_val:
+            # Long exit: Williams %R crosses above -50 (mean reversion complete) or below 12h EMA50 (trend break)
+            if wr > -50 or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price above weekly EMA200 OR close above KAMA
-            if close_val > ema_val or close_val > kama_val:
+            # Short exit: Williams %R crosses below -50 (mean reversion complete) or above 12h EMA50 (trend break)
+            if wr < -50 or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
