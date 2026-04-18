@@ -3,13 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with volume confirmation and ATR volatility filter.
-# Captures breakouts in trending markets and avoids false breakouts in low volatility.
-# Works in both bull and bear: breakouts continue in bull, mean-reversion at channel bounds in bear.
-# Target: 20-150 total trades over 4 years (5-37/year) to minimize fee drag.
-
-name = "12h_Donchian20_Volume_ATRFilter_V1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_12hEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,25 +17,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for ATR and volume average
+    # Load 12h data for EMA34 filter
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate EMA34 on 12h close
+    close_12h = df_12h['close']
+    ema_34_12h = close_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Load 1d data for Camarilla pivot levels (H3/L3)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channel (20-period) on 12h data
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels (H3, L3) from previous daily bar
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate daily ATR (14) for volatility filter
-    tr1 = np.abs(df_1d['high'] - df_1d['low'])
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    H3 = pivot + (range_hl * 1.1 / 4)
+    L3 = pivot - (range_hl * 1.1 / 4)
     
-    # Calculate 20-period volume average on 12h data
+    # Align H3/L3 to 4h (wait for daily close)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Volume filter: current volume > 1.8 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align daily ATR to 12h (wait for daily close)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    volume_filter = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,38 +53,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
-            np.isnan(atr_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper = high_max[i]
-        lower = low_min[i]
-        atr_val = atr_aligned[i]
-        vol_filter = volume[i] > (1.5 * vol_ma_20[i])
+        H3_val = H3_aligned[i]
+        L3_val = L3_aligned[i]
+        ema_12h_val = ema_34_12h_aligned[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above upper band with volume and volatility
-            if close_val > upper and vol_filter and (atr_val > 0):
+            # Long: break above H3 with volume confirmation and 12h EMA34 above price (bullish bias)
+            if close_val > H3_val and vol_filter and (close_val > ema_12h_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume and volatility
-            elif close_val < lower and vol_filter and (atr_val > 0):
+            # Short: break below L3 with volume confirmation and 12h EMA34 below price (bearish bias)
+            elif close_val < L3_val and vol_filter and (close_val < ema_12h_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below lower band or volatility drops
-            if close_val < lower or (atr_val < 0.5 * atr_aligned[i-1] if i > 0 else False):
+            # Long exit: price falls back below L3 or 12h EMA34 turns bearish
+            if close_val < L3_val or (close_val < ema_12h_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above upper band or volatility drops
-            if close_val > upper or (atr_val < 0.5 * atr_aligned[i-1] if i > 0 else False):
+            # Short exit: price rises back above H3 or 12h EMA34 turns bullish
+            if close_val > H3_val or (close_val > ema_12h_val):
                 signals[i] = 0.0
                 position = 0
             else:
