@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Williams Alligator with 1d Trend Filter and Volume Confirmation
-Hypothesis: Williams Alligator (three SMAs) identifies trend direction and momentum.
-In trending markets, the jaws (13-period SMA), teeth (8-period SMA), and lips (5-period SMA)
-align and diverge. We use 1d EMA50 for higher timeframe trend filter to avoid counter-trend trades,
-and enter on 4h when the Alligator shows strong alignment with volume confirmation.
-This strategy targets 20-30 trades/year to minimize fee drag while capturing
-strong trending moves. The Alligator's convergence/divergence provides clear
-entry/exit signals, while the 1d trend filter ensures we trade with the
-dominant higher timeframe momentum in both bull and bear markets.
+6h Donchian Breakout with Weekly Pivot Direction and Volume Confirmation
+Hypothesis: In both bull and bear markets, breakouts from Donchian channels
+with weekly pivot support/resistance and volume confirmation capture strong
+momentum moves. The weekly pivot provides institutional-level support/resistance
+that holds across market regimes, reducing false breakouts. Volume ensures
+institutional participation. Targets 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -17,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,38 +22,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot points (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H-L), S2 = P - (H-L)
+    # R3 = H + 2*(P-L), S3 = L - 2*(H-P)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Williams Alligator components on 4h
-    # Jaws: 13-period SMMA (smoothed moving average)
-    # Teeth: 8-period SMMA
-    # Lips: 5-period SMMA
-    # Using EMA as approximation for SMMA for simplicity
-    jaws = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_range = weekly_high - weekly_low
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + weekly_range
+    weekly_s2 = weekly_pivot - weekly_range
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    # Alligator alignment metrics
-    # When jaws > teeth > lips: strong uptrend
-    # When jaws < teeth < lips: strong downtrend
-    # When intertwined: ranging/no trend
-    jaws_above_teeth = jaws > teeth
-    teeth_above_lips = teeth > lips
-    jaws_below_teeth = jaws < teeth
-    teeth_below_lips = teeth < lips
+    # Align weekly levels to 6h timeframe (forward-filled from weekly close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
     
-    # Strong trend conditions
-    strong_uptrend = jaws_above_teeth & teeth_above_lips
-    strong_downtrend = jaws_below_teeth & teeth_below_lips
+    # Donchian channel (20-period) on 6h
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volatility filter using ATR
+    # ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -64,48 +66,62 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume filter: current volume > 1.3x 20-period volume average
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = max(50, lookback)  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(jaws[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        trend = ema50_1d_aligned[i]
-        strong_up = strong_uptrend[i]
-        strong_down = strong_downtrend[i]
         vol_ok = vol_filter[i]
+        atr_val = atr[i]
+        
+        # Breakout conditions with volume
+        bullish_breakout = (price > donchian_high[i-1]) and vol_ok
+        bearish_breakout = (price < donchian_low[i-1]) and vol_ok
+        
+        # Weekly pivot filter: avoid breakouts against strong S/R
+        # For longs: price should be above S1, preferably above pivot
+        # For shorts: price should be below R1, preferably below pivot
+        long_pivot_ok = price > s1_aligned[i]
+        short_pivot_ok = price < r1_aligned[i]
         
         if position == 0:
-            # Long: strong uptrend alignment, price above trend, with volume
-            if strong_up and price > trend and vol_ok:
+            # Long: bullish breakout with volume and pivot support
+            if bullish_breakout and long_pivot_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: strong downtrend alignment, price below trend, with volume
-            elif strong_down and price < trend and vol_ok:
+            # Short: bearish breakout with volume and pivot resistance
+            elif bearish_breakout and short_pivot_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if trend weakens or price crosses below teeth
-            if not strong_up or price < teeth[i]:
+            # Exit: price returns to Donchian midpoint or breaks below S1
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2.0
+            if price < midpoint or price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if trend weakens or price crosses above teeth
-            if not strong_down or price > teeth[i]:
+            # Exit: price returns to Donchian midpoint or breaks above R1
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2.0
+            if price > midpoint or price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Donchian_WeeklyPivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
