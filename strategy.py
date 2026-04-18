@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
-"""
-6h Williams Alligator + Elder Ray + ADX Filter
-Hypothesis: The Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength,
-while Elder Ray (Bull/Bear Power) measures bull/bear strength relative to EMA13.
-Combined with ADX > 25 for trend confirmation, this captures strong trends while avoiding whipsaws.
-Works in both bull (Alligator aligned up, Bull Power > 0) and bear (Alligator aligned down, Bear Power < 0).
-Target: 15-25 trades/year to minimize fee drain.
-"""
+# 12h_Top_Tier_Pivot_Breakout_Volume_Trend
+# Hypothesis: Pivot point breakouts (R1/S1) with volume confirmation and trend alignment (weekly EMA34) capture institutional flow with minimal whipsaw.
+# Works in bull/bear: Pivots adapt to volatility, volume confirms institutional participation, weekly trend filter avoids countertrend traps.
+# Target: 15-25 trades/year to minimize fee drag while capturing major moves.
 
 import numpy as np
 import pandas as pd
@@ -14,93 +9,94 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator: SMAs with specific periods
-    # Jaw: SMA(13), 8 periods ahead
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth: SMA(8), 5 periods ahead
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips: SMA(5), 3 periods ahead
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Daily Pivot Points (calculate once per day, align to 12h)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
+        return np.zeros(n)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate daily pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ADX for trend strength (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align pivot levels to 12h timeframe (with proper delay for daily close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    # Weekly EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
     
-    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
-    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Volume confirmation: volume > 1.5x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ratio = volume / vol_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for indicators (max of shifts + periods)
+    start_idx = 35  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        price = close[i]
+        vol_conf = vol_ratio[i] > 1.5
         
-        if position == 0:
-            # Long: Alligator aligned up, Bull Power positive, ADX > 25
-            if alligator_long and bull_power[i] > 0 and adx[i] > 25:
+        # Long conditions: price breaks above R1 with volume and weekly uptrend
+        if price > r1_aligned[i] and vol_conf and price > ema34_1w_aligned[i]:
+            if position <= 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator aligned down, Bear Power negative, ADX > 25
-            elif alligator_short and bear_power[i] < 0 and adx[i] > 25:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Exit if Alligator alignment breaks or Bull Power turns negative
-            if not alligator_long or bull_power[i] <= 0:
-                signals[i] = 0.0
-                position = 0
             else:
                 signals[i] = 0.25
         
-        elif position == -1:
-            # Exit if Alligator alignment breaks or Bear Power turns positive
-            if not alligator_short or bear_power[i] >= 0:
-                signals[i] = 0.0
-                position = 0
+        # Short conditions: price breaks below S1 with volume and weekly downtrend
+        elif price < s1_aligned[i] and vol_conf and price < ema34_1w_aligned[i]:
+            if position >= 0:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = -0.25
+        
+        # Exit conditions: price returns to pivot or volume dries up
+        elif position == 1 and (price < pivot_aligned[i] or vol_ratio[i] < 1.0):
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and (price > pivot_aligned[i] or vol_ratio[i] < 1.0):
+            signals[i] = 0.0
+            position = 0
+        
+        # Hold position
+        else:
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-name = "6h_Alligator_ElderRay_ADX"
-timeframe = "6h"
+name = "12h_Top_Tier_Pivot_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
