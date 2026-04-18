@@ -1,17 +1,21 @@
-# 4h_RSI4_BB20_Breakout_BullBear
-# Hypothesis: RSI(4) crossing above 60 with Bollinger Band(20,2) upper band breakout for longs,
-# and RSI(4) crossing below 40 with lower band breakout for shorts, only in trending regimes (ADX(14) > 25).
-# Uses Bollinger Bands for dynamic support/resistance and breakouts, RSI for momentum confirmation,
-# and ADX to filter ranging markets. Designed for ~20-30 trades/year on 4h timeframe.
-# Works in bull markets via momentum breakouts and in bear markets via mean-reversion failures
-# (false breakouts in ranging markets filtered by ADX).
-name = "4h_RSI4_BB20_Breakout_BullBear"
-timeframe = "4h"
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 1d price closing above/below weekly Bollinger Bands with volume confirmation and ADX trend filter.
+# Long when close > upper BB(20,2) on weekly, volume > 1.5x 20-period average, and weekly ADX > 25.
+# Short when close < lower BB(20,2) on weekly, volume > 1.5x 20-period average, and weekly ADX > 25.
+# Exit when price returns to weekly middle band (20-period SMA).
+# Uses weekly Bollinger Bands for dynamic support/resistance, volume surge for conviction, ADX for trend strength.
+# Designed for ~10-20 trades/year per symbol to minimize fee drag in ranging markets.
+name = "1d_WeeklyBB_Width_ADX_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,90 +23,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean()
-    bb_std = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_middle = bb_middle.values
-    bb_upper = bb_upper.values
-    bb_lower = bb_lower.values
+    # Weekly data for Bollinger Bands and ADX
+    df_1w = get_htf_data(prices, '1w')
     
-    # RSI(4)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Weekly OHLC
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # ADX(14) for trend filter
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Weekly Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_20 + (bb_std * std_20)
+    lower_bb = sma_20 - (bb_std * std_20)
+    middle_bb = sma_20  # 20-period SMA for exit
+    
+    # Weekly ADX (14-period)
+    adx_period = 14
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    adx = adx.values
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr_period = pd.Series(tr).rolling(window=adx_period, min_periods=adx_period).sum().values
+    dm_plus_period = pd.Series(dm_plus).rolling(window=adx_period, min_periods=adx_period).sum().values
+    dm_minus_period = pd.Series(dm_minus).rolling(window=adx_period, min_periods=adx_period).sum().values
+    
+    # DI+ and DI-
+    di_plus = 100 * (dm_plus_period / tr_period)
+    di_minus = 100 * (dm_minus_period / tr_period)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=adx_period, min_periods=adx_period).mean().values
+    
+    # Align weekly indicators to daily timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)
+    middle_bb_aligned = align_htf_to_ltf(prices, df_1w, middle_bb)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(rsi[i]) or np.isnan(adx[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(middle_bb_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        rsi_val = rsi[i]
-        adx_val = adx[i]
-        bb_upper_val = bb_upper[i]
-        bb_lower_val = bb_lower[i]
-        
-        # Trend filter: only trade when ADX > 25 (trending market)
-        if adx_val <= 25:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        upper_bb_val = upper_bb_aligned[i]
+        lower_bb_val = lower_bb_aligned[i]
+        middle_bb_val = middle_bb_aligned[i]
+        adx_val = adx_aligned[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: RSI(4) > 60 and close breaks above BB upper
-            if rsi_val > 60 and close_val > bb_upper_val:
+            # Long: close above upper BB with volume surge and strong trend (ADX > 25)
+            if close_val > upper_bb_val and vol_filter and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI(4) < 40 and close breaks below BB lower
-            elif rsi_val < 40 and close_val < bb_lower_val:
+            # Short: close below lower BB with volume surge and strong trend (ADX > 25)
+            elif close_val < lower_bb_val and vol_filter and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI < 50 or close below BB middle
-            if rsi_val < 50 or close_val < bb_middle[i]:
+            # Long exit: price returns to middle BB
+            if close_val <= middle_bb_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI > 50 or close above BB middle
-            if rsi_val > 50 or close_val > bb_middle[i]:
+            # Short exit: price returns to middle BB
+            if close_val >= middle_bb_val:
                 signals[i] = 0.0
                 position = 0
             else:
