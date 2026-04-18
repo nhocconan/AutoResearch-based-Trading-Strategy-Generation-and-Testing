@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_RSI_Filter
-Hypothesis: Use 12h KAMA to filter trend direction, with RSI(14) < 30 for long and > 70 for short entries. KAMA adapts to market noise, reducing false signals in choppy markets. RSI extremes provide mean-reversion entries within the trend. Designed for low trade frequency on 12h timeframe to minimize fee drift while capturing high-probability reversals in both bull and bear markets.
+4h_TRIX_Zero_Cross_With_Volume_Spike_and_1dTrend
+Hypothesis: Go long when TRIX crosses above zero with volume spike and price above 1d EMA50; short when TRIX crosses below zero with volume spike and price below 1d EMA50. TRIX is a momentum oscillator that filters out insignificant price movements, effective in trending markets. Volume spike confirms institutional participation, and 1d EMA50 ensures alignment with long-term trend. Designed for low trade frequency to minimize fee drain while capturing high-probability momentum shifts.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf  # Note: align_ltf_to_htf is not used; using align_htf_to_ltf as per standard
 
 def generate_signals(prices):
     n = len(prices)
@@ -14,91 +14,68 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 12h KAMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate TRIX (1-period ROC of triple EMA)
+    # TRIX = 100 * (EMA3 - EMA3_prev) / EMA3_prev
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix[0] = 0  # First value has no previous
     
-    # Efficiency Ratio for KAMA
-    change = np.abs(np.diff(close_12h, k=10))  # 10-period change
-    abs_change = np.sum(np.abs(np.diff(close_12h)), axis=0)  # placeholder, will fix below
+    # 1d EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Proper ER calculation
-    er = np.zeros_like(close_12h)
-    for i in range(10, len(close_12h)):
-        direction = np.abs(close_12h[i] - close_12h[i-10])
-        volatility = np.sum(np.abs(np.diff(close_12h[i-9:i+1])))
-        if volatility > 0:
-            er[i] = direction / volatility
-        else:
-            er[i] = 0
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.full_like(close_12h, np.nan)
-    kama[9] = close_12h[9]  # seed
-    for i in range(10, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
-    
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(14, 10)  # RSI and KAMA seed
+    start_idx = 50  # Need EMA50 and TRIX warmup
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_spike[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi[i]
+        ema50_val = ema50_1d_aligned[i]
+        vol_spike = volume_spike[i]
+        trix_now = trix[i]
+        trix_prev = trix[i-1] if i > 0 else 0
         
         if position == 0:
-            # Long: price above KAMA and RSI oversold
-            if price > kama_val and rsi_val < 30:
+            # Long: TRIX crosses above zero with volume spike and above 1d EMA50
+            if trix_now > 0 and trix_prev <= 0 and vol_spike and price > ema50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and RSI overbought
-            elif price < kama_val and rsi_val > 70:
+            # Short: TRIX crosses below zero with volume spike and below 1d EMA50
+            elif trix_now < 0 and trix_prev >= 0 and vol_spike and price < ema50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price below KAMA or RSI overbought
-            if price < kama_val or rsi_val > 70:
+            # Exit: TRIX crosses below zero or price below 1d EMA50
+            if trix_now < 0 and trix_prev >= 0 or price < ema50_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price above KAMA or RSI oversold
-            if price > kama_val or rsi_val < 30:
+            # Exit: TRIX crosses above zero or price above 1d EMA50
+            if trix_now > 0 and trix_prev <= 0 or price > ema50_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_KAMA_Trend_With_RSI_Filter"
-timeframe = "12h"
+name = "4h_TRIX_Zero_Cross_With_Volume_Spike_and_1dTrend"
+timeframe = "4h"
 leverage = 1.0
