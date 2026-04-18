@@ -1,111 +1,101 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h MACD histogram crossover with 4h trend filter and volume confirmation.
-MACD histogram crossing above/below zero captures momentum shifts. The 4h EMA50 trend filter ensures we trade only in the direction of the higher timeframe trend, reducing whipsaws. Volume confirmation (>1.5x 20-period average) ensures institutional participation. Designed for 15-30 trades/year to minimize fee drag. Works in bull markets (buy when MACD crosses above zero in uptrend) and bear markets (sell when MACD crosses below zero in downtrend).
+Hypothesis: 6h Bollinger Band squeeze breakout with weekly trend filter.
+In low volatility (BB width < 20th percentile), price builds energy. Breakout above upper band (long) or below lower band (short) captures the move.
+Weekly trend filter (price > weekly EMA20 for longs, < for shorts) ensures we trade with the higher timeframe trend, reducing false breakouts in chop.
+Designed for 15-25 trades/year to minimize fee drag. Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands. Returns: upper, lower, width"""
+    if len(close) < period:
+        return np.full(len(close), np.nan), np.full(len(close), np.nan), np.full(len(close), np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
+    width = upper - lower
+    return upper, lower, width
+
+def calculate_ema(close, period):
+    """Calculate EMA."""
+    if len(close) < period:
+        return np.full(len(close), np.nan)
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    # Calculate EMA50 on 4h data
-    ema_50_4h = np.full(len(df_4h), np.nan)
-    if len(close_4h) >= 50:
-        ema_50_4h[49] = np.mean(close_4h[:50])
-        for i in range(50, len(close_4h)):
-            ema_50_4h[i] = (close_4h[i] * 2 / (50 + 1)) + (ema_50_4h[i-1] * (49 / (50 + 1)))
+    # Calculate weekly EMA20 for trend filter
+    ema20_weekly = calculate_ema(close_weekly, 20)
+    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
     
-    # Align 4h EMA50 to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate Bollinger Bands on 6h data
+    upper, lower, width = calculate_bollinger_bands(close, 20, 2.0)
     
-    # Calculate MACD (12,26,9) on 1h close
-    ema_12 = np.full(n, np.nan)
-    ema_26 = np.full(n, np.nan)
-    if n >= 26:
-        ema_12[11] = np.mean(close[:12])
-        ema_26[25] = np.mean(close[:26])
-        for i in range(12, n):
-            ema_12[i] = (close[i] * 2 / (12 + 1)) + (ema_12[i-1] * (11 / (12 + 1)))
-        for i in range(26, n):
-            ema_26[i] = (close[i] * 2 / (26 + 1)) + (ema_26[i-1] * (25 / (26 + 1)))
-    
-    macd_line = ema_12 - ema_26
-    
-    # Calculate signal line (9-period EMA of MACD)
-    signal_line = np.full(n, np.nan)
-    valid_macd = ~np.isnan(macd_line)
-    if np.sum(valid_macd) >= 9:
-        # Find first valid index
-        first_valid = np.where(valid_macd)[0][0]
-        signal_line[first_valid + 8] = np.mean(macd_line[first_valid:first_valid + 9])
-        for i in range(first_valid + 9, n):
-            if not np.isnan(macd_line[i]):
-                signal_line[i] = (macd_line[i] * 2 / (9 + 1)) + (signal_line[i-1] * (8 / (9 + 1)))
-    
-    macd_hist = macd_line - signal_line
-    
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
+    # Calculate Bollinger Band width percentile (20-period lookback)
+    width_percentile = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+        if not np.isnan(width[i]):
+            past_widths = width[i-20:i]
+            valid_widths = past_widths[~np.isnan(past_widths)]
+            if len(valid_widths) > 0:
+                percentile = (np.sum(valid_widths < width[i]) / len(valid_widths)) * 100
+                width_percentile[i] = percentile
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(26, 20)  # need MACD and volume MA
+    start_idx = 20  # need BB calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(macd_hist[i]) or 
-            np.isnan(signal_line[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(width_percentile[i]) or np.isnan(ema20_weekly_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Squeeze condition: BB width below 20th percentile (low volatility)
+        squeeze = width_percentile[i] < 20
         
-        # Trend filter: price above/below 4h EMA50
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
-        
-        if position == 0:
-            # Only trade in the direction of 4h trend with volume confirmation
-            if uptrend and vol_confirmed:
-                # Long when MACD histogram crosses above zero
-                if macd_hist[i] > 0 and macd_hist[i-1] <= 0:
-                    signals[i] = 0.25
-                    position = 1
-            elif downtrend and vol_confirmed:
-                # Short when MACD histogram crosses below zero
-                if macd_hist[i] < 0 and macd_hist[i-1] >= 0:
-                    signals[i] = -0.25
-                    position = -1
+        if position == 0 and squeeze:
+            # Long: breakout above upper band with weekly uptrend
+            if close[i] > upper[i] and close[i] > ema20_weekly_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: breakdown below lower band with weekly downtrend
+            elif close[i] < lower[i] and close[i] < ema20_weekly_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: MACD histogram crosses below zero or trend change
-            if macd_hist[i] < 0 or not uptrend:
+            # Long exit: price returns to middle band (SMA20) or opposite breakdown
+            sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values[i]
+            if not np.isnan(sma20) and close[i] < sma20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: MACD histogram crosses above zero or trend change
-            if macd_hist[i] > 0 or not downtrend:
+            # Short exit: price returns to middle band (SMA20) or opposite breakout
+            sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values[i]
+            if not np.isnan(sma20) and close[i] > sma20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_MACD_Hist_4hEMA50_Volume"
-timeframe = "1h"
+name = "6h_BB_Squeeze_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
