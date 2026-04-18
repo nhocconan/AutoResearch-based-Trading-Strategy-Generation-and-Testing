@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_Bollinger_Bands_Mean_Reversion_with_Volume_and_Trend_Filter_v1
-Hypothesis: Use Bollinger Bands mean reversion on 1h with volume confirmation and 4h/1d trend filter to capture reversals in both bull and bear markets. Bollinger Bands identify overextended moves, volume confirms institutional participation, and higher timeframe filters (4h EMA50, 1d ADX) ensure alignment with stronger trends. Designed for low trade frequency (15-35/year) to minimize fee drift while maintaining edge in ranging and trending markets.
+12h_Pivot_R1S1_Breakout_Volume_Confirmation_v5
+Hypothesis: On 12h timeframe, use daily Camarilla pivot levels (R1/S1) as dynamic support/resistance.
+Long when price breaks above R1 with volume confirmation; short when breaks below S1 with volume confirmation.
+Uses daily volatility filter (ATR ratio) to avoid choppy markets. Designed for low trade frequency (15-25/year)
+to minimize fee drag while capturing meaningful intraday moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,93 +21,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    
-    # 4h EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d ADX trend strength filter (avoid strong trends, favor ranging)
+    # Calculate daily Camarilla pivot levels (R1, S1)
     df_1d = get_htf_data(prices, '1d')
-    # Calculate ADX (14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    # Smooth TR, DM+, DM-
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False).fillna(0).values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).fillna(0).values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).fillna(0).values
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / np.where(tr_smooth == 0, 1, tr_smooth)
-    di_minus = 100 * dm_minus_smooth / np.where(tr_smooth == 0, 1, tr_smooth)
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).fillna(0).values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 12
+    s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 12
+    
+    # Align to 12h timeframe (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Daily ATR for volatility filter (20-period)
+    tr_1d = np.maximum(
+        high_1d - low_1d,
+        np.maximum(
+            np.abs(high_1d - np.roll(close_1d, 1)),
+            np.abs(low_1d - np.roll(close_1d, 1))
+        )
+    )
+    tr_1d[0] = high_1d[0] - low_1d[0]  # First period
+    atr_20_1d = pd.Series(tr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20_1d)
+    
+    # Current ATR ratio (ATR / prior ATR) to detect volatility expansion
+    atr_ratio = atr_20_1d / np.roll(atr_20_1d, 1)
+    atr_ratio[0] = 1.0
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need sufficient history for indicators
+    start_idx = 40  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(adx_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         price = close[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        vol_spike = volume_spike[i]
+        vol_expansion = atr_ratio_aligned[i] > 1.2  # Volatility expanding
         
-        # Mean reversion conditions
-        near_lower_band = price <= bb_lower[i] * 1.01  # within 1% of lower band
-        near_upper_band = price >= bb_upper[i] * 0.99  # within 1% of upper band
+        if position == 0:
+            # Long: price breaks above R1 with volume and volatility expansion
+            if price > r1 and vol_spike and vol_expansion:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below S1 with volume and volatility expansion
+            elif price < s1 and vol_spike and vol_expansion:
+                signals[i] = -0.25
+                position = -1
         
-        # Trend filter: only take mean reversion in weak or ranging markets (ADX < 25)
-        ranging_market = adx_aligned[i] < 25
+        elif position == 1:
+            signals[i] = 0.25
+            # Exit: price returns below R1 or volatility contracts
+            if price < r1 or atr_ratio_aligned[i] < 0.8:
+                signals[i] = 0.0
+                position = 0
         
-        # Entry conditions
-        if near_lower_band and volume_spike[i] and price > ema_4h_aligned[i] and ranging_market:
-            # Oversold in uptrend context -> long
-            signals[i] = 0.20
-        elif near_upper_band and volume_spike[i] and price < ema_4h_aligned[i] and ranging_market:
-            # Overbought in downtrend context -> short
-            signals[i] = -0.20
-        else:
-            signals[i] = 0.0
+        elif position == -1:
+            signals[i] = -0.25
+            # Exit: price returns above S1 or volatility contracts
+            if price > s1 or atr_ratio_aligned[i] < 0.8:
+                signals[i] = 0.0
+                position = 0
     
     return signals
 
-name = "1h_Bollinger_Bands_Mean_Reversion_with_Volume_and_Trend_Filter_v1"
-timeframe = "1h"
+name = "12h_Pivot_R1S1_Breakout_Volume_Confirmation_v5"
+timeframe = "12h"
 leverage = 1.0
