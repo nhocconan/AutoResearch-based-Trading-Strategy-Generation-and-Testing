@@ -1,70 +1,34 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h volume-weighted VWAP mean reversion with 1d RSI filter.
-- Long: price < VWAP(20) and RSI(14) < 30 on 1d (oversold in larger trend)
-- Short: price > VWAP(20) and RSI(14) > 70 on 1d (overbought in larger trend)
-- Exit: price crosses back to VWAP(20) or RSI returns to neutral zone (40-60)
-- Uses 4h VWAP for entry timing and 1d RSI for regime filter to avoid counter-trend trades.
-Designed for 20-50 trades/year (80-200 total) to minimize fee drag while capturing mean reversion in both bull and bear markets.
+Hypothesis: 1-day Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
+- Long: Price breaks above 1-day Donchian upper band, 1-week EMA(20) > price (bullish bias), volume > 1.5x 20-day average
+- Short: Price breaks below 1-day Donchian lower band, 1-week EMA(20) < price (bearish bias), volume > 1.5x 20-day average
+- Exit: Opposite Donchian band touch
+- Uses 1-week EMA for trend bias to avoid counter-trend trades in opposing markets.
+Designed for 7-25 trades/year (30-100 total) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_vwap(high, low, close, volume, period):
-    """Calculate Volume Weighted Average Price."""
-    if len(close) < period:
-        return np.full(len(close), np.nan)
+def calculate_ema(values, period):
+    """Calculate Exponential Moving Average."""
+    if len(values) < period:
+        return np.full(len(values), np.nan)
     
-    typical_price = (high + low + close) / 3
-    vwap = np.full(len(close), np.nan)
+    ema = np.full(len(values), np.nan)
+    multiplier = 2 / (period + 1)
+    ema[period-1] = np.mean(values[:period])
     
-    for i in range(period - 1, len(close)):
-        tp_sum = np.sum(typical_price[i - period + 1:i + 1] * volume[i - period + 1:i + 1])
-        vol_sum = np.sum(volume[i - period + 1:i + 1])
-        if vol_sum != 0:
-            vwap[i] = tp_sum / vol_sum
+    for i in range(period, len(values)):
+        ema[i] = (values[i] * multiplier) + (ema[i-1] * (1 - multiplier))
     
-    return vwap
-
-def calculate_rsi(close, period):
-    """Calculate Relative Strength Index."""
-    if len(close) < period + 1:
-        return np.full(len(close), np.nan)
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(len(close), np.nan)
-    avg_loss = np.full(len(close), np.nan)
-    
-    if len(gain) >= period:
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        
-        for i in range(period + 1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    
-    rs = np.full(len(close), np.nan)
-    for i in range(period, len(close)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-    
-    rsi = np.full(len(close), np.nan)
-    for i in range(period, len(close)):
-        if rs[i] != 0:
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100  # when avg_loss is 0, RSI is 100
-    
-    return rsi
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -72,51 +36,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI filter
+    # Get 1d data for Donchian bands
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate VWAP (20-period) on 4h
-    vwap_20 = calculate_vwap(high, low, close, volume, 20)
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate RSI (14-period) on 1d
-    rsi_14_1d = calculate_rsi(close_1d, 14)
+    # Calculate Donchian channels (20-period) on 1d
+    donchian_high = np.full(len(high_1d), np.nan)
+    donchian_low = np.full(len(low_1d), np.nan)
     
-    # Align 1d RSI to 4h timeframe
-    rsi_14_1d_4h = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    for i in range(19, len(high_1d)):  # 20-period lookback
+        donchian_high[i] = np.max(high_1d[i-19:i+1])
+        donchian_low[i] = np.min(low_1d[i-19:i+1])
+    
+    # Calculate EMA (20-period) on 1w
+    ema_20_1w = calculate_ema(close_1w, 20)
+    
+    # Align to 1d timeframe
+    donchian_high_1d = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_1d = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_20_1w_1d = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Calculate volume moving average (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # need VWAP(20) and aligned RSI
+    start_idx = 40  # need Donchian, EMA, and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(vwap_20[i]) or np.isnan(rsi_14_1d_4h[i]):
+        if (np.isnan(donchian_high_1d[i]) or np.isnan(donchian_low_1d[i]) or 
+            np.isnan(ema_20_1w_1d[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 0:
-            # Long: price below VWAP and 1d RSI oversold (<30)
-            if close[i] < vwap_20[i] and rsi_14_1d_4h[i] < 30:
+            # Long: price breaks above Donchian high, EMA > price (bullish), volume confirmation
+            if close[i] > donchian_high_1d[i] and ema_20_1w_1d[i] > close[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price above VWAP and 1d RSI overbought (>70)
-            elif close[i] > vwap_20[i] and rsi_14_1d_4h[i] > 70:
+            # Short: price breaks below Donchian low, EMA < price (bearish), volume confirmation
+            elif close[i] < donchian_low_1d[i] and ema_20_1w_1d[i] < close[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back to VWAP or RSI returns to neutral (>=40)
-            if close[i] >= vwap_20[i] or rsi_14_1d_4h[i] >= 40:
+            # Long exit: price touches Donchian low
+            if close[i] <= donchian_low_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back to VWAP or RSI returns to neutral (<=60)
-            if close[i] <= vwap_20[i] or rsi_14_1d_4h[i] <= 60:
+            # Short exit: price touches Donchian high
+            if close[i] >= donchian_high_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP20_RSI14_MeanReversion"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA20_Volume"
+timeframe = "1d"
 leverage = 1.0
