@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-12h 1W Pivot R1/S1 Breakout with Volume Spike and 1W EMA50 Trend Filter
-Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance across market regimes.
-Breakouts confirmed by volume and trend filter reduce false signals. Designed for low frequency.
+4h Donchian Breakout + Volume Spike + 1d EMA Trend + ATR Stop
+Hypothesis: Donchian(20) breakouts capture strong momentum, filtered by volume spike and 1d EMA50 trend. 
+ATR-based stop loss limits downside. Designed for low frequency (20-50 trades/year) with edge in both bull and bear markets.
 """
 
 import numpy as np
@@ -19,83 +19,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot and trend filter (once before loop)
-    df_w = get_htf_data(prices, '1w')
+    # Donchian channel (20-period high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly high, low, close for pivot levels
-    weekly_high = df_w['high'].values
-    weekly_low = df_w['low'].values
-    weekly_close = df_w['close'].values
+    # ATR for stop loss and volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly pivot: P = (H+L+C)/3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_range = weekly_high - weekly_low
-    # Weekly R1 = P + (H-L) = P + range
-    weekly_r1 = weekly_pivot + weekly_range
-    # Weekly S1 = P - (H-L) = P - range
-    weekly_s1 = weekly_pivot - weekly_range
+    # 1d EMA50 for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align weekly levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_w, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_w, weekly_s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_w, weekly_pivot)
-    ema_50_w_aligned = align_htf_to_ltf(prices, df_w, ema_50_w)
-    
-    # Volume spike detection (1.5x 20-period average)
+    # Volume spike (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
+    entry_price = 0.0
+    atr_at_entry = 0.0
     
-    start_idx = 50  # need enough history for calculations
+    start_idx = 50  # need enough history for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or
-            np.isnan(ema_50_w_aligned[i]) or
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        pivot_level = pivot_aligned[i]
-        ema_50 = ema_50_w_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        ema_trend = ema_50_1d_aligned[i]
+        volatility = atr[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: break above weekly R1 with volume spike and above weekly EMA50
-            if (price > r1_level and volume_spike[i] and price > ema_50):
+            # Long: break above Donchian high with volume spike and above daily EMA50
+            if price > upper and vol_spike and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S1 with volume spike and below weekly EMA50
-            elif (price < s1_level and volume_spike[i] and price < ema_50):
+                entry_price = price
+                atr_at_entry = volatility
+            # Short: break below Donchian low with volume spike and below daily EMA50
+            elif price < lower and vol_spike and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                atr_at_entry = volatility
         
         elif position == 1:
-            # Long position management
             signals[i] = 0.25
-            # Exit: price returns to weekly pivot or below weekly EMA50 (trend change)
-            if price <= pivot_level or price < ema_50:
+            # Exit: ATR-based stop loss or price retrace to midpoint
+            if price <= entry_price - 2.0 * atr_at_entry:
+                signals[i] = 0.0
+                position = 0
+            elif price <= (upper + lower) / 2.0:  # retrace to channel midpoint
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position management
             signals[i] = -0.25
-            # Exit: price returns to weekly pivot or above weekly EMA50 (trend change)
-            if price >= pivot_level or price > ema_50:
+            # Exit: ATR-based stop loss or price retrace to midpoint
+            if price >= entry_price + 2.0 * atr_at_entry:
+                signals[i] = 0.0
+                position = 0
+            elif price >= (upper + lower) / 2.0:  # retrace to channel midpoint
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_WeeklyPivot_R1S1_Breakout_VolumeSpike_1wEMA50"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_1dEMA50_ATRStop"
+timeframe = "4h"
 leverage = 1.0
