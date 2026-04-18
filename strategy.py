@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter
-Hypothesis: Use weekly Camarilla pivot levels to identify breakout points on daily chart. Go long when price breaks above S4 with volume confirmation, short when breaks below R4. Uses weekly structure for stronger support/resistance and daily volume for confirmation. Designed to work in both bull and bear markets by capturing strong momentum moves. Targets 15-25 trades/year with position size 0.25.
+1h_4h1d_MultiTimeframe_PivotBreakout_VolumeFilter
+Hypothesis: Combine 4h and 1d timeframe structure with 1h entry timing. Use 4h EMA34 for trend direction, 1d Camarilla pivot levels for key support/resistance, and 1h volume spike for entry timing. Go long when price is above 4h EMA34, breaks above 1d S1 with volume confirmation; short when below 4h EMA34, breaks below 1d R1 with volume confirmation. Designed to capture momentum in both bull and bear markets by aligning with higher timeframe structure. Targets 15-30 trades/year with position size 0.20.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,72 +18,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 4h data for EMA34 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate weekly Camarilla levels
-    # R4 = Close + 1.5 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
-    camarilla_r4 = close_1w + 1.5 * (high_1w - low_1w)
-    camarilla_s4 = close_1w - 1.5 * (high_1w - low_1w)
+    # Calculate 4h EMA34
+    ema34_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 34:
+        ema34_4h[33] = np.mean(close_4h[:34])
+        for i in range(34, len(close_4h)):
+            ema34_4h[i] = (close_4h[i] * 2/35) + (ema34_4h[i-1] * 33/35)
     
-    # Align weekly Camarilla levels to daily timeframe (wait for weekly bar close)
-    r4_1d = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    s4_1d = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # Align 4h EMA34 to 1h timeframe (wait for 4h bar close)
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # Calculate volume average (20-period) for confirmation
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d Camarilla levels (S1, R1)
+    # S1 = Close - 1.05 * (High - Low)
+    # R1 = Close + 1.05 * (High - Low)
+    camarilla_s1 = close_1d - 1.05 * (high_1d - low_1d)
+    camarilla_r1 = close_1d + 1.05 * (high_1d - low_1d)
+    
+    # Align 1d Camarilla levels to 1h timeframe (wait for daily bar close)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    
+    # Calculate 1h volume average (24-period = 1 day) for confirmation
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA
+    start_idx = 24  # need volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 2.0 * 24-period average
+        vol_confirmed = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above S4 with volume confirmation
-            if close[i] > s4_1d[i] and vol_confirmed:
-                signals[i] = 0.25
+            # Long entry: above 4h EMA34, breaks above 1d S1 with volume confirmation
+            if close[i] > ema34_4h_aligned[i] and close[i] > s1_1d_aligned[i] and vol_confirmed:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price breaks below R4 with volume confirmation
-            elif close[i] < r4_1d[i] and vol_confirmed:
-                signals[i] = -0.25
+            # Short entry: below 4h EMA34, breaks below 1d R1 with volume confirmation
+            elif close[i] < ema34_4h_aligned[i] and close[i] < r1_1d_aligned[i] and vol_confirmed:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses back below S4
-            if close[i] < s4_1d[i]:
+            # Long exit: price crosses back below 1d S1 or below 4h EMA34
+            if close[i] < s1_1d_aligned[i] or close[i] < ema34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price crosses back above R4
-            if close[i] > r4_1d[i]:
+            # Short exit: price crosses back above 1d R1 or above 4h EMA34
+            if close[i] > r1_1d_aligned[i] or close[i] > ema34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter"
-timeframe = "1d"
+name = "1h_4h1d_MultiTimeframe_PivotBreakout_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
