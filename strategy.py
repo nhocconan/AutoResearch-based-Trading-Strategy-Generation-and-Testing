@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_ThreeBarReversal_WithVolume_TrendFilter
-Hypothesis: Three-bar reversal patterns on 4h with volume confirmation and 1d EMA trend filter.
-Buy when three consecutive higher closes form with volume spike and uptrend (price > EMA34).
-Sell when three consecutive lower closes form with volume spike and downtrend (price < EMA34).
-Designed for low trade frequency (20-50/year) to avoid fee drag while capturing
-reversal moves in both bull and bear markets via trend alignment.
+6h_Camarilla_R1S1_Breakout_WithVolume_1dTrend
+Hypothesis: Camarilla pivot breakouts at R1/S1 levels on 6h with volume confirmation and 1d EMA50 trend filter.
+Long when price breaks above R1 with volume spike and above EMA50; short when breaks below S1 with volume spike and below EMA50.
+Uses daily pivots calculated from previous day's OHLC. Designed for low trade frequency (15-30/year) to avoid fee drag.
+Works in bull/bear markets by aligning with 1d trend - only takes long in uptrend, short in downtrend.
 """
 
 import numpy as np
@@ -22,69 +21,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for pivot and trend
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Camarilla levels from previous day's OHLC
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.0 * (high - low)
+    # R2 = close + 0.5 * (high - low)
+    # R1 = close + 0.25 * (high - low)
+    # S1 = close - 0.25 * (high - low)
+    # S2 = close - 0.5 * (high - low)
+    # S3 = close - 1.0 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    high_low_range = prev_high - prev_low
     
-    # Volume spike: >2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    r1 = prev_close + 0.25 * high_low_range
+    s1 = prev_close - 0.25 * high_low_range
     
-    # Three-bar reversal detection
-    # Bullish: three consecutive higher closes
-    bullish_reversal = (close > np.roll(close, 1)) & (np.roll(close, 1) > np.roll(close, 2))
-    # Bearish: three consecutive lower closes
-    bearish_reversal = (close < np.roll(close, 1)) & (np.roll(close, 1) < np.roll(close, 2))
+    # Align daily pivot levels to 6h timeframe
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume spike: >1.8x 24-period average (4 days of 6h bars)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20)  # Warmup for EMA and volume
+    start_idx = max(50, 25)  # Warmup for EMA and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(volume_spike[i]) or
-            np.isnan(bullish_reversal[i]) or
-            np.isnan(bearish_reversal[i])):
+        if (np.isnan(r1_6h[i]) or 
+            np.isnan(s1_6h[i]) or
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema34 = ema_34_aligned[i]
+        r1_level = r1_6h[i]
+        s1_level = s1_6h[i]
+        ema50 = ema_50_aligned[i]
         vol_spike = volume_spike[i]
-        bull_rev = bullish_reversal[i]
-        bear_rev = bearish_reversal[i]
         
         if position == 0:
-            # Long: bullish reversal with volume spike and uptrend
-            if bull_rev and vol_spike and price > ema34:
+            # Long: break above R1 with volume spike and uptrend
+            if price > r1_level and vol_spike and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish reversal with volume spike and downtrend
-            elif bear_rev and vol_spike and price < ema34:
+            # Short: break below S1 with volume spike and downtrend
+            elif price < s1_level and vol_spike and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: bearish reversal OR trend turns down
-            if bear_rev or price < ema34:
+            # Exit: price returns below R1 OR trend turns down
+            if price < r1_level or price < ema50:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: bullish reversal OR trend turns up
-            if bull_rev or price > ema34:
+            # Exit: price returns above S1 OR trend turns up
+            if price > s1_level or price > ema50:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_ThreeBarReversal_WithVolume_TrendFilter"
-timeframe = "4h"
+name = "6h_Camarilla_R1S1_Breakout_WithVolume_1dTrend"
+timeframe = "6h"
 leverage = 1.0
