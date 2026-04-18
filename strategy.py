@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter
-Hypothesis: Trade Camarilla pivot breakouts at R1 (long) and S1 (short) with volume confirmation and 1d EMA34 trend filter. Camarilla levels provide high-probability reversal/breakout points. Only take longs when price > 1d EMA34 (uptrend) and shorts when price < 1d EMA34 (downtrend) to avoid counter-trend trades. Volume > 1.5x 24-period average confirms breakout strength. Targets 20-30 trades/year via strict pivot breaks + trend + volume filters. Works in bull/bear by following higher timeframe trend.
+12h_Momentum_1wTrend_1dVolume
+Hypothesis: Trade momentum on 12h using 1w trend filter (bull/bear) with 1d volume confirmation. 
+In bull (price > 1w EMA50): long when 12h RSI crosses above 50 + volume > 1.5x 24-period average.
+In bear (price < 1w EMA50): short when 12h RSI crosses below 50 + volume > 1.5x 24-period average.
+Uses 1w EMA50 for trend filter to avoid counter-trend trades, and volume confirmation to ensure 
+momentum validity. Designed for low trade frequency (<30/year) to minimize fee drag. Works in 
+both bull and bear by following the higher-timeframe trend.
 """
 
 import numpy as np
@@ -18,79 +23,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA34
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # 1w EMA50
+    ema_period = 50
+    ema_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= ema_period:
+        multiplier = 2 / (ema_period + 1)
+        ema_1w[ema_period-1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
+    
+    # Align 1w EMA50 to 12h
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Get 1d data for volume average
     df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for each 1d bar: R1, S1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d volume 24-period average
+    vol_ma_period = 24
+    vol_ma_1d = np.full_like(volume_1d, np.nan)
+    if len(volume_1d) >= vol_ma_period:
+        for i in range(vol_ma_period, len(volume_1d)):
+            vol_ma_1d[i] = np.mean(volume_1d[i - vol_ma_period:i])
     
-    camarilla_R1 = np.full_like(close_1d, np.nan)
-    camarilla_S1 = np.full_like(close_1d, np.nan)
+    # Align 1d volume MA to 12h
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    for i in range(len(close_1d)):
-        if i >= 0:  # Need at least one bar
-            rng = high_1d[i] - low_1d[i]
-            camarilla_R1[i] = close_1d[i] + rng * 1.1 / 12
-            camarilla_S1[i] = close_1d[i] - rng * 1.1 / 12
+    # 12h RSI(14)
+    rsi_period = 14
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate EMA34 on 1d close
-    ema_period = 34
-    ema_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (ema_period - 1) / (ema_period + 1))
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume confirmation: volume > 1.5x 24-period average
-    vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    if len(close) >= rsi_period + 1:
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+        
+        for i in range(rsi_period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+    else:
+        rsi = np.full_like(close, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(vol_period, 1)  # Need volume MA and at least 1 bar for crossover
+    start_idx = max(ema_period, vol_ma_period, rsi_period + 1)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend: bull if price > 1w EMA50, bear if price < 1w EMA50
+        is_bull = close[i] > ema_1w_aligned[i]
+        is_bear = close[i] < ema_1w_aligned[i]
+        
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend (price > EMA34) + volume
-            if close[i] > camarilla_R1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_confirm:
+            # Long in bull: RSI crosses above 50 + volume
+            if i > 0 and not np.isnan(rsi[i-1]) and rsi[i-1] <= 50 and rsi[i] > 50 and is_bull and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + downtrend (price < EMA34) + volume
-            elif close[i] < camarilla_S1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_confirm:
+            # Short in bear: RSI crosses below 50 + volume
+            elif i > 0 and not np.isnan(rsi[i-1]) and rsi[i-1] >= 50 and rsi[i] < 50 and is_bear and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or trend turns down (price < EMA34)
-            if close[i] < camarilla_S1_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: RSI crosses below 50 or trend turns bear
+            if (i > 0 and not np.isnan(rsi[i-1]) and rsi[i-1] > 50 and rsi[i] <= 50) or not is_bull:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or trend turns up (price > EMA34)
-            if close[i] > camarilla_R1_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: RSI crosses above 50 or trend turns bull
+            if (i > 0 and not np.isnan(rsi[i-1]) and rsi[i-1] < 50 and rsi[i] >= 50) or not is_bear:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -98,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter"
-timeframe = "4h"
+name = "12h_Momentum_1wTrend_1dVolume"
+timeframe = "12h"
 leverage = 1.0
