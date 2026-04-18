@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Direction_1dVolumeFilter
-Hypothesis: Use weekly pivot levels for long-term trend direction, with 1d volume confirmation for entry timing. 
-Go long when price is above weekly pivot (bullish bias) and breaks above 1d high with volume > 1.5x average. 
-Go short when price is below weekly pivot (bearish bias) and breaks below 1d low with volume > 1.5x average. 
-Weekly pivot provides structural bias that works in both bull and bear markets, while volume confirmation ensures 
-entries occur with conviction. Target: 20-40 trades/year by requiring both directional bias and volume confirmation.
+12h_WK1_Trend_Momentum_v1
+Hypothesis: Use 1w EMA34 for trend direction and 1d RSI for momentum confirmation on 12h timeframe. 
+Go long when price > 1w EMA34 AND 1d RSI > 55, short when price < 1w EMA34 AND 1d RSI < 45. 
+Requires volume > 1.5x 20-period average for confirmation. Target: 15-30 trades/year by combining multiple filters to reduce noise. 
+Works in bull markets via trend following and in bear via short signals. 
+Multi-timeframe: 1w trend (HTF), 1d momentum (MTF), 12h execution (LTF).
 """
 
 import numpy as np
@@ -22,26 +22,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # Get 1w data for EMA34 trend
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Weekly pivot points: P = (H + L + C)/3
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    # Align weekly pivot to 6h timeframe
-    pivot_weekly_aligned = align_htf_to_ltf(prices, df_weekly, pivot_weekly)
+    # 1w EMA34
+    ema_len = 34
+    ema_1w = np.full_like(close_1w, np.nan)
     
-    # Get daily data for high/low and volume
+    if len(close_1w) >= ema_len:
+        # Use pandas EMA for proper calculation
+        ema_series = pd.Series(close_1w).ewm(span=ema_len, adjust=False).mean()
+        ema_1w = ema_series.values
+    
+    # Align 1w EMA34 to 12h timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Get 1d data for RSI
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Align daily high/low to 6h timeframe
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    # 1d RSI(14)
+    rsi_period = 14
+    rsi_1d = np.full_like(close_1d, np.nan)
+    
+    if len(close_1d) >= rsi_period + 1:
+        delta = np.diff(close_1d)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close_1d, np.nan)
+        avg_loss = np.full_like(close_1d, np.nan)
+        
+        # First average
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+        
+        # Wilder smoothing
+        for i in range(rsi_period + 1, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Align 1d RSI to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -51,44 +77,51 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
+    # Time-based filters
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Avoid low liquidity hours: 22-06 UTC (6 hours)
+    # Active hours: 06-22 UTC (16 hours)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(vol_period, 1) + 1
+    start_idx = max(ema_len, rsi_period, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_weekly_aligned[i]) or 
-            np.isnan(high_1d_aligned[i]) or 
-            np.isnan(low_1d_aligned[i]) or 
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Time filter: avoid 22-06 UTC (low liquidity)
+        hour = hours[i]
+        in_active_hours = 6 <= hour < 22
+        
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        if position == 0:
-            # Long: price above weekly pivot AND breaks above 1d high with volume
-            if close[i] > pivot_weekly_aligned[i] and high[i] > high_1d_aligned[i] and vol_confirm:
+        if position == 0 and in_active_hours:
+            # Long: price > 1w EMA34 AND 1d RSI > 55 AND volume confirmation
+            if close[i] > ema_1w_aligned[i] and rsi_1d_aligned[i] > 55 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly pivot AND breaks below 1d low with volume
-            elif close[i] < pivot_weekly_aligned[i] and low[i] < low_1d_aligned[i] and vol_confirm:
+            # Short: price < 1w EMA34 AND 1d RSI < 45 AND volume confirmation
+            elif close[i] < ema_1w_aligned[i] and rsi_1d_aligned[i] < 45 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below weekly pivot OR breaks below 1d low
-            if close[i] < pivot_weekly_aligned[i] or low[i] < low_1d_aligned[i]:
+            # Long exit: price < 1w EMA34 OR 1d RSI < 40
+            if close[i] < ema_1w_aligned[i] or rsi_1d_aligned[i] < 40:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above weekly pivot OR breaks above 1d high
-            if close[i] > pivot_weekly_aligned[i] or high[i] > high_1d_aligned[i]:
+            # Short exit: price > 1w EMA34 OR 1d RSI > 60
+            if close[i] > ema_1w_aligned[i] or rsi_1d_aligned[i] > 60:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -96,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Direction_1dVolumeFilter"
-timeframe = "6h"
+name = "12h_WK1_Trend_Momentum_v1"
+timeframe = "12h"
 leverage = 1.0
