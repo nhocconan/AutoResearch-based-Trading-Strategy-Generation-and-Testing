@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_12h_Trend_1d_Confluence_Breakout
-Hypothesis: On 6h timeframe, take long when price breaks above the 12h EMA20 with
-1d EMA50 uptrend and volume confirmation; take short when price breaks below
-12h EMA20 with 1d EMA50 downtrend and volume confirmation. Uses EMA trend
-alignment across timeframes to filter noise and capture sustained moves.
-Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in
-downtrend) markets with tight entry conditions targeting 15-25 trades/year.
+12h_KAMA_RSI_Trend_Filter
+Hypothesis: Use KAMA to identify trend direction, combined with RSI for momentum confirmation and volume filter for validation.
+Works in both bull and bear markets by following the trend direction while avoiding whipsaws through RSI extremes and volume confirmation.
+Target: 12-30 trades per year (48-120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -18,67 +15,90 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h EMA20 for trend and breakout level
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h_20 = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_20_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_20)
+    # KAMA trend indicator
+    def kama(close, er_len=10, fast_len=2, slow_len=30):
+        change = np.abs(np.diff(close, n=er_len))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close.shape) > 1 else np.abs(np.diff(close)).sum()
+        # Handle 1D case
+        if len(close.shape) == 1:
+            volatility = np.sum(np.abs(np.diff(close)))
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # 1d EMA50 for higher timeframe trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    kama_vals = kama(close, 10, 2, 30)
     
-    # Volume filter: >1.5x 20-period average
+    # RSI(14) for momentum
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_vals = rsi(close, 14)
+    
+    # Volume filter: above 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_12h_20_aligned[i]) or np.isnan(ema_1d_50_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
+            
         price = close[i]
-        ema_12h = ema_12h_20_aligned[i]
-        ema_1d = ema_1d_50_aligned[i]
+        kama_val = kama_vals[i]
+        rsi_val = rsi_vals[i]
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above 12h EMA20 with 1d uptrend and volume
-            if price > ema_12h and ema_1d > ema_12h and vol_ok:
+            # Long: price above KAMA, RSI not overbought, volume confirmation
+            if price > kama_val and rsi_val < 70 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 12h EMA20 with 1d downtrend and volume
-            elif price < ema_12h and ema_1d < ema_12h and vol_ok:
+            # Short: price below KAMA, RSI not oversold, volume confirmation
+            elif price < kama_val and rsi_val > 30 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns below 12h EMA20 or 1d trend turns down
-            if price < ema_12h or ema_1d < ema_12h:
+            # Exit: price crosses below KAMA or RSI overbought
+            if price < kama_val or rsi_val > 75:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price returns above 12h EMA20 or 1d trend turns up
-            if price > ema_12h or ema_1d > ema_12h:
+            # Exit: price crosses above KAMA or RSI oversold
+            if price > kama_val or rsi_val < 25:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_12h_Trend_1d_Confluence_Breakout"
-timeframe = "6h"
+name = "12h_KAMA_RSI_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
