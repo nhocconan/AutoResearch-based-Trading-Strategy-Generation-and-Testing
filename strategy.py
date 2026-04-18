@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_StrongTrend_With_Volume_Confirmation
-Hypothesis: Strong 12-hour trends (price > 50-period SMA) combined with above-average volume 
-capture sustained institutional moves. Works in bull/bear by following confirmed trends.
-Target: 20-40 trades/year (80-160 total over 4 years) for optimal balance.
+4h_TRIX_Volume_Spike_Chop_Regime
+Hypothesis: TRIX (triple exponential average) with period 9 detects momentum shifts.
+A volume spike (1.5x 20-period average) confirms the move. Choppiness index > 61.8 filters
+for ranging markets where TRIX is less reliable. Works in bull/bear by capturing momentum
+in trending regimes and avoiding whipsaws in ranges. Target: 20-40 trades/year (80-160 total).
 """
 
 import numpy as np
@@ -15,66 +16,73 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # TRIX calculation: triple EMA of log returns
+    log_returns = np.diff(np.log(close), prepend=np.log(close[0]))
+    ema1 = pd.Series(log_returns).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix[0] = 0  # first value undefined
+    
+    # 12h data for Choppiness Index
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    # Daily EMA50 trend
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (max(HH14) - min(LL14))) / log10(14)
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = np.abs(df_12h['high'] - df_12h['close'].shift(1))
+    tr3 = np.abs(df_12h['low'] - df_12h['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    hh14 = df_12h['high'].rolling(window=14, min_periods=14).max().values
+    ll14 = df_12h['low'].rolling(window=14, min_periods=14).min().values
+    chop = 100 * (np.log10(np.nansum(pd.Series(atr14).rolling(14, min_periods=14).sum(), axis=0)) / 
+                  np.log10(14)) / np.log10((hh14 - ll14).replace(0, np.nan))
+    chop = np.where((hh14 - ll14) == 0, 100, chop)
+    chop_4h = align_htf_to_ltf(prices, df_12h, chop, additional_delay_bars=0)
     
-    # Volume filter: >1.3x 20-period average
+    # Volume spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
-    
-    # Price momentum: close > open for bullish, close < open for bearish
-    bullish_momentum = close > prices['open'].values
-    bearish_momentum = close < prices['open'].values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Warmup for EMA50
+    start_idx = max(20, 14)  # warmup for volume and chop
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(bullish_momentum[i]) or np.isnan(bearish_momentum[i])):
+        if (np.isnan(trix[i]) or np.isnan(chop_4h[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        ema_trend = ema_50_12h[i]
-        vol_ok = volume_filter[i]
-        bull_mom = bullish_momentum[i]
-        bear_mom = bearish_momentum[i]
-        
         if position == 0:
-            # Long: price above daily EMA50 with volume and bullish momentum
-            if price > ema_trend and vol_ok and bull_mom:
+            # Long: TRIX turns up with volume spike in trending market (CHOP <= 61.8)
+            if trix[i] > trix[i-1] and volume_spike[i] and chop_4h[i] <= 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily EMA50 with volume and bearish momentum
-            elif price < ema_trend and vol_ok and bear_mom:
+            # Short: TRIX turns down with volume spike in trending market
+            elif trix[i] < trix[i-1] and volume_spike[i] and chop_4h[i] <= 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: trend breaks or volume dries up
-            if price < ema_trend or not vol_ok:
+            # Exit: TRIX turns down or chop increases (range)
+            if trix[i] < trix[i-1] or chop_4h[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: trend breaks or volume dries up
-            if price > ema_trend or not vol_ok:
+            # Exit: TRIX turns up or chop increases
+            if trix[i] > trix[i-1] or chop_4h[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_StrongTrend_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_TRIX_Volume_Spike_Chop_Regime"
+timeframe = "4h"
 leverage = 1.0
