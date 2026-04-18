@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Three-Bar Reversal with Volume Surge and ADX Filter
-Hypothesis: Three-bar reversal patterns (three consecutive higher highs/lows) signal momentum exhaustion.
-Combined with volume surge (>2x average) and weak trend (ADX < 25) to catch reversals in both bull and bear markets.
-Target: 20-40 trades/year to minimize fee drain.
+4h Donchian Breakout with Volume Confirmation and ADX Filter
+Hypothesis: Price breaking above/below Donchian Channel (20-period high/low) with volume confirmation 
+(volume > 1.5x average) and trend strength (ADX > 20) indicates strong momentum. 
+Donchian channels provide clear breakout levels. Works in both bull (breakouts up) and bear (breakouts down) 
+markets by capturing momentum bursts. Target: 20-40 trades/year to minimize fee drain.
 """
 
 import numpy as np
@@ -19,6 +20,10 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian Channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # ADX for trend strength (14-period)
     tr1 = high - low
@@ -44,53 +49,51 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume surge: volume > 2x 20-period EMA
+    # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_surge = volume > (2 * vol_ema)
-    
-    # Three-bar reversal detection
-    # Bullish reversal: three consecutive higher lows
-    bull_reversal = (low > np.roll(low, 1)) & (np.roll(low, 1) > np.roll(low, 2)) & (np.roll(low, 2) > np.roll(low, 3))
-    # Bearish reversal: three consecutive lower highs
-    bear_reversal = (high < np.roll(high, 1)) & (np.roll(high, 1) < np.roll(high, 2)) & (np.roll(high, 2) < np.roll(high, 3))
+    vol_ratio = volume / vol_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators (max of 14,20,3)
+    start_idx = 35  # Warmup for indicators (max of 20,20,14)
     
     for i in range(start_idx, n):
-        if (np.isnan(adx[i]) or np.isnan(vol_surge[i]) or 
-            np.isnan(bull_reversal[i]) or np.isnan(bear_reversal[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
+        price = close[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         adx_val = adx[i]
-        vol_surge_val = vol_surge[i]
-        bull_rev = bull_reversal[i]
-        bear_rev = bear_reversal[i]
+        vol_conf = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Look for bullish reversal with volume surge and weak trend
-            if bull_rev and vol_surge_val and adx_val < 25:
+            # Strong trend (ADX > 20) and volume confirmation
+            # Price breaks above upper Donchian = long
+            if adx_val > 20 and price > upper and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Look for bearish reversal with volume surge and weak trend
-            elif bear_rev and vol_surge_val and adx_val < 25:
+            # Price breaks below lower Donchian = short
+            elif adx_val > 20 and price < lower and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit on bearish reversal or trend strengthening
-            if bear_rev or adx_val > 30:
+            # Exit if trend weakens or price returns to middle of channel
+            middle = (upper + lower) / 2
+            if adx_val < 15 or price < middle:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit on bullish reversal or trend strengthening
-            if bull_rev or adx_val > 30:
+            # Exit if trend weakens or price returns to middle of channel
+            middle = (upper + lower) / 2
+            if adx_val < 15 or price > middle:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ThreeBar_Reversal_Volume_ADX"
+name = "4h_Donchian_Breakout_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
