@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Volume_Weighted_RSI_MeanReversion_v1
-Hypothesis: In 12h timeframe, RSI mean reversion with volume confirmation works across market regimes.
-Long when RSI < 30 and volume > 1.5x average, short when RSI > 70 and volume > 1.5x average.
-Uses 1-week trend filter to avoid counter-trend trades in strong trends.
-Target: 20-30 trades/year by requiring RSI extremes + volume confirmation + trend alignment.
-Works in both bull and bear markets by fading extremes only when aligned with higher timeframe trend.
+1h_Camarilla_Pivot_R1S1_Breakout_Volume_Session_v1
+Hypothesis: In 1h timeframe, use daily Camarilla pivot levels (R1/S1) as key support/resistance.
+Breakouts above R1 or below S1 with volume confirmation trigger trades, but only during
+liquid session (08-20 UTC) to avoid low-volume noise. Uses daily ADX < 25 to filter for
+range-bound conditions where pivot breaks are more likely to hold. Targets 15-30 trades/year
+by requiring confluence of pivot break, volume, session, and low volatility regime.
+Works in both bull/bear markets by fading false breaks in ranging conditions and
+capturing genuine breakouts when volatility expands.
 """
 
 import numpy as np
@@ -22,28 +24,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(close_prices, np.nan)
-        avg_loss = np.full_like(close_prices, np.nan)
-        
-        if len(close_prices) >= period + 1:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-            
-            for i in range(period + 1, len(close_prices)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Get daily data for Camarilla pivots and ADX
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    rsi = calculate_rsi(close, 14)
+    # Calculate Camarilla levels (based on previous day)
+    R1 = np.full_like(high_1d, np.nan)
+    S1 = np.full_like(low_1d, np.nan)
+    
+    for i in range(1, len(close_1d)):
+        # Use previous day's range
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_ = prev_high - prev_low
+        
+        if range_ > 0:
+            R1[i] = prev_close + 1.1 * range_ / 12
+            S1[i] = prev_close - 1.1 * range_ / 12
+    
+    # Calculate 14-period ADX for regime filtering
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[np.nan], dm_plus])
+        dm_minus = np.concatenate([[np.nan], dm_minus])
+        
+        # Smooth TR, DM+
+        atr = np.full_like(tr, np.nan)
+        dm_plus_smooth = np.full_like(dm_plus, np.nan)
+        dm_minus_smooth = np.full_like(dm_minus, np.nan)
+        
+        if len(tr) >= period:
+            # Initial values
+            atr[period] = np.nanmean(tr[1:period+1])
+            dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
+            dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
+            
+            # Wilder smoothing
+            for i in range(period+1, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+        
+        # DI+ and DI-
+        di_plus = np.full_like(dm_plus_smooth, np.nan)
+        di_minus = np.full_like(dm_minus_smooth, np.nan)
+        valid = ~np.isnan(atr) & (atr != 0)
+        di_plus[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
+        di_minus[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
+        
+        # DX and ADX
+        dx = np.full_like(di_plus, np.nan)
+        dx_valid = ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
+        dx[dx_valid] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
+        
+        adx = np.full_like(dx, np.nan)
+        if len(dx) >= period:
+            # Initial ADX
+            adx[2*period-1] = np.nanmean(dx[period:2*period])
+            # Wilder smoothing for ADX
+            for i in range(2*period, len(dx)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
+    
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    
+    # Align all 1d data to 1h timeframe
+    R1_1h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_1h = align_htf_to_ltf(prices, df_1d, S1)
+    adx_1h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -53,66 +116,60 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA(34) for trend filter
-    if len(close_1w) >= 34:
-        ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False).mean().values
-    else:
-        ema_1w = np.full_like(close_1w, np.nan)
-    
-    # Align weekly EMA to 12h timeframe
-    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # Pre-compute session hours
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20, 34) + 1  # Ensure we have enough data
+    start_idx = max(20, 14) + 1  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema_1w_12h[i])):
+        if (np.isnan(R1_1h[i]) or np.isnan(S1_1h[i]) or 
+            np.isnan(adx_1h[i]) or np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade during liquid hours 08-20 UTC
+        if hours[i] < 8 or hours[i] > 20:
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: price above weekly EMA for longs, below for shorts
-        bullish_trend = close[i] > ema_1w_12h[i]
-        bearish_trend = close[i] < ema_1w_12h[i]
+        # Regime filter: daily ADX < 25 (range-bound conditions)
+        range_regime = adx_1h[i] < 25
         
         if position == 0:
-            # Long: RSI oversold with volume confirmation and bullish trend
-            if rsi[i] < 30 and vol_confirm and bullish_trend:
-                signals[i] = 0.25
+            # Long: price breaks above R1 with volume in range regime
+            if close[i] > R1_1h[i] and vol_confirm and range_regime:
+                signals[i] = 0.20
                 position = 1
-            # Short: RSI overbought with volume confirmation and bearish trend
-            elif rsi[i] > 70 and vol_confirm and bearish_trend:
-                signals[i] = -0.25
+            # Short: price breaks below S1 with volume in range regime
+            elif close[i] < S1_1h[i] and vol_confirm and range_regime:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI returns to neutral (50) or trend changes
-            if rsi[i] >= 50 or not bullish_trend:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price breaks below S1 OR ADX rises above 30 (trend emerging)
+            if close[i] < S1_1h[i] or adx_1h[i] > 30:
+                signals[i] = -0.20  # reverse to short
+                position = -1
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: RSI returns to neutral (50) or trend changes
-            if rsi[i] <= 50 or not bearish_trend:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price breaks above R1 OR ADX rises above 30 (trend emerging)
+            if close[i] > R1_1h[i] or adx_1h[i] > 30:
+                signals[i] = 0.20  # reverse to long
+                position = 1
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Volume_Weighted_RSI_MeanReversion_v1"
-timeframe = "12h"
+name = "1h_Camarilla_Pivot_R1S1_Breakout_Volume_Session_v1"
+timeframe = "1h"
 leverage = 1.0
