@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1_S1_Breakout_Volume_Trend
-Hypothesis: Camarilla pivot levels from 1d with volume confirmation and trend filter on 4h timeframe.
-Long when price breaks above S1 with volume spike and 4h price above 20 EMA (uptrend).
-Short when price breaks below R1 with volume spike and 4h price below 20 EMA (downtrend).
-Uses volume spike (>2x 20-period average) and EMA20 trend filter to avoid false breakouts.
-Target: 20-30 trades/year to minimize fee drag while capturing institutional breakout moves.
+4h_KAMA_Trend_Filter
+Hypothesis: KAMA adapts to market noise, reducing whipsaw in sideways markets. Combined with volume confirmation and 1d trend filter, it should work in both bull and bear markets by capturing strong trends while avoiding chop.
 """
 
 import numpy as np
@@ -17,82 +13,88 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot levels (calculated from previous day's OHLC)
+    # KAMA (Kaufman Adaptive Moving Average) parameters
+    er_len = 10
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.zeros_like(change)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
+    er = np.concatenate([np.full(er_len, np.nan), er])
+    
+    # Calculate Smoothing Constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[er_len] = close[er_len]
+    for i in range(er_len + 1, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 1d trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels: R1, S1 based on previous day
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_range = (high_1d - low_1d) * 1.1 / 12
-    r1 = close_1d + camarilla_range
-    s1 = close_1d - camarilla_range
-    
-    # Align to 4h timeframe (use previous day's levels for current day)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # EMA20 for trend filter on 4h
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume spike: >2x 20-period average
+    # Volume confirmation: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 1)  # Warmup for indicators
+    start_idx = max(34, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_20[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        ema20 = ema_20[i]
+        kama_val = kama[i]
+        ema1d = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above S1 with volume spike in uptrend
-            if (price > s1_level and          # breaks above S1
-                vol_spike and                 # volume confirmation
-                price > ema20):               # uptrend filter
+            # Long: price above KAMA and 1d EMA with volume spike
+            if (price > kama_val and
+                price > ema1d and
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R1 with volume spike in downtrend
-            elif (price < r1_level and        # breaks below R1
-                  vol_spike and               # volume confirmation
-                  price < ema20):             # downtrend filter
+            # Short: price below KAMA and 1d EMA with volume spike
+            elif (price < kama_val and
+                  price < ema1d and
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses back below S1 or trend reverses
-            if price < s1_level or price < ema20:
+            # Exit: price crosses below KAMA or 1d EMA
+            if price < kama_val or price < ema1d:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses back above R1 or trend reverses
-            if price > r1_level or price > ema20:
+            # Exit: price crosses above KAMA or 1d EMA
+            if price > kama_val or price > ema1d:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_Trend"
+name = "4h_KAMA_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
