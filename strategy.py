@@ -1,109 +1,125 @@
 #!/usr/bin/env python3
 """
-4h RSI and Volume Spike with 1d Trend Filter
-Hypothesis: RSI extremes (oversold/overbought) combined with volume spikes 
-indicate potential reversals. The 1d trend filter (EMA50) ensures trades 
-align with higher timeframe direction, reducing whipsaws in both bull and 
-bear markets. Works by fading extremes in trending markets.
+1d Weekly ATR Breakout with Volume Spike and Trend Filter
+Hypothesis: Weekly ATR-based breakouts capture strong momentum moves. 
+Volume surge confirms institutional participation. Trend filter (price vs weekly EMA20) 
+ensures alignment with higher timeframe direction. Works in both bull and bear 
+markets by following breakout direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper handling"""
-    if len(close) < period + 1:
-        return np.full_like(close, np.nan)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+def calculate_atr(high, low, close, period=14):
+    """Calculate Average True Range"""
+    if len(high) < period:
+        return np.full_like(high, np.nan)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    atr = np.zeros_like(high)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    return atr
+
+def calculate_ema(arr, period):
+    """Calculate Exponential Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    ema = np.zeros_like(arr)
+    multiplier = 2 / (period + 1)
+    ema[0] = arr[0]
+    for i in range(1, len(arr)):
+        ema[i] = (arr[i] - ema[i-1]) * multiplier + ema[i-1]
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for ATR and EMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i < 20:
-            ema_50_1d[i] = np.mean(close_1d[max(0, i-19):i+1]) if i >= 0 else close_1d[i]
-        else:
-            ema_50_1d[i] = (ema_50_1d[i-1] * 0.9047619047619048 + close_1d[i] * 0.09523809523809523)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly ATR and EMA20
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate RSI
-    rsi = calculate_rsi(close, 14)
+    weekly_atr = calculate_atr(weekly_high, weekly_low, weekly_close, 14)
+    weekly_ema20 = calculate_ema(weekly_close, 20)
     
-    # Volume spike: current volume > 2.0 x 20-period average
-    vol_ma = np.zeros_like(volume)
+    # Align to daily timeframe (use previous week's values)
+    weekly_atr_aligned = align_htf_to_ltf(prices, df_1w, weekly_atr)
+    weekly_ema20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema20)
+    
+    # Weekly breakout levels: previous week close ± ATR * multiplier
+    weekly_close_prev = np.roll(weekly_close, 1)
+    weekly_close_prev[0] = weekly_close[0]  # First value
+    breakout_up = weekly_close_prev + (weekly_atr_aligned * 1.5)
+    breakout_down = weekly_close_prev - (weekly_atr_aligned * 1.5)
+    
+    # Volume spike: current volume > 2.0x 20-day average
+    vol_ma20 = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
+            vol_ma20[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 2.0)
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    vol_spike = volume > (vol_ma20 * 2.0)
+    
+    # Trend filter: price above/below weekly EMA20
+    price_above_ema = close > weekly_ema20_aligned
+    price_below_ema = close < weekly_ema20_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = 20  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
+            np.isnan(vol_ma20[i]) or np.isnan(weekly_ema20_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI oversold + volume spike + above 1d EMA50 (uptrend)
-            if (rsi[i] < 30 and 
+            # Long breakout: price breaks above weekly resistance with volume spike and uptrend
+            if (close[i] > breakout_up[i] and 
                 vol_spike[i] and 
-                close[i] > ema_50_1d_aligned[i]):
+                price_above_ema[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought + volume spike + below 1d EMA50 (downtrend)
-            elif (rsi[i] > 70 and 
+            # Short breakdown: price breaks below weekly support with volume spike and downtrend
+            elif (close[i] < breakout_down[i] and 
                   vol_spike[i] and 
-                  close[i] < ema_50_1d_aligned[i]):
+                  price_below_ema[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral or trend changes
-            if rsi[i] > 50 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price returns below breakout level or volume spike ends
+            if close[i] < breakout_up[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral or trend changes
-            if rsi[i] < 50 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price returns above breakout level or volume spike ends
+            if close[i] > breakout_down[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_VolumeSpike_1dEMA50TrendFilter"
-timeframe = "4h"
+name = "1d_Weekly_ATRBreakout_VolumeSpike_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
