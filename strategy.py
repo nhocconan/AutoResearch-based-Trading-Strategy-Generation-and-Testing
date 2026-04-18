@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume
-Hypothesis: Uses daily Camarilla pivot levels R1/S1 as entry triggers with volume confirmation.
-In bull markets, buy R1 breakouts; in bear markets, short S1 breakdowns. Volume filter reduces
-false signals. Targets 20-30 trades/year to minimize fee drag. Works in both regimes by
-trading breakouts of key daily support/resistance levels.
+4h_1d_Camarilla_R1S1_Pullback_Entry_Volume
+Hypothesis: Instead of chasing breakouts, enter on pullbacks to R1 (long) or S1 (short) after a strong directional move.
+This reduces false breakouts and improves win rate. Uses 1d RSI regime filter: only long when RSI>50, short when RSI<50.
+Volume confirmation on entry. Targets 20-30 trades/year to minimize fee drift. Works in both bull and bear by aligning with daily momentum.
 """
 
 import numpy as np
@@ -21,22 +20,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels for each day
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Calculate Camarilla levels R1 and S1
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
     rng = high_1d - low_1d
     r1 = close_1d + rng * 1.1 / 12
     s1 = close_1d - rng * 1.1 / 12
     
-    # Align daily levels to 4h timeframe (wait for daily close)
+    # Align to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Daily RSI for regime filter (14-period)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -51,36 +59,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above R1 with volume confirmation
-            if close[i] > r1_aligned[i] and vol_confirm[i]:
+            # Long: pullback to R1 in bullish regime (RSI>50) with volume
+            if close[i] <= r1_aligned[i] * 1.005 and rsi_aligned[i] > 50 and vol_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume confirmation
-            elif close[i] < s1_aligned[i] and vol_confirm[i]:
+            # Short: pullback to S1 in bearish regime (RSI<50) with volume
+            elif close[i] >= s1_aligned[i] * 0.995 and rsi_aligned[i] < 50 and vol_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to daily pivot (close_1d) or breaks S1
-            # Calculate daily pivot: (H+L+C)/3
-            pivot_1d = (high_1d + low_1d + close_1d) / 3
-            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-            if not np.isnan(pivot_aligned[i]) and close[i] < pivot_aligned[i]:
+            # Long exit: price reaches S1 or RSI turns bearish
+            if close[i] <= s1_aligned[i] or rsi_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to daily pivot or breaks R1
-            pivot_1d = (high_1d + low_1d + close_1d) / 3
-            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-            if not np.isnan(pivot_aligned[i]) and close[i] > pivot_aligned[i]:
+            # Short exit: price reaches R1 or RSI turns bullish
+            if close[i] >= r1_aligned[i] or rsi_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume"
+name = "4h_1d_Camarilla_R1S1_Pullback_Entry_Volume"
 timeframe = "4h"
 leverage = 1.0
