@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily breakout strategy using weekly high/low channels with volume confirmation.
-# Uses weekly Donchian channel (20-week high/low) for trend context and daily price action
-# for entry timing. Enters on daily breakouts above weekly high or below weekly low
-# with volume > 1.5x 20-day average. Exits on opposite weekly channel touch or ATR stop.
-# Designed for low frequency (target 15-25 trades/year) to minimize fee drag.
-# Works in bull markets (breakouts continue) and bear markets (mean reversion at extremes).
+# Hypothesis: 4h Donchian(20) breakout with 1-day ADX trend filter and volume confirmation.
+# Uses daily ADX(14) > 20 to confirm trending markets and daily EMA50 for trend direction.
+# Enters on 4h breakouts above/below Donchian channel with volume confirmation.
+# Designed for 20-40 trades/year to avoid fee drag, works in both bull and bear via trend filter.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,75 +19,113 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channel (20-period)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get daily data for ADX and EMA
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Donchian channel (20-period high/low)
-    donchian_high_20w = np.full(len(high_1w), np.nan)
-    donchian_low_20w = np.full(len(low_1w), np.nan)
-    for i in range(20, len(high_1w)):
-        donchian_high_20w[i] = np.max(high_1w[i-20:i])
-        donchian_low_20w[i] = np.min(low_1w[i-20:i])
-    
-    # Align weekly Donchian levels to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20w)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20w)
-    
-    # Calculate daily ATR(14) for stop loss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
+    # Calculate ADX(14) on daily data
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_daily = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 20-day volume moving average for confirmation
-    vol_ma_20d = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20d[i] = np.mean(volume[i-20:i])
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate EMA(50) on daily close
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align daily indicators to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate 4h Donchian channel (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h ATR for stop loss
+    tr_4h_1 = high - low
+    tr_4h_2 = np.abs(high - np.roll(close, 1))
+    tr_4h_3 = np.abs(low - np.roll(close, 1))
+    tr_4h_1[0] = high[0] - low[0]
+    tr_4h_2[0] = np.abs(high[0] - close[0])
+    tr_4h_3[0] = np.abs(low[0] - close[0])
+    tr_4h = np.maximum(tr_4h_1, np.maximum(tr_4h_2, tr_4h_3))
+    atr_4h = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate volume moving average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # need weekly Donchian and volume MA
+    start_idx = max(50, 20)  # need daily EMA50, Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(atr_daily[i]) or np.isnan(vol_ma_20d[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-day average
-        vol_confirmed = volume[i] > 1.5 * vol_ma_20d[i]
+        # Trend filter: ADX > 20 indicates trending market
+        trending = adx_aligned[i] > 20
+        
+        # Trend direction: price above/below daily EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.3 * 20-period average
+        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Long entry: daily close breaks above weekly Donchian high with volume
-            if (close[i] > donchian_high_aligned[i] and vol_confirmed):
+            # Long entry: price breaks above Donchian high, with volume and trend filter
+            if (close[i] > donch_high[i] and 
+                vol_confirmed and 
+                trending and 
+                trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: daily close breaks below weekly Donchian low with volume
-            elif (close[i] < donchian_low_aligned[i] and vol_confirmed):
+            # Short entry: price breaks below Donchian low, with volume and trend filter
+            elif (close[i] < donch_low[i] and 
+                  vol_confirmed and 
+                  trending and 
+                  trend_down):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price touches weekly Donchian low or ATR stop
-            if close[i] <= donchian_low_aligned[i] or close[i] < open_price[i] - 2.0 * atr_daily[i]:
+            # Long exit: price crosses below Donchian low or ATR-based stop
+            if close[i] < donch_low[i] - 1.0 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price touches weekly Donchian high or ATR stop
-            if close[i] >= donchian_high_aligned[i] or close[i] > open_price[i] + 2.0 * atr_daily[i]:
+            # Short exit: price crosses above Donchian high or ATR-based stop
+            if close[i] > donch_high[i] + 1.0 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian20_Breakout_VolumeConfirmation"
-timeframe = "1d"
+name = "4h_Donchian20_1dADX20_EMA50_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
