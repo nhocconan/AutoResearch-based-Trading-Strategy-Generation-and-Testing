@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_R1_S1_Breakout_Volume
-Hypothesis: Trade 12h breakouts above Camarilla R1 or below S1 levels derived from 1d candles, 
-with volume confirmation and a 1w EMA filter to avoid counter-trend trades. 
-Camarilla levels provide institutional support/resistance; volume ensures momentum; 
-weekly EMA ensures trend alignment. Works in bull via long breakouts and in bear via short breakdowns. 
-Target: 12-37 trades/year by requiring confluence of level break, volume spike, and trend filter.
+6h_Pivot_R1_S1_Breakout_Volume_ATRFilter_V2
+Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout entries on 6h timeframe.
+Long when price breaks above R1 with volume > 1.5x average and ATR filter (low volatility).
+Short when price breaks below S1 with same conditions.
+Exit when price returns to the pivot point (PP) or reverses at opposite level (S1 for longs, R1 for shorts).
+Uses ATR filter to avoid choppy markets. Works in bull via breakouts, bear via reversals at S1/R1.
+Target: 20-40 trades/year by requiring multiple confirmations (level break + volume + volatility filter).
 """
 
 import numpy as np
 import pandas as pd
-from math import ceil
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
@@ -23,46 +23,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar: R1, S1
-    camarilla_R1 = np.full_like(close_1d, np.nan)
-    camarilla_S1 = np.full_like(close_1d, np.nan)
+    # Calculate Camarilla pivot levels for each day
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.0 * (high - low)
+    # R2 = close + 0.5 * (high - low)
+    # R1 = close + 0.25 * (high - low)
+    # PP = (high + low + close) / 3
+    # S1 = close - 0.25 * (high - low)
+    # S2 = close - 0.5 * (high - low)
+    # S3 = close - 1.0 * (high - low)
+    # S4 = close - 1.5 * (high - low)
     
-    for i in range(len(close_1d)):
-        if i < 1:  # Need previous day
-            continue
-        H = high_1d[i-1]
-        L = low_1d[i-1]
-        C = close_1d[i-1]
-        camarilla_R1[i] = C + (H - L) * 1.1 / 12
-        camarilla_S1[i] = C - (H - L) * 1.1 / 12
+    rng = high_1d - low_1d
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    r1 = close_1d + 0.25 * rng
+    s1 = close_1d - 0.25 * rng
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    # Align daily pivot levels to 6h timeframe (using previous day's close for calculation)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # ATR filter (6-period ATR on 6s timeframe)
+    atr_period = 6
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # first period
+    atr = np.full_like(close, np.nan)
     
-    # 1w EMA34
-    ema_period = 34
-    ema_1w = np.full_like(close_1w, np.nan)
+    if len(tr) >= atr_period:
+        for i in range(atr_period, len(tr)):
+            atr[i] = np.mean(tr[i - atr_period:i])
     
-    if len(close_1w) >= ema_period:
-        # Use pandas EMA for efficiency and correctness
-        ema_series = pd.Series(close_1w).ewm(span=ema_period, adjust=False).values
-        ema_1w[:] = ema_series
-    
-    # Align 1w EMA34 to 12h timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation: volume > 2.0x 20-period average (higher threshold to reduce trades)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
     
@@ -70,43 +68,54 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
+    # Session filter: 08-20 UTC (avoid low liquidity)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after all warmup periods
-    start_idx = max(vol_period, 1) + 1  # +1 for Camarilla needing prior day
+    start_idx = max(atr_period, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: at least 2x average volume
-        vol_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Session filter
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
-        if position == 0:
-            # Long: price breaks above Camarilla R1, above weekly EMA, with volume
-            if close[i] > camarilla_R1_aligned[i] and close[i] > ema_1w_aligned[i] and vol_confirm:
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # ATR filter: only trade when volatility is not too high (avoid chop)
+        # Use ATR as percentage of price - only trade when ATR% < 0.03 (3%)
+        atr_percent = atr[i] / close[i] if close[i] > 0 else 0
+        vol_filter = atr_percent < 0.03
+        
+        if position == 0 and in_session:
+            # Long: price breaks above R1 + volume + volatility filter
+            if close[i] > r1_aligned[i] and vol_confirm and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1, below weekly EMA, with volume
-            elif close[i] < camarilla_S1_aligned[i] and close[i] < ema_1w_aligned[i] and vol_confirm:
+            # Short: price breaks below S1 + volume + volatility filter
+            elif close[i] < s1_aligned[i] and vol_confirm and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Camarilla S1 or below weekly EMA
-            if close[i] < camarilla_S1_aligned[i] or close[i] < ema_1w_aligned[i]:
+            # Long exit: price returns to PP or breaks below S1 (reversal)
+            if close[i] <= pp_aligned[i] or close[i] < s1_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Camarilla R1 or above weekly EMA
-            if close[i] > camarilla_R1_aligned[i] or close[i] > ema_1w_aligned[i]:
+            # Short exit: price returns to PP or breaks above R1 (reversal)
+            if close[i] >= pp_aligned[i] or close[i] > r1_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -114,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R1_S1_Breakout_Volume"
-timeframe = "12h"
+name = "6h_Pivot_R1_S1_Breakout_Volume_ATRFilter_V2"
+timeframe = "6h"
 leverage = 1.0
