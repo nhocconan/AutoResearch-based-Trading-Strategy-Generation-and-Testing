@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian_Breakout_Volume_Regime
-1d strategy: Donchian(20) breakout with weekly trend filter, volume confirmation, and chop regime filter.
-Long: Close breaks above 20-day high + weekly EMA20 > EMA50 + volume > 1.5x daily avg + chop < 61.8
-Short: Close breaks below 20-day low + weekly EMA20 < EMA50 + volume > 1.5x daily avg + chop < 61.8
-Exit: Opposite breakout or trend reversal
-Designed for 10-20 trades/year per symbol (40-80 total over 4 years)
-Works in trending markets via breakouts, avoids choppy regimes
+4h_Camarilla_Pivot_R1S1_VolumeSpike_Momentum
+4h strategy using daily Camarilla pivot levels (R1/S1) with volume spike and momentum confirmation.
+- Long: Close crosses above R1 + volume > 2x average + RSI > 50
+- Short: Close crosses below S1 + volume > 2x average + RSI < 50
+- Exit: Opposite crossover or RSI mean reversion (crosses 50)
+Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -23,94 +23,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
     
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla pivot levels from previous day
+    # Using formula: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C, H, L are previous day's close, high, low
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly EMA20 and EMA50 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Previous day values (shift by 1 to avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # First day has no previous, set to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    ema_50w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Camarilla levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Daily Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align daily levels to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 20-period average
+    volume_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Choppiness Index (14-period) - chop > 61.8 = ranging, chop < 38.2 = trending
-    def choppiness_index(high, low, close, window=14):
-        atr = []
-        tr = []
-        for i in range(len(high)):
-            if i == 0:
-                tr.append(high[i] - low[i])
-            else:
-                tr.append(max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1])))
-            atr_val = np.mean(tr[-window:]) if len(tr) >= window else np.nan
-            atr.append(atr_val)
-        atr = np.array(atr)
-        sum_atr = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
-        highest_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        range_max_min = highest_high - lowest_low
-        chop = 100 * np.log10(sum_atr / window) / np.log10(range_max_min)
-        return chop
-    
-    chop = choppiness_index(high, low, close, 14)
+    # RSI(14) for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for weekly EMA50 and Donchian
+    start_idx = 20  # need enough for volume MA and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_20w_aligned[i]) or np.isnan(ema_50w_aligned[i]) or 
-            np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i]) or np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend conditions
-        weekly_uptrend = ema_20w_aligned[i] > ema_50w_aligned[i]
-        weekly_downtrend = ema_20w_aligned[i] < ema_50w_aligned[i]
-        
-        # Donchian breakout conditions
-        breakout_up = close[i] > high_roll[i]
-        breakdown_down = close[i] < low_roll[i]
-        
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        vol_confirm = volume[i] > 2.0 * vol_ma_aligned[i]
         
-        # Regime filter: only trade in trending markets (chop < 61.8)
-        trending_regime = chop[i] < 61.8
+        # Price crossover conditions
+        cross_above_R1 = close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1]
+        cross_below_S1 = close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1]
+        
+        # RSI momentum
+        rsi_bullish = rsi_values[i] > 50
+        rsi_bearish = rsi_values[i] < 50
         
         if position == 0:
-            # Long: weekly uptrend + volume + breakout + trending regime
-            if weekly_uptrend and vol_confirm and breakout_up and trending_regime:
+            # Long: cross above R1 + volume spike + RSI bullish
+            if cross_above_R1 and vol_confirm and rsi_bullish:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + volume + breakdown + trending regime
-            elif weekly_downtrend and vol_confirm and breakdown_down and trending_regime:
+            # Short: cross below S1 + volume spike + RSI bearish
+            elif cross_below_S1 and vol_confirm and rsi_bearish:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal, volume breakdown, or chop regime shift
-            if not weekly_uptrend or (vol_confirm and breakdown_down) or chop[i] >= 61.8:
+            # Long exit: cross below S1 or RSI mean reversion (below 50)
+            if cross_below_S1 or (rsi_values[i] < 50 and rsi_values[i-1] >= 50):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal, volume breakout, or chop regime shift
-            if not weekly_downtrend or (vol_confirm and breakout_up) or chop[i] >= 61.8:
+            # Short exit: cross above R1 or RSI mean reversion (above 50)
+            if cross_above_R1 or (rsi_values[i] > 50 and rsi_values[i-1] <= 50):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -118,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_Volume_Regime"
-timeframe = "1d"
+name = "4h_Camarilla_Pivot_R1S1_VolumeSpike_Momentum"
+timeframe = "4h"
 leverage = 1.0
