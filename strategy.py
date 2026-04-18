@@ -1,34 +1,30 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter.
-- Long: price breaks above Donchian upper band, ADX > 25 (trending), volume > 1.5x average
-- Short: price breaks below Donchian lower band, ADX > 25, volume > 1.5x average
-- Exit: opposite Donchian band touch or ADX < 20 (trend weakening)
-- Uses 1d Donchian bands for structure, avoiding whipsaws in ranging markets.
-Designed for 19-50 trades/year (75-200 total) to minimize fee drag.
+Hypothesis: 12h 12-period EMA trend with 1d volume spike filter and 1d ADX regime filter.
+- Long: Price > EMA(12) on 12h, volume > 2.0x 20-period average on 1d, ADX > 25 on 1d
+- Short: Price < EMA(12) on 12h, volume > 2.0x 20-period average on 1d, ADX > 25 on 1d
+- Exit: Price crosses back below/above EMA(12) or volume drops below 1.5x average
+- Uses EMA for trend, volume spike for momentum confirmation, ADX to avoid ranging markets.
+Designed for 12-37 trades/year (50-150 total) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range."""
-    if len(high) < period:
-        return np.full(len(high), np.nan)
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
+    if len(close) < period:
+        return np.full(len(close), np.nan)
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    ema = np.full(len(close), np.nan)
+    multiplier = 2 / (period + 1)
+    ema[period-1] = np.mean(close[:period])
     
-    atr = np.full(len(tr), np.nan)
-    atr[period] = np.nanmean(tr[1:period+1])
+    for i in range(period, len(close)):
+        ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
     
-    for i in range(period + 1, len(tr)):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-    
-    return atr
+    return ema
 
 def calculate_adx(high, low, close, period):
     """Calculate Average Directional Index."""
@@ -92,74 +88,71 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian bands and ADX
+    # Get 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) on 1d
-    donchian_high = np.full(len(high_1d), np.nan)
-    donchian_low = np.full(len(low_1d), np.nan)
+    # Calculate EMA (12-period) on 12h
+    ema_12 = calculate_ema(close, 12)
     
-    for i in range(19, len(high_1d)):  # 20-period lookback
-        donchian_high[i] = np.max(high_1d[i-19:i+1])
-        donchian_low[i] = np.min(low_1d[i-19:i+1])
+    # Calculate volume moving average (20-period) on 1d
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
     # Calculate ADX (14-period) on 1d
     adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align to 4h timeframe
-    donchian_high_4h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_4h = align_htf_to_ltf(prices, df_1d, donchian_low)
-    adx_14_1d_4h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
-    
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Align 1d indicators to 12h timeframe
+    vol_ma_1d_12h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    adx_14_1d_12h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # need Donchian, ADX, and volume MA
+    start_idx = 35  # need EMA, volume MA, and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or 
-            np.isnan(adx_14_1d_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_12[i]) or np.isnan(vol_ma_1d_12h[i]) or 
+            np.isnan(adx_14_1d_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current 1d volume > 2.0 * 20-period average
+        # Get the 1d volume for current 12h bar (use aligned volume data)
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        vol_spike = vol_1d_aligned[i] > 2.0 * vol_ma_1d_12h[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high, ADX > 25, volume confirmation
-            if close[i] > donchian_high_4h[i] and adx_14_1d_4h[i] > 25 and vol_confirmed:
+            # Long: price above EMA, volume spike, ADX > 25
+            if close[i] > ema_12[i] and vol_spike and adx_14_1d_12h[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low, ADX > 25, volume confirmation
-            elif close[i] < donchian_low_4h[i] and adx_14_1d_4h[i] > 25 and vol_confirmed:
+            # Short: price below EMA, volume spike, ADX > 25
+            elif close[i] < ema_12[i] and vol_spike and adx_14_1d_12h[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches Donchian low or ADX < 20 (trend weakening)
-            if close[i] <= donchian_low_4h[i] or adx_14_1d_4h[i] < 20:
+            # Long exit: price crosses below EMA or volume drops below 1.5x average
+            vol_exit = vol_1d_aligned[i] < 1.5 * vol_ma_1d_12h[i]
+            if close[i] <= ema_12[i] or vol_exit:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price touches Donchian high or ADX < 20 (trend weakening)
-            if close[i] >= donchian_high_4h[i] or adx_14_1d_4h[i] < 20:
+            # Short exit: price crosses above EMA or volume drops below 1.5x average
+            vol_exit = vol_1d_aligned[i] < 1.5 * vol_ma_1d_12h[i]
+            if close[i] >= ema_12[i] or vol_exit:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -167,6 +160,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_ADX14_Volume"
-timeframe = "4h"
+name = "12h_EMA12_VolumeSpike_ADX14"
+timeframe = "12h"
 leverage = 1.0
