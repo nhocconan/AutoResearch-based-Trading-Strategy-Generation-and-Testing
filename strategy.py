@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_RSI_Filter_v2
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets. Combined with RSI(14) for momentum confirmation and volume spike filter, this strategy aims to capture medium-term trend moves with reduced whipsaw. Uses 12h EMA34 as higher timeframe trend filter for alignment. Designed for low trade frequency (~25-40/year) to minimize fee drag while maintaining edge in bull and bear markets.
+1h_Volume_Spice_4h_Trend_Filter_v1
+Hypothesis: On 1h timeframe, enter long when price breaks above 20-period high with volume spike (>1.5x avg) and 4h trend is up (price > 4h EMA20); enter short when price breaks below 20-period low with volume spike and 4h trend is down (price < 4h EMA20). Exit on opposite break or trend reversal. Uses volume to confirm institutional interest and 4h EMA20 for trend filter to avoid counter-trend trades. Designed for 15-30 trades/year to minimize fee drag while capturing momentum in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,85 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA ( Kaufman Adaptive Moving Average )
-    close_series = pd.Series(close)
-    # Efficiency Ratio
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series.diff()).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = close_series.copy()
-    kama.iloc[0] = close_series.iloc[0]
-    for i in range(1, len(close_series)):
-        kama.iloc[i] = kama.iloc[i-1] + sc.iloc[i] * (close_series.iloc[i] - kama.iloc[i-1])
-    kama_values = kama.values
+    # 20-period high/low for breakout
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    highest_20 = high_series.rolling(window=20, min_periods=20).max().values
+    lowest_20 = low_series.rolling(window=20, min_periods=20).min().values
     
-    # RSI(14)
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Volume spike: >1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Volume spike: >1.8x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
-    
-    # 12h EMA34 trend filter (higher timeframe trend)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 4h EMA20 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 40  # Need KAMA, RSI, volume MA
+    start_idx = 40  # Need 20-period high/low and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_values[i]) or 
-            np.isnan(rsi_values[i]) or
+        if (np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(ema_12h_aligned[i])):
+            np.isnan(ema_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama_values[i]
-        rsi_val = rsi_values[i]
+        highest = highest_20[i]
+        lowest = lowest_20[i]
         vol_spike = volume_spike[i]
-        ema_12h_val = ema_12h_aligned[i]
+        ema_4h_val = ema_4h_aligned[i]
         
         if position == 0:
-            # Long: price > KAMA, RSI > 50, volume spike, above 12h EMA34
-            if price > kama_val and rsi_val > 50 and vol_spike and price > ema_12h_val:
-                signals[i] = 0.25
+            # Long: price > 20-period high with volume spike and above 4h EMA20
+            if price > highest and vol_spike and price > ema_4h_val:
+                signals[i] = 0.20
                 position = 1
-            # Short: price < KAMA, RSI < 50, volume spike, below 12h EMA34
-            elif price < kama_val and rsi_val < 50 and vol_spike and price < ema_12h_val:
-                signals[i] = -0.25
+            # Short: price < 20-period low with volume spike and below 4h EMA20
+            elif price < lowest and vol_spike and price < ema_4h_val:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            signals[i] = 0.25
-            # Exit: price < KAMA or RSI < 40
-            if price < kama_val or rsi_val < 40:
+            signals[i] = 0.20
+            # Exit: price < 20-period low or below 4h EMA20 (trend change)
+            if price < lowest or price < ema_4h_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            signals[i] = -0.25
-            # Exit: price > KAMA or RSI > 60
-            if price > kama_val or rsi_val > 60:
+            signals[i] = -0.20
+            # Exit: price > 20-period high or above 4h EMA20 (trend change)
+            if price > highest or price > ema_4h_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_KAMA_Trend_With_RSI_Filter_v2"
-timeframe = "4h"
+name = "1h_Volume_Spice_4h_Trend_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
