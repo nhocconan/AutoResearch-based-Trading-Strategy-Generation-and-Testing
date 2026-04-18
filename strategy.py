@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Volume-Weighted Price Action with Daily Trend Filter and ATR Stop
-Hypothesis: Combines volume confirmation with price action near VWAP and daily EMA trend
-to capture sustainable moves. Designed for 12-37 trades/year on 12h timeframe.
-Works in bull markets via trend continuation and bear markets via mean reversion
-at VWAP with trend filter.
+4h Camarilla Pivot R1S1 Breakout with Volume Spike and Daily Trend Filter
+Hypothesis: Camarilla pivot levels (R1/S1) act as strong intraday support/resistance.
+Breakouts with volume confirmation and daily EMA34 trend filter capture momentum moves.
+Designed for 20-50 trades/year on 4h timeframe. Works in both bull and bear markets
+by filtering trades with the daily trend and requiring volume confirmation to avoid false breakouts.
 """
 
 import numpy as np
@@ -21,24 +21,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once before loop
+    # Get daily data for Camarilla pivots and EMA (once before loop)
     df_d = get_htf_data(prices, '1d')
     
-    # Daily EMA50 for trend filter
-    ema_50 = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_d, ema_50)
+    # Calculate Camarilla pivot levels for the day
+    # Using previous day's OHLC to calculate today's levels
+    # Shift by 1 to avoid look-ahead: use previous day's data
+    prev_high = df_d['high'].shift(1).values
+    prev_low = df_d['low'].shift(1).values
+    prev_close = df_d['close'].shift(1).values
     
-    # VWAP calculation (typical price * volume) cumulative
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price)
+    # Camarilla pivot calculations
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Volume spike: 1.8x 20-period average
+    # Resistance and Support levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
+    r2 = pivot + (range_val * 1.1 / 6)
+    s2 = pivot - (range_val * 1.1 / 6)
+    
+    # Align pivots to 4h timeframe (no additional delay needed as pivots are known at day open)
+    r1_aligned = align_htf_to_ltf(prices, df_d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_d, s2)
+    
+    # Daily EMA34 for trend filter
+    ema_34 = pd.Series(df_d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_d, ema_34)
+    
+    # Volume spike: 2x 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Price deviation from VWAP (normalized by ATR for stability)
+    # ATR for stop loss (4h ATR)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -47,7 +64,6 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    vwap_dev = (close - vwap) / atr  # Deviation in ATR units
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -55,46 +71,48 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_aligned[i]) or 
-            np.isnan(vwap_dev[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
         ema = ema_aligned[i]
         atr_val = atr[i]
-        dev = vwap_dev[i]
         
         if position == 0:
-            # Long: price below VWAP (mean reversion) in uptrend with volume spike
-            if dev < -0.8 and volume_spike[i] and price > ema:
+            # Long: break above R1 with volume spike and price above EMA34 (uptrend)
+            if price > r1_level and volume_spike[i] and price > ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: price above VWAP (mean reversion) in downtrend with volume spike
-            elif dev > 0.8 and volume_spike[i] and price < ema:
+            # Short: break below S1 with volume spike and price below EMA34 (downtrend)
+            elif price < s1_level and volume_spike[i] and price < ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: price crosses VWAP or ATR trailing stop
-            if dev > 0.2 or price < (high[i] - 1.5 * atr_val):
+            # Exit: price returns to S1 or ATR trailing stop
+            if price <= s1_level or price < (high[i] - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: price crosses VWAP or ATR trailing stop
-            if dev < -0.2 or price > (low[i] + 1.5 * atr_val):
+            # Exit: price returns to R1 or ATR trailing stop
+            if price >= r1_level or price > (low[i] + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_VWAP_MeanReversion_VolumeSpike_EMA50"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_VolumeSpike_EMA34"
+timeframe = "4h"
 leverage = 1.0
