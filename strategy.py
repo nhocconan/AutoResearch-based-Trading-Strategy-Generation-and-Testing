@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dEMA34_Volume
-Hypothesis: 12-hour trading based on daily Camarilla R1/S1 breakouts filtered by 1-day EMA34 trend and volume confirmation.
-This strategy targets major support/resistance breaks in trending markets, using higher timeframe (1d) trend filter to avoid counter-trend trades.
-Designed for low frequency (12-37 trades/year) with strong performance in both bull and bear markets by combining
-daily structure with intermediate trend alignment. Uses 12h timeframe for entries/exits to balance signal quality and trade frequency.
+4h_TRIX_VolumeSpike_Regime
+Hypothesis: TRIX (triple exponential moving average crossover) detects momentum shifts in 4h timeframe. 
+Combined with volume spike (>2x 20-period average) and Choppiness Index regime filter (CHOP > 61.8 = ranging), 
+the strategy enters long when TRIX turns positive in ranging markets and short when TRIX turns negative.
+Designed to capture mean-reversion bounces in ranging conditions while avoiding strong trends where TRIX whipsaws.
+Target: 20-40 trades/year with controlled risk via position sizing (0.25).
 """
 
 import numpy as np
@@ -21,38 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate TRIX (15-period triple EMA of 1-period ROC)
+    # ROC = (close - close.shift(1)) / close.shift(1)
+    roc = np.zeros(n)
+    roc[1:] = (close[1:] - close[:-1]) / close[:-1]
     
-    # Calculate daily EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = close_1d[i] * alpha + ema34_1d[i-1] * (1 - alpha)
+    # Triple EMA of ROC
+    def ema(series, period):
+        result = np.full_like(series, np.nan)
+        if len(series) < period:
+            return result
+        multiplier = 2 / (period + 1)
+        result[period-1] = np.mean(series[:period])
+        for i in range(period, len(series)):
+            result[i] = series[i] * multiplier + result[i-1] * (1 - multiplier)
+        return result
     
-    # Calculate daily Camarilla levels (R1/S1 from prior day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema1 = ema(roc, 12)
+    ema2 = ema(ema1, 12)
+    ema3 = ema(ema2, 12)
+    trix = ema3 * 100  # scale for readability
     
-    r1 = np.full(len(close_1d), np.nan)  # R1 level
-    s1 = np.full(len(close_1d), np.nan)  # S1 level
+    # Calculate Choppiness Index (14-period)
+    def choppiness_index(high, low, close, period=14):
+        chop = np.full_like(high, np.nan)
+        if len(high) < period:
+            return chop
+        atr = np.zeros_like(high)
+        atr[0] = high[0] - low[0]
+        for i in range(1, len(high)):
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            atr[i] = (atr[i-1] * (period-1) + tr) / period
+        
+        for i in range(period-1, len(high)):
+            hh = np.max(high[i-period+1:i+1])
+            ll = np.min(low[i-period+1:i+1])
+            if hh - ll == 0:
+                chop[i] = 50
+            else:
+                chop[i] = 100 * np.log10(atr[i] * period / (hh - ll)) / np.log10(period)
+        return chop
     
-    for i in range(1, len(close_1d)):
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        diff = ph - pl
-        r1[i] = pc + 1.0 * diff  # R1
-        s1[i] = pc - 1.0 * diff  # S1
-    
-    # Align daily EMA and levels to 12h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    chop = choppiness_index(high, low, close, 14)
     
     # Volume spike: current volume > 2.0 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -63,37 +74,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(36, 20, 14)  # TRIX needs ~36 bars for stability
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trix[i]) or np.isnan(chop[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above daily R1 with volume spike and 1-day uptrend
-            if (close[i] > r1_aligned[i] and vol_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # Enter long: TRIX turns positive in ranging market with volume spike
+            if trix[i] > 0 and trix[i-1] <= 0 and chop[i] > 61.8 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below daily S1 with volume spike and 1-day downtrend
-            elif (close[i] < s1_aligned[i] and vol_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # Enter short: TRIX turns negative in ranging market with volume spike
+            elif trix[i] < 0 and trix[i-1] >= 0 and chop[i] > 61.8 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below daily S1 or 1-day trend turns down
-            if (close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]):
+            # Exit long: TRIX turns negative or market becomes trending (CHOP < 38.2)
+            if trix[i] < 0 or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above daily R1 or 1-day trend turns up
-            if (close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]):
+            # Exit short: TRIX turns positive or market becomes trending (CHOP < 38.2)
+            if trix[i] > 0 or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
