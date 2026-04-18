@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Momentum_Reversal_v1
-Hypothesis: Weekly momentum reversal on daily timeframe. In strong uptrends (price > weekly EMA20), look for bearish reversals when RSI > 70 and price closes below weekly VWAP. In strong downtrends (price < weekly EMA20), look for bullish reversals when RSI < 30 and price closes above weekly VWAP. Uses weekly trend filter to avoid counter-trend trades, targeting 5-15 trades/year. Works in bull/bear via trend-aligned mean reversion.
+12h_Pivot_R1S1_Breakout_Volume_Momentum_v1
+Strategy: 12h Camarilla pivot breakout with momentum confirmation.
+Long: Price breaks above R1 (bullish pivot) with momentum confirmation.
+Short: Price breaks below S1 (bearish pivot) with momentum confirmation.
+Uses 1d pivot levels, 12h momentum (ROC > 0), and volume filter.
+Designed for 12h timeframe: ~10-20 trades/year per symbol (40-80 total over 4 years).
+Works in bull/bear via momentum confirmation and pivot-based mean reversion.
 """
 
 import numpy as np
@@ -18,77 +23,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and VWAP
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Weekly VWAP (volume-weighted average price)
-    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
-    vwap_1w = (typical_price_1w * volume_1w).cumsum() / volume_1w.cumsum()
-    vwap_1w = vwap_1w.values  # convert to numpy array
+    # Align pivot levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Daily RSI(14) for entry signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Momentum confirmation: 12-period ROC on 12h timeframe
+    roc = np.zeros_like(close)
+    roc[12:] = (close[12:] - close[:-12]) / close[:-12] * 100
     
-    # Align weekly data to daily timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = np.zeros_like(volume)
+    vol_ma[20:] = np.convolve(volume, np.ones(20)/20, mode='valid')
+    vol_ma = np.concatenate([np.full(19, np.nan), vol_ma])
+    vol_confirm = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # need enough for weekly EMA20 and RSI
+    start_idx = max(20, 12)  # need volume MA and ROC
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_20_aligned[i]) or np.isnan(vwap_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(roc[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend conditions
-        weekly_uptrend = close[i] > ema_20_aligned[i]  # price above weekly EMA20
-        weekly_downtrend = close[i] < ema_20_aligned[i]  # price below weekly EMA20
+        # Momentum confirmation: positive ROC for long, negative for short
+        mom_long = roc[i] > 0
+        mom_short = roc[i] < 0
         
-        # Reversal conditions
-        bearish_reversal = (rsi[i] > 70) and (close[i] < vwap_aligned[i])
-        bullish_reversal = (rsi[i] < 30) and (close[i] > vwap_aligned[i])
+        # Breakout conditions
+        breakout_long = close[i] > r1_aligned[i]
+        breakout_short = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: weekly uptrend + bullish reversal
-            if weekly_uptrend and bullish_reversal:
+            # Long: breakout above R1 + volume + momentum
+            if breakout_long and vol_confirm[i] and mom_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + bearish reversal
-            elif weekly_downtrend and bearish_reversal:
+            # Short: breakout below S1 + volume + momentum
+            elif breakout_short and vol_confirm[i] and mom_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: weekly trend turns down OR bearish reversal
-            if not weekly_uptrend or bearish_reversal:
+            # Long exit: breakdown below S1 or momentum reversal
+            if close[i] < s1_aligned[i] or roc[i] < 0:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly trend turns up OR bullish reversal
-            if not weekly_downtrend or bullish_reversal:
+            # Short exit: breakout above R1 or momentum reversal
+            if close[i] > r1_aligned[i] or roc[i] > 0:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -96,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Momentum_Reversal_v1"
-timeframe = "1d"
+name = "12h_Pivot_R1S1_Breakout_Volume_Momentum_v1"
+timeframe = "12h"
 leverage = 1.0
