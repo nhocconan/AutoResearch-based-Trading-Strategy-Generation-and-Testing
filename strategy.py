@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_1w_Woodies_CCI_Divergence
-Hypothesis: Combines Woodies CCI with divergence detection on 1d timeframe and uses 1w trend as filter.
-Trades CCI extremes with divergence in direction of weekly trend. Designed to work in both bull and bear
-markets by filtering with 1w trend. Target: 10-25 trades/year on 1d.
+12h_1w_Donchian_20_Breakout_Volume_Trend
+Hypothesis: Uses weekly Donchian channels (20-bar) as price channels. Trades breakouts of the 
+weekly upper/lower band in the direction of the 12h trend (above/below 12h EMA34) with 
+volume confirmation. Designed for both bull and bear markets by filtering with 12h trend. 
+Target: 12-37 trades per year on 12h timeframe.
 """
 
 import numpy as np
@@ -12,106 +13,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate Woodies CCI (20-period)
-    typical_price = (high + low + close) / 3.0
-    tp_mean = np.full(n, np.nan)
-    tp_dev = np.full(n, np.nan)
-    cci = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        tp_slice = typical_price[i-20:i+1]
-        tp_mean[i] = np.mean(tp_slice)
-        tp_dev[i] = np.mean(np.abs(tp_slice - tp_mean[i]))
-        if tp_dev[i] > 0:
-            cci[i] = (typical_price[i] - tp_mean[i]) / (0.015 * tp_dev[i])
-    
-    # Get 1w data for trend filter
+    # Get weekly data for Donchian channels
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 1w EMA34 for trend
-    close_1w = df_1w['close'].values
-    ema_34_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 34:
-        ema_34_1w[33] = np.mean(close_1w[:34])
-        for i in range(34, len(close_1w)):
-            ema_34_1w[i] = (close_1w[i] * 2/35) + (ema_34_1w[i-1] * 33/35)
+    # Calculate weekly Donchian channels (20-period)
+    lookback = 20
+    upper_1w = np.full(len(high_1w), np.nan)
+    lower_1w = np.full(len(low_1w), np.nan)
     
-    # Align EMA34 to 1d timeframe (wait for bar close)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    for i in range(lookback, len(high_1w)):
+        upper_1w[i] = np.max(high_1w[i-lookback:i])
+        lower_1w[i] = np.min(low_1w[i-lookback:i])
     
-    # Detect bullish/bearish divergence
-    bullish_div = np.zeros(n, dtype=bool)
-    bearish_div = np.zeros(n, dtype=bool)
+    # Get 12h data for trend filter (EMA34)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Look for divergence over last 10 bars
-    lookback = 10
-    for i in range(lookback, n):
-        if np.isnan(cci[i]) or np.isnan(cci[i-lookback]):
-            continue
-            
-        # Bullish divergence: price makes lower low, CCI makes higher low
-        if (low[i] < low[i-lookback] and 
-            cci[i] > cci[i-lookback] and
-            cci[i] < -100):  # Only in oversold territory
-            # Find local lows
-            price_low_idx = i - np.argmin(low[i-lookback:i+1])
-            cci_low_idx = i - np.argmin(cci[i-lookback:i+1])
-            if price_low_idx == cci_low_idx:  # Same bar
-                bullish_div[i] = True
-                
-        # Bearish divergence: price makes higher high, CCI makes lower high
-        if (high[i] > high[i-lookback] and 
-            cci[i] < cci[i-lookback] and
-            cci[i] > 100):  # Only in overbought territory
-            # Find local highs
-            price_high_idx = i - np.argmax(high[i-lookback:i+1])
-            cci_high_idx = i - np.argmax(cci[i-lookback:i+1])
-            if price_high_idx == cci_high_idx:  # Same bar
-                bearish_div[i] = True
+    # Calculate 12h EMA34
+    ema_34_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 34:
+        ema_34_12h[33] = np.mean(close_12h[:34])
+        multiplier = 2 / (34 + 1)
+        for i in range(34, len(close_12h)):
+            ema_34_12h[i] = (close_12h[i] - ema_34_12h[i-1]) * multiplier + ema_34_12h[i-1]
+    
+    # Align all indicators to 12h timeframe (wait for bar close)
+    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Volume confirmation: current volume > 1.5 x 28-period average (more selective)
+    vol_ma = np.full(n, np.nan)
+    for i in range(28, n):
+        vol_ma[i] = np.mean(volume[i-28:i])
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = max(28, 34)  # Ensure we have enough data for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(cci[i]) or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: CCI < -200 with bullish divergence and price above weekly EMA34
-            if (cci[i] < -200 and bullish_div[i] and 
-                close[i] > ema_34_1w_aligned[i]):
+            # Long entry: price breaks above weekly upper band AND above 12h EMA34, with volume
+            if (close[i] > upper_1w_aligned[i] and 
+                close[i] > ema_34_12h_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: CCI > 200 with bearish divergence and price below weekly EMA34
-            elif (cci[i] > 200 and bearish_div[i] and 
-                  close[i] < ema_34_1w_aligned[i]):
+            # Short entry: price breaks below weekly lower band AND below 12h EMA34, with volume
+            elif (close[i] < lower_1w_aligned[i] and 
+                  close[i] < ema_34_12h_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: CCI crosses above zero or drops below -300 (extreme oversold)
-            if cci[i] > 0 or cci[i] < -300:
+            # Long exit: price returns to 12h EMA34 or breaks below weekly lower band
+            if (not np.isnan(ema_34_12h_aligned[i]) and close[i] < ema_34_12h_aligned[i]) or \
+               (not np.isnan(lower_1w_aligned[i]) and close[i] < lower_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: CCI crosses below zero or rises above 300 (extreme overbought)
-            if cci[i] < 0 or cci[i] > 300:
+            # Short exit: price returns to 12h EMA34 or breaks above weekly upper band
+            if (not np.isnan(ema_34_12h_aligned[i]) and close[i] > ema_34_12h_aligned[i]) or \
+               (not np.isnan(upper_1w_aligned[i]) and close[i] > upper_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Woodies_CCI_Divergence"
-timeframe = "1d"
+name = "12h_1w_Donchian_20_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
