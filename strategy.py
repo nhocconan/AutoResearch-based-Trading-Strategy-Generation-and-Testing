@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_R2S2_Breakout_Volume_Trend
-Hypothesis: Daily Pivot levels (R1,S1,R2,S2) from 1-day timeframe act as strong support/resistance.
-Breakouts above R2 or below S2 with volume confirmation and daily EMA trend filter capture
-institutional move initiation. Works in bull/bear by following institutional flow.
-Target: 12-37 trades/year (48-148 total over 4 years) to balance opportunity and fee drag.
+1d_KAMA_Direction_WeeklyTrend_Filter
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) on daily timeframe adapts to market noise,
+providing trend direction that avoids whipsaws in ranging markets. Combined with weekly trend
+filter (EMA34 on weekly) and volume confirmation, it captures strong trends while avoiding
+false signals in chop. Works in bull markets by riding uptrends and in bear markets by
+avoiding false longs and taking shorts when weekly trend turns down.
+Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,106 +15,107 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for Pivot calculation
+    # Daily data for KAMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous day's OHLC for Pivot
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
+        return np.zeros(n)
     
-    # Pivot point and support/resistance levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
+    # === KAMA on Daily (ER=10, FAST=2, SLOW=30) ===
+    def kama(close_vals, er_period=10, fast=2, slow=30):
+        n = len(close_vals)
+        change = np.abs(np.diff(close_vals, k=er_period))  # |close[t] - close[t-er]|
+        volatility = np.sum(np.abs(np.diff(close_vals)), axis=0) if False else None  # placeholder
+        
+        # Calculate ER (Efficiency Ratio) properly
+        change = np.abs(np.diff(close_vals, k=er_period))
+        # Volatility = sum of absolute changes over er_period window
+        volatility = np.zeros_like(close_vals)
+        for i in range(er_period, len(close_vals)):
+            volatility[i] = np.sum(np.abs(np.diff(close_vals[i-er_period+1:i+1])))
+        
+        # Avoid division by zero
+        er = np.zeros_like(close_vals)
+        mask = volatility != 0
+        er[mask] = change[mask] / volatility[mask]
+        
+        # Smooth constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # Calculate KAMA
+        kama_vals = np.zeros_like(close_vals)
+        kama_vals[0] = close_vals[0]
+        for i in range(1, n):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close_vals[i] - kama_vals[i-1])
+        
+        return kama_vals
     
-    # Align to 12h timeframe (waits for 1-day bar to close)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate KAMA on daily close
+    kama_1d = kama(df_1d['close'].values)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Volume filter: >1.5x 20-period average
+    # === Weekly EMA34 for trend filter ===
+    ema_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # === Volume filter: >1.3x 20-period average ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
-    
-    # 1-day EMA trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
-    bars_since_entry = 0
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
         price = close[i]
-        r2_val = r2_12h[i]
-        s2_val = s2_12h[i]
-        r1_val = r1_12h[i]
-        s1_val = s1_12h[i]
+        kama_val = kama_1d_aligned[i]
+        ema_trend = ema_1w_aligned[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_1d_12h[i]
         
         if position == 0:
-            # Long: break above R2 with volume in uptrend
-            if price > r2_val and vol_ok and price > ema_trend:
+            # Long: price above KAMA and above weekly EMA (uptrend) with volume
+            if price > kama_val and price > ema_trend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: break below S2 with volume in downtrend
-            elif price < s2_val and vol_ok and price < ema_trend:
+            # Short: price below KAMA and below weekly EMA (downtrend) with volume
+            elif price < kama_val and price < ema_trend and vol_ok:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day)
-            if bars_since_entry < 2:
-                signals[i] = 0.25
+            # Long: exit if price crosses below KAMA or weekly EMA turns down
+            if price < kama_val or price < ema_trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
-                # Exit: price returns to S1 or trend reverses
-                if price < s1_val or price < ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
         
         elif position == -1:
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day)
-            if bars_since_entry < 2:
-                signals[i] = -0.25
+            # Short: exit if price crosses above KAMA or weekly EMA turns up
+            if price > kama_val or price > ema_trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
-                # Exit: price returns to R1 or trend reverses
-                if price > r1_val or price > ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
     
     return signals
 
-name = "12h_Pivot_R1S1_R2S2_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "1d_KAMA_Direction_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
