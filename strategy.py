@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_R1_S1_Breakout_With_Trend_Filter
-Hypothesis: Weekly pivot R1/S1 breakouts on daily timeframe with volume spike and weekly EMA trend filter.
-Buy when price breaks above weekly R1 with volume spike and uptrend (price > weekly EMA34).
-Sell when price breaks below weekly S1 with volume spike and downtrend (price < weekly EMA34).
-Designed for low trade frequency (7-25/year) to avoid fee decay while capturing
-significant momentum moves in both bull and bear markets via weekly trend alignment.
+4h_ChaikinMoneyFlow_Pullback_Trend
+Hypothesis: Chaikin Money Flow (CMF) pullback to trend during strong institutional flow.
+Enter long when price pulls back to 20-period EMA during CMF > 0.25 inflow and rising.
+Enter short when price pulls back to 20-period EMA during CMF < -0.25 outflow and falling.
+Uses 1d trend filter to avoid counter-trend trades. Designed for low frequency (20-40/year)
+by requiring strong CMF extremes + pullback confirmation, reducing whipsaws in ranging markets.
+Works in bull markets via long pullbacks and bear markets via short pullbacks with trend alignment.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mkt_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,75 +23,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Weekly Camarilla pivot levels (using previous week's data)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    rng = high_1w - low_1w
-    r1 = close_1w + rng * 1.1 / 12
-    s1 = close_1w - rng * 1.1 / 12
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align to daily timeframe (wait for weekly bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Chaikin Money Flow (20-period)
+    # CMF = sum((close - low - (high - close)) / (high - low) * volume) / sum(volume)
+    # Simplified: CMF = sum(((close - low) - (high - close)) * volume / (high - low)) / sum(volume)
+    # = sum((2*close - high - low) * volume / (high - low)) / sum(volume)
+    mfm = ((2 * close - high - low) / (high - low)) * volume
+    mfm = np.where((high - low) == 0, 0, mfm)  # avoid division by zero
+    mfv = mfm
+    cmf = pd.Series(mfv).rolling(window=20, min_periods=20).sum() / \
+          pd.Series(volume).rolling(window=20, min_periods=20).sum()
+    cmf = cmf.values
     
-    # Weekly EMA(34) for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume spike: >2.0x 20-period average (higher threshold to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # 20-period EMA for pullback entry
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(30, 20)  # Warmup for EMA and volume
+    start_idx = max(34, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_aligned[i]) or
+            np.isnan(cmf[i]) or
+            np.isnan(ema_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        cmf_val = cmf[i]
+        ema20 = ema_20[i]
         ema34 = ema_34_aligned[i]
-        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and uptrend
-            if price > r1_val and vol_spike and price > ema34:
+            # Long: CMF strong inflow (>0.25), price pulls back to EMA20, uptrend (price > EMA34)
+            if cmf_val > 0.25 and abs(price - ema20) / ema20 < 0.015 and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and downtrend
-            elif price < s1_val and vol_spike and price < ema34:
+            # Short: CMF strong outflow (<-0.25), price pulls back to EMA20, downtrend (price < EMA34)
+            elif cmf_val < -0.25 and abs(price - ema20) / ema20 < 0.015 and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns below R1 OR trend turns down
-            if price < r1_val or price < ema34:
+            # Exit: CMF turns negative OR price breaks above recent high (take profit)
+            if cmf_val < 0 or price > ema20 * 1.03:  # 3% profit target or CMF deterioration
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price returns above S1 OR trend turns up
-            if price > s1_val or price > ema34:
+            # Exit: CMF turns positive OR price breaks below recent low (take profit)
+            if cmf_val > 0 or price < ema20 * 0.97:  # 3% profit target or CMF improvement
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Weekly_Pivot_R1_S1_Breakout_With_Trend_Filter"
-timeframe = "1d"
+name = "4h_ChaikinMoneyFlow_Pullback_Trend"
+timeframe = "4h"
 leverage = 1.0
