@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Donchian_Breakout_WeeklyPivotDirection_Volume
-Hypothesis: 6-hour Donchian breakout with weekly pivot direction filter and volume confirmation.
-Trades breakouts from 20-period 6-hour high/low only when aligned with weekly pivot trend (price above/below weekly pivot)
-and accompanied by volume spike. Designed for low frequency (~15-30 trades/year) with strong performance
-in both bull and bear markets by combining intraday breakout structure with weekly trend filter.
+4h_RelativeStrengthIndex_With_DailyTrend_Filter
+Hypothesis: RSI(14) mean-reversion on 4h timeframe, filtered by daily EMA50 trend direction.
+In bull markets (price > daily EMA50), we take long signals when RSI < 30.
+In bear markets (price < daily EMA50), we take short signals when RSI > 70.
+This avoids counter-trend trades and focuses on mean-reversion within the dominant trend.
+Designed for low frequency (~15-30 trades/year) with strong performance in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,76 +14,83 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot (average of weekly high, low, close)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[0:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = close_1d[i] * alpha + ema50_1d[i-1] * (1 - alpha)
     
-    weekly_pivot = np.full(len(close_1w), np.nan)
-    for i in range(len(close_1w)):
-        weekly_pivot[i] = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
+    # Calculate RSI(14) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
     
-    # Calculate 6-hour Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Wilder's smoothing: first average is simple average
+    if n >= 14:
+        avg_gain[13] = np.mean(gain[1:14])  # gain[1] to gain[13] (13 periods)
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    rs = np.full(n, np.nan)
+    rsi = np.full(n, 50.0)  # default to neutral
+    valid = (avg_loss != 0) & ~np.isnan(avg_loss)
+    rs[valid] = avg_gain[valid] / avg_loss[valid]
+    rsi[valid] = 100 - (100 / (1 + rs[valid]))
+    # Handle case where avg_loss is zero (all gains)
+    rsi[avg_loss == 0] = 100
     
-    # Volume spike: current volume > 2.0 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    # Align daily EMA50 to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(50, 14)
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above 6h Donchian high with volume spike and above weekly pivot
-            if (high[i] > donchian_high[i] and vol_spike[i] and 
-                close[i] > weekly_pivot_aligned[i]):
+            # Long signal: RSI oversold in uptrend (price above daily EMA50)
+            if close[i] > ema50_1d_aligned[i] and rsi[i] < 30:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 6h Donchian low with volume spike and below weekly pivot
-            elif (low[i] < donchian_low[i] and vol_spike[i] and 
-                  close[i] < weekly_pivot_aligned[i]):
+            # Short signal: RSI overbought in downtrend (price below daily EMA50)
+            elif close[i] < ema50_1d_aligned[i] and rsi[i] > 70:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: break below 6h Donchian low or price crosses below weekly pivot
-            if (low[i] < donchian_low[i] or close[i] < weekly_pivot_aligned[i]):
+            # Exit long: RSI overbought or trend turns down
+            if rsi[i] > 70 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above 6h Donchian high or price crosses above weekly pivot
-            if (high[i] > donchian_high[i] or close[i] > weekly_pivot_aligned[i]):
+            # Exit short: RSI oversold or trend turns up
+            if rsi[i] < 30 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_Breakout_WeeklyPivotDirection_Volume"
-timeframe = "6h"
+name = "4h_RelativeStrengthIndex_With_DailyTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
