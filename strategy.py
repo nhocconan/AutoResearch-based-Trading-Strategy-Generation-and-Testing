@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filtered
-Hypothesis: Uses daily trend filter with Camarilla pivot breakout on 4h. 
-Enters long when price breaks above R1 with daily close above daily EMA34 and volume spike.
-Enters short when price breaks below S1 with daily close below daily EMA34 and volume spike.
-Uses daily EMA34 for trend filter to avoid counter-trend trades, reducing false signals in chop.
-Designed for 20-40 trades/year with strong trend capture in both bull and bear markets.
+6h_Stochastic_RSI_Trend
+Hypothesis: Combines Stochastic RSI momentum with 1d trend filter and volume confirmation to capture medium-term swings.
+Designed for 6h timeframe with selective entries (target: 20-40 trades/year) to minimize fee drag.
+Works in both bull and bear markets by using trend filter to align with higher timeframe direction.
 """
 
 import numpy as np
@@ -22,35 +20,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop
+    # Stochastic RSI parameters
+    rsi_period = 14
+    stoch_period = 14
+    k_smooth = 3
+    d_smooth = 3
+    
+    # Calculate RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    
+    # Wilder's smoothing
+    for i in range(rsi_period, n):
+        if i == rsi_period:
+            avg_gain[i] = np.mean(gain[i-rsi_period+1:i+1])
+            avg_loss[i] = np.mean(loss[i-rsi_period+1:i+1])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Stochastic of RSI
+    rsi_min = np.full(n, np.nan)
+    rsi_max = np.full(n, np.nan)
+    for i in range(stoch_period, n):
+        rsi_min[i] = np.min(rsi[i-stoch_period+1:i+1])
+        rsi_max[i] = np.max(rsi[i-stoch_period+1:i+1])
+    
+    stoch_rsi = np.divide((rsi - rsi_min), (rsi_max - rsi_min), 
+                          out=np.full_like(rsi, np.nan), where=(rsi_max - rsi_min)!=0)
+    stoch_rsi = stoch_rsi * 100  # Convert to 0-100 scale
+    
+    # %K and %D lines
+    k = np.full(n, np.nan)
+    d = np.full(n, np.nan)
+    
+    for i in range(k_smooth, n):
+        k[i] = np.mean(stoch_rsi[i-k_smooth+1:i+1])
+    
+    for i in range(d_smooth, n):
+        d[i] = np.mean(k[i-d_smooth+1:i+1])
+    
+    # 1d EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        k = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            if i == 34:
-                ema34_1d[i] = np.mean(close_1d[i-34+1:i+1])
-            else:
-                ema34_1d[i] = close_1d[i] * k + ema34_1d[i-1] * (1 - k)
+    ema_period = 34
+    ema_1d = np.full(len(close_1d), np.nan)
+    k_ema = 2 / (ema_period + 1)
     
-    # Align daily EMA34 to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    for i in range(ema_period, len(close_1d)):
+        if i == ema_period:
+            ema_1d[i] = np.mean(close_1d[i-ema_period+1:i+1])
+        else:
+            ema_1d[i] = close_1d[i] * k_ema + ema_1d[i-1] * (1 - k_ema)
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    
-    # Camarilla R1 and S1 from previous day
-    R1 = close_1d_prev + (high_1d - low_1d) * 1.1 / 12
-    S1 = close_1d_prev - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -61,35 +91,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = max(50, rsi_period + stoch_period + k_smooth + d_smooth, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(k[i]) or np.isnan(d[i]) or 
+            np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above R1 with daily uptrend and volume spike
-            if close[i] > R1_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_spike[i]:
+            # Long: Stochastic RSI oversold (<20) and rising, with uptrend and volume spike
+            if k[i] < 20 and d[i] < 20 and k[i] > d[i] and ema_1d_aligned[i] < close[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with daily downtrend and volume spike
-            elif close[i] < S1_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_spike[i]:
+            # Short: Stochastic RSI overbought (>80) and falling, with downtrend and volume spike
+            elif k[i] > 80 and d[i] > 80 and k[i] < d[i] and ema_1d_aligned[i] > close[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below S1 or daily trend turns down
-            if close[i] < S1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit: Stochastic RSI overbought or trend weakens
+            if k[i] > 80 or d[i] > 80 or ema_1d_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above R1 or daily trend turns up
-            if close[i] > R1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit: Stochastic RSI oversold or trend weakens
+            if k[i] < 20 or d[i] < 20 or ema_1d_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filtered"
-timeframe = "4h"
+name = "6h_Stochastic_RSI_Trend"
+timeframe = "6h"
 leverage = 1.0
