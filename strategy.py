@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_RSI2_Recovery_Volume_TrendFilter
-1h strategy using 2-period RSI for mean-reversion entries with volume confirmation and 4h trend filter.
-- Long: RSI(2) < 10 + volume > 1.5x 20-bar avg + price > 4h EMA50
-- Short: RSI(2) > 90 + volume > 1.5x 20-bar avg + price < 4h EMA50
-- Exit: RSI(2) > 60 for longs, RSI(2) < 40 for shorts (mean-reversion completion)
-Designed for ~15-35 trades/year per symbol (60-140 total over 4 years)
-Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
+6h_WeeklyPivot_RangeBreakout
+6h strategy using weekly pivot points with range expansion/contraction filter.
+- Long: Close breaks above weekly R1 + weekly range expansion (current week > 1.5x avg weekly range)
+- Short: Close breaks below weekly S1 + weekly range expansion
+- Exit: Opposite breakout or range contraction (current week < 0.5x avg weekly range)
+Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -15,95 +15,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly data for pivot points and range filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 2-period RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # Calculate weekly pivot points
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12.0
+    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12.0
     
-    # Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[1] = gain[1]
-    avg_loss[1] = loss[1]
-    for i in range(2, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2  # 2-period
-        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+    # Weekly range (high - low)
+    weekly_range = high_1w - low_1w
+    # Average weekly range over 4 weeks
+    avg_weekly_range = pd.Series(weekly_range).rolling(window=4, min_periods=4).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[0] = 50  # neutral for first value
-    
-    # Volume confirmation: 20-bar average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly data to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    avg_range_aligned = align_htf_to_ltf(prices, df_1w, avg_weekly_range)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA and RSI
+    start_idx = 20  # need enough for 4-week average
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(avg_range_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions from 4h
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # Weekly range expansion condition
+        current_week_range = high_1w[i // (7*24//6)] - low_1w[i // (7*24//6)] if i >= (7*24//6) else 0
+        range_expansion = current_week_range > 1.5 * avg_range_aligned[i] if i >= (7*24//6) else False
+        range_contraction = current_week_range < 0.5 * avg_range_aligned[i] if i >= (7*24//6) else False
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
-        
-        # RSI conditions for mean reversion
-        rsi_oversold = rsi[i] < 10
-        rsi_overbought = rsi[i] > 90
-        rsi_exit_long = rsi[i] > 60
-        rsi_exit_short = rsi[i] < 40
+        # Breakout conditions
+        breakout_up = close[i] > r1_aligned[i]
+        breakdown_down = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: oversold RSI + volume + uptrend
-            if rsi_oversold and vol_confirm and uptrend:
-                signals[i] = 0.20
+            # Long: range expansion + breakout above weekly R1
+            if range_expansion and breakout_up:
+                signals[i] = 0.25
                 position = 1
-            # Short: overbought RSI + volume + downtrend
-            elif rsi_overbought and vol_confirm and downtrend:
-                signals[i] = -0.20
+            # Short: range expansion + breakdown below weekly S1
+            elif range_expansion and breakdown_down:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI recovery or trend change
-            if rsi_exit_long or not uptrend:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: range contraction or breakdown below weekly S1
+            if range_contraction or breakdown_down:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI recovery or trend change
-            if rsi_exit_short or not downtrend:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: range contraction or breakout above weekly R1
+            if range_contraction or breakout_up:
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI2_Recovery_Volume_TrendFilter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_RangeBreakout"
+timeframe = "6h"
 leverage = 1.0
+#%%
