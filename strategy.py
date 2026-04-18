@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter
-Hypothesis: Use weekly Camarilla pivot levels to identify breakout points on daily chart.
-Go long when price breaks above weekly S4 with volume confirmation, short when breaks below weekly R4.
-Weekly structure provides stronger support/resistance, reducing false breakouts.
-Volume confirms institutional participation. Designed for low-frequency, high-conviction trades.
-Target: 10-20 trades/year with position size 0.25 to minimize fee drag.
-Works in bull/bear markets by capturing strong momentum moves after consolidation.
+4h_Camarilla_R1_S1_Breakout_Volume_Regime
+Hypothesis: Use daily Camarilla R1/S1 levels with volume confirmation and a chop regime filter to capture breakouts with follow-through. Works in bull and bear markets by avoiding choppy conditions and only trading when price breaks key daily support/resistance with volume. Targets 20-40 trades/year with position size 0.25.
 """
 
 import numpy as np
@@ -23,65 +18,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for stronger structural levels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1D data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla levels
-    # R4 = Close + 1.5 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
-    camarilla_r4 = close_1w + 1.5 * (high_1w - low_1w)
-    camarilla_s4 = close_1w - 1.5 * (high_1w - low_1w)
+    # Calculate Camarilla levels for each day
+    # R1 = Close + 1.1 * (High - Low)
+    # S1 = Close - 1.1 * (High - Low)
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Align weekly levels to daily timeframe (wait for weekly bar close)
-    r4_1d = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    s4_1d = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # Align Camarilla levels to 4h timeframe (wait for daily bar close)
+    r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume confirmation: 20-day average
+    # Calculate volume average (20-period) for confirmation
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
+    # Calculate chop regime filter using 14-period high-low range vs true range
+    # Chop > 61.8 = ranging (avoid), Chop < 38.2 = trending (favor)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    atr14 = np.full(n, np.nan)
+    for i in range(14, n):
+        atr14[i] = np.mean(tr[i-13:i+1])  # simple moving average of TR
+    hl14 = np.full(n, np.nan)
+    for i in range(14, n):
+        hl14[i] = np.max(high[i-13:i+1]) - np.min(low[i-13:i+1])
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        if atr14[i] > 0:
+            chop[i] = 100 * np.log10(hl14[i] / (atr14[i] * 14)) / np.log10(14)
+        else:
+            chop[i] = 50  # neutral if ATR is zero
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA
+    start_idx = max(20, 14)  # need volume MA and chop
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-day average
+        # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
+        # Regime filter: only trade when chop < 50 (trending bias)
+        trending_regime = chop[i] < 50
+        
         if position == 0:
-            # Long entry: price breaks above weekly S4 with volume confirmation
-            if close[i] > s4_1d[i] and vol_confirmed:
+            # Long entry: price breaks above S1 with volume confirmation and trending regime
+            if close[i] > s1_4h[i] and vol_confirmed and trending_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below weekly R4 with volume confirmation
-            elif close[i] < r4_1d[i] and vol_confirmed:
+            # Short entry: price breaks below R1 with volume confirmation and trending regime
+            elif close[i] < r1_4h[i] and vol_confirmed and trending_regime:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses back below weekly S4
-            if close[i] < s4_1d[i]:
+            # Long exit: price crosses back below S1
+            if close[i] < s1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above weekly R4
-            if close[i] > r4_1d[i]:
+            # Short exit: price crosses back above R1
+            if close[i] > r1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
