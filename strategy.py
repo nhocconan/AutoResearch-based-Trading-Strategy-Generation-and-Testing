@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_Regime_v1
-Hypothesis: On 12h timeframe, price breaking above Camarilla R1 or below S1 with volume confirmation and 1d ADX trend filter captures breakouts in trending markets while avoiding false signals in ranging markets. Uses 1d ATR for stop loss via signal reversal. Designed for fewer trades (target 12-37/year) to minimize fee drag on 12h timeframe.
+4h_12h_Camarilla_Pivot_Breakout_Volume_Regime_v1
+Hypothesis: Use 12h Camarilla pivot levels (R1/S1) for breakout direction, 12h EMA34 for trend filter, and volume confirmation for entry timing.
+Go long when price breaks above 12h R1 AND 12h EMA34 is rising AND volume > 2x 20-period average.
+Go short when price breaks below 12h S1 AND 12h EMA34 is falling AND volume > 2x 20-period average.
+Exit on opposite breakout or when volume drops below average.
+Uses 12h timeframe to reduce trade frequency and avoid overtrading.
+Target: 20-40 trades/year by requiring multiple confluence factors.
+Works in bull markets via breakout longs and in bear via breakdown shorts.
 """
 
 import numpy as np
@@ -18,75 +24,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculation
+    # Get 12h data for Camarilla pivots and EMA
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels for previous 12h bar
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    rango_12h = high_12h - low_12h
-    r1_12h = close_12h + rango_12h * 1.1 / 12
-    s1_12h = close_12h - rango_12h * 1.1 / 12
+    # Calculate 12h Camarilla pivot levels (based on previous day's range)
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # But we need to use the previous 12h bar's range
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h[0] = np.nan
+    prev_low_12h[0] = np.nan
+    prev_close_12h[0] = np.nan
     
-    # Align Camarilla levels to 12h timeframe (previous bar values)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Calculate Camarilla levels
+    R1_12h = prev_close_12h + 1.1 * (prev_high_12h - prev_low_12h) / 12
+    S1_12h = prev_close_12h - 1.1 * (prev_high_12h - prev_low_12h) / 12
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h EMA34 for trend filter
+    ema_period = 34
+    ema_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= ema_period:
+        ema_12h[ema_period-1] = np.mean(close_12h[:ema_period])
+        for i in range(ema_period, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 2 / (ema_period + 1)) + (ema_12h[i-1] * (ema_period - 1) / (ema_period + 1))
     
-    # Calculate ADX(14) on daily
-    adx_period = 14
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                               np.abs(low_1d[1:] - close_1d[:-1])))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Calculate EMA slope for trend direction
+    ema_slope_12h = np.diff(ema_12h, prepend=np.nan)
     
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Align 12h indicators to 4h timeframe
+    R1_12h_aligned = align_htf_to_ltf(prices, df_12h, R1_12h)
+    S1_12h_aligned = align_htf_to_ltf(prices, df_12h, S1_12h)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    ema_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_slope_12h)
     
-    # Smoothed values
-    atr_1d = np.full_like(close_1d, np.nan)
-    dm_plus_smooth = np.full_like(close_1d, np.nan)
-    dm_minus_smooth = np.full_like(close_1d, np.nan)
-    
-    if len(tr) >= adx_period:
-        # Initial values
-        atr_1d[adx_period] = np.nansum(tr[1:adx_period+1])
-        dm_plus_smooth[adx_period] = np.nansum(dm_plus[1:adx_period+1])
-        dm_minus_smooth[adx_period] = np.nansum(dm_minus[1:adx_period+1])
-        
-        # Wilder smoothing
-        for i in range(adx_period + 1, len(close_1d)):
-            atr_1d[i] = (atr_1d[i-1] * (adx_period - 1) + tr[i]) / adx_period
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (adx_period - 1) + dm_plus[i]) / adx_period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (adx_period - 1) + dm_minus[i]) / adx_period
-    
-    # DI and DX
-    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
-    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    
-    # ADX smoothing
-    adx_1d = np.full_like(close_1d, np.nan)
-    if len(dx) >= adx_period * 2:
-        adx_1d[adx_period*2-1] = np.nanmean(dx[adx_period:adx_period*2])
-        for i in range(adx_period*2, len(close_1d)):
-            adx_1d[i] = (adx_1d[i-1] * (adx_period - 1) + dx[i]) / adx_period
-    
-    # Align ADX to 12h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
     
@@ -94,45 +69,41 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
+    vol_confirm = volume > 2 * vol_ma
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(1, vol_period) + 1  # Need at least one 12h bar for Camarilla
+    start_idx = max(1, vol_period)  # Simple start index
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_12h_aligned[i]) or np.isnan(S1_12h_aligned[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(ema_slope_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
-        
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        if position == 0 and trending:
-            # Long: price breaks above R1 with volume
-            if close[i] > r1_12h_aligned[i] and vol_confirm:
+        if position == 0:
+            # Long: price breaks above R1 AND EMA rising AND volume confirmation
+            if close[i] > R1_12h_aligned[i] and ema_slope_12h_aligned[i] > 0 and vol_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume
-            elif close[i] < s1_12h_aligned[i] and vol_confirm:
+            # Short: price breaks below S1 AND EMA falling AND volume confirmation
+            elif close[i] < S1_12h_aligned[i] and ema_slope_12h_aligned[i] < 0 and vol_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or ADX weakens (< 20)
-            if close[i] < s1_12h_aligned[i] or adx_1d_aligned[i] < 20:
+            # Long exit: price breaks below S1 OR EMA turns down OR volume drops
+            if close[i] < S1_12h_aligned[i] or ema_slope_12h_aligned[i] < 0 or not vol_confirm[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or ADX weakens (< 20)
-            if close[i] > r1_12h_aligned[i] or adx_1d_aligned[i] < 20:
+            # Short exit: price breaks above R1 OR EMA turns up OR volume drops
+            if close[i] > R1_12h_aligned[i] or ema_slope_12h_aligned[i] > 0 or not vol_confirm[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -140,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Regime_v1"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Pivot_Breakout_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
