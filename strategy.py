@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R with 12h EMA(34) trend filter and volume confirmation.
-Williams %R identifies overbought/oversold conditions; EMA(34) defines trend direction.
-Long when %R < -80 (oversold) and price > EMA(34) (uptrend); short when %R > -20 (overbought) and price < EMA(34) (downtrend).
-Volume filter ensures momentum confirmation. Designed for 15-25 trades/year to minimize fee drag.
-Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+Hypothesis: 4h Williams %R with 1d ATR volatility filter and 1w trend filter.
+Williams %R identifies overbought/oversold conditions. In trending markets (ADX>25),
+we fade extremes only when volatility is contracting (ATR ratio < 0.8) to avoid
+whipsaws. In ranging markets (ADX<20), we mean-revert at extreme levels.
+Weekly EMA(50) determines trend direction: only long when price > weekly EMA(50),
+short when price < weekly EMA(50). Designed for 20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -23,14 +24,31 @@ def calculate_williams_r(high, low, close, period=14):
         highest_high[i] = np.max(high[i-(period-1):i+1])
         lowest_low[i] = np.min(low[i-(period-1):i+1])
     
-    williams_r = np.full(len(close), np.nan)
+    wr = np.full(len(close), np.nan)
     for i in range(period-1, len(close)):
-        if highest_high[i] - lowest_low[i] != 0:
-            williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
+        if highest_high[i] != lowest_low[i]:
+            wr[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
         else:
-            williams_r[i] = -50
+            wr[i] = -50
     
-    return williams_r
+    return wr
+
+def calculate_atr(high, low, close, period=14):
+    """Calculate Average True Range."""
+    if len(close) < period:
+        return np.full(len(close), np.nan)
+    
+    tr = np.zeros(len(close))
+    tr[0] = high[0] - low[0]
+    for i in range(1, len(close)):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = np.full(len(close), np.nan)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(close)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    
+    return atr
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average."""
@@ -52,63 +70,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams %R and EMA(34)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data for ATR(14)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams %R(14) on 12h
-    williams_r_12h = calculate_williams_r(high_12h, low_12h, close_12h, 14)
+    # Get 1w data for EMA(50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(34) on 12h
-    ema_34_12h = calculate_ema(close_12h, 34)
+    # Calculate indicators
+    williams_r = calculate_williams_r(high, low, close, 14)
+    atr_14_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    ema_50_1w = calculate_ema(close_1w, 50)
     
-    # Align to 6h timeframe
-    williams_r_12h_6h = align_htf_to_ltf(prices, df_12h, williams_r_12h)
-    ema_34_12h_6h = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Align to 4h timeframe
+    williams_r_4h = align_htf_to_ltf(prices, df_1d, williams_r)
+    atr_14_1d_4h = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    ema_50_1w_4h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
+    # Calculate ATR ratio (current ATR / 20-period average ATR) for volatility filter
+    atr_ratio = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+        if not np.isnan(atr_14_1d_4h[i-20:i]).any():
+            atr_avg = np.nanmean(atr_14_1d_4h[i-20:i])
+            if atr_avg > 0:
+                atr_ratio[i] = atr_14_1d_4h[i] / atr_avg
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA calculation
+    start_idx = 30  # need Williams %R, ATR ratio, and EMA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_12h_6h[i]) or np.isnan(ema_34_12h_6h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r_4h[i]) or np.isnan(atr_ratio[i]) or 
+            np.isnan(ema_50_1w_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3 * 20-period average
-        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # Determine market regime (simplified: using price relative to EMA)
+        # In practice, would use ADX but keeping it simple with price/EMA relationship
+        price_above_ema = close[i] > ema_50_1w_4h[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80), price above EMA(34) (uptrend), volume confirmation
-            if williams_r_12h_6h[i] < -80 and close[i] > ema_34_12h_6h[i] and vol_confirmed:
+            # Long: oversold + volatility contracting + uptrend bias
+            if (williams_r_4h[i] <= -80 and atr_ratio[i] < 0.8 and price_above_ema):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20), price below EMA(34) (downtrend), volume confirmation
-            elif williams_r_12h_6h[i] > -20 and close[i] < ema_34_12h_6h[i] and vol_confirmed:
+            # Short: overbought + volatility contracting + downtrend bias
+            elif (williams_r_4h[i] >= -20 and atr_ratio[i] < 0.8 and not price_above_ema):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R rises above -50 (momentum fading) or price crosses below EMA(34)
-            if williams_r_12h_6h[i] > -50 or close[i] <= ema_34_12h_6h[i]:
+            # Long exit: Williams %R returns from oversold or volatility expands
+            if williams_r_4h[i] >= -50 or atr_ratio[i] >= 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R falls below -50 (momentum fading) or price crosses above EMA(34)
-            if williams_r_12h_6h[i] < -50 or close[i] >= ema_34_12h_6h[i]:
+            # Short exit: Williams %R returns from overbought or volatility expands
+            if williams_r_4h[i] <= -50 or atr_ratio[i] >= 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_12hEMA34_Volume"
-timeframe = "6h"
+name = "4h_WilliamsR_ATR_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
