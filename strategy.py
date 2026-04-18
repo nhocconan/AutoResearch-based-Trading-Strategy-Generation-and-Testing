@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Squeeze_Breakout_v1
-Hypothesis: In low-volatility regimes (BB/KC squeeze), price often breaks out with momentum.
-We use daily timeframe with weekly trend filter to capture multi-day moves.
-Long when: price breaks above upper Keltner + weekly trend up + volume spike.
-Short when: price breaks below lower Keltner + weekly trend down + volume spike.
-Exit when: opposite Keltner break or trend change.
-Designed for 1d timeframe: ~10-25 trades/year per symbol (40-100 total over 4 years).
-Works in bull/bear via weekly trend filter and volatility squeeze logic.
+6h_WeeklyPivot_Retest_1dTrend
+Strategy: Retest of weekly pivot levels (R1/S1) with 1d trend filter and volume confirmation.
+Long: Price retests and fails below weekly S1, then closes back above it in 1d uptrend.
+Short: Price retests and fails above weekly R1, then closes back below it in 1d downtrend.
+Designed for 6h timeframe: ~15-25 trades/year per symbol (60-100 total over 4 years).
+Works in bull/bear via trend filter and mean-reversion retest logic.
 """
 
 import numpy as np
@@ -24,90 +22,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (using 1w as HTF)
+    # Get weekly data for pivot points (using daily data to calculate weekly pivots)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA20 and EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly pivot points from weekly OHLC
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Align weekly data to daily timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Weekly pivot: P = (H + L + C) / 3
+    pivot_w = (high_w + low_w + close_w) / 3.0
+    # Weekly R1 = 2*P - L
+    r1_w = 2 * pivot_w - low_w
+    # Weekly S1 = 2*P - H
+    s1_w = 2 * pivot_w - high_w
     
-    # Daily Keltner Channel (20, 2.0)
-    # Typical Price = (H+L+C)/3
-    typical_price = (high + low + close) / 3.0
-    atr_period = 20
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    ema_tp = pd.Series(typical_price).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_tp + 2.0 * atr
-    kc_lower = ema_tp - 2.0 * atr
+    close_1d = df_1d['close'].values
     
-    # Bollinger Bands (20, 2.0) for squeeze detection
-    sma_close = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_close = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_close + 2.0 * std_close
-    bb_lower = sma_close - 2.0 * std_close
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Squeeze condition: BB inside KC (low volatility)
-    squeeze = (bb_upper <= kc_upper) & (bb_lower >= kc_lower)
+    # Daily volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align all weekly and daily data to 6h timeframe
+    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for weekly EMA50 and daily indicators
+    start_idx = 50  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
-            np.isnan(squeeze[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend conditions
-        weekly_uptrend = ema_20_1w_aligned[i] > ema_50_1w_aligned[i]
-        weekly_downtrend = ema_20_1w_aligned[i] < ema_50_1w_aligned[i]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Breakout conditions
-        buy_breakout = close[i] > kc_upper[i] and squeeze[i]
-        sell_breakout = close[i] < kc_lower[i] and squeeze[i]
+        # Weekly pivot retest conditions
+        # Long: price tested below weekly S1, then closed back above it
+        retest_long = low[i] < s1_w_aligned[i] and close[i] > s1_w_aligned[i]
+        # Short: price tested above weekly R1, then closed back below it
+        retest_short = high[i] > r1_w_aligned[i] and close[i] < r1_w_aligned[i]
         
         if position == 0:
-            # Long: weekly uptrend + volume + buy breakout in squeeze
-            if weekly_uptrend and vol_confirm and buy_breakout:
+            # Long: uptrend + volume + retest long setup
+            if uptrend and vol_confirm and retest_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + volume + sell breakout in squeeze
-            elif weekly_downtrend and vol_confirm and sell_breakout:
+            # Short: downtrend + volume + retest short setup
+            elif downtrend and vol_confirm and retest_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: weekly trend change, sell breakout, or squeeze release
-            if (not weekly_uptrend) or sell_breakout or (not squeeze[i]):
+            # Long exit: trend change, volume confirmation, or retest short setup
+            if not uptrend or vol_confirm or retest_short:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly trend change, buy breakout, or squeeze release
-            if (not weekly_downtrend) or buy_breakout or (not squeeze[i]):
+            # Short exit: trend change, volume confirmation, or retest long setup
+            if not downtrend or vol_confirm or retest_long:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -115,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_Squeeze_Breakout_v1"
-timeframe = "1d"
+name = "6h_WeeklyPivot_Retest_1dTrend"
+timeframe = "6h"
 leverage = 1.0
