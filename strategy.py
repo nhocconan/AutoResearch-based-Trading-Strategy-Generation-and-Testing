@@ -1,117 +1,109 @@
 #!/usr/bin/env python3
 """
-12h Trading Range Breakout with Volume and Trend Confirmation
-Hypothesis: In trending markets, price breaks above/below prior 12h high/low with volume
-indicate institutional participation. Works in both bull and bear by following breakout
-direction. Uses 1w trend filter to avoid counter-trend trades.
+4h RSI and Volume Spike with 1d Trend Filter
+Hypothesis: RSI extremes (oversold/overbought) combined with volume spikes 
+indicate potential reversals. The 1d trend filter (EMA50) ensures trades 
+align with higher timeframe direction, reducing whipsaws in both bull and 
+bear markets. Works by fading extremes in trending markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_rsi(close, period=14):
+    """Calculate RSI with proper handling"""
+    if len(close) < period + 1:
+        return np.full_like(close, np.nan)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    for i in range(period + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Weekly EMA34 for trend
-    close_1w = df_1w['close'].values
-    ema_34_1w = np.zeros_like(close_1w)
-    ema_34_1w[:] = np.nan
-    if len(close_1w) >= 34:
-        ema_34_1w[33] = np.mean(close_1w[:34])
-        for i in range(34, len(close_1w)):
-            ema_34_1w[i] = (close_1w[i] * 2 + ema_34_1w[i-1] * 33) / 35
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get daily data for volatility filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily ATR for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_1d = np.zeros_like(tr)
-    atr_1d[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_50_1d = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < 20:
+            ema_50_1d[i] = np.mean(close_1d[max(0, i-19):i+1]) if i >= 0 else close_1d[i]
+        else:
+            ema_50_1d[i] = (ema_50_1d[i-1] * 0.9047619047619048 + close_1d[i] * 0.09523809523809523)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12-period high/low for breakout levels (using prior 12h bar)
-    highest_12 = np.full(n, np.nan)
-    lowest_12 = np.full(n, np.nan)
-    for i in range(12, n):
-        highest_12[i] = np.max(high[i-12:i])
-        lowest_12[i] = np.min(low[i-12:i])
+    # Calculate RSI
+    rsi = calculate_rsi(close, 14)
     
-    # Volume spike: current volume > 2x average of last 12 periods
-    vol_avg = np.full(n, np.nan)
-    for i in range(12, n):
-        vol_avg[i] = np.mean(volume[i-12:i])
-    vol_spike = volume > (vol_avg * 2.0)
+    # Volume spike: current volume > 2.0 x 20-period average
+    vol_ma = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
+        else:
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Ensure we have enough data for calculations
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_12[i]) or np.isnan(lowest_12[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_avg[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely low volatility
-        vol_filter = atr_1d_aligned[i] > 0.01 * close[i]  # At least 1% ATR
-        
         if position == 0:
-            # Long: break above 12h high with volume in uptrend
-            if (close[i] > highest_12[i] and 
+            # Long: RSI oversold + volume spike + above 1d EMA50 (uptrend)
+            if (rsi[i] < 30 and 
                 vol_spike[i] and 
-                close[i] > ema_34_1w_aligned[i] and 
-                vol_filter):
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 12h low with volume in downtrend
-            elif (close[i] < lowest_12[i] and 
+            # Short: RSI overbought + volume spike + below 1d EMA50 (downtrend)
+            elif (rsi[i] > 70 and 
                   vol_spike[i] and 
-                  close[i] < ema_34_1w_aligned[i] and 
-                  vol_filter):
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: break below 12h low or trend reversal
-            if (close[i] < lowest_12[i] or 
-                close[i] < ema_34_1w_aligned[i]):
+            # Exit long: RSI returns to neutral or trend changes
+            if rsi[i] > 50 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: break above 12h high or trend reversal
-            if (close[i] > highest_12[i] or 
-                close[i] > ema_34_1w_aligned[i]):
+            # Exit short: RSI returns to neutral or trend changes
+            if rsi[i] < 50 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Trend_Breakout_Volume_Filter"
-timeframe = "12h"
+name = "4h_RSI_VolumeSpike_1dEMA50TrendFilter"
+timeframe = "4h"
 leverage = 1.0
