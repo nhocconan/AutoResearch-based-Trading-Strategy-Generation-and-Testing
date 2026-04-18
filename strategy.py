@@ -1,9 +1,11 @@
-# 1d_WeeklyTrend_RSI_Pullback
-# Hypothesis: On daily timeframe, buy pullbacks to EMA50 during weekly uptrends (price > weekly EMA200) and sell rallies to EMA50 during weekly downtrends (price < weekly EMA200).
-# Uses RSI(14) for entry timing: RSI < 40 for longs in uptrend, RSI > 60 for shorts in downtrend.
-# Weekly trend filter ensures we only trade with the higher timeframe momentum, reducing whipsaws in ranging markets.
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
-# Works in bull markets by catching dips in uptrends and in bear markets by selling rallies in downtrends.
+#!/usr/bin/env python3
+"""
+12h_Camarilla_R1S1_Breakout_Volume_Trend
+Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance. 
+Price breaking above R1 or below S1 with volume confirmation and 12h EMA trend filter captures 
+institutional breakout moves. Works in both bull/bear markets as Camarilla adapts to volatility.
+Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag.
+"""
 
 import numpy as np
 import pandas as pd
@@ -11,71 +13,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA200 for trend filter (loaded once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    ema200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate Camarilla levels from previous day (to avoid look-ahead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily EMA50 for dynamic support/resistance
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), R2 = close + 1.05*(high-low), R1 = close + 1.025*(high-low)
+    # S1 = close - 1.025*(high-low), S2 = close - 1.05*(high-low), S3 = close - 1.125*(high-low), S4 = close - 1.5*(high-low)
+    r1 = close_1d + 1.025 * (high_1d - low_1d)
+    s1 = close_1d - 1.025 * (high_1d - low_1d)
     
-    # Daily RSI(14) for entry timing
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Align to 12h timeframe (wait for daily close)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 12h EMA34 trend filter
+    ema_34 = pd.Series(prices['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume filter: >1.5x 20-period average
+    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_filter = prices['volume'].values > (1.5 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 50  # Warmup for EMA50 and RSI
+    start_idx = 34  # Warmup for EMA34
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema200_1w_aligned[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema_34[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        ema50_val = ema50[i]
-        rsi_val = rsi[i]
-        weekly_trend = ema200_1w_aligned[i]  # Weekly EMA200 value
+        price = prices['close'].iloc[i]
+        r1_val = r1_12h[i]
+        s1_val = s1_12h[i]
+        ema_val = ema_34[i]
+        vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: Weekly uptrend (price > weekly EMA200) + price near EMA50 + RSI oversold
-            if price > weekly_trend and price <= ema50_val * 1.02 and rsi_val < 40:
+            # Long: price breaks above R1 with volume in uptrend
+            if price > r1_val and vol_ok and price > ema_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly downtrend (price < weekly EMA200) + price near EMA50 + RSI overbought
-            elif price < weekly_trend and price >= ema50_val * 0.98 and rsi_val > 60:
+            # Short: price breaks below S1 with volume in downtrend
+            elif price < s1_val and vol_ok and price < ema_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: RSI overbought or price moves significantly above EMA50
-            if rsi_val > 70 or price > ema50_val * 1.05:
+            # Exit: price returns to S1 or trend reverses
+            if price < s1_val or price < ema_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: RSI oversold or price moves significantly below EMA50
-            if rsi_val < 30 or price < ema50_val * 0.95:
+            # Exit: price returns to R1 or trend reverses
+            if price > r1_val or price > ema_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WeeklyTrend_RSI_Pullback"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
