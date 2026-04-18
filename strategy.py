@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-1d Weekly Pivot Breakout with Volume Confirmation and Trend Filter
-Hypothesis: Weekly pivot levels act as strong support/resistance on daily charts.
-Breakouts above R1 or below S1 with volume confirmation and weekly trend alignment
-capture institutional moves while avoiding false breakouts. Designed for 1d timeframe
-to work in both bull and bear markets by filtering with weekly trend and volume.
-Target: 10-25 trades/year to minimize fee drag on higher timeframe.
+4h Bollinger Band Breakout with Volume Confirmation and ATR Filter
+Hypothesis: In BTC/ETH, Bollinger Band breakouts combined with volume spikes and 
+ATR-based volatility filtering capture genuine momentum moves while avoiding 
+false breakouts in low-volatility periods. The strategy is designed to work in 
+both bull and bear markets by using volatility expansion as a signal of 
+increased participation, which often precedes sustained moves. 
+Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -22,76 +23,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points from prior week
-    # Using weekly high, low, close from previous week
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Bollinger Bands (20, 2) on close
+    close_series = pd.Series(close)
+    basis = close_series.rolling(window=20, min_periods=20).mean()
+    dev = close_series.rolling(window=20, min_periods=20).std()
+    upper = basis + 2 * dev
+    lower = basis - 2 * dev
     
-    # Weekly high, low, close from previous week (already completed)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # ATR for volatility filter (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pivot point calculation
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
-    
-    # Align to daily timeframe (wait for weekly bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Weekly trend filter: EMA34 on weekly close
-    weekly_ema34 = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_ema34_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema34)
-    
-    # Daily volume filter: 1.5x 20-day average
+    # Volume filter: 1.8x 20-period average (higher threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup for weekly data and volume
+    start_idx = 30  # Warmup for BB and ATR
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(weekly_ema34_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        weekly_trend = weekly_ema34_aligned[i]
+        bb_upper = upper[i]
+        bb_lower = lower[i]
+        atr_val = atr[i]
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume and weekly uptrend
-            if price > r1_aligned[i] and vol_ok and price > weekly_trend:
+            # Long: break above upper BB with volume and sufficient volatility
+            if price > bb_upper and vol_ok and atr_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume and weekly downtrend
-            elif price < s1_aligned[i] and vol_ok and price < weekly_trend:
+            # Short: break below lower BB with volume and sufficient volatility
+            elif price < bb_lower and vol_ok and atr_val > 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price returns to pivot or weekly trend breaks down
-            if price < pivot_aligned[i] or price < weekly_trend:
+            # Exit long if price returns to middle band or volatility drops
+            if price < basis[i] or atr_val < 0.5 * atr[i-1]:  # Volatility contraction
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns to pivot or weekly trend breaks up
-            if price > pivot_aligned[i] or price > weekly_trend:
+            # Exit short if price returns to middle band or volatility drops
+            if price > basis[i] or atr_val < 0.5 * atr[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Pivot_R1S1_Breakout_With_Volume_and_Trend_Filter"
-timeframe = "1d"
+name = "4h_Bollinger_Breakout_Volume_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
