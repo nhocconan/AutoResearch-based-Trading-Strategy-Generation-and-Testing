@@ -3,87 +3,111 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_Momentum_Conservative"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Kijun_Sen"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4h trend filter: EMA34 on close
-    df_4h = get_htf_data(prices, '4h')
-    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    
-    # 1d momentum filter: ROC10 on close
+    # Get daily data for Ichimoku calculations
     df_1d = get_htf_data(prices, '1d')
-    roc10_1d = pd.Series(df_1d['close']).pct_change(10).values
-    roc10_1d_aligned = align_htf_to_ltf(prices, df_1d, roc10_1d)
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # 1h entry: RSI14 with extreme levels
-    rsi_period = 14
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(d_high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(d_low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(d_high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(d_low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(d_high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(d_low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # For signal generation, we use current price vs cloud
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_span_a_6h, senkou_span_b_6h)
+    cloud_bottom = np.minimum(senkou_span_a_6h, senkou_span_b_6h)
+    
+    # Volume filter: current volume > 1.2 * 20-period average
+    volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.2 * vol_ma_20)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(roc10_1d_aligned[i]) or
-            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema34_val = ema34_4h_aligned[i]
-        roc_val = roc10_1d_aligned[i]
-        rsi_val = rsi[i]
+        tenkan_val = tenkan_sen_6h[i]
+        kijun_val = kijun_sen_6h[i]
+        cloud_top_val = cloud_top[i]
+        cloud_bottom_val = cloud_bottom[i]
         vol_filter = volume_filter[i]
         
+        # Determine if price is above or below cloud
+        above_cloud = close_val > cloud_top_val
+        below_cloud = close_val < cloud_bottom_val
+        in_cloud = not (above_cloud or below_cloud)
+        
         if position == 0:
-            # Long: 4h uptrend + 1d positive momentum + RSI oversold bounce
-            if close_val > ema34_val and roc_val > 0.02 and rsi_val < 30 and vol_filter:
-                signals[i] = 0.20
+            # Long: Tenkan crosses above Kijun AND price above cloud AND volume
+            if tenkan_val > kijun_val and above_cloud and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + 1d negative momentum + RSI overbought bounce
-            elif close_val < ema34_val and roc_val < -0.02 and rsi_val > 70 and vol_filter:
-                signals[i] = -0.20
+            # Short: Tenkan crosses below Kijun AND price below cloud AND volume
+            elif tenkan_val < kijun_val and below_cloud and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: 4h trend breaks or RSI overbought
-            if close_val < ema34_val or rsi_val > 70:
+            # Exit long: Tenkan crosses below Kijun OR price drops below cloud
+            if tenkan_val < kijun_val or close_val < cloud_top_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: 4h trend breaks or RSI oversold
-            if close_val > ema34_val or rsi_val < 30:
+            # Exit short: Tenkan crosses above Kijun OR price rises above cloud
+            if tenkan_val > kijun_val or close_val > cloud_bottom_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
