@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot Point Breakout with Volume Confirmation
-Strategy: Enter long when price breaks above weekly R3 with volume confirmation,
-          short when price breaks below weekly S3 with volume confirmation.
-          Use weekly trend (price vs weekly SMA200) to avoid counter-trend trades.
-          Designed for low trade frequency with clear breakout edge in both bull and bear markets.
-          Weekly pivots provide strong institutional levels that work across market regimes.
+1d Williams Alligator + Volume Spike + Weekly Trend Filter
+Strategy: Use Williams Alligator (3 SMAs) to detect trend direction.
+          Enter long when price > Alligator Jaw with volume spike and weekly EMA20 uptrend.
+          Enter short when price < Alligator Jaw with volume spike and weekly EMA20 downtrend.
+          Williams Alligator helps avoid whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:  # Need enough history for weekly SMA200
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,31 +21,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points and trend filter (once before loop)
+    # Get weekly data for trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1w) < 200:  # Need enough weekly history for SMA200
-        return np.zeros(n)
-    
-    # Calculate weekly high, low, close for pivot points
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
+    # Calculate weekly EMA20 for trend filter
     weekly_close = df_1w['close'].values
+    ema_20_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Calculate weekly R3 and S3: R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    weekly_r3 = weekly_high + 2.0 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2.0 * (weekly_high - weekly_pivot)
+    # Williams Alligator components (13,8,5 smoothed by 8,5,3)
+    # Jaw (13-period SMMA smoothed by 8)
+    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    jaw = pd.Series(jaw_raw).rolling(window=8, min_periods=8).mean().values
+    # Teeth (8-period SMMA smoothed by 5)
+    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(teeth_raw).rolling(window=5, min_periods=5).mean().values
+    # Lips (5-period SMMA smoothed by 3)
+    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(lips_raw).rolling(window=3, min_periods=3).mean().values
     
-    # Calculate weekly SMA200 for trend filter
-    sma_200_1w = pd.Series(weekly_close).rolling(window=200, min_periods=200).mean().values
-    
-    # Align weekly levels to 6h timeframe
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
-    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
-    sma_200_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_200_1w)
+    # Align Alligator components to daily timeframe
+    jaw_aligned = align_htf_to_ltf(prices, prices, jaw)  # Already daily data
+    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
+    lips_aligned = align_htf_to_ltf(prices, prices, lips)
     
     # Volume spike detection (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,51 +52,52 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 200  # need enough history for calculations
+    start_idx = 100  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_r3_aligned[i]) or 
-            np.isnan(weekly_s3_aligned[i]) or
-            np.isnan(weekly_close_aligned[i]) or
-            np.isnan(sma_200_1w_aligned[i]) or
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        weekly_r3_level = weekly_r3_aligned[i]
-        weekly_s3_level = weekly_s3_aligned[i]
-        weekly_close_val = weekly_close_aligned[i]
-        sma_200 = sma_200_1w_aligned[i]
+        jaw_val = jaw_aligned[i]
+        ema_20w = ema_20_1w_aligned[i]
+        
+        # Alligator alignment: jaw > teeth > lips = uptrend, reverse = downtrend
+        # But we simplify to price vs jaw for entry
         
         if position == 0:
-            # Long: break above weekly R3 with volume spike and above weekly SMA200 (bullish trend)
-            if (price > weekly_r3_level and volume_spike[i] and weekly_close_val > sma_200):
+            # Long: price above jaw with volume spike and weekly uptrend
+            if (price > jaw_val and volume_spike[i] and price > ema_20w):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S3 with volume spike and below weekly SMA200 (bearish trend)
-            elif (price < weekly_s3_level and volume_spike[i] and weekly_close_val < sma_200):
+            # Short: price below jaw with volume spike and weekly downtrend
+            elif (price < jaw_val and volume_spike[i] and price < ema_20w):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: price breaks below weekly S3 or weekly close drops below SMA200
-            if price < weekly_s3_level or weekly_close_val < sma_200:
+            # Exit: price crosses below jaw or weekly trend turns down
+            if price < jaw_val or price < ema_20w:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: price breaks above weekly R3 or weekly close rises above SMA200
-            if price > weekly_r3_level or weekly_close_val > sma_200:
+            # Exit: price crosses above jaw or weekly trend turns up
+            if price > jaw_val or price > ema_20w:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_Breakout_Volume_TrendFilter"
-timeframe = "6h"
+name = "1d_WilliamsAlligator_VolumeSpike_WeeklyEMA20"
+timeframe = "1d"
 leverage = 1.0
