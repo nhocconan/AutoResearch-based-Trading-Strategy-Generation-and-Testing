@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume_Filtered_V3
-Hypothesis: In low volatility regimes (weekly ATR < 50-day ATR median), price respects daily Camarilla pivot levels R1/S1.
-Breakouts with volume (>2.0x 24-period mean) trigger entries. Uses weekly trend filter to avoid counter-trend trades.
-Optimized for very low trade frequency (<20/year) on 12h timeframe to minimize fee drag. Works in both bull and bear by
-adapting to volatility regime. Uses much stricter volume and volatility filters to reduce overtrading.
+4h_ADX_VWAP_Retest
+Hypothesis: In trending markets (ADX>25), price pulls back to VWAP before continuing.
+Entries occur on pullbacks to VWAP with volume confirmation (>1.5x average).
+Exit when trend weakens (ADX<20) or price extends too far (>2*ATR from VWAP).
+Designed for low trade frequency (15-25/year) on 4h timeframe to minimize fee drag.
+Works in both bull and bear by following the trend via ADX filter.
 """
 
 import numpy as np
@@ -13,82 +14,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate VWAP (typical price * volume) cumulative
+    typical_price = (high + low + close) / 3.0
+    tpv = typical_price * volume
+    cum_tpv = np.cumsum(tpv)
+    cum_vol = np.cumsum(volume)
+    vwap = np.where(cum_vol > 0, cum_tpv / cum_vol, 0.0)
     
-    # Calculate Camarilla levels (based on previous day)
-    R1 = np.full_like(high_1d, np.nan)
-    S1 = np.full_like(low_1d, np.nan)
+    # Calculate ATR for stop loss and extension filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    for i in range(1, len(close_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_ = prev_high - prev_low
+    atr_period = 14
+    atr = np.full_like(tr, np.nan)
+    if len(tr) >= atr_period:
+        atr[atr_period] = np.nanmean(tr[1:atr_period+1])
+        for i in range(atr_period+1, len(tr)):
+            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    
+    # Calculate ADX for trend strength
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smooth TR, DM+ and DM-
+    tr_smooth = np.full_like(tr, np.nan)
+    dm_plus_smooth = np.full_like(dm_plus, np.nan)
+    dm_minus_smooth = np.full_like(dm_minus, np.nan)
+    
+    if len(tr) >= atr_period:
+        tr_smooth[atr_period] = np.nanmean(tr[1:atr_period+1])
+        dm_plus_smooth[atr_period] = np.nanmean(dm_plus[1:atr_period+1])
+        dm_minus_smooth[atr_period] = np.nanmean(dm_minus[1:atr_period+1])
         
-        if range_ > 0:
-            R1[i] = prev_close + 1.1 * range_ / 12
-            S1[i] = prev_close - 1.1 * range_ / 12
+        for i in range(atr_period+1, len(tr)):
+            tr_smooth[i] = (tr_smooth[i-1] * (atr_period-1) + tr[i]) / atr_period
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (atr_period-1) + dm_plus[i]) / atr_period
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (atr_period-1) + dm_minus[i]) / atr_period
     
-    # Get weekly data for volatility and trend filters
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # DI+ and DI-
+    di_plus = np.full_like(dm_plus_smooth, np.nan)
+    di_minus = np.full_like(dm_minus_smooth, np.nan)
+    valid = ~np.isnan(tr_smooth) & (tr_smooth != 0)
+    di_plus[valid] = 100 * dm_plus_smooth[valid] / tr_smooth[valid]
+    di_minus[valid] = 100 * dm_minus_smooth[valid] / tr_smooth[valid]
     
-    # Weekly ATR(14)
-    def calculate_atr(high, low, close, period=14):
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        atr = np.full_like(tr, np.nan)
-        if len(tr) >= period:
-            atr[period] = np.nanmean(tr[1:period+1])
-            for i in range(period+1, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+    # DX and ADX
+    dx = np.full_like(di_plus, np.nan)
+    dx_valid = ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
+    dx[dx_valid] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
     
-    atr_1w = calculate_atr(high_1w, low_1w, close_1w, 14)
+    adx = np.full_like(dx, np.nan)
+    if len(dx) >= atr_period:
+        adx[2*atr_period-1] = np.nanmean(dx[atr_period:2*atr_period])
+        for i in range(2*atr_period, len(dx)):
+            adx[i] = (adx[i-1] * (atr_period-1) + dx[i]) / atr_period
     
-    # Weekly ATR 50-period median for volatility regime
-    atr_median = np.full_like(atr_1w, np.nan)
-    if len(atr_1w) >= 50:
-        for i in range(49, len(atr_1w)):
-            atr_median[i] = np.nanmedian(atr_1w[i-49:i+1])
-    
-    # Weekly EMA(34) for trend filter
-    if len(close_1w) >= 34:
-        ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False).mean().values
-    else:
-        ema_1w = np.full_like(close_1w, np.nan)
-    
-    # Align all 1w data to 12h timeframe
-    atr_1w_12h = align_htf_to_ltf(prices, df_1w, atr_1w)
-    atr_median_12h = align_htf_to_ltf(prices, df_1w, atr_median)
-    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Align daily data to 12h timeframe
-    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume confirmation: volume > 2.0x 24-period average (much stricter)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24
-    
+    vol_period = 20
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
@@ -96,46 +95,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24) + 1  # Ensure we have enough data
+    start_idx = max(atr_period*2, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or 
-            np.isnan(atr_1w_12h[i]) or np.isnan(atr_median_12h[i]) or 
-            np.isnan(ema_1w_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx[i]) or np.isnan(vwap[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: weekly ATR < 50-day median (low volatility regime)
-        low_vol_regime = atr_1w_12h[i] < atr_median_12h[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Volume confirmation: much stricter
-        vol_confirm = volume[i] > 2.0 * vol_ma[i]
-        
-        # Trend filter: price above weekly EMA (bullish bias)
-        bullish_bias = close[i] > ema_1w_12h[i]
+        # Distance from VWAP in ATR units
+        if atr[i] > 0:
+            dist_from_vwap = abs(close[i] - vwap[i]) / atr[i]
+        else:
+            dist_from_vwap = 0
         
         if position == 0:
-            # Long: price breaks above R1 with volume in low volatility regime
-            if close[i] > R1_12h[i] and vol_confirm and low_vol_regime and bullish_bias:
+            # Long: ADX > 25 (trending), price near VWAP (<1 ATR), volume confirmation
+            if adx[i] > 25 and dist_from_vwap < 1.0 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume in low volatility regime (counter-trend only in strong bear)
-            elif close[i] < S1_12h[i] and vol_confirm and low_vol_regime and not bullish_bias:
-                signals[i] = -0.25
-                position = -1
+            # Short: ADX > 25 (trending), price near VWAP (<1 ATR), volume confirmation
+            elif adx[i] > 25 and dist_from_vwap < 1.0 and vol_confirm:
+                # For short, we need price to be below VWAP in downtrend
+                # We'll use price < VWAP as additional filter for short
+                if close[i] < vwap[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 OR volatility increases (regime change)
-            if close[i] < S1_12h[i] or atr_1w_12h[i] > atr_median_12h[i]:
+            # Long exit: trend weakens (ADX<20) or price extends too far (>2*ATR from VWAP)
+            if adx[i] < 20 or dist_from_vwap > 2.0:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 OR volatility increases (regime change)
-            if close[i] > R1_12h[i] or atr_1w_12h[i] > atr_median_12h[i]:
+            # Short exit: trend weakens (ADX<20) or price extends too far (>2*ATR from VWAP)
+            if adx[i] < 20 or dist_from_vwap > 2.0:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -143,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_Volume_Filtered_V3"
-timeframe = "12h"
+name = "4h_ADX_VWAP_Retest"
+timeframe = "4h"
 leverage = 1.0
