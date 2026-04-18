@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Momentum_With_Trend
-Hypothesis: RSI momentum (cross above 50) in the direction of the 4h EMA trend, with volume confirmation, yields fewer false signals than pure RSI extremes.
-Works in bull markets (trend-following) and bear markets (only trades when RSI>50 in downtrend for shorts).
-Target: 20-40 trades/year to minimize fee drag while capturing momentum with trend alignment.
+1d_Weekly_Pivot_R1S1_Breakout_With_Volume_Confirmation
+Hypothesis: Price breaks above/below weekly pivot S1/R1 with volume spike and daily trend filter.
+Weekly pivots provide strong support/resistance levels; breakouts with volume indicate institutional interest.
+Daily trend filter (EMA50) ensures alignment with higher timeframe momentum. Designed for 1d timeframe
+to target 15-25 trades/year, minimizing fee drag while capturing significant moves in bull/bear markets.
 """
 
 import numpy as np
@@ -20,66 +21,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Trend: 4h EMA34
-    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Weekly pivot from previous week
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Pivot levels: P = (H+L+C)/3, R1 = C + (H-L)*1.1/2, S1 = C - (H-L)*1.1/2
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = close_1w + (high_1w - low_1w) * 1.1 / 2.0
+    s1 = close_1w - (high_1w - low_1w) * 1.1 / 2.0
     
-    # Volume spike: >1.5x 20-period average
+    # Align to 1d: previous week's levels available after weekly bar closes
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Trend filter: daily EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 34  # Warmup for EMA and RSI
+    start_idx = max(50, 20)  # Warmup for EMA and indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34[i]) or 
-            np.isnan(rsi[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_val = ema_34[i]
-        rsi_val = rsi[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema50 = ema_50[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: RSI crosses above 50, price above EMA, volume spike
-            if rsi_val > 50 and rsi[i-1] <= 50 and price > ema_val and vol_spike:
+            # Long: price breaks above R1 with volume spike and uptrend
+            if price > r1_val and vol_spike and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI crosses below 50, price below EMA, volume spike
-            elif rsi_val < 50 and rsi[i-1] >= 50 and price < ema_val and vol_spike:
+            # Short: price breaks below S1 with volume spike and downtrend
+            elif price < s1_val and vol_spike and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: RSI falls below 40 OR price crosses below EMA
-            if rsi_val < 40 or price < ema_val:
+            # Exit: price closes below weekly pivot OR trend turns down
+            if price < pivot_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif price < ema50:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: RSI rises above 60 OR price crosses above EMA
-            if rsi_val > 60 or price > ema_val:
+            # Exit: price closes above weekly pivot OR trend turns up
+            if price > pivot_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif price > ema50:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_RSI_Momentum_With_Trend"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_R1S1_Breakout_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
