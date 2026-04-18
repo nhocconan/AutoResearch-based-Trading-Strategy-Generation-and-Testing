@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R3S3_Reversal_S4S4_Breakout
-Hypothesis: On 6h timeframe, weekly pivot levels act as strong support/resistance.
-- Mean reversion: Price touching weekly R3/S3 with rejection (close back inside R2/S2) signals reversal.
-- Breakout: Price breaking weekly S4/R4 with volume and trend continuation signals strong momentum.
-Works in both bull and bear markets by combining mean reversion at extremes and breakout continuation.
-Uses weekly pivots calculated from prior week's OHLC to avoid look-ahead.
-Target: 20-40 trades/year on 6h (~80-160 total over 4 years) to minimize fee drag.
+12h_DailyPivot_R1S1_Breakout_VolumeSpike_1dEMA34
+Hypothesis: Daily pivot points (R1, S1) from 1D chart act as strong support/resistance.
+Breakouts beyond these levels with volume confirmation and 1D EMA34 trend filter capture momentum.
+Designed for 12-37 trades/year on 12h timeframe with low trade frequency to minimize fee drift.
+Works in bull/bear markets by requiring volume spike and 1D EMA34 trend filter.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,112 +21,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1D data for pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points using prior week's data
+    # Calculate 1D pivot points using standard formula
     # P = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    # R4 = R3 + (H - L), S4 = S3 - (H - L)
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    close_1w = df_1w['close']
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # Using previous 1D bar's data to avoid look-ahead
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
     
-    pivot = (high_1w + low_1w + close_1w) / 3
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
-    r2 = pivot + (high_1w - low_1w)
-    s2 = pivot - (high_1w - low_1w)
-    r3 = high_1w + 2 * (pivot - low_1w)
-    s3 = low_1w - 2 * (high_1w - pivot)
-    r4 = r3 + (high_1w - low_1w)
-    s4 = s3 - (high_1w - low_1w)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
-    # Shift by 1 to use previous week's levels only (avoid look-ahead)
+    # Shift by 1 to use previous 1D bar's levels only
     r1_prev = r1.shift(1).values
     s1_prev = s1.shift(1).values
-    r2_prev = r2.shift(1).values
-    s2_prev = s2.shift(1).values
-    r3_prev = r3.shift(1).values
-    s3_prev = s3.shift(1).values
-    r4_prev = r4.shift(1).values
-    s4_prev = s4.shift(1).values
     
-    # Align to 6h timeframe
-    r1_a = align_htf_to_ltf(prices, df_1w, r1_prev)
-    s1_a = align_htf_to_ltf(prices, df_1w, s1_prev)
-    r2_a = align_htf_to_ltf(prices, df_1w, r2_prev)
-    s2_a = align_htf_to_ltf(prices, df_1w, s2_prev)
-    r3_a = align_htf_to_ltf(prices, df_1w, r3_prev)
-    s3_a = align_htf_to_ltf(prices, df_1w, s3_prev)
-    r4_a = align_htf_to_ltf(prices, df_1w, r4_prev)
-    s4_a = align_htf_to_ltf(prices, df_1w, s4_prev)
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
     
-    # 60-period EMA for trend filter (on 6h close)
-    close_series = pd.Series(close)
-    ema60 = close_series.ewm(span=60, adjust=False, min_periods=60).mean().values
+    # Get 1D data for EMA trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike: 1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Volume spike: 2x 20-period average on 12h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 60  # need EMA60
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if any weekly pivot level is NaN
-        if (np.isnan(r1_a[i]) or np.isnan(s1_a[i]) or
-            np.isnan(r2_a[i]) or np.isnan(s2_a[i]) or
-            np.isnan(r3_a[i]) or np.isnan(s3_a[i]) or
-            np.isnan(r4_a[i]) or np.isnan(s4_a[i]) or
-            np.isnan(ema60[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_spike = volume_spike[i]
-        ema_trend = ema60[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         
         if position == 0:
-            # Mean reversion long: price touches S3 but closes back above S2
-            if price <= s3_a[i] and close[i] > s2_a[i]:
+            # Long: break above R1 with volume spike and price above 1D EMA (uptrend)
+            if price > r1_val and volume_spike[i] and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Mean reversion short: price touches R3 but closes back below R2
-            elif price >= r3_a[i] and close[i] < r2_a[i]:
-                signals[i] = -0.25
-                position = -1
-            # Breakout long: price breaks above R4 with volume and uptrend
-            elif price > r4_a[i] and vol_spike and price > ema_trend:
-                signals[i] = 0.25
-                position = 1
-            # Breakout short: price breaks below S4 with volume and downtrend
-            elif price < s4_a[i] and vol_spike and price < ema_trend:
+            # Short: break below S1 with volume spike and price below 1D EMA (downtrend)
+            elif price < s1_val and volume_spike[i] and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: mean reversion at R1 or break below S2 (failed breakout)
-            if price >= r1_a[i] or price < s2_a[i]:
+            # Exit: price returns to S1 or breaks below 1D EMA
+            if price <= s1_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: mean reversion at S1 or break above R2 (failed breakdown)
-            if price <= s1_a[i] or price > r2_a[i]:
+            # Exit: price returns to R1 or breaks above 1D EMA
+            if price >= r1_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_Reversal_S4S4_Breakout"
-timeframe = "6h"
+name = "12h_DailyPivot_R1S1_Breakout_VolumeSpike_1dEMA34"
+timeframe = "12h"
 leverage = 1.0
