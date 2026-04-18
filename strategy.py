@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1D Weekly Trend Following with Volume Confirmation
-Long when price closes above weekly EMA34 with volume above average, short when below.
-Uses weekly EMA34 as trend filter and daily close for entry timing.
-Designed for low trade frequency with strong trend-following edge in both bull and bear markets.
+12h Donchian Channel Breakout with 1d Trend Filter and Volume Confirmation
+Long when price breaks above 12h Donchian upper channel (20-period) with 1d EMA50 uptrend and volume spike.
+Short when price breaks below 12h Donchian lower channel with 1d EMA50 downtrend and volume spike.
+Uses 1d EMA50 for trend filter to avoid counter-trend trades, improving performance in both bull and bear markets.
+Designed for low trade frequency (target: 12-37 trades/year) with strong trend-following edge.
 """
 
 import numpy as np
@@ -15,63 +16,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA34 on weekly close
-    close_1w = df_1w['close'].values
-    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align weekly EMA to daily timeframe (wait for weekly bar to close)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    # 12h Donchian channels (20-period)
+    donchian_period = 20
+    upper_channel = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_channel = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection (2x 4-period average)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # need enough history for calculations
+    start_idx = max(50, donchian_period)  # need enough history
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ok = volume[i] > vol_ma[i]  # volume above average
+        price_above_upper = price > upper_channel[i]
+        price_below_lower = price < lower_channel[i]
+        
+        # Determine 1d trend: above EMA50 = uptrend, below = downtrend
+        uptrend = ema_50_1d_aligned[i] > 0 and price > ema_50_1d_aligned[i]
+        downtrend = ema_50_1d_aligned[i] > 0 and price < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: price closes above weekly EMA34 with volume confirmation
-            if price > ema_34_aligned[i] and vol_ok:
+            # Long: price breaks above upper channel with volume spike and 1d uptrend
+            if price_above_upper and volume_spike[i] and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price closes below weekly EMA34 with volume confirmation
-            elif price < ema_34_aligned[i] and vol_ok:
+            # Short: price breaks below lower channel with volume spike and 1d downtrend
+            elif price_below_lower and volume_spike[i] and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long position
+            # Long position: maintain until reversal signal
             signals[i] = 0.25
-            # Exit: price closes below weekly EMA34
-            if price < ema_34_aligned[i]:
+            # Exit: price breaks below lower channel (trend reversal)
+            if price_below_lower:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position
+            # Short position: maintain until reversal signal
             signals[i] = -0.25
-            # Exit: price closes above weekly EMA34
-            if price > ema_34_aligned[i]:
+            # Exit: price breaks above upper channel (trend reversal)
+            if price_above_upper:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1D_WeeklyEMA34_Trend_VolumeFilter"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
