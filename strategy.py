@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_MultiTimeframe_Pivot_Zone_MeanReversion
-4h strategy using 12h/1d pivot zones with volume confirmation and mean reversion logic.
-- Long: Price touches daily S1 pivot + 12h trend bullish + volume spike (2x avg)
-- Short: Price touches daily R1 pivot + 12h trend bearish + volume spike (2x avg)
-- Exit: Price reaches opposite pivot level or trend reversal
-Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
-Works in ranging markets (mean reversion at pivot levels) and trending markets (pullbacks to pivot)
+1d_WeeklySupportResistance_VolumeBreakout
+1d strategy using weekly support/resistance levels with volume confirmation.
+- Long: Close breaks above weekly high + volume > 1.3x daily average volume
+- Short: Close breaks below weekly low + volume > 1.3x daily average volume
+- Exit: Opposite breakout or price returns to weekly midpoint
+Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -23,82 +23,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get weekly data for Support/Resistance levels
+    df_1w = get_htf_data(prices, '1w')
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Weekly High and Low (resistance/support)
+    weekly_high = high_1w
+    weekly_low = low_1w
+    weekly_mid = (weekly_high + weekly_low) / 2.0
+    
+    # Align weekly S/R levels to daily
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    weekly_mid_aligned = align_htf_to_ltf(prices, df_1w, weekly_mid)
+    
+    # Get daily data for volume average
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    volume_1d = df_1d['volume'].values
     
-    # Align daily pivots to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Volume average (20-period) for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # need enough for EMA34
+    start_idx = 20  # need enough for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(weekly_mid_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions from 12h EMA34
-        # Use previous bar's EMA to avoid look-ahead (trend confirmation from closed 12h bar)
-        if i >= 1:
-            trend_bullish = ema_34_12h_aligned[i-1] > close[i-1]  # price above EMA = bullish
-            trend_bearish = ema_34_12h_aligned[i-1] < close[i-1]  # price below EMA = bearish
-        else:
-            trend_bullish = False
-            trend_bearish = False
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.3 * vol_ma_aligned[i]
         
-        # Volume confirmation (2x average)
-        vol_confirm = volume[i] > 2.0 * vol_ma_20[i]
-        
-        # Price touching pivot zones (with small tolerance)
-        touch_s1 = low[i] <= s1_aligned[i] * 1.002 and high[i] >= s1_aligned[i] * 0.998
-        touch_r1 = high[i] >= r1_aligned[i] * 0.998 and low[i] <= r1_aligned[i] * 1.002
+        # Breakout conditions
+        breakout_up = close[i] > weekly_high_aligned[i]
+        breakdown_down = close[i] < weekly_low_aligned[i]
+        return_to_mid = abs(close[i] - weekly_mid_aligned[i]) < 0.1 * (weekly_high_aligned[i] - weekly_low_aligned[i])
         
         if position == 0:
-            # Long: touch S1 + bullish 12h trend + volume spike
-            if touch_s1 and trend_bullish and vol_confirm:
+            # Long: volume + breakout above weekly high
+            if vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: touch R1 + bearish 12h trend + volume spike
-            elif touch_r1 and trend_bearish and vol_confirm:
+            # Short: volume + breakdown below weekly low
+            elif vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: touch R1 or trend turns bearish
-            if touch_r1 or not trend_bullish:
+            # Long exit: breakdown below weekly low OR return to midpoint
+            if breakdown_down or return_to_mid:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: touch S1 or trend turns bullish
-            if touch_s1 or not trend_bearish:
+            # Short exit: breakout above weekly high OR return to midpoint
+            if breakout_up or return_to_mid:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -106,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_MultiTimeframe_Pivot_Zone_MeanReversion"
-timeframe = "4h"
+name = "1d_WeeklySupportResistance_VolumeBreakout"
+timeframe = "1d"
 leverage = 1.0
