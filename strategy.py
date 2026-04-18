@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1S1_Pullback_Entry_Volume
-Hypothesis: Instead of chasing breakouts, enter on pullbacks to R1 (long) or S1 (short) after a strong directional move.
-This reduces false breakouts and improves win rate. Uses 1d RSI regime filter: only long when RSI>50, short when RSI<50.
-Volume confirmation on entry. Targets 20-30 trades/year to minimize fee drift. Works in both bull and bear by aligning with daily momentum.
+12h_1w_Donchian_Breakout_Trend_Filter
+Hypothesis: Uses weekly Donchian(20) breakouts with 1d trend filter (EMA50) and volume confirmation.
+In bull markets, buy upper band breakouts; in bear markets, sell lower band breakdowns.
+Trades only when price is above/below EMA50 to avoid counter-trend whipsaws.
+Targets 15-25 trades/year to minimize fee drag on 12h timeframe.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,70 +21,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data
+    # Get weekly data for Donchian channels (20-period high/low)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate Donchian channels on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # 20-period rolling high/low on weekly data
+    donchian_high = np.full(len(high_1w), np.nan)
+    donchian_low = np.full(len(low_1w), np.nan)
+    
+    for i in range(20, len(high_1w)):
+        donchian_high[i] = np.max(high_1w[i-20:i+1])
+        donchian_low[i] = np.min(low_1w[i-20:i+1])
+    
+    # Align weekly Donchian levels to 12h timeframe
+    dh_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    dh_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    
+    # Get daily data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla levels R1 and S1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    rng = high_1d - low_1d
-    r1 = close_1d + rng * 1.1 / 12
-    s1 = close_1d - rng * 1.1 / 12
     
-    # Align to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate EMA50 on daily close
+    ema_50 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50[i] = (close_1d[i] * 2/51) + (ema_50[i-1] * (1 - 2/51))
     
-    # Daily RSI for regime filter (14-period)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align daily EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # Volume confirmation: current volume > 1.3 x 30-period average
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    for i in range(30, n):
+        vol_ma[i] = np.mean(volume[i-30:i])
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = max(30, 50)  # Need volume MA and EMA warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(dh_high_aligned[i]) or np.isnan(dh_low_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: pullback to R1 in bullish regime (RSI>50) with volume
-            if close[i] <= r1_aligned[i] * 1.005 and rsi_aligned[i] > 50 and vol_confirm[i]:
+            # Long: break above weekly Donchian high with volume confirmation and uptrend (price > EMA50)
+            if (close[i] > dh_high_aligned[i] and vol_confirm[i] and 
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: pullback to S1 in bearish regime (RSI<50) with volume
-            elif close[i] >= s1_aligned[i] * 0.995 and rsi_aligned[i] < 50 and vol_confirm[i]:
+            # Short: break below weekly Donchian low with volume confirmation and downtrend (price < EMA50)
+            elif (close[i] < dh_low_aligned[i] and vol_confirm[i] and 
+                  close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches S1 or RSI turns bearish
-            if close[i] <= s1_aligned[i] or rsi_aligned[i] < 50:
+            # Long exit: price returns to weekly Donchian low or breaks below EMA50
+            if close[i] < dh_low_aligned[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches R1 or RSI turns bullish
-            if close[i] >= r1_aligned[i] or rsi_aligned[i] > 50:
+            # Short exit: price returns to weekly Donchian high or breaks above EMA50
+            if close[i] > dh_high_aligned[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R1S1_Pullback_Entry_Volume"
-timeframe = "4h"
+name = "12h_1w_Donchian_Breakout_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
