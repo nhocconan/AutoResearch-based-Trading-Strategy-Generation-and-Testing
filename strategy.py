@@ -1,12 +1,3 @@
-# ANALYSIS
-# The key failure pattern: overtrading (>1000 trades/year) due to loose entry conditions.
-# From experiment history: 4h_Donchian20_1dEMA34_RSI_VolumeFilter_v1 had 1394 trades/sym.
-# To reduce trades: make entry conditions stricter by requiring multiple confirmations.
-# Hypothesis: Combine Donchian breakout with volume spike AND RSI reversal (not just non-extreme)
-# for higher quality signals. Use 1d timeframe for Donchian/EMA/RSI as in the original,
-# but add stricter filters to reduce trade frequency while maintaining edge.
-# Target: 20-50 trades/year on 4h (80-200 total over 4 years) to avoid fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -14,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,12 +13,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators (HTF)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 50-period EMA on weekly for trend filter
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Get daily data for entry signals
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate 20-period Donchian channels on daily
     upper_channel = np.full_like(close_1d, np.nan)
@@ -37,10 +34,7 @@ def generate_signals(prices):
         upper_channel[i] = np.max(high_1d[i-19:i+1])
         lower_channel[i] = np.min(low_1d[i-19:i+1])
     
-    # Calculate 34-period EMA on daily for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Calculate 14-day RSI for momentum and reversal signals
+    # Calculate 14-day RSI for momentum filter
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -49,63 +43,61 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Align all daily data to 4h timeframe
-    upper_channel_4h = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_4h = align_htf_to_ltf(prices, df_1d, lower_channel)
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
-    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align weekly EMA to daily
+    ema_50_1d = align_htf_to_ltf(df_1d, df_1w, ema_50)
     
-    # Volume spike: volume > 2.0x 20-period average (stricter than 1.5x)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Align daily indicators to 1d timeframe (we're already on daily, but keep consistent)
+    upper_channel_1d = upper_channel
+    lower_channel_1d = lower_channel
+    rsi_1d = rsi
     
-    # RSI reversal signals: RSI < 30 for long entry, RSI > 70 for short entry
-    rsi_oversold = rsi_4h < 30
-    rsi_overbought = rsi_4h > 70
+    # Calculate daily volume spike (volume > 2x 20-period average)
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = df_1d['volume'].values > (2.0 * vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(19, 34) + 1
+    start_idx = max(50, 19, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_channel_4h[i]) or np.isnan(lower_channel_4h[i]) or 
-            np.isnan(ema_34_4h[i]) or np.isnan(rsi_4h[i])):
+        if (np.isnan(ema_50_1d[i]) or np.isnan(upper_channel_1d[i]) or 
+            np.isnan(lower_channel_1d[i]) or np.isnan(rsi_1d[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA
-        uptrend = close[i] > ema_34_4h[i]
-        downtrend = close[i] < ema_34_4h[i]
+        # Trend filter: price above/below weekly EMA50
+        uptrend = close_1d[i] > ema_50_1d[i]
+        downtrend = close_1d[i] < ema_50_1d[i]
+        
+        # RSI filter: avoid extremes
+        rsi_not_extreme = (rsi_1d[i] > 30) and (rsi_1d[i] < 70)
+        
+        # Volume confirmation: require volume spike
+        vol_confirmed = volume_spike_1d[i]
         
         if position == 0:
-            # LONG: Price breaks above upper Donchian + uptrend + volume spike + RSI oversold (reversal signal)
-            if (close[i] > upper_channel_4h[i] and 
-                uptrend and 
-                volume_spike[i] and 
-                rsi_oversold[i]):
+            # Long: price breaks above upper Donchian with uptrend, RSI not extreme, volume spike
+            if close_1d[i] > upper_channel_1d[i] and uptrend and rsi_not_extreme and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian + downtrend + volume spike + RSI overbought (reversal signal)
-            elif (close[i] < lower_channel_4h[i] and 
-                  downtrend and 
-                  volume_spike[i] and 
-                  rsi_overbought[i]):
+            # Short: price breaks below lower Donchian with downtrend, RSI not extreme, volume spike
+            elif close_1d[i] < lower_channel_1d[i] and downtrend and rsi_not_extreme and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # EXIT LONG: Price breaks below lower Donchian OR trend reverses OR RSI overbought
-            if (close[i] < lower_channel_4h[i]) or (not uptrend) or (rsi_overbought[i]):
+            # Long exit: price closes below lower Donchian OR trend reverses OR RSI overbought
+            if (close_1d[i] < lower_channel_1d[i]) or (not uptrend) or (rsi_1d[i] >= 70):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # EXIT SHORT: Price breaks above upper Donchian OR trend reverses OR RSI oversold
-            if (close[i] > upper_channel_4h[i]) or (not downtrend) or (rsi_oversold[i]):
+            # Short exit: price closes above upper Donchian OR trend reverses OR RSI oversold
+            if (close_1d[i] > upper_channel_1d[i]) or (not downtrend) or (rsi_1d[i] <= 30):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -113,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_RSIReversal_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_RSI_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
