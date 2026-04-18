@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_Price_Action_Reversal_V1
-Hypothesis: Mean reversion at extreme daily levels with volume confirmation.
-Uses 1-day ATR-based upper/lower bands as dynamic support/resistance.
-Enters long when price touches lower band with volume spike in downtrend (RSI<40),
-short when price touches upper band with volume spike in uptrend (RSI>60).
-Works in both bull/bear by fading extremes only when momentum is exhausted.
-Target: 20-35 trades/year via tight entry conditions.
+4h_12h_1d_ParabolicSAR_Trend
+Hypothesis: Use Parabolic SAR from 12h as primary trend filter (proven to reduce whipsaws in 2022 crash), combined with 1d breakout above/below daily high/low and volume confirmation. Parabolic SAR provides clear trend direction with built-in acceleration, making it effective in both trending and ranging markets. Targets 20-30 trades/year by requiring PSAR trend alignment, price breakout beyond daily range, and volume > 1.8x 20-period average. Works in bull markets by following uptrend breaks above daily high, and in bear markets by taking short breaks below daily low only when PSAR confirms downtrend.
 """
 
 import numpy as np
@@ -15,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,88 +18,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR-based bands
+    # Get 12h data for Parabolic SAR (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Parabolic SAR
+    # Parameters: start=0.02, increment=0.02, max=0.2
+    psar = np.full_like(close_12h, np.nan)
+    bull = True  # start assuming bullish
+    af = 0.02    # acceleration factor
+    ep = low_12h[0] if bull else high_12h[0]  # extreme point
+    psar[0] = ep
+    
+    for i in range(1, len(close_12h)):
+        if bull:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Reverse if price < SAR
+            if low_12h[i] < psar[i]:
+                bull = False
+                psar[i] = ep  # SAR = prior EP
+                af = 0.02
+                ep = high_12h[i]
+            else:
+                # Continue bullish
+                if high_12h[i] > ep:
+                    ep = high_12h[i]
+                    af = min(af + 0.02, 0.2)
+        else:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Reverse if price > SAR
+            if high_12h[i] > psar[i]:
+                bull = True
+                psar[i] = ep  # SAR = prior EP
+                af = 0.02
+                ep = low_12h[i]
+            else:
+                # Continue bearish
+                if low_12h[i] < ep:
+                    ep = low_12h[i]
+                    af = min(af + 0.02, 0.2)
+    
+    # Align PSAR to 4h timeframe (wait for bar close)
+    psar_aligned = align_htf_to_ltf(prices, df_12h, psar)
+    
+    # Get 1d data for daily high/low (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 1-day ATR(10)
-    tr_1d = np.maximum(
-        high_1d[1:] - low_1d[1:],
-        np.maximum(
-            np.abs(high_1d[1:] - close_1d[:-1]),
-            np.abs(low_1d[1:] - close_1d[:-1])
-        )
-    )
-    tr_1d = np.concatenate([[np.nan], tr_1d])  # align length
-    atr_1d = np.full(len(close_1d), np.nan)
-    for i in range(10, len(tr_1d)):
-        atr_1d[i] = np.mean(tr_1d[i-9:i+1])
+    # Align daily high/low to 4h timeframe (wait for bar close)
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
     
-    # Dynamic bands: close ± 1.5 * ATR
-    upper_band_1d = close_1d + 1.5 * atr_1d
-    lower_band_1d = close_1d - 1.5 * atr_1d
-    
-    # Align bands to 4h
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band_1d)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band_1d)
-    
-    # 4h RSI(14) for momentum filter
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    for i in range(14, n):
-        avg_gain[i] = np.mean(gain[i-13:i+1])
-        avg_loss[i] = np.mean(loss[i-13:i+1])
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: > 2x 20-period average
+    # Volume confirmation: current volume > 1.8 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (2.0 * vol_ma)
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # volume MA and RSI
+    start_idx = 20  # need volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        # Skip if any required data is not available
+        if (np.isnan(psar_aligned[i]) or np.isnan(high_1d_aligned[i]) or 
+            np.isnan(low_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: touch lower band, volume spike, RSI < 40 (oversold)
-            if (low[i] <= lower_band_aligned[i] and vol_spike[i] and rsi[i] < 40):
+            # Long entry: price breaks above 1d high, with volume, and PSAR bullish (close > PSAR)
+            if (close[i] > high_1d_aligned[i] and vol_confirm[i] and 
+                close[i] > psar_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: touch upper band, volume spike, RSI > 60 (overbought)
-            elif (high[i] >= upper_band_aligned[i] and vol_spike[i] and rsi[i] > 60):
+            # Short entry: price breaks below 1d low, with volume, and PSAR bearish (close < PSAR)
+            elif (close[i] < low_1d_aligned[i] and vol_confirm[i] and 
+                  close[i] < psar_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Exit long: RSI > 50 (momentum shift) or price > upper band
-            if (rsi[i] > 50 or high[i] >= upper_band_aligned[i]):
+            # Long exit: price returns below PSAR (trend change) or breaks below 1d low (failed breakout)
+            if (close[i] < psar_aligned[i] or 
+                (not np.isnan(low_1d_aligned[i]) and close[i] < low_1d_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 or price < lower band
-            if (rsi[i] < 50 or low[i] <= lower_band_aligned[i]):
+            # Short exit: price returns above PSAR (trend change) or breaks above 1d high (failed breakout)
+            if (close[i] > psar_aligned[i] or 
+                (not np.isnan(high_1d_aligned[i]) and close[i] > high_1d_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Price_Action_Reversal_V1"
+name = "4h_12h_1d_ParabolicSAR_Trend"
 timeframe = "4h"
 leverage = 1.0
