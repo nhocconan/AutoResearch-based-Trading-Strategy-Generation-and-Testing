@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_12h_Multiplier_Volume_Filtered_Breakout
-Hypothesis: Use 12h price action relative to 12h EMA34 as directional bias, with 6h Donchian breakout and volume confirmation.
-Long when 6h price breaks above Donchian(20) high, 12h price > 12h EMA34, and volume > 2x 20-period average.
-Short when 6h price breaks below Donchian(20) low, 12h price < 12h EMA34, and volume > 2x 20-period average.
-Position size 0.25. Target: 20-40 trades/year per symbol (80-160 total over 4 years) to avoid fee drag.
-Works in bull/bear via EMA trend filter and volume surge requirement.
+4h_PriceChannel_Breakout_Volume_Regime
+Hypothesis: Breakout above/below 4h Donchian channel (20) with volume confirmation and 1d chop regime filter.
+Long when price breaks above 4h DC upper with volume > 1.5x avg and 1d chop > 61.8 (range).
+Short when price breaks below 4h DC lower with volume > 1.5x avg and 1d chop > 61.8.
+Position size 0.25. Designed for mean-reversion in choppy markets (works in bull/bear).
+Target: 20-40 trades/year per symbol to avoid fee drag.
 """
 
 import numpy as np
@@ -22,64 +22,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # 4h Donchian channel (20-period)
+    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 12h EMA34 for trend direction
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 1d chop regime filter (choppiness index > 61.8 = range)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 6h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # True range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(np.roll(close_1d, 1) - low_1d)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high_1d[0] - low_1d[0]
     
-    # Volume confirmation: current volume > 2x 20-period average
+    # ATR(14) and sum of true ranges
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Chop = 100 * log10(sum(tr)/(atr*14)) / log10(14)
+    chop = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
+    chop = np.where(tr_sum > 0, chop, 50)  # avoid division by zero
+    
+    chop_align = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume confirmation: current > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # need EMA and Donchian
+    start_idx = 50  # need enough for indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
+            np.isnan(chop_align[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume surge filter
-        vol_surge = volume[i] > 2.0 * vol_ma[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        in_range = chop_align[i] > 61.8  # chop > 61.8 = ranging market
         
         if position == 0:
-            # Long: Donchian breakout up + 12h above EMA34 + volume surge
-            if (close[i] > high_20[i] and 
-                close[i] > ema_34_12h_aligned[i] and 
-                vol_surge):
+            # Long: break above DC upper in ranging market with volume
+            if close[i] > dc_high[i] and vol_confirm and in_range:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down + 12h below EMA34 + volume surge
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_34_12h_aligned[i] and 
-                  vol_surge):
+            # Short: break below DC lower in ranging market with volume
+            elif close[i] < dc_low[i] and vol_confirm and in_range:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or 12h crosses below EMA34
-            if (close[i] < low_20[i] or 
-                close[i] < ema_34_12h_aligned[i]):
+            # Long exit: price returns below DC upper or chop drops (trending)
+            if close[i] < dc_high[i] or chop_align[i] <= 61.8:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or 12h crosses above EMA34
-            if (close[i] > high_20[i] or 
-                close[i] > ema_34_12h_aligned[i]):
+            # Short exit: price returns above DC lower or chop drops (trending)
+            if close[i] > dc_low[i] or chop_align[i] <= 61.8:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -87,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Multiplier_Volume_Filtered_Breakout"
-timeframe = "6h"
+name = "4h_PriceChannel_Breakout_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
