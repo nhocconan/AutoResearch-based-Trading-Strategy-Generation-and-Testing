@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_6hr_ChaikinMoneyFlow_RangeBreakout_1dTrend
-Hypothesis: CMF confirms institutional flow direction; breakout from 20-period high/low with CMF confirmation and 1-day trend filter captures sustainable moves. Works in bull (breakouts with +CMF) and bear (breakdowns with -CMF). Target: 15-30 trades/year (60-120 total).
+4h_Camarilla_R1S1_Breakout_Volume_Trend_Filter
+Hypothesis: Breakout above Camarilla R1 or below S1 with volume confirmation and 1-day EMA trend filter captures institutional momentum while avoiding false breakouts. Camarilla levels act as high-probability support/resistance, volume confirms institutional participation, and daily trend filter ensures alignment with higher timeframe momentum. Works in both bull (breakouts continue) and bear (breakdowns continue) markets. Target: 20-40 trades/year (80-160 total over 4 years).
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,67 +18,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Chaikin Money Flow (20)
-    mfm = ((close - low) - (high - close)) / (high - low)
-    mfm = np.where((high - low) == 0, 0, mfm)
-    mfv = mfm * volume
-    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = mfv_sum / vol_sum
-    cmf = np.where(vol_sum == 0, 0, cmf)
-    
-    # Donchian channel (20)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 1-day EMA trend filter
+    # Calculate Camarilla levels from previous day
+    # Need daily OHLC from previous day
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla levels for current day based on previous day
+    # R1 = close + (high - low) * 1.12 / 12
+    # S1 = close - (high - low) * 1.12 / 12
+    rng = prev_high - prev_low
+    r1 = prev_close + rng * 1.12 / 12
+    s1 = prev_close - rng * 1.12 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1-day EMA trend filter
     ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_6h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_1d_4h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume filter: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Warmup for indicators
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(cmf[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(ema_1d_6h[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(ema_1d_4h[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        cmf_val = cmf[i]
-        hh = highest_high[i]
-        ll = lowest_low[i]
-        ema_trend = ema_1d_6h[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
+        vol_ok = volume_filter[i]
+        ema_trend = ema_1d_4h[i]
         
         if position == 0:
-            # Long: break above 20-period high with positive CMF and uptrend
-            if price > hh and cmf_val > 0.05 and price > ema_trend:
+            # Long: price breaks above R1 with volume in uptrend
+            if price > r1_val and vol_ok and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-period low with negative CMF and downtrend
-            elif price < ll and cmf_val < -0.05 and price < ema_trend:
+            # Short: price breaks below S1 with volume in downtrend
+            elif price < s1_val and vol_ok and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price retrace to midpoint OR CMF turns negative
-            midpoint = (hh + ll) / 2
-            if price < midpoint or cmf_val < -0.02:
+            # Maintain long until price crosses below S1 or trend reverses
+            if price < s1_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price retrace to midpoint OR CMF turns positive
-            midpoint = (hh + ll) / 2
-            if price > midpoint or cmf_val > 0.02:
+            # Maintain short until price crosses above R1 or trend reverses
+            if price > r1_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_6hr_ChaikinMoneyFlow_RangeBreakout_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
