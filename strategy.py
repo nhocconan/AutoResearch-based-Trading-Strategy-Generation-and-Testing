@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_WeeklyPivot_DonchianBreakout_Trend
-Hypothesis: Weekly pivot levels (S2/S3, R2/R3) on weekly timeframe combined with 12-hour Donchian channel breakout and trend filter.
-Weekly pivots provide strong institutional support/resistance, Donchian breakout captures momentum, trend filter avoids false signals.
-Designed for low trade frequency (target: 15-30/year) with strong performance in both bull and bear markets.
+1d_Keltner_Channel_Breakout_1wTrend_Volume
+Hypothesis: Daily breakouts above/below Keltner Channel (ATR-based) with weekly EMA trend filter and volume confirmation.
+Keltner Channels adapt to volatility, providing dynamic support/resistance. Weekly EMA ensures trend alignment.
+Designed for low trade frequency (target: 10-25/year) with strong performance in both bull and bear markets via volatility-adjusted breakouts.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,51 +20,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly high, low, close for pivot points
+    # Calculate weekly EMA20 trend filter
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P-H, R1 = 2P-L, S2 = P-(H-L), R2 = P+(H-L)
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    weekly_range = high_1w - low_1w
-    r2 = pivot + weekly_range
-    s2 = pivot - weekly_range
-    r3 = r2 + weekly_range  # R3 = R2 + (H-L)
-    s3 = s2 - weekly_range  # S3 = S2 - (H-L)
+    # Calculate EMA20 with proper smoothing
+    ema20_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        ema20_1w[19] = np.mean(close_1w[0:20])
+        alpha = 2 / (20 + 1)
+        for i in range(20, len(close_1w)):
+            ema20_1w[i] = close_1w[i] * alpha + ema20_1w[i-1] * (1 - alpha)
     
-    # Align weekly pivot levels to 12h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Align weekly EMA20 to daily timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate 12-hour Donchian channel (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Calculate ATR(10) for Keltner Channel
+    atr = np.full(n, np.nan)
+    if n >= 10:
+        tr = np.zeros(n)
+        tr[0] = high[0] - low[0]
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # ATR with Wilder's smoothing
+        atr[9] = np.mean(tr[0:10])
+        for i in range(10, n):
+            atr[i] = (atr[i-1] * 9 + tr[i]) / 10
     
-    # Calculate 12-hour EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema50_12h[49] = np.mean(close_12h[0:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_12h)):
-            ema50_12h[i] = close_12h[i] * alpha + ema50_12h[i-1] * (1 - alpha)
+    # Calculate Keltner Channel (20 EMA ± 2 * ATR)
+    ema20 = np.full(n, np.nan)
+    if n >= 20:
+        ema20[19] = np.mean(close[0:20])
+        alpha = 2 / (20 + 1)
+        for i in range(20, n):
+            ema20[i] = close[i] * alpha + ema20[i-1] * (1 - alpha)
     
-    # Align 12-hour EMA50 to 12h timeframe (identity since same timeframe)
-    ema50_12h_aligned = ema50_12h  # Already on 12h timeframe
+    kc_upper = ema20 + 2 * atr
+    kc_lower = ema20 - 2 * atr
     
-    # For 12h timeframe, we need to expand EMA50_12h_aligned to match 12h bar count
-    # Since prices is already 12h timeframe, we can use it directly
-    ema50_12h_final = ema50_12h_aligned
-    
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # Volume spike: current volume > 1.5 x 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -73,38 +68,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure all indicators ready
+    start_idx = max(20, 10)  # Ensure indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema50_12h_final[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above Donchian high with volume spike and above S2 pivot
-            if (close[i] > donchian_high[i] and vol_spike[i] and 
-                close[i] > s2_aligned[i] and close[i] > ema50_12h_final[i]):
+            # Long: break above Keltner upper with volume spike and weekly uptrend
+            if (close[i] > kc_upper[i] and vol_spike[i] and 
+                close[i] > ema20_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume spike and below R2 pivot
-            elif (close[i] < donchian_low[i] and vol_spike[i] and 
-                  close[i] < r2_aligned[i] and close[i] < ema50_12h_final[i]):
+            # Short: break below Keltner lower with volume spike and weekly downtrend
+            elif (close[i] < kc_lower[i] and vol_spike[i] and 
+                  close[i] < ema20_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below Donchian low or below EMA50
-            if (close[i] < donchian_low[i] or close[i] < ema50_12h_final[i]):
+            # Long exit: close below Keltner lower or weekly trend turns down
+            if (close[i] < kc_lower[i] or close[i] < ema20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above Donchian high or above EMA50
-            if (close[i] > donchian_high[i] or close[i] > ema50_12h_final[i]):
+            # Short exit: close above Keltner upper or weekly trend turns up
+            if (close[i] > kc_upper[i] or close[i] > ema20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_DonchianBreakout_Trend"
-timeframe = "12h"
+name = "1d_Keltner_Channel_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
