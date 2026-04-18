@@ -1,3 +1,11 @@
+# 12h_Camarilla_Pivot_R1_S1_Breakout_Volume_ATRFilter_v1
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe act as strong support/resistance.
+# Breakouts with volume confirmation and ATR filter for volatility regime work in both bull/bear markets.
+# Pivot levels derived from prior day's range provide objective levels that work across regimes.
+# Volume surge confirms institutional interest. ATR filter avoids choppy markets.
+# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+# Strategy uses discrete position sizing (0.25) to reduce churn.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,84 +21,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly high/low from daily data (lookback 5 days)
-    weekly_high = np.full_like(close_1d, np.nan)
-    weekly_low = np.full_like(close_1d, np.nan)
+    # Calculate Camarilla pivot levels for each day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = np.full_like(close_1d, np.nan)
+    camarilla_s1 = np.full_like(close_1d, np.nan)
     
-    for i in range(4, len(close_1d)):
-        weekly_high[i] = np.max(high_1d[i-4:i+1])
-        weekly_low[i] = np.min(low_1d[i-4:i+1])
+    for i in range(len(close_1d)):
+        H = high_1d[i]
+        L = low_1d[i]
+        C = close_1d[i]
+        camarilla_r1[i] = C + (H - L) * 1.1 / 12
+        camarilla_s1[i] = C - (H - L) * 1.1 / 12
     
-    # Calculate weekly pivot points
-    # Pivot = (H + L + C) / 3
-    weekly_pivot = (weekly_high + weekly_low + close_1d) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1 = 2 * weekly_pivot - weekly_low
-    s1 = 2 * weekly_pivot - weekly_high
-    # R2 = P + (H - L), S2 = P - (H - L)
-    r2 = weekly_pivot + (weekly_high - weekly_low)
-    s2 = weekly_pivot - (weekly_high - weekly_low)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    # Calculate 14-day ATR for volatility filter
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly data to 6h timeframe
-    weekly_high_6h = align_htf_to_ltf(prices, df_1d, weekly_high)
-    weekly_low_6h = align_htf_to_ltf(prices, df_1d, weekly_low)
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate 20-period average volume for volume spike detection
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 6h volume spike (volume > 2x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Align all daily data to 12h timeframe
+    camarilla_r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
+    vol_ma_20_12h = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Calculate 12h volume spike (current volume > 1.8x 20-period average)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for volume MA
+    start_idx = 20  # need enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_high_6h[i]) or np.isnan(weekly_low_6h[i]) or 
-            np.isnan(weekly_pivot_6h[i]) or np.isnan(r1_6h[i]) or 
-            np.isnan(s1_6h[i]) or np.isnan(r2_6h[i]) or 
-            np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or 
-            np.isnan(s3_6h[i])):
+        if (np.isnan(camarilla_r1_12h[i]) or np.isnan(camarilla_s1_12h[i]) or 
+            np.isnan(atr_14_12h[i]) or np.isnan(vol_ma_20_12h[i])):
             signals[i] = 0.0
             continue
         
+        # Volatility filter: only trade when ATR is above its 20-period average (avoid chop)
+        vol_filter = atr_14_12h[i] > vol_ma_20_12h[i]
+        
         if position == 0:
-            # Long: price breaks above S3 with volume spike (mean reversion from extreme oversold)
-            if close[i] > s3_6h[i] and volume_spike[i]:
+            # Long: price breaks above R1 with volume spike and volatility filter
+            if close[i] > camarilla_r1_12h[i] and volume_spike[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R3 with volume spike (mean reversion from extreme overbought)
-            elif close[i] < r3_6h[i] and volume_spike[i]:
+            # Short: price breaks below S1 with volume spike and volatility filter
+            elif close[i] < camarilla_s1_12h[i] and volume_spike[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches R1 (take profit) or breaks below weekly low (stop)
-            if close[i] >= r1_6h[i] or close[i] < weekly_low_6h[i]:
+            # Long exit: price crosses below S1 OR volatility dies
+            if close[i] < camarilla_s1_12h[i] or not vol_filter:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches S1 (take profit) or breaks above weekly high (stop)
-            if close[i] <= s1_6h[i] or close[i] > weekly_high_6h[i]:
+            # Short exit: price crosses above R1 OR volatility dies
+            if close[i] > camarilla_r1_12h[i] or not vol_filter:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -98,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_S3_R1_MeanReversion_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_R1_S1_Breakout_Volume_ATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
