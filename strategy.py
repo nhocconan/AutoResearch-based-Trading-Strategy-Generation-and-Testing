@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d ADX trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) AND 1d ADX > 25 (trending) AND volume > 1.5x 24-period average.
-# Short when Williams %R > -20 (overbought) AND 1d ADX > 25 AND volume > 1.5x 24-period average.
-# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts).
-# Williams %R identifies reversal points in trending markets, ADX filters for strong trends,
-# volume confirms conviction. Designed for ~15-30 trades/year per symbol.
-name = "6h_WilliamsR_1dADX_VolumeFilter"
-timeframe = "6h"
+# Hypothesis: 12h Camarilla pivot R1/S1 breakout with volume confirmation and 1-week trend filter.
+# Long when price breaks above daily pivot-based R1 with volume > 1.5x 24-period average and weekly close > weekly open.
+# Short when price breaks below daily pivot-based S1 with volume > 1.5x 24-period average and weekly close < weekly open.
+# Exit when price returns to daily pivot (PP).
+# Uses weekly trend filter to avoid counter-trend trades, volume for conviction, and Camarilla levels for structure.
+# Designed for ~15-30 trades/year per symbol.
+name = "12h_Camarilla_R1S1_Breakout_Volume_WeeklyTrend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,52 +23,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for ADX trend filter
+    # Daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     
-    # ADX(14) on 1d
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate daily Camarilla levels: PP, R1, S1
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - close_1d)
-    tr3 = np.abs(low_1d - close_1d)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    r1 = pp + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = pp - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Align daily Camarilla levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Pad to same length
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # Weekly trend: bullish if weekly close > weekly open
+    open_1w = df_1w['open'].values
+    close_1w = df_1w['close'].values
+    weekly_bullish = close_1w > open_1w  # True for bullish week
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
     
-    # Smoothed values
-    atr_period = 14
-    atr_smooth = pd.Series(atr_1d).rolling(window=atr_period, min_periods=atr_period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=atr_period, min_periods=atr_period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr_smooth
-    minus_di = 100 * minus_dm_smooth / atr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Williams %R on 6h (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    
-    # Volume filter: current volume > 1.5 * 24-period average (24 * 6h = 6 days)
+    # Volume filter: current volume > 1.5 * 24-period average (24 * 12h = 12 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_filter = volume > (1.5 * vol_ma_24)
     
@@ -79,37 +60,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        williams_r_val = williams_r[i]
-        adx_val = adx_1d_aligned[i]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        weekly_bull = weekly_bullish_aligned[i] > 0.5  # Convert back to boolean
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: oversold + trending + volume
-            if williams_r_val < -80 and adx_val > 25 and vol_filter:
+            # Long: price breaks above R1 with volume surge and weekly bullish
+            if close_val > r1_val and vol_filter and weekly_bull:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought + trending + volume
-            elif williams_r_val > -20 and adx_val > 25 and vol_filter:
+            # Short: price breaks below S1 with volume surge and weekly bearish
+            elif close_val < s1_val and vol_filter and not weekly_bull:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R crosses back above -50
-            if williams_r_val > -50:
+            # Long exit: price returns to or below pivot point
+            if close_val <= pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses back below -50
-            if williams_r_val < -50:
+            # Short exit: price returns to or above pivot point
+            if close_val >= pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
