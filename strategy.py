@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with daily ATR filter and volume confirmation.
+# Hypothesis: 1d Donchian breakout with weekly ATR filter and volume confirmation.
 # Donchian channels provide clear breakout levels based on price extremes.
-# Daily ATR filter ensures we only trade when volatility is sufficient to avoid chop.
+# Weekly ATR filter ensures we only trade when volatility is sufficient to avoid chop.
 # Volume confirmation adds conviction to breakouts.
-# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
+# Designed for low trade frequency (7-25/year) to minimize fee drag in 1d timeframe.
 # Works in bull markets (breakouts above upper band) and bear markets (breakouts below lower band).
-name = "4h_Donchian20_DailyATR_Volume_Filter"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyATR_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,8 +23,8 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR filter (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for ATR filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -32,15 +32,15 @@ def generate_signals(prices):
     upper_band = high_20
     lower_band = low_20
     
-    # Calculate daily ATR (14-period)
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
+    # Calculate weekly ATR (14-period)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
     # True Range calculation
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr1 = high_w[1:] - low_w[1:]
+    tr2 = np.abs(high_w[1:] - close_w[:-1])
+    tr3 = np.abs(low_w[1:] - close_w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # ATR using Wilder's smoothing (EMA with alpha=1/14)
@@ -58,14 +58,11 @@ def generate_signals(prices):
     atr_mult = 1.5
     atr_threshold = atr * atr_mult
     
-    # Align daily ATR threshold to 4h timeframe
-    atr_threshold_aligned = align_htf_to_ltf(prices, df_1d, atr_threshold)
+    # Align weekly ATR threshold to 1d timeframe
+    atr_threshold_aligned = align_htf_to_ltf(prices, df_1w, atr_threshold)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hour_index = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,13 +73,6 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
             np.isnan(atr_threshold_aligned[i]) or np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0
-            continue
-        
-        hour = hour_index[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
             signals[i] = 0.0
             continue
         
