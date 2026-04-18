@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-4h RSI Divergence + Volume Spike + 12h EMA Trend Filter
-Uses RSI(14) divergence with price action, confirmed by volume spikes and 12h EMA trend.
-Designed for low trade frequency with high win rate in both trending and ranging markets.
+4h Donchian Breakout with Volume Spike and 12h EMA Trend Filter
+Uses Donchian channel breakout with volume confirmation and 12h EMA trend filter.
+Designed for low trade frequency with strong edge in trending markets.
+Works in both bull and bear markets by taking breakouts in direction of higher timeframe trend.
 """
 
 import numpy as np
@@ -19,30 +20,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI calculation
+    # Get 1d data for Donchian channel
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate RSI(14) on daily timeframe
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Donchian channel (20-day high/low)
+    high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_14 = 100 - (100 / (1 + rs))
-    
-    # Align RSI to 4h timeframe
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    # Align Donchian levels to 4h timeframe
+    donchian_high = align_htf_to_ltf(prices, df_1d, high_max)
+    donchian_low = align_htf_to_ltf(prices, df_1d, low_min)
     
     # Get 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
@@ -56,19 +45,6 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # RSI divergence detection (lookback 3 periods)
-    rsi_rising = rsi_14_aligned > np.roll(rsi_14_aligned, 1)
-    price_rising = close > np.roll(close, 1)
-    rsi_falling = rsi_14_aligned < np.roll(rsi_14_aligned, 1)
-    price_falling = close < np.roll(close, 1)
-    
-    # Bullish divergence: price makes lower low, RSI makes higher low
-    bull_div = (price_falling & (close < np.roll(close, 2))) & \
-               (rsi_rising & (rsi_14_aligned > np.roll(rsi_14_aligned, 2)))
-    # Bearish divergence: price makes higher high, RSI makes lower high
-    bear_div = (price_rising & (close > np.roll(close, 2))) & \
-               (rsi_falling & (rsi_14_aligned < np.roll(rsi_14_aligned, 2)))
-    
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     entry_price = 0.0
@@ -76,29 +52,28 @@ def generate_signals(prices):
     start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_14_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi_val = rsi_14_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         ema_trend = ema_34_12h_aligned[i]
         
         if position == 0:
-            # Long: bullish divergence with volume spike and above 12h EMA
-            if (bull_div[i] and 
+            # Long: price breaks above Donchian high with volume spike and above 12h EMA
+            if (price > upper and 
                 volume_spike[i] and 
-                price > ema_trend and
-                rsi_val < 40):  # additional filter for oversold condition
+                price > ema_trend):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: bearish divergence with volume spike and below 12h EMA
-            elif (bear_div[i] and 
+            # Short: price breaks below Donchian low with volume spike and below 12h EMA
+            elif (price < lower and 
                   volume_spike[i] and 
-                  price < ema_trend and
-                  rsi_val > 60):  # additional filter for overbought condition
+                  price < ema_trend):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -106,21 +81,21 @@ def generate_signals(prices):
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit conditions: bearish divergence or RSI overbought
-            if bear_div[i] or rsi_val > 70:
+            # Exit conditions: reverse signal (break below Donchian low)
+            if price < lower:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit conditions: bullish divergence or RSI oversold
-            if bull_div[i] or rsi_val < 30:
+            # Exit conditions: reverse signal (break above Donchian high)
+            if price > upper:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_RSI_Divergence_Volume_Spike_12hEMA34"
+name = "4h_Donchian_Breakout_Volume_12hEMA34"
 timeframe = "4h"
 leverage = 1.0
