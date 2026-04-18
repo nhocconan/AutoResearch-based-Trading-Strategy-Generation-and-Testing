@@ -3,91 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Pivot (R1/S1) breakout with volume confirmation and 1d ATR filter.
-# Works in bull (breakouts continue) and bear (mean reversion at S1/R1 in range) via price action at key levels.
-# Target: 12-37 trades/year (50-150 total over 4 years) to avoid fee drag.
-name = "12h_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "12h"
+# Hypothesis: 1d Bollinger Band squeeze breakout with volume confirmation and 1w trend filter.
+# Works in bull (breakouts continue in trend direction) and bear (mean reversion at bands in range) via volatility expansion.
+# Target: 7-25 trades/year (30-100 total over 4 years) to avoid fee drag.
+name = "1d_Bollinger_Squeeze_Breakout_Volume_TrendFilter_V1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot levels and ATR
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous daily bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Bollinger Bands (20, 2) on daily
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + (bb_std * bb_stddev)
+    lower = sma - (bb_std * bb_stddev)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    R1 = pivot + (range_hl * 1.1 / 12)
-    S1 = pivot - (range_hl * 1.1 / 12)
+    # Bollinger Band Width for squeeze detection
+    bb_width = (upper - lower) / sma
+    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    squeeze = bb_width < (0.5 * bb_width_ma)  # Squeeze when width is less than 50% of MA
     
-    # Calculate daily ATR (14) for volatility filter
-    tr1 = np.abs(df_1d['high'] - df_1d['low'])
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Weekly EMA34 for trend filter
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Align daily R1/S1 and ATR to 12h (wait for daily close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 2.0 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(atr_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(sma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(bb_width_ma[i]) or np.isnan(ema34_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
-        atr_val = atr_aligned[i]
+        sma_val = sma[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
+        squeeze_val = squeeze[i]
+        ema34_val = ema34_1w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume confirmation and sufficient volatility
-            if close_val > R1_val and vol_filter and (atr_val > 0):
-                signals[i] = 0.25
-                position = 1
-            # Short: break below S1 with volume confirmation and sufficient volatility
-            elif close_val < S1_val and vol_filter and (atr_val > 0):
-                signals[i] = -0.25
-                position = -1
+            # Look for volatility expansion (end of squeeze) with volume
+            if not squeeze_val and vol_filter:
+                # Break above upper band in uptrend
+                if close_val > upper_val and close_val > ema34_val:
+                    signals[i] = 0.25
+                    position = 1
+                # Break below lower band in downtrend
+                elif close_val < lower_val and close_val < ema34_val:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: price falls below S1 or ATR drops too low (low volatility)
-            if close_val < S1_val or (atr_val < 0.5 * atr_aligned[i-1] if i > 0 else False):
+            # Long exit: price returns to middle (mean reversion) or volatility drops
+            if close_val < sma_val or squeeze_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 or ATR drops too low (low volatility)
-            if close_val > R1_val or (atr_val < 0.5 * atr_aligned[i-1] if i > 0 else False):
+            # Short exit: price returns to middle (mean reversion) or volatility drops
+            if close_val > sma_val or squeeze_val:
                 signals[i] = 0.0
                 position = 0
             else:
