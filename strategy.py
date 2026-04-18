@@ -3,168 +3,166 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Supertrend for direction and 1d ADX for trend strength filter.
-# Enters on 1h pullbacks to EMA21 in the direction of 4h Supertrend when 1d ADX > 25.
-# Uses tight stops and targets to limit trades (target 15-30/year) and avoid fee drag.
-# Designed to work in both bull (trend following) and bear (counter-trend at extremes) markets.
+# Hypothesis: 6h Ichimoku Cloud with weekly trend filter and volume confirmation.
+# Uses Ichimoku from daily timeframe (Tenkan/Kijun/Senkou) for trend direction and cloud filter.
+# Weekly trend filter (price vs weekly Kumo) avoids counter-trend trades in strong trends.
+# Volume confirmation ensures breakouts have conviction.
+# Designed for 15-35 trades/year to avoid fee drag while capturing major trends.
+# Works in bull/bear by only trading in direction of weekly trend.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Supertrend
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate ATR(10) for Supertrend
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr1[0] = high_4h[0] - low_4h[0]
-    tr2[0] = np.abs(high_4h[0] - close_4h[0])
-    tr3[0] = np.abs(low_4h[0] - close_4h[0])
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_4h = pd.Series(tr_4h).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
-    
-    # Supertrend calculation
-    basic_ub = (high_4h + low_4h) / 2 + 3.0 * atr_4h
-    basic_lb = (high_4h + low_4h) / 2 - 3.0 * atr_4h
-    final_ub = np.zeros_like(basic_ub)
-    final_lb = np.zeros_like(basic_lb)
-    supertrend = np.zeros_like(close_4h)
-    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_4h)):
-        if basic_ub[i] < final_ub[i-1] or close_4h[i-1] > final_ub[i-1]:
-            final_ub[i] = basic_ub[i]
-        else:
-            final_ub[i] = final_ub[i-1]
-            
-        if basic_lb[i] > final_lb[i-1] or close_4h[i-1] < final_lb[i-1]:
-            final_lb[i] = basic_lb[i]
-        else:
-            final_lb[i] = final_lb[i-1]
-    
-    for i in range(len(close_4h)):
-        if i == 0:
-            supertrend[i] = final_lb[i]
-            direction[i] = 1
-        elif supertrend[i-1] == final_ub[i-1]:
-            if close_4h[i] <= final_ub[i]:
-                supertrend[i] = final_ub[i]
-            else:
-                supertrend[i] = final_lb[i]
-                direction[i] = -1
-        else:
-            if close_4h[i] >= final_lb[i]:
-                supertrend[i] = final_lb[i]
-            else:
-                supertrend[i] = final_ub[i]
-                direction[i] = 1
-    
-    # Align 4h Supertrend direction to 1h
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, direction)
-    
-    # Get 1d data for ADX
+    # Get daily data for Ichimoku components
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX(14)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate Ichimoku components on daily data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Align 1d ADX to 1h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    # Calculate 1h EMA21 for pullback entries
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Align Ichimoku components to 6h timeframe (wait for daily close)
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly Ichimoku components for trend filter
+    period9_high_w = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    period9_low_w = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan_w = (period9_high_w + period9_low_w) / 2
+    
+    period26_high_w = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    period26_low_w = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun_w = (period26_high_w + period26_low_w) / 2
+    
+    senkou_a_w = ((tenkan_w + kijun_w) / 2)
+    period52_high_w = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    period52_low_w = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_b_w = ((period52_high_w + period52_low_w) / 2)
+    
+    # Align weekly Ichimoku to 6m timeframe
+    tenkan_w_6h = align_htf_to_ltf(prices, df_1w, tenkan_w)
+    kijun_w_6h = align_htf_to_ltf(prices, df_1w, kijun_w)
+    senkou_a_w_6h = align_htf_to_ltf(prices, df_1w, senkou_a_w)
+    senkou_b_w_6h = align_htf_to_ltf(prices, df_1w, senkou_b_w)
+    
+    # Calculate 6h ATR for stop loss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_6h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Volume moving average (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(21, 30)  # need EMA21 and enough ADX data
+    start_idx = max(52, 26, 20)  # need Ichimoku components, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_21[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
+            np.isnan(tenkan_w_6h[i]) or np.isnan(kijun_w_6h[i]) or
+            np.isnan(senkou_a_w_6h[i]) or np.isnan(senkou_b_w_6h[i]) or
+            np.isnan(atr_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(open_price[i]).hour
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        # Determine cloud boundaries (Senkou A/B)
+        upper_cloud = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
+        lower_cloud = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
         
-        # Trend strength filter: ADX > 25
-        strong_trend = adx_aligned[i] > 25
+        # Weekly cloud boundaries for trend filter
+        upper_cloud_w = np.maximum(senkou_a_w_6h[i], senkou_b_w_6h[i])
+        lower_cloud_w = np.minimum(senkou_a_w_6h[i], senkou_b_w_6h[i])
+        
+        # Ichimoku signals
+        tk_cross_bull = tenkan_6h[i] > kijun_6h[i]  # Bullish TK cross
+        tk_cross_bear = tenkan_6h[i] < kijun_6h[i]  # Bearish TK cross
+        
+        # Price above/below cloud
+        price_above_cloud = close[i] > upper_cloud
+        price_below_cloud = close[i] < lower_cloud
+        
+        # Weekly trend filter: price vs weekly cloud
+        weekly_uptrend = close[i] > upper_cloud_w
+        weekly_downtrend = close[i] < lower_cloud_w
+        
+        # Volume confirmation
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: pullback to EMA21 in uptrend
-            if (supertrend_dir_aligned[i] == 1 and 
-                strong_trend and
-                low[i] <= ema_21[i] <= high[i]):
-                signals[i] = 0.20
+            # Long entry: bullish TK cross + price above cloud + weekly uptrend + volume
+            if (tk_cross_bull and price_above_cloud and 
+                weekly_uptrend and vol_confirmed):
+                signals[i] = 0.25
                 position = 1
-            # Short entry: pullback to EMA21 in downtrend
-            elif (supertrend_dir_aligned[i] == -1 and 
-                  strong_trend and
-                  low[i] <= ema_21[i] <= high[i]):
-                signals[i] = -0.20
+            # Short entry: bearish TK cross + price below cloud + weekly downtrend + volume
+            elif (tk_cross_bear and price_below_cloud and 
+                  weekly_downtrend and vol_confirmed):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: trend change or ADX weakens
-            if (supertrend_dir_aligned[i] == -1 or 
-                adx_aligned[i] < 20):
+            # Long exit: price crosses below cloud or TK cross turns bearish
+            if close[i] < lower_cloud or tk_cross_bear:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change or ADX weakens
-            if (supertrend_dir_aligned[i] == 1 or 
-                adx_aligned[i] < 20):
+            # Short exit: price crosses above cloud or TK cross turns bullish
+            if close[i] > upper_cloud or tk_cross_bull:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Supertrend4h_ADX1d_EMA21_Pullback"
-timeframe = "1h"
+name = "6h_Ichimoku_WeeklyTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
