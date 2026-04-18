@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) with 4h ADX(14) trend filter and 1d volume regime filter.
-# RSI < 30 = oversold (long), RSI > 70 = overbought (short) in ranging markets (ADX < 25).
-# In trending markets (ADX >= 25), follow momentum: RSI > 50 long, RSI < 50 short.
-# 1d volume regime: only trade when 1d volume > 20-day average (avoid low-volume chop).
-# Session filter: 08-20 UTC to avoid low-liquidity Asian session.
-# Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag.
-name = "1h_RSI_ADX_VolumeRegime"
-timeframe = "1h"
+# Hypothesis: 6h Williams %R with 1d ADX regime filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions. ADX > 25 filters for trending markets.
+# In trending markets (ADX > 25), we fade extreme Williams %R readings (>80 for short, <20 for long).
+# Volume spike (>1.5x 20-period average) confirms the reversal signal.
+# Works in both bull and bear markets as it captures mean reversions within trends.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+name = "6h_WilliamsR_1dADX25_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,135 +23,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (pre-compute)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Get 1d data for ADX calculation (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Williams %R (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
-    # Get 4h data for ADX(14) (trend strength)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate ADX components (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[-1]), np.abs(low_4h[0] - close_4h[-1])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d)
+    tr2 = pd.Series(close_1d).shift(1) - pd.Series(low_1d)
+    tr3 = pd.Series(high_1d) - pd.Series(close_1d).shift(1)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Directional Movement
-    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    dm_plus = pd.Series(high_1d).diff()
+    dm_minus = pd.Series(low_1d).diff()
+    dm_plus = np.where((dm_plus > dm_minus) & (dm_plus > 0), dm_plus, 0)
+    dm_minus = np.where((dm_minus > dm_plus) & (dm_minus > 0), dm_minus, 0)
     
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Smoothed values
+    atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
     # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr_smooth + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr_smooth + 1e-10)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * (dm_plus_14 / atr_14)
+    minus_di = 100 * (dm_minus_14 / atr_14)
     
-    # Align 4h ADX to 1h
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1d data for volume regime filter
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_regime = volume_1d > volume_ma_20  # High volume regime
-    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume spike: current volume > 1.5 * 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_regime_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter
-        if not in_session[i]:
-            if position != 0:
+        # Regime filter: ADX > 25 indicates trending market
+        trending = adx_aligned[i] > 25
+        
+        if position == 0:
+            # Long: Williams %R oversold (< -80) AND trending AND volume spike
+            if williams_r[i] < -80 and trending and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: Williams %R overbought (> -20) AND trending AND volume spike
+            elif williams_r[i] > -20 and trending and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: Williams %R rises above -50 (exit oversold) OR trend weakens
+            if williams_r[i] > -50 or not trending:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.0
-            continue
-        
-        # Market regime: ADX < 25 = ranging, ADX >= 25 = trending
-        ranging = adx_aligned[i] < 25
-        trending = adx_aligned[i] >= 25
-        
-        if position == 0:
-            # Entry logic
-            if ranging:
-                # Mean reversion in ranging markets
-                if rsi[i] < 30 and volume_regime_aligned[i]:
-                    signals[i] = 0.20
-                    position = 1
-                elif rsi[i] > 70 and volume_regime_aligned[i]:
-                    signals[i] = -0.20
-                    position = -1
-            else:  # trending
-                # Momentum in trending markets
-                if rsi[i] > 50 and volume_regime_aligned[i]:
-                    signals[i] = 0.20
-                    position = 1
-                elif rsi[i] < 50 and volume_regime_aligned[i]:
-                    signals[i] = -0.20
-                    position = -1
-        
-        elif position == 1:
-            # Long exit conditions
-            if ranging:
-                # Exit mean reversion at RSI 50
-                if rsi[i] >= 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20
-            else:
-                # Exit trend when RSI < 40 (weakening momentum)
-                if rsi[i] < 40:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit conditions
-            if ranging:
-                # Exit mean reversion at RSI 50
-                if rsi[i] <= 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20
+            # Short exit: Williams %R falls below -50 (exit overbought) OR trend weakens
+            if williams_r[i] < -50 or not trending:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Exit trend when RSI > 60 (weakening momentum)
-                if rsi[i] > 60:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
