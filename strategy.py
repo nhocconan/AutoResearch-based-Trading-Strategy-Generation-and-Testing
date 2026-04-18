@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_H3L3_4hTrendFilter_v2"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,34 +17,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot levels (H3/L3)
+    # Load weekly data for Williams Alligator (13,8,5 SMAs on median price)
+    df_1w = get_htf_data(prices, '1w')
+    median_1w = (df_1w['high'] + df_1w['low']) / 2
+    jaw = median_1w.rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = median_1w.rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = median_1w.rolling(window=5, min_periods=5).mean().shift(3).values
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    
+    # Load daily data for Elder Ray (13-period EMA)
     df_1d = get_htf_data(prices, '1d')
+    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = (df_1d['high'] - ema13_1d).values
+    bear_power = (df_1d['low'] - ema13_1d).values
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Calculate Camarilla pivot levels (H3, L3) from previous daily bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    H3 = pivot + (range_hl * 1.1 / 4)
-    L3 = pivot - (range_hl * 1.1 / 4)
-    
-    # Align H3/L3 to 1h (wait for daily close)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # Load 4h data for trend filter (EMA34)
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate EMA34 on 4h close
-    close_4h = df_4h['close']
-    ema_34_4h = close_4h.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Volume filter: current volume > 1.8 * 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (1.8 * vol_ma_30)
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -57,42 +50,49 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        H3_val = H3_aligned[i]
-        L3_val = L3_aligned[i]
-        ema_4h_val = ema_34_4h_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
         vol_filter = volume_filter[i]
         sess_filter = session_filter[i]
         
+        # Alligator aligned: jaws < teeth < lips (bullish) or jaws > teeth > lips (bearish)
+        bullish_alligator = (jaw_val < teeth_val) and (teeth_val < lips_val)
+        bearish_alligator = (jaw_val > teeth_val) and (teeth_val > lips_val)
+        
         if position == 0:
-            # Long: break above H3 with volume, session, and 4h EMA34 above price (bullish bias)
-            if close_val > H3_val and vol_filter and sess_filter and (close_val > ema_4h_val):
-                signals[i] = 0.20
+            # Long: bullish Alligator + positive Bull Power + volume + session
+            if bullish_alligator and (bull_val > 0) and vol_filter and sess_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below L3 with volume, session, and 4h EMA34 below price (bearish bias)
-            elif close_val < L3_val and vol_filter and sess_filter and (close_val < ema_4h_val):
-                signals[i] = -0.20
+            # Short: bearish Alligator + negative Bear Power + volume + session
+            elif bearish_alligator and (bear_val < 0) and vol_filter and sess_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below L3 or 4h EMA34 turns bearish
-            if close_val < L3_val or (close_val < ema_4h_val):
+            # Long exit: Alligator turns bearish OR Bull Power turns negative
+            if not bullish_alligator or (bull_val <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above H3 or 4h EMA34 turns bullish
-            if close_val > H3_val or (close_val > ema_4h_val):
+            # Short exit: Alligator turns bullish OR Bear Power turns positive
+            if not bearish_alligator or (bear_val >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
