@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray with 1d regime filter
-# Elder Ray (Bull/Bear Power) measures bull/bear strength relative to EMA.
-# Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# In bull regime (price > weekly EMA50), go long when Bull Power crosses above zero.
-# In bear regime (price < weekly EMA50), go short when Bear Power crosses below zero.
-# Uses 1d EMA13 for Bull/Bear Power and weekly EMA50 for regime filter.
-# Target: 15-30 trades/year per symbol.
-name = "6h_ElderRay_1dEMA13_WeeklyEMA50_Regime"
-timeframe = "6h"
+# Hypothesis: 12h Camarilla Pivot R1/S1 breakout with weekly EMA34 filter and volume confirmation.
+# Camarilla levels from daily data provide institutional support/resistance.
+# Weekly EMA34 ensures alignment with longer-term trend, avoiding counter-trend trades.
+# Volume confirmation filters breakouts with low participation.
+# Designed for low trade frequency (15-35/year) to minimize fee drag in 12h timeframe.
+# Works in bull markets (breakouts continue with trend) and bear markets (breakdowns continue with trend).
+name = "12h_Camarilla_R1_S1_Breakout_WeeklyEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,65 +21,79 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for calculations (ONCE before loop)
+    # Get daily data for Camarilla pivot calculation (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    # Get weekly data for regime filter (ONCE before loop)
+    # Get weekly data for EMA34 filter (ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate EMA13 on daily closes for Elder Ray
-    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    # Align EMA13 to 6h timeframe
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    # Calculate Camarilla pivot levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Using previous day's OHLC to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Calculate Bull Power and Bear Power
-    bull_power = high - ema13_1d_aligned
-    bear_power = low - ema13_1d_aligned
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate weekly EMA50 for regime filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align weekly EMA50 to 6h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 20-period average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hour_index = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 calculation
+    start_idx = 20  # Wait for volume MA calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema13_1d_aligned[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: bull if price > weekly EMA50, bear if price < weekly EMA50
-        is_bull_regime = close[i] > ema50_1w_aligned[i]
-        is_bear_regime = close[i] < ema50_1w_aligned[i]
+        hour = hour_index[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume above average
+        vol_confirm = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # Long: bull regime AND bull power crosses above zero
-            if is_bull_regime and bull_power[i] > 0 and bull_power[i-1] <= 0:
+            # Long: price breaks above R1 with weekly uptrend and volume
+            if vol_confirm and close[i] > camarilla_r1_aligned[i] and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bear regime AND bear power crosses below zero
-            elif is_bear_regime and bear_power[i] < 0 and bear_power[i-1] >= 0:
+            # Short: price breaks below S1 with weekly downtrend and volume
+            elif vol_confirm and close[i] < camarilla_s1_aligned[i] and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bear power crosses below zero (momentum shift)
-            if bear_power[i] < 0 and bear_power[i-1] >= 0:
+            # Long exit: price breaks below S1 (reversal signal)
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bull power crosses above zero (momentum shift)
-            if bull_power[i] > 0 and bull_power[i-1] <= 0:
+            # Short exit: price breaks above R1 (reversal signal)
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
