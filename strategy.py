@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_HTF_Target_Zone_Reversal
-Hypothesis: Price reverses from multi-day high/low zones (HTF target areas) with volume exhaustion and momentum divergence.
-Works in bull markets by catching pullbacks in uptrends and in bear markets by catching bounces in downtrends.
-Uses daily high/low as dynamic support/resistance, volume drying up on approach, and RSI divergence for confirmation.
-Target: 20-40 trades/year with high win rate via confluence of HTF structure and LTF timing.
+4h_Pivot_R1S1_Breakout_1dEMA50_Volume
+Hypothesis: 4-hour breakouts above 1d Camarilla R1 or below S1 with 1-day EMA50 trend filter and volume confirmation.
+Uses actual daily OHLC for precise Camarilla levels, EMA50 filters trend direction, volume confirms breakout strength.
+Designed for low trade frequency (target: 20-50/year) with strong performance in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,90 +20,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF reference
+    # Calculate 1-day EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period RSI on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate EMA50 with proper smoothing
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[0:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = close_1d[i] * alpha + ema50_1d[i-1] * (1 - alpha)
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    rs = np.full(n, np.nan)
-    rsi = np.full(n, 50.0)  # Start neutral
+    # Align 1-day EMA50 to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Initialize first average
-    if n >= 14:
-        avg_gain[13] = np.mean(gain[1:15])
-        avg_loss[13] = np.mean(loss[1:15])
-        if avg_loss[13] != 0:
-            rs[13] = avg_gain[13] / avg_loss[13]
-            rsi[13] = 100 - (100 / (1 + rs[13]))
+    # Calculate Camarilla levels from previous day's OHLC
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
     
-    # Wilder smoothing
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
+    # Get daily OHLC from 1d data and align to 4h
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Align daily high/low to 4h (these represent prior day's levels)
-    # Using already completed daily bars only
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    # Align daily values to 4h timeframe (use previous day's values for today's levels)
+    daily_open_aligned = align_htf_to_ltf(prices, df_1d, daily_open)
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
     
-    # Volume exhaustion: current volume < 60% of 20-period average
+    # Calculate Camarilla levels using previous day's OHLC
+    for i in range(n):
+        if (np.isnan(daily_open_aligned[i]) or np.isnan(daily_high_aligned[i]) or 
+            np.isnan(daily_low_aligned[i]) or np.isnan(daily_close_aligned[i])):
+            continue
+        
+        # Use previous day's values (shifted by 1 to avoid look-ahead)
+        if i > 0:
+            prev_high = daily_high_aligned[i-1]
+            prev_low = daily_low_aligned[i-1]
+            prev_close = daily_close_aligned[i-1]
+            range_val = prev_high - prev_low
+            camarilla_r1[i] = prev_close + range_val * 1.1 / 12
+            camarilla_s1[i] = prev_close - range_val * 1.1 / 12
+    
+    # Volume spike: current volume > 2.0 x 20-period average (stricter to reduce trades)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_exhaustion = volume < (vol_ma * 0.6)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)
+    start_idx = max(50, 20, 1)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long setup: price near daily low, volume exhaustion, RSI oversold
-        near_support = (low[i] <= daily_low_aligned[i] * 1.005)  # Within 0.5% of daily low
-        rsi_oversold = rsi[i] < 30
-        
-        if position == 0 and near_support and vol_exhaustion[i] and rsi_oversold:
-            signals[i] = 0.25
-            position = 1
-        
-        # Short setup: price near daily high, volume exhaustion, RSI overbought
-        elif position == 0:
-            near_resistance = (high[i] >= daily_high_aligned[i] * 0.995)  # Within 0.5% of daily high
-            rsi_overbought = rsi[i] > 70
-            
-            if near_resistance and vol_exhaustion[i] and rsi_overbought:
+        if position == 0:
+            # Long: break above Camarilla R1 with volume spike and 1d uptrend
+            if (close[i] > camarilla_r1[i] and vol_spike[i] and 
+                close[i] > ema50_1d_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: break below Camarilla S1 with volume spike and 1d downtrend
+            elif (close[i] < camarilla_s1[i] and vol_spike[i] and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
-        # Exit long: price moves back toward daily high or RSI overbought
         elif position == 1:
-            if (high[i] >= daily_high_aligned[i] * 0.995 or 
-                rsi[i] > 70):
+            # Long exit: close below Camarilla S1 or 1d trend turns down
+            if (close[i] < camarilla_s1[i] or close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
-        # Exit short: price moves back toward daily low or RSI oversold
         elif position == -1:
-            if (low[i] <= daily_low_aligned[i] * 1.005 or 
-                rsi[i] < 30):
+            # Short exit: close above Camarilla R1 or 1d trend turns up
+            if (close[i] > camarilla_r1[i] or close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_Target_Zone_Reversal"
+name = "4h_Pivot_R1S1_Breakout_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
