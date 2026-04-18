@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Weekly_Momentum_Reversal
-Hypothesis: Weekly momentum extremes (RSI > 70 or < 30) combined with 12h price rejection 
-at weekly support/resistance levels (from prior week's high/low) capture reversal 
-opportunities. Works in bull/bear by fading overextended moves. Target: 15-25 trades/year 
-(60-100 total over 4 years) to minimize fee drag while capturing high-probability setups.
+1d_TrendFollow_Volume_Signal_Adaptive
+Hypothesis: On daily timeframe, trend following with volume confirmation captures major moves while avoiding whipsaws.
+In bull markets, buy on strong up days with volume; in bear markets, sell on strong down days with volume.
+Uses adaptive thresholds based on volatility to maintain consistent signal frequency.
+Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -16,85 +16,90 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for momentum and levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for trend and volatility
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly RSI (14) for momentum extreme
-    rsi_period = 14
-    delta = pd.Series(df_1w['close']).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Weekly data for trend filter (avoid counter-trend trades)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Previous week's high/low for support/resistance
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
+    # Daily 20-period EMA for trend
+    ema_20 = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    # Align weekly data to 12h timeframe
-    rsi_12h = align_htf_to_ltf(prices, df_1w, rsi_values)
-    week_high_12h = align_htf_to_ltf(prices, df_1w, prev_week_high)
-    week_low_12h = align_htf_to_ltf(prices, df_1w, prev_week_low)
+    # Daily ATR for volatility normalization
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Volume filter: >1.3x 20-period average
+    # Weekly trend filter: price above/below weekly EMA
+    weekly_ema = pd.Series(df_1w['close']).ewm(span=10, adjust=False, min_periods=10).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    
+    # Daily price change normalized by ATR
+    price_change = np.diff(close, prepend=close[0])
+    price_change_norm = price_change / atr_aligned
+    
+    # Volume filter: >1.3x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_12h[i]) or np.isnan(week_high_12h[i]) or 
-            np.isnan(week_low_12h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_20_aligned[i]) or np.isnan(weekly_ema_aligned[i]) or
+            np.isnan(atr_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi_val = rsi_12h[i]
-        wh = week_high_12h[i]
-        wl = week_low_12h[i]
+        ema_trend = ema_20_aligned[i]
+        weekly_trend = weekly_ema_aligned[i]
         vol_ok = volume_filter[i]
+        price_norm = price_change_norm[i]
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + price near weekly low + volume
-            if rsi_val < 30 and price <= wl * 1.005 and vol_ok:
-                signals[i] = 0.25
+            # Long: strong up day with volume, aligned with weekly trend
+            if price_norm > 0.8 and vol_ok and price > weekly_trend:
+                signals[i] = 0.30
                 position = 1
-            # Short: RSI > 70 (overbought) + price near weekly high + volume
-            elif rsi_val > 70 and price >= wh * 0.995 and vol_ok:
-                signals[i] = -0.25
+            # Short: strong down day with volume, aligned with weekly trend
+            elif price_norm < -0.8 and vol_ok and price < weekly_trend:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit: RSI > 50 (momentum shift) or price reaches weekly high
-            if rsi_val > 50 or price >= wh:
+            # Exit: trend reversal or volatility drop
+            if price < ema_trend or abs(price_norm) < 0.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit: RSI < 50 (momentum shift) or price reaches weekly low
-            if rsi_val < 50 or price <= wl:
+            # Exit: trend reversal or volatility drop
+            if price > ema_trend or abs(price_norm) < 0.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Weekly_Momentum_Reversal"
-timeframe = "12h"
+name = "1d_TrendFollow_Volume_Signal_Adaptive"
+timeframe = "1d"
 leverage = 1.0
