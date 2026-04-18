@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v1
-Hypothesis: Use 1d Camarilla pivot levels (R1, S1) for breakout signals on 12h timeframe. 
-Go long when price breaks above R1 with volume > 1.5x average and choppy market (CHOP > 61.8), 
-short when price breaks below S1 with volume > 1.5x average and choppy market. 
-Choppy market filter ensures mean-reversion behavior at pivot levels. 
-Target: 12-30 trades/year by requiring confluence of breakout, volume, and regime.
-Works in bull markets via breakouts and in bear via mean-reversion at pivot levels.
+4h_KAMA_Trend_RSI_Confirmation_v1
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) for trend direction and RSI for momentum confirmation on 4h timeframe.
+Go long when price is above KAMA and RSI > 55, short when price is below KAMA and RSI < 45.
+Requires volume > 1.5x 20-period average for confirmation.
+Target: 20-30 trades/year by using trend-following with momentum filter to reduce noise.
+Works in bull markets via trend following and in bear via short signals.
 """
 
 import numpy as np
@@ -23,115 +22,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # KAMA parameters
+    kama_period = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Calculate Camarilla pivot levels (R1, S1) for each day
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate ER (Efficiency Ratio)
+    change = np.abs(np.diff(close, kama_period))
+    abs_diff = np.abs(np.diff(close))
+    er_num = change[kama_period-1:]  # length n - kama_period + 1
+    er_den = np.array([np.sum(abs_diff[i:i+kama_period]) for i in range(len(abs_diff)-kama_period+1)])
+    er = np.divide(er_num, er_den, out=np.full_like(er_num, 0.0), where=er_den!=0)
     
-    # Align Camarilla levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Calculate smoothing constant SC
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
     
-    # Get weekly data for choppy market filter (CHOP)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[kama_period-1] = close[kama_period-1]  # seed
     
-    # Choppiness Index (CHOP) calculation
-    chop_period = 14
-    atr_1w = np.full_like(close_1w, np.nan)
+    for i in range(kama_period, len(close)):
+        kama[i] = kama[i-1] + sc[i-kama_period] * (close[i] - kama[i-1])
     
-    if len(close_1w) >= chop_period:
-        tr_1w = np.zeros_like(high_1w)
-        for i in range(len(high_1w)):
-            if i == 0:
-                tr_1w[i] = high_1w[i] - low_1w[i]
-            else:
-                tr_1w[i] = max(
-                    high_1w[i] - low_1w[i],
-                    abs(high_1w[i] - close_1w[i-1]),
-                    abs(low_1w[i] - close_1w[i-1])
-                )
-        
-        # True Range moving sum
-        tr_sum = np.full_like(close_1w, np.nan)
-        for i in range(chop_period, len(tr_1w)):
-            tr_sum[i] = np.sum(tr_1w[i-chop_period:i])
-        
-        # Highest high and lowest low over period
-        hh_1w = np.full_like(high_1w, np.nan)
-        ll_1w = np.full_like(low_1w, np.nan)
-        for i in range(chop_period, len(high_1w)):
-            hh_1w[i] = np.max(high_1w[i-chop_period:i])
-            ll_1w[i] = np.min(low_1w[i-chop_period:i])
-        
-        # Chop calculation: 100 * log10(sum(tr1..tr14) / (HH - LL)) / log10(14)
-        rr_1w = hh_1w - ll_1w
-        chop_1w = np.full_like(close_1w, 50.0)  # default to neutral
-        mask = (rr_1w > 0) & (~np.isnan(tr_sum))
-        chop_1w[mask] = 100 * np.log10(tr_sum[mask] / rr_1w[mask]) / np.log10(chop_period)
+    # RSI(14) calculation
+    rsi_period = 14
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align Chop to 12h timeframe
-    chop_12h = align_htf_to_ltf(prices, df_1w, chop_1w)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    
+    # First average
+    if len(gain) >= rsi_period:
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+    
+        # Wilder smoothing
+        for i in range(rsi_period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0.0), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
+    vol_ma = np.full_like(volume, np.nan)
     
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
-    # Signals array
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(1, vol_period) + 1  # Camarilla levels available from first bar
+    start_idx = max(kama_period, rsi_period, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(chop_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Choppy market filter: CHOP > 61.8 indicates ranging market (good for mean reversion at pivots)
-        chop_filter = chop_12h[i] > 61.8
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        if position == 0 and chop_filter:
-            # Long: price breaks above R1 with volume confirmation
-            if close[i] > r1_12h[i] and vol_confirm:
+        if position == 0:
+            # Long: price above KAMA and RSI > 55 and volume confirmation
+            if close[i] > kama[i] and rsi[i] > 55 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation
-            elif close[i] < s1_12h[i] and vol_confirm:
+            # Short: price below KAMA and RSI < 45 and volume confirmation
+            elif close[i] < kama[i] and rsi[i] < 45 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 (mean reversion) OR chop breaks down (trending market)
-            if close[i] < s1_12h[i] or chop_12h[i] < 38.2:
+            # Long exit: price below KAMA OR RSI < 40
+            if close[i] < kama[i] or rsi[i] < 40:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 (mean reversion) OR chop breaks down (trending market)
-            if close[i] > r1_12h[i] or chop_12h[i] < 38.2:
+            # Short exit: price above KAMA OR RSI > 60
+            if close[i] > kama[i] or rsi[i] > 60:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -139,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v1"
-timeframe = "12h"
+name = "4h_KAMA_Trend_RSI_Confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
