@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,22 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for price channels and volatility
+    # Get daily data for Choppiness Index and Donchian channels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Donchian channel (20-day)
-    upper_1d = np.full_like(high_1d, np.nan)
-    lower_1d = np.full_like(low_1d, np.nan)
-    
-    for i in range(20, len(high_1d)):
-        upper_1d[i] = np.max(high_1d[i-20:i])
-        lower_1d[i] = np.min(low_1d[i-20:i])
-    
-    # Calculate daily ATR (14-day) for volatility filter
-    def calculate_atr(high, low, close, period=14):
+    # Calculate 14-period Choppiness Index
+    def calculate_chop(high, low, close, period=14):
         tr1 = high[1:] - low[1:]
         tr2 = np.abs(high[1:] - close[:-1])
         tr3 = np.abs(low[1:] - close[:-1])
@@ -40,31 +32,61 @@ def generate_signals(prices):
             atr[period] = np.nanmean(tr[1:period+1])
             for i in range(period+1, len(tr)):
                 atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+        
+        hh = np.maximum.accumulate(high)
+        ll = np.minimum.accumulate(low)
+        sum_atr = np.full_like(tr, np.nan)
+        range_hl = np.full_like(tr, np.nan)
+        
+        if len(tr) >= period:
+            sum_atr[period] = np.nansum(atr[1:period+1])
+            range_hl[period] = hh[period] - ll[period]
+            
+            for i in range(period+1, len(tr)):
+                sum_atr[i] = sum_atr[i-1] + atr[i]
+                hh[i] = max(hh[i-1], high[i])
+                ll[i] = min(ll[i-1], low[i])
+                range_hl[i] = hh[i] - ll[i]
+        
+        chop = np.full_like(tr, np.nan)
+        valid = (sum_atr != 0) & (range_hl != 0) & ~np.isnan(sum_atr) & ~np.isnan(range_hl)
+        chop[valid] = 100 * np.log10(sum_atr[valid] / range_hl[valid]) / np.log10(period)
+        
+        return chop
     
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
+    
+    # Calculate Donchian channels (20-period)
+    def calculate_donchian(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        if len(high) >= period:
+            for i in range(period-1, len(high)):
+                upper[i] = np.max(high[i - period + 1:i + 1])
+                lower[i] = np.min(low[i - period + 1:i + 1])
+        return upper, lower
+    
+    upper_20, lower_20 = calculate_donchian(high_1d, low_1d, 20)
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Weekly SMA(50) for trend filter
-    if len(close_1w) >= 50:
-        sma_1w = np.full_like(close_1w, np.nan)
-        for i in range(50, len(close_1w)):
-            sma_1w[i] = np.mean(close_1w[i-50:i])
+    # Weekly EMA(34) for trend filter
+    if len(close_1w) >= 34:
+        ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     else:
-        sma_1w = np.full_like(close_1w, np.nan)
+        ema_1w = np.full_like(close_1w, np.nan)
     
     # Align all 1d data to 12h timeframe
-    upper_12h = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_12h = align_htf_to_ltf(prices, df_1d, lower_1d)
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    sma_1w_12h = align_htf_to_ltf(prices, df_1w, sma_1w)
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop_1d)
+    upper_12h = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_12h = align_htf_to_ltf(prices, df_1d, lower_20)
+    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume confirmation: volume > 1.8x 24-period average (balanced for 12h)
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24  # 24 * 12h = 12 days
+    vol_period = 20
     
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
@@ -73,12 +95,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14, 50, 24) + 1  # Ensure we have enough data
+    start_idx = max(34, 20, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or 
-            np.isnan(atr_12h[i]) or np.isnan(sma_1w_12h[i]) or 
+        if (np.isnan(chop_12h[i]) or np.isnan(upper_12h[i]) or 
+            np.isnan(lower_12h[i]) or np.isnan(ema_1w_12h[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -86,30 +108,32 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume[i] > 1.8 * vol_ma[i]
         
-        # Trend filter: price above weekly SMA(50) = bullish bias
-        bullish_bias = close[i] > sma_1w_12h[i]
+        # Choppiness regime: Chop > 61.8 = ranging (mean revert)
+        ranging = chop_12h[i] > 61.8
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume in bullish bias
-            if close[i] > upper_12h[i] and vol_confirm and bullish_bias:
+            # Long: price touches lower Donchian band in ranging market
+            if low[i] <= lower_12h[i] and vol_confirm and ranging:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with volume in bearish bias
-            elif close[i] < lower_12h[i] and vol_confirm and not bullish_bias:
+            # Short: price touches upper Donchian band in ranging market
+            elif high[i] >= upper_12h[i] and vol_confirm and ranging:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below lower Donchian OR volatility drops (low vol = range)
-            if close[i] < lower_12h[i] or atr_12h[i] < np.nanmedian(atr_12h[max(0, i-50):i]):
+            # Long exit: price reaches midpoint or Chop drops below 40 (trend emerging)
+            midpoint = (upper_12h[i] + lower_12h[i]) / 2
+            if high[i] >= midpoint or chop_12h[i] < 40:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above upper Donchian OR volatility drops
-            if close[i] > upper_12h[i] or atr_12h[i] < np.nanmedian(atr_12h[max(0, i-50):i]):
+            # Short exit: price reaches midpoint or Chop drops below 40 (trend emerging)
+            midpoint = (upper_12h[i] + lower_12h[i]) / 2
+            if low[i] <= midpoint or chop_12h[i] < 40:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -117,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_Trend_Filter"
+name = "12h_Choppiness_Donchian_MeanReversion_Volume"
 timeframe = "12h"
 leverage = 1.0
