@@ -1,5 +1,3 @@
-# Hypothesis: 12-hour timeframe with Donchian channel breakout (20-period) combined with 1-day EMA (50-period) trend filter and volume confirmation (volume > 1.8x 20-period average). The strategy aims for low trade frequency (target: 50-150 trades over 4 years) by requiring confluence of trend, breakout, and volume. Works in bull markets via breakout momentum and in bear markets via short-side breakouts. Uses 12h bars to reduce noise and avoid overtrading. Position size is 0.25 to limit drawdown.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -22,10 +20,10 @@ def generate_signals(prices):
     # Calculate 50-period EMA on 1d for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA to 12h (properly delayed for completed 1d bar)
+    # Align 1d EMA to 4h (properly delayed for completed 1d bar)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h ATR (14-period)
+    # Calculate 4h ATR (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -34,18 +32,18 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h volume spike (volume > 1.8x 20-period average)
+    # Calculate 4h volume spike (volume > 1.8x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.8 * vol_ma)
     
-    # Calculate 12h Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Donchian channel (15-period)
+    donchian_high = pd.Series(high).rolling(window=15, min_periods=15).max().values
+    donchian_low = pd.Series(low).rolling(window=15, min_periods=15).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20) + 1
+    start_idx = max(50, 15, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
@@ -70,11 +68,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above Donchian high with uptrend and volume
             if long_breakout and uptrend and vol_confirmed:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below Donchian low with downtrend and volume
             elif short_breakout and downtrend and vol_confirmed:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -83,7 +81,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Short exit: price crosses above Donchian high or trend reverses
@@ -91,10 +89,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian15_1dEMA50_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
