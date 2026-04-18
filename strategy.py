@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_12hEMA34
-Hypothesis: Buy when price breaks above Camarilla R1 with volume spike and above 12h EMA34; short when breaks below S1 with volume spike and below 12h EMA34. Camarilla levels are derived from previous day's range and act as intraday support/resistance. Volume confirms institutional participation, and 12h EMA34 ensures alignment with medium-term trend. Designed for low trade frequency to minimize fee drag while capturing high-probability breakouts in both bull and bear markets.
+6h_WeeklyPivotDirection_DonchianBreakout_VolumeFilter
+Hypothesis: Use weekly pivot point direction (from previous week's PP) as trend filter for 6h Donchian(20) breakouts with volume confirmation.
+In bull markets: price above weekly PP, buy Donchian high breakouts with volume spike.
+In bear markets: price below weekly PP, sell Donchian low breakouts with volume spike.
+Weekly pivot provides institutional reference point, Donchian captures breakouts, volume confirms institutional participation.
+Designed for low trade frequency (15-35/year) to minimize fee drag while capturing strong directional moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,77 +22,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily high, low, close for Camarilla calculation (using 1d data)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly high, low, close for pivot point calculation (using 1w data)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels for each 4h bar using previous day's HLC
-    # Camarilla R1 = close + 1.1*(high-low)/12
-    # Camarilla S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Calculate Weekly Pivot Point (PP) and support/resistance levels
+    # PP = (H + L + C) / 3
+    weekly_pp = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly R1 = 2*PP - L, S1 = 2*PP - H
+    weekly_r1 = 2 * weekly_pp - low_1w
+    weekly_s1 = 2 * weekly_pp - high_1w
     
-    # Align daily Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align weekly levels to 6h timeframe
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # Donchian(20) channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # 12h EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(30, 20)  # Need volume MA and Camarilla aligned
+    start_idx = max(30, 20)  # Need Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(weekly_pp_aligned[i]) or 
+            np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i]) or
+            np.isnan(high_20[i]) or
+            np.isnan(low_20[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
+        pp = weekly_pp_aligned[i]
+        r1 = weekly_r1_aligned[i]
+        s1 = weekly_s1_aligned[i]
+        upper_channel = high_20[i]
+        lower_channel = low_20[i]
         vol_spike = volume_spike[i]
-        ema_12h_val = ema_12h_aligned[i]
         
         if position == 0:
-            # Long: price > Camarilla R1 with volume spike and above 12h EMA34
-            if price > r1 and vol_spike and price > ema_12h_val:
+            # Long: price > weekly PP AND price breaks above Donchian upper with volume spike
+            if price > pp and price > upper_channel and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Camarilla S1 with volume spike and below 12h EMA34
-            elif price < s1 and vol_spike and price < ema_12h_val:
+            # Short: price < weekly PP AND price breaks below Donchian lower with volume spike
+            elif price < pp and price < lower_channel and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < Camarilla S1 or below 12h EMA34
-            if price < s1 or price < ema_12h_val:
+            # Exit: price breaks below Donchian lower OR price crosses below weekly PP
+            if price < lower_channel or price < pp:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > Camarilla R1 or above 12h EMA34
-            if price > r1 or price > ema_12h_val:
+            # Exit: price breaks above Donchian upper OR price crosses above weekly PP
+            if price > upper_channel or price > pp:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_12hEMA34"
-timeframe = "4h"
+name = "6h_WeeklyPivotDirection_DonchianBreakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
