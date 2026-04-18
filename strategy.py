@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Weekly Pivot Point Reversal with Volume Confirmation
-Strategy: Trade reversals at weekly pivot support/resistance levels.
-          Long at S1/S2 with volume confirmation and price > weekly EMA20.
-          Short at R1/R2 with volume confirmation and price < weekly EMA20.
-          Uses weekly timeframe for pivot calculation and trend filter.
-          Designed for low frequency, high-probability reversals in ranging markets.
+4h Donchian20 Breakout with Volume Spike and ADX Filter
+Strategy: Enter long on Donchian20 upper break with volume spike and ADX>25,
+          short on Donchian20 lower break with volume spike and ADX>25.
+          Exit on opposite Donchian break or ADX<20.
+          Uses 12h EMA34 for higher timeframe trend filter to avoid counter-trend trades.
+          Designed for low trade frequency with clear breakout edge in both bull and bear markets.
 """
 
 import numpy as np
@@ -22,36 +22,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points and trend filter (once before loop)
-    df_w = get_htf_data(prices, '1w')
+    # Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly high, low, close for pivot points
-    weekly_high = df_w['high'].values
-    weekly_low = df_w['low'].values
-    weekly_close = df_w['close'].values
+    # ADX calculation (14-period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.absolute(high[1:] - close[:-1]), 
+                    np.absolute(low[1:] - close[:-1]))
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
     
-    # Calculate pivot points: P = (H + L + C)/3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Support and resistance levels
-    weekly_s1 = (2 * weekly_pivot) - weekly_high
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r1 = (2 * weekly_pivot) - weekly_low
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
+    dx = 100 * np.absolute(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly EMA20 for trend filter
-    ema_20_w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align weekly levels to 12h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_w, weekly_pivot)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_w, weekly_s1)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_w, weekly_s2)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_w, weekly_r1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_w, weekly_r2)
-    ema_20_w_aligned = align_htf_to_ltf(prices, df_w, ema_20_w)
-    
-    # Volume spike detection (1.5x 20-period average)
+    # Volume spike detection (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Get 12h data for EMA34 trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -59,53 +60,46 @@ def generate_signals(prices):
     start_idx = 100  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(weekly_s2_aligned[i]) or
-            np.isnan(weekly_r1_aligned[i]) or
-            np.isnan(weekly_r2_aligned[i]) or
-            np.isnan(ema_20_w_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema_34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        s1 = weekly_s1_aligned[i]
-        s2 = weekly_s2_aligned[i]
-        r1 = weekly_r1_aligned[i]
-        r2 = weekly_r2_aligned[i]
-        ema_20 = ema_20_w_aligned[i]
+        adx_val = adx[i]
+        ema_34_12h = ema_34_12h_aligned[i]
         
         if position == 0:
-            # Long: price near S1 or S2 with volume spike and above weekly EMA20
-            if ((abs(price - s1) < 0.005 * price or abs(price - s2) < 0.005 * price) and 
-                volume_spike[i] and price > ema_20):
+            # Long: Donchian upper break + volume spike + ADX>25 + above 12h EMA34
+            if (price > donch_high[i] and volume_spike[i] and 
+                adx_val > 25 and price > ema_34_12h):
                 signals[i] = 0.25
                 position = 1
-            # Short: price near R1 or R2 with volume spike and below weekly EMA20
-            elif ((abs(price - r1) < 0.005 * price or abs(price - r2) < 0.005 * price) and 
-                  volume_spike[i] and price < ema_20):
+            # Short: Donchian lower break + volume spike + ADX>25 + below 12h EMA34
+            elif (price < donch_low[i] and volume_spike[i] and 
+                  adx_val > 25 and price < ema_34_12h):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: price crosses weekly pivot or below weekly EMA20
-            if price > weekly_pivot_aligned[i] or price < ema_20:
+            # Exit: Donchian lower break or ADX<20
+            if price < donch_low[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: price crosses weekly pivot or above weekly EMA20
-            if price < weekly_pivot_aligned[i] or price > ema_20:
+            # Exit: Donchian upper break or ADX<20
+            if price > donch_high[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_WeeklyPivot_Reversal_Volume_EMA20"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_ADXFilter_12hEMA34"
+timeframe = "4h"
 leverage = 1.0
