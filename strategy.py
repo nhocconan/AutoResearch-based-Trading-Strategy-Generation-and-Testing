@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-12h Tri-Pivot Breakout with Volume Filter and ADX Trend Filter
-- Uses 1-day Camarilla pivot levels (R1, S1) for entries
-- Confirms with 1-day volume > 1.5x 20-day average
+4h Donchian Breakout with Volume Spike and ADX Trend Filter
+- Uses 4-hour Donchian channel (20-period) for breakout signals
+- Confirms with 4-hour volume > 2.0x 20-period average
 - Filters by 1-day ADX > 25 to ensure trending market
-- Exits on pivot level reversal or volume drop below 1.2x average
-- Designed for 15-30 trades/year (60-120 total) to minimize fee drag
+- Exits on opposite Donchian band touch
+- Designed for 20-40 trades/year (80-160 total) to minimize fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_pivots(high, low, close):
-    """Calculate Camarilla pivot levels from previous day's OHLC."""
-    typical = (high + low + close) / 3.0
-    range_val = high - low
-    r1 = close + range_val * 1.1 / 12
-    s1 = close - range_val * 1.1 / 12
-    return r1, s1
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands."""
+    upper = np.full(len(high), np.nan)
+    lower = np.full(len(high), np.nan)
+    for i in range(period-1, len(high)):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    return upper, lower
 
 def calculate_sma(arr, period):
     """Calculate Simple Moving Average with NaN for insufficient data."""
@@ -95,69 +96,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivots, volume, and ADX
+    # Get 4h data for Donchian and volume
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate 4h Donchian channel (20-period)
+    upper_4h, lower_4h = calculate_donchian(high_4h, low_4h, 20)
+    
+    # Calculate 4h volume moving average (20-period)
+    vol_ma_4h = calculate_sma(volume_4h, 20)
+    
+    # Get 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 1-day Camarilla pivot levels (based on previous day)
-    r1, s1 = calculate_pivots(high_1d, low_1d, close_1d)
-    
-    # Calculate 1-day volume moving average (20-period)
-    vol_ma_1d = calculate_sma(volume_1d, 20)
     
     # Calculate 1-day ADX (14-period)
     adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align 1d indicators to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    vol_ma_1d_12h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    adx_14_1d_12h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Align 4h indicators to 4h timeframe (no alignment needed as we're already on 4h)
+    upper_4h_aligned = upper_4h
+    lower_4h_aligned = lower_4h
+    vol_ma_4h_aligned = vol_ma_4h
+    
+    # Align 1d ADX to 4h timeframe
+    adx_14_1d_4h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # need sufficient data for pivots, volume MA, and ADX
+    start_idx = 40  # need sufficient data for Donchian, volume MA, and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(vol_ma_1d_12h[i]) or np.isnan(adx_14_1d_12h[i])):
+        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
+            np.isnan(vol_ma_4h_aligned[i]) or np.isnan(adx_14_1d_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d volume for current 12h bar
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        # Get aligned 4h volume for current 4h bar
+        vol_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
         
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        vol_spike = vol_1d_aligned[i] > 1.5 * vol_ma_1d_12h[i]
+        # Volume confirmation: current 4h volume > 2.0x 20-period average
+        vol_spike = vol_4h_aligned[i] > 2.0 * vol_ma_4h_aligned[i]
         
         if position == 0:
-            # Long: price above R1, volume spike, ADX > 25
-            if close[i] > r1_12h[i] and vol_spike and adx_14_1d_12h[i] > 25:
+            # Long: price above upper Donchian band, volume spike, ADX > 25
+            if close[i] > upper_4h_aligned[i] and vol_spike and adx_14_1d_4h[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below S1, volume spike, ADX > 25
-            elif close[i] < s1_12h[i] and vol_spike and adx_14_1d_12h[i] > 25:
+            # Short: price below lower Donchian band, volume spike, ADX > 25
+            elif close[i] < lower_4h_aligned[i] and vol_spike and adx_14_1d_4h[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below S1 or volume drops below 1.2x average
-            vol_exit = vol_1d_aligned[i] < 1.2 * vol_ma_1d_12h[i]
-            if close[i] < s1_12h[i] or vol_exit:
+            # Long exit: price touches or goes below lower Donchian band
+            if close[i] < lower_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above R1 or volume drops below 1.2x average
-            vol_exit = vol_1d_aligned[i] < 1.2 * vol_ma_1d_12h[i]
-            if close[i] > r1_12h[i] or vol_exit:
+            # Short exit: price touches or goes above upper Donchian band
+            if close[i] > upper_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -165,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_CamarillaPivot_VolumeSpike_ADX14"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_ADX14"
+timeframe = "4h"
 leverage = 1.0
