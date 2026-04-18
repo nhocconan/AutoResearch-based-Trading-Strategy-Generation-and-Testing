@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,7 +20,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channels on daily
+    # Calculate 20-day Donchian channels
     upper_channel = np.full_like(close_1d, np.nan)
     lower_channel = np.full_like(close_1d, np.nan)
     
@@ -28,10 +28,10 @@ def generate_signals(prices):
         upper_channel[i] = np.max(high_1d[i-19:i+1])
         lower_channel[i] = np.min(low_1d[i-19:i+1])
     
-    # Calculate 20-day EMA for trend filter
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 34-day EMA for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 14-day RSI for momentum filter
+    # Calculate 14-day RSI
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -46,56 +46,56 @@ def generate_signals(prices):
         for i in range(20, len(volume_1d)):
             vol_ma[i] = np.mean(volume_1d[i-20:i])
     
-    # Align all daily data to 6h timeframe
-    upper_channel_6h = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_6h = align_htf_to_ltf(prices, df_1d, lower_channel)
-    ema_20_6h = align_htf_to_ltf(prices, df_1d, ema_20)
-    rsi_6h = align_htf_to_ltf(prices, df_1d, rsi)
-    vol_ma_6h = align_htf_to_ltf(prices, df_1d, vol_ma)
+    # Align all daily data to 4h timeframe
+    upper_channel_4h = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_channel_4h = align_htf_to_ltf(prices, df_1d, lower_channel)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
+    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi)
+    vol_ma_4h = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(19, 20) + 1
+    start_idx = max(19, 34) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_channel_6h[i]) or np.isnan(lower_channel_6h[i]) or 
-            np.isnan(ema_20_6h[i]) or np.isnan(rsi_6h[i]) or np.isnan(vol_ma_6h[i])):
+        if (np.isnan(upper_channel_4h[i]) or np.isnan(lower_channel_4h[i]) or 
+            np.isnan(ema_34_4h[i]) or np.isnan(rsi_4h[i]) or np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        vol_confirm = volume[i] > 1.5 * vol_ma_6h[i]
+        # Volume confirmation: current volume > 1.8x 20-day average
+        vol_confirm = volume[i] > 1.8 * vol_ma_4h[i]
         
-        # Trend filter: price above/below EMA
-        uptrend = close[i] > ema_20_6h[i]
-        downtrend = close[i] < ema_20_6h[i]
+        # Trend filter: price above/below EMA34
+        uptrend = close[i] > ema_34_4h[i]
+        downtrend = close[i] < ema_34_4h[i]
         
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_not_extreme = (rsi_6h[i] > 30) and (rsi_6h[i] < 70)
+        # RSI filter: avoid extremes
+        rsi_ok = (rsi_4h[i] >= 35) and (rsi_4h[i] <= 65)
         
         if position == 0:
-            # Long: price breaks above upper Donchian channel with uptrend, volume, and RSI not extreme
-            if close[i] > upper_channel_6h[i] and uptrend and vol_confirm and rsi_not_extreme:
+            # Long: break above upper channel with uptrend, volume, and RSI in range
+            if close[i] > upper_channel_4h[i] and uptrend and vol_confirm and rsi_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian channel with downtrend, volume, and RSI not extreme
-            elif close[i] < lower_channel_6h[i] and downtrend and vol_confirm and rsi_not_extreme:
+            # Short: break below lower channel with downtrend, volume, and RSI in range
+            elif close[i] < lower_channel_4h[i] and downtrend and vol_confirm and rsi_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below lower Donchian channel OR trend reverses OR RSI overbought
-            if (close[i] < lower_channel_6h[i]) or (not uptrend) or (rsi_6h[i] >= 70):
+            # Long exit: break below lower channel OR trend reversal OR RSI overbought
+            if (close[i] < lower_channel_4h[i]) or (not uptrend) or (rsi_4h[i] >= 70):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above upper Donchian channel OR trend reverses OR RSI oversold
-            if (close[i] > upper_channel_6h[i]) or (not downtrend) or (rsi_6h[i] <= 30):
+            # Short exit: break above upper channel OR trend reversal OR RSI oversold
+            if (close[i] > upper_channel_4h[i]) or (not downtrend) or (rsi_4h[i] <= 30):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dEMA20_RSI_VolumeFilter_v1"
-timeframe = "6h"
+name = "4h_Donchian20_EMA34_RSI_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
