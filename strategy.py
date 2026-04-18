@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_TrendBreakout_VolumeSpike_1dEMA34
-Hypothesis: Trade breakouts from 4h Donchian channels (20) with 1d EMA34 trend filter and volume spike confirmation. Works in bull markets by catching breakouts and in bear markets by filtering trades to only those aligned with higher timeframe trend (1d EMA34). Volume spike ensures institutional participation. Targets 20-40 trades/year via strict breakout + volume + trend confluence. Uses ATR-based stoploss via signal=0 when price closes against position by 2x ATR.
+4h_Donchian20_Breakout_1dTrendVolume
+Hypothesis: Trade 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation. 
+Long when price breaks above Donchian upper (20-period high) with 1d EMA34 rising and volume > 1.5x 24-period average.
+Short when price breaks below Donchian lower (20-period low) with 1d EMA34 falling and volume > 1.5x average.
+Exit when price crosses opposite Donchian band or trend reverses.
+Uses volatility-adjusted position sizing (0.25) to manage drawdown in volatile markets.
+Works in bull by capturing breakouts, in bear by shorting breakdowns with trend filter.
+Target: 20-40 trades/year via strict breakout + trend + volume confluence.
 """
 
 import numpy as np
@@ -28,40 +34,24 @@ def generate_signals(prices):
     if len(close_1d) >= ema_period:
         ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
         for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (1 - 2 / (ema_period + 1)))
+            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (ema_period - 1) / (ema_period + 1))
     
     # Align 1d EMA34 to 4h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 4h Donchian channel (20)
-    lookback = 20
-    upper = np.full_like(high, np.nan)
-    lower = np.full_like(low, np.nan)
+    # Donchian channels on 4h
+    donch_period = 20
+    donch_high = np.full_like(high, np.nan)
+    donch_low = np.full_like(low, np.nan)
     
-    for i in range(lookback-1, len(high)):
-        upper[i] = np.max(high[i-lookback+1:i+1])
-        lower[i] = np.min(low[i-lookback+1:i+1])
+    if len(high) >= donch_period:
+        for i in range(donch_period-1, len(high)):
+            donch_high[i] = np.max(high[i-donch_period+1:i+1])
+            donch_low[i] = np.min(low[i-donch_period+1:i+1])
     
-    # ATR for stoploss (20 period)
-    atr_period = 20
-    tr = np.zeros_like(high)
-    atr = np.full_like(high, np.nan)
-    
-    for i in range(len(high)):
-        if i == 0:
-            tr[i] = high[i] - low[i]
-        else:
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    if len(tr) >= atr_period:
-        atr[atr_period-1] = np.mean(tr[:atr_period])
-        for i in range(atr_period, len(tr)):
-            atr[i] = (tr[i] + (atr_period-1) * atr[i-1]) / atr_period
-    
-    # Volume spike: volume > 2x 20-period average
+    # Volume confirmation: volume > 1.5x 24-period average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
-    
+    vol_period = 24
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i-vol_period:i])
@@ -69,46 +59,51 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, vol_period, ema_period, atr_period) + 1
+    start_idx = max(donch_period, vol_period, ema_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema_1d_aligned[i-1])):
             signals[i] = 0.0
             continue
         
-        vol_spike = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # Trend direction from 1d EMA34 slope
+        ema_rising = ema_1d_aligned[i] > ema_1d_aligned[i-1]
+        ema_falling = ema_1d_aligned[i] < ema_1d_aligned[i-1]
         
         if position == 0:
-            # Long: price breaks above upper Donchian + above 1d EMA34 + volume spike
-            if close[i] > upper[i] and close[i] > ema_1d_aligned[i] and vol_spike:
+            # Long: break above Donchian high + rising trend + volume
+            if close[i] > donch_high[i] and ema_rising and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + below 1d EMA34 + volume spike
-            elif close[i] < lower[i] and close[i] < ema_1d_aligned[i] and vol_spike:
+            # Short: break below Donchian low + falling trend + volume
+            elif close[i] < donch_low[i] and ema_falling and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long: hold unless stoploss or reversal
-            if close[i] < ema_1d_aligned[i] or close[i] < (high[i-max(1, lookback//2)] - 2.0 * atr[i]):
+            # Long: maintain position
+            signals[i] = 0.25
+            # Exit: price crosses below Donchian low OR trend turns down
+            if close[i] < donch_low[i] or ema_falling:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
         
         elif position == -1:
-            # Short: hold unless stoploss or reversal
-            if close[i] > ema_1d_aligned[i] or close[i] > (low[i-max(1, lookback//2)] + 2.0 * atr[i]):
+            # Short: maintain position
+            signals[i] = -0.25
+            # Exit: price crosses above Donchian high OR trend turns up
+            if close[i] > donch_high[i] or ema_rising:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "4h_TrendBreakout_VolumeSpike_1dEMA34"
+name = "4h_Donchian20_Breakout_1dTrendVolume"
 timeframe = "4h"
 leverage = 1.0
