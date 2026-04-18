@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Pivot_R1_S1_Breakout_Volume"
-timeframe = "12h"
+name = "6h_WeeklyPivot_R4_S4_Breakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,26 +17,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot levels (R1/S1)
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous daily bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate weekly pivot and R4/S4 from previous weekly bar
+    prev_close_w = df_1w['close'].shift(1).values
+    prev_high_w = df_1w['high'].shift(1).values
+    prev_low_w = df_1w['low'].shift(1).values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    R1 = pivot + (range_hl * 1.1 / 12)
-    S1 = pivot - (range_hl * 1.1 / 12)
+    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3
+    range_w = prev_high_w - prev_low_w
+    R4_w = pivot_w + (range_w * 1.1 / 2) * 2  # R4 = pivot + 1.1*range
+    S4_w = pivot_w - (range_w * 1.1 / 2) * 2  # S4 = pivot - 1.1*range
     
-    # Align R1/S1 to 12h (wait for daily close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align weekly R4/S4 to 6h (wait for weekly close)
+    R4_w_aligned = align_htf_to_ltf(prices, df_1w, R4_w)
+    S4_w_aligned = align_htf_to_ltf(prices, df_1w, S4_w)
     
-    # Volume filter: current volume > 1.8 * 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (1.8 * vol_ma_30)
+    # Volume filter: current volume > 1.8 * 24-period average (4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.8 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -45,37 +45,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(R4_w_aligned[i]) or np.isnan(S4_w_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
+        R4_val = R4_w_aligned[i]
+        S4_val = S4_w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume
-            if close_val > R1_val and vol_filter:
+            # Long: break above R4 with volume
+            if close_val > R4_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume
-            elif close_val < S1_val and vol_filter:
+            # Short: break below S4 with volume
+            elif close_val < S4_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below S1
-            if close_val < S1_val:
+            # Long exit: price falls back below pivot
+            if close_val < pivot_w[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above R1
-            if close_val > R1_val:
+            # Short exit: price rises back above pivot
+            if close_val > pivot_w[i]:
                 signals[i] = 0.0
                 position = 0
             else:
