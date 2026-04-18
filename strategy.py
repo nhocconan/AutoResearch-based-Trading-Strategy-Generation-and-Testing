@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Bollinger_Squeeze_4hEMA34_Trend
-Hypothesis: Trade Bollinger Band squeezes on 1h with 4h EMA34 trend filter. Squeeze occurs when BB width < 50th percentile of last 200 periods. Enter long when price > upper band and 4h EMA34 trending up (current > previous), short when price < lower band and 4h EMA34 trending down. Target 20-40 trades/year via Bollinger squeeze rarity + trend alignment. Works in bull/bear by following 4h trend. Uses volume confirmation > 1.5x 24-period average to avoid false breakouts.
+4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume confirmation. Enter long when price breaks above R1 with volume > 1.5x 20-period average and 1d EMA34 trending up. Enter short when price breaks below S1 with volume confirmation and 1d EMA34 trending down. Exit when price reverses to opposite Camarilla level (S1 for long, R1 for short) or trend changes. Target 20-40 trades/year via Camarilla breakout rarity + trend alignment + volume filter. Works in bull/bear by following 1d trend. Uses volume confirmation to avoid false breakouts.
 """
 
 import numpy as np
@@ -18,51 +18,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA34 trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for EMA34 trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # 4h EMA(34)
-    close_4h = df_4h['close'].values
+    # 1d EMA(34)
+    close_1d = df_1d['close'].values
     ema_period = 34
-    ema_4h = np.full_like(close_4h, np.nan)
+    ema_1d = np.full_like(close_1d, np.nan)
     
-    if len(close_4h) >= ema_period:
-        ema_4h[ema_period - 1] = np.mean(close_4h[:ema_period])
-        for i in range(ema_period, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * 2 / (ema_period + 1)) + (ema_4h[i-1] * (ema_period - 1) / (ema_period + 1))
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (ema_period - 1) / (ema_period + 1))
     
-    # Align 4h EMA to 1h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = np.full_like(close, np.nan)
-    std_dev = np.full_like(close, np.nan)
-    upper_band = np.full_like(close, np.nan)
-    lower_band = np.full_like(close, np.nan)
-    bb_width = np.full_like(close, np.nan)
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R4 = close + 1.5*(high-low)*1.1/2, R3 = close + 1.1*(high-low), 
+    # R2 = close + high-low, R1 = close + 1.1*(high-low)/2, 
+    # S1 = close - 1.1*(high-low)/2, S2 = close - (high-low), 
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)*1.1/2
+    camarilla_R1 = np.full_like(close_1d, np.nan)
+    camarilla_S1 = np.full_like(close_1d, np.nan)
     
-    for i in range(bb_period, n):
-        sma[i] = np.mean(close[i - bb_period:i])
-        std_dev[i] = np.std(close[i - bb_period:i])
-        upper_band[i] = sma[i] + bb_std * std_dev[i]
-        lower_band[i] = sma[i] - bb_std * std_dev[i]
-        bb_width[i] = upper_band[i] - lower_band[i]
+    for i in range(1, len(close_1d)):
+        if not (np.isnan(high[i-1]) or np.isnan(low[i-1]) or np.isnan(close[i-1])):
+            rng = high[i-1] - low[i-1]
+            camarilla_R1[i] = close[i-1] + 1.1 * rng / 2
+            camarilla_S1[i] = close[i-1] - 1.1 * rng / 2
     
-    # Bollinger Band width percentile (50th percentile of last 200)
-    width_percentile = np.full_like(bb_width, np.nan)
-    lookback = 200
+    # Align Camarilla levels to 4h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    for i in range(lookback, n):
-        width_window = bb_width[i - lookback:i]
-        width_window = width_window[~np.isnan(width_window)]
-        if len(width_window) > 0:
-            width_percentile[i] = np.percentile(width_window, 50)
-    
-    # Volume confirmation: volume > 1.5x 24-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24
+    vol_period = 20
     
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
@@ -71,52 +63,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, vol_period, ema_period, lookback)
+    start_idx = max(ema_period, vol_period, 1)  # need at least 1 for Camarilla (uses previous bar)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(width_percentile[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or 
+            np.isnan(camarilla_S1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Bollinger squeeze condition: width < 50th percentile
-        squeeze = bb_width[i] < width_percentile[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price > upper band + squeeze + volume + 4h EMA trending up
-            if (close[i] > upper_band[i] and squeeze and vol_confirm and 
-                i > 0 and not np.isnan(ema_4h_aligned[i-1]) and ema_4h_aligned[i] > ema_4h_aligned[i-1]):
-                signals[i] = 0.20
+            # Long: price > R1 + volume + 1d EMA trending up
+            if (close[i] > camarilla_R1_aligned[i] and vol_confirm and 
+                i > 0 and not np.isnan(ema_1d_aligned[i-1]) and ema_1d_aligned[i] > ema_1d_aligned[i-1]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price < lower band + squeeze + volume + 4h EMA trending down
-            elif (close[i] < lower_band[i] and squeeze and vol_confirm and 
-                  i > 0 and not np.isnan(ema_4h_aligned[i-1]) and ema_4h_aligned[i] < ema_4h_aligned[i-1]):
-                signals[i] = -0.20
+            # Short: price < S1 + volume + 1d EMA trending down
+            elif (close[i] < camarilla_S1_aligned[i] and vol_confirm and 
+                  i > 0 and not np.isnan(ema_1d_aligned[i-1]) and ema_1d_aligned[i] < ema_1d_aligned[i-1]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < lower band or 4h EMA turns down
-            if close[i] < lower_band[i] or (i > 0 and not np.isnan(ema_4h_aligned[i-1]) and ema_4h_aligned[i] < ema_4h_aligned[i-1]):
-                signals[i] = -0.20  # reverse to short
+            # Long exit: price < S1 or 1d EMA turns down
+            if close[i] < camarilla_S1_aligned[i] or (i > 0 and not np.isnan(ema_1d_aligned[i-1]) and ema_1d_aligned[i] < ema_1d_aligned[i-1]):
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > upper band or 4h EMA turns up
-            if close[i] > upper_band[i] or (i > 0 and not np.isnan(ema_4h_aligned[i-1]) and ema_4h_aligned[i] > ema_4h_aligned[i-1]):
-                signals[i] = 0.20  # reverse to long
+            # Short exit: price > R1 or 1d EMA turns up
+            if close[i] > camarilla_R1_aligned[i] or (i > 0 and not np.isnan(ema_1d_aligned[i-1]) and ema_1d_aligned[i] > ema_1d_aligned[i-1]):
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Bollinger_Squeeze_4hEMA34_Trend"
-timeframe = "1h"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
