@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_VolumeBreakout_KAMA_Trend_v1
-Hypothesis: Volume breakouts above KAMA(14) trend with ATR filter capture momentum in both bull and bear markets.
-KAMA adapts to market noise, reducing false signals. Volume breakout confirms conviction. Designed for ~30 trades/year.
+1d_Weekly_Pivot_R1S1_Breakout_Trend_Filter_v1
+Hypothesis: Weekly pivot R1/S1 level breakouts with daily trend filter (EMA50) capture momentum in both bull and bear markets.
+Weekly pivots provide strong support/resistance. Daily EMA50 filters trend direction. Designed for low trade frequency (<10/year) to minimize fee drag on 1d timeframe.
 """
 
 import numpy as np
@@ -19,27 +19,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA(14) trend filter
-    close_s = pd.Series(close)
-    change = abs(close_s.diff(1))
-    volatility = change.rolling(window=14, min_periods=14).sum()
-    er = change.rolling(window=14, min_periods=14).sum() / volatility.replace(0, 1e-10)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = [close[0]]
-    for i in range(1, len(close)):
-        kama.append(kama[-1] + sc.iloc[i] * (close[i] - kama[-1]))
-    kama = np.array(kama)
+    # Get weekly data for pivot calculation (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high']
+    low_weekly = df_weekly['low']
+    close_weekly = df_weekly['close']
     
-    # ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = abs(high[1:] - close[:-1])
-    tr3 = abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate weekly pivot points and R1/S1 levels
+    pivot = (high_weekly + low_weekly + close_weekly) / 3
+    r1 = 2 * pivot - low_weekly
+    s1 = 2 * pivot - high_weekly
     
-    # Volume spike: volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Align weekly pivot levels to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    
+    # Daily EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -47,44 +43,43 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or 
-            np.isnan(atr[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        atr_val = atr[i]
-        vol_spike = volume_spike[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        ema_trend = ema_50[i]
         
         if position == 0:
-            # Long: price above KAMA with volume spike and volatility filter
-            if price > kama_val and vol_spike and atr_val > 0:
+            # Long: break above R1 with daily uptrend
+            if price > r1_level and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA with volume spike and volatility filter
-            elif price < kama_val and vol_spike and atr_val > 0:
+            # Short: break below S1 with daily downtrend
+            elif price < s1_level and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns to KAMA or volatility drops
-            if price < kama_val or atr_val < atr[i-1] * 0.5:
+            # Exit: price returns to S1 or breaks below daily EMA
+            if price < s1_level or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price returns to KAMA or volatility drops
-            if price > kama_val or atr_val < atr[i-1] * 0.5:
+            # Exit: price returns to R1 or breaks above daily EMA
+            if price > r1_level or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_VolumeBreakout_KAMA_Trend_v1"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_R1S1_Breakout_Trend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
