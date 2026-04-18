@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_TradingRangeBreakout_TrendFilter
-12h strategy using 1d trading range breakout with 1d trend filter.
-- Long: Price breaks above 1d high of previous 20 periods + 1d EMA50 > EMA200
-- Short: Price breaks below 1d low of previous 20 periods + 1d EMA50 < EMA200
-- Exit: Opposite breakout
-Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+4h_Camarilla_R1S1_Pullback_Volume
+4h strategy using daily Camarilla pivot R1/S1 levels with pullback to EMA34 and volume spike.
+- Long: Price touches or crosses above S1 + pullback to EMA34 (bullish) + volume > 1.5x average
+- Short: Price touches or crosses below R1 + pullback to EMA34 (bearish) + volume > 1.5x average
+- Exit: Opposite signal or close beyond R3/S3
+Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
+Works in both bull and bear markets via mean-reversion at key pivot levels with volume confirmation.
 """
 
 import numpy as np
@@ -15,76 +15,96 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for range and trend
+    # Get daily data for Camarilla pivots and EMA34
     df_1d = get_htf_data(prices, '1d')
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d 20-period high/low for breakout levels
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot points for daily timeframe
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    # R3 = C + (H - L) * 1.1 / 4
+    # S3 = C - (H - L) * 1.1 / 4
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12.0
+    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    r3_1d = close_1d + range_1d * 1.1 / 4.0
+    s3_1d = close_1d - range_1d * 1.1 / 4.0
     
-    # Align 1d breakout levels to 12h
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # Align daily levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # 1d EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate EMA34 on daily closes for pullback confirmation
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate volume average (20-period) for volume spike filter
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200
+    start_idx = 34  # need enough for EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Volume spike condition (current volume > 1.5x average)
+        volume_spike = volume[i] > 1.5 * vol_avg[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > high_20_aligned[i]
-        breakdown_down = close[i] < low_20_aligned[i]
+        # Price touch conditions at S1/R1 with small tolerance
+        touch_s1 = low[i] <= s1_aligned[i] * 1.001  # allow 0.1% overshoot
+        touch_r1 = high[i] >= r1_aligned[i] * 0.999  # allow 0.1% undershoot
+        
+        # Pullback to EMA34 conditions
+        pullback_bullish = close[i] > ema_34_aligned[i]  # price above EMA = bullish bias
+        pullback_bearish = close[i] < ema_34_aligned[i]  # price below EMA = bearish bias
+        
+        # Exit conditions: price beyond R3/S3
+        exit_long = high[i] >= r3_aligned[i] * 0.999
+        exit_short = low[i] <= s3_aligned[i] * 1.001
         
         if position == 0:
-            # Long: uptrend + breakout above 20-period high
-            if uptrend and breakout_up:
+            # Long: touch S1 + bullish pullback + volume spike
+            if touch_s1 and pullback_bullish and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + breakdown below 20-period low
-            elif downtrend and breakdown_down:
+            # Short: touch R1 + bearish pullback + volume spike
+            elif touch_r1 and pullback_bearish and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change or breakdown below 20-period low
-            if not uptrend or breakdown_down:
+            # Long exit: touch R1 (reverse) or exit beyond R3
+            if touch_r1 or exit_long:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change or breakout above 20-period high
-            if not downtrend or breakout_up:
+            # Short exit: touch S1 (reverse) or exit beyond S3
+            if touch_s1 or exit_short:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -92,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_TradingRangeBreakout_TrendFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Pullback_Volume"
+timeframe = "4h"
 leverage = 1.0
