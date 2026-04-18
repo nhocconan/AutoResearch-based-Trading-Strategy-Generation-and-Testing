@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,61 +13,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations
+    # Get 1d data for calculations (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR (14-period) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     # Calculate daily EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate daily volume spike (volume > 2.0x 20-period average)
+    # Calculate daily volume spike (volume > 2.5x 20-period average)
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
+    volume_spike_1d = volume_1d > (2.5 * vol_ma_1d)
     
     # Align indicators to 4h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Donchian channels (15-period for fewer trades)
+    donchian_high = pd.Series(high).rolling(window=15, min_periods=15).max().values
+    donchian_low = pd.Series(low).rolling(window=15, min_periods=15).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for enough data
+    start_idx = 50  # Wait for enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or
             np.isnan(donchian_high[i]) or
             np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above its 30-period average
-        if i >= 30:
-            atr_ma_1d = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
-            atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
-            vol_filter = atr_1d_aligned[i] > atr_ma_1d_aligned[i] if not np.isnan(atr_ma_1d_aligned[i]) else False
-        else:
-            vol_filter = False
-        
-        trade_allowed = volume_spike_1d_aligned[i] and vol_filter
+        trade_allowed = volume_spike_1d_aligned[i]
         
         if position == 0:
             # Long: Donchian breakout above upper band with EMA34 uptrend
@@ -97,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRFilter"
+name = "4h_Donchian15_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
