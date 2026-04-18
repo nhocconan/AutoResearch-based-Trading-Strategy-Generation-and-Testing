@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_ChopFilter
-1d strategy using KAMA direction, RSI extremes, and Chop index regime filter.
-- Long: KAMA trending up + RSI > 50 + Chop > 61.8 (range) → mean reversion long
-- Short: KAMA trending down + RSI < 50 + Chop > 61.8 (range) → mean reversion short
-- Exit: Opposite KAMA direction or Chop < 38.2 (trend)
-Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
-Works in range-bound markets (2022-2024, 2025+) with mean reversion
+12h_Combined_Signal_With_Volume_Confirmation
+Combines multiple entry signals (breakout, pullback, momentum) with volume confirmation and 1d trend filter.
+Designed for 12-30 trades per year per symbol (48-120 total over 4 years).
+Works in bull markets (breakout continuation) and bear markets (pullback/reversal entries).
 """
 
 import numpy as np
@@ -15,111 +12,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA and RSI
+    # Get weekly data for breakout levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
+    
+    # Get daily data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # KAMA (adaptive moving average)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
-    # Fix: calculate volatility properly
-    volatility = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        volatility[i] = volatility[i-1] + np.abs(close_1d[i] - close_1d[i-1])
-    er = np.where(volatility > 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    kama_1d = kama
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # RSI (14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Chop index (14)
-    atr_period = 14
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0], low[0], close[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
-    max_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
-    min_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
-    chop = np.where((max_high - min_low) > 0, 
-                    100 * np.log10(atr * atr_period / (max_high - min_low)) / np.log10(atr_period), 
-                    50)
-    
-    # Align daily indicators to higher timeframe (we're on 1d, so no alignment needed)
-    kama_1d_aligned = kama_1d
-    rsi_aligned = rsi
-    chop_aligned = chop
+    # Daily RSI(14) for pullback signals
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14.fillna(50).values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for indicators
+    start_idx = 50  # need enough for EMA200 and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(rsi_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA direction
-        kama_up = kama_1d_aligned[i] > kama_1d_aligned[i-1]
-        kama_down = kama_1d_aligned[i] < kama_1d_aligned[i-1]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
-        # RSI conditions
-        rsi_over_50 = rsi_aligned[i] > 50
-        rsi_under_50 = rsi_aligned[i] < 50
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Chop conditions (range-bound market)
-        chop_high = chop_aligned[i] > 61.8  # range
-        chop_low = chop_aligned[i] < 38.2   # trend
+        # Entry signals
+        breakout_up = close[i] > weekly_high_aligned[i]
+        breakdown_down = close[i] < weekly_low_aligned[i]
+        pullback_long = rsi_14_aligned[i] < 30 and close[i] > low[i]  # RSI oversold + price above low
+        pullback_short = rsi_14_aligned[i] > 70 and close[i] < high[i]  # RSI overbought + price below high
         
         if position == 0:
-            # Long: KAMA up + RSI > 50 + Chop > 61.8 (range)
-            if kama_up and rsi_over_50 and chop_high:
+            # Long: uptrend + volume + (breakout OR pullback)
+            if uptrend and vol_confirm and (breakout_up or pullback_long):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down + RSI < 50 + Chop > 61.8 (range)
-            elif kama_down and rsi_under_50 and chop_high:
+            # Short: downtrend + volume + (breakdown OR pullback)
+            elif downtrend and vol_confirm and (breakdown_down or pullback_short):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA down or Chop < 38.2 (trend)
-            if kama_down or chop_low:
+            # Long exit: trend change, RSI overbought, or breakdown
+            if not uptrend or rsi_14_aligned[i] > 70 or breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA up or Chop < 38.2 (trend)
-            if kama_up or chop_low:
+            # Short exit: trend change, RSI oversold, or breakout
+            if not downtrend or rsi_14_aligned[i] < 30 or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -127,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Direction_RSI_ChopFilter"
-timeframe = "1d"
+name = "12h_Combined_Signal_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
