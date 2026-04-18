@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R (14) with daily pivot point (PP) as dynamic support/resistance.
-# Williams %R identifies overbought/oversold conditions; pivot points provide institutional levels.
-# Long when %R < -80 (oversold) and price > PP; Short when %R > -20 (overbought) and price < PP.
-# Uses volume confirmation and session filter to reduce false signals.
-# Designed for low trade frequency (15-30/year) to minimize fee drag in 12h timeframe.
-# Works in both bull and bear markets by fading extremes at key institutional levels.
-name = "12h_WilliamsR_PivotPoint_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Donchian channel breakout with 1d RSI momentum filter and volume confirmation.
+# Donchian breakouts capture momentum in trending markets, while RSI filter avoids overextended moves.
+# Volume confirmation ensures breakouts have institutional participation.
+# Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
+# Works in bull markets (breakouts continue with trend) and bear markets (breakdowns continue with trend).
+name = "4h_Donchian20_1dRSI_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,22 +22,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot point calculation (ONCE before loop)
+    # Get daily data for RSI filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot point: PP = (H + L + C) / 3
-    # Use previous day's OHLC to avoid look-ahead
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    pivot_point = (prev_high + prev_low + prev_close) / 3
-    pivot_point_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    # Calculate 20-period Donchian channels from previous periods (no look-ahead)
+    # Upper = max(high over last 20 periods), Lower = min(low over last 20 periods)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate Williams %R (14) on 12h data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Calculate 14-period RSI on daily close
+    close_1d = pd.Series(df_1d['close'])
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_values = rsi_14.values
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,12 +52,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for Williams %R and volume MA calculation
+    start_idx = 20  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_point_aligned[i]) or
-            np.isnan(williams_r[i]) or
+        if (np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -70,26 +73,26 @@ def generate_signals(prices):
         vol_confirm = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) and price above pivot point
-            if vol_confirm and williams_r[i] < -80 and close[i] > pivot_point_aligned[i]:
+            # Long: price breaks above Donchian upper with RSI not overbought and volume
+            if vol_confirm and close[i] > donchian_upper[i] and rsi_14_values[i // 16] < 70:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) and price below pivot point
-            elif vol_confirm and williams_r[i] > -20 and close[i] < pivot_point_aligned[i]:
+            # Short: price breaks below Donchian lower with RSI not oversold and volume
+            elif vol_confirm and close[i] < donchian_lower[i] and rsi_14_values[i // 16] > 30:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R rises above -50 (momentum fading) or price below pivot
-            if williams_r[i] > -50 or close[i] < pivot_point_aligned[i]:
+            # Long exit: price breaks below Donchian lower (reversal signal)
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R falls below -50 (momentum fading) or price above pivot
-            if williams_r[i] < -50 or close[i] > pivot_point_aligned[i]:
+            # Short exit: price breaks above Donchian upper (reversal signal)
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
