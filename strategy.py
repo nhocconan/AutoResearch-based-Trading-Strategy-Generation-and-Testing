@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-1d KAMA + RSI + Chop Filter
-Hypothesis: Kaufman's Adaptive Moving Average (KAMA) adapts to market noise,
-reducing whipsaws in ranging markets. Combined with RSI extremes and Choppiness
-Index regime filter, this strategy captures strong trends while avoiding false
-signals in chop. Works in both bull (trend following) and bear (mean reversion
-in chop) markets by adapting to market conditions.
+1d Williams Alligator + Volume Spike + 1w Trend Filter
+Hypothesis: Williams Alligator identifies trend phases; aligned with 1w EMA55 trend and volume spikes
+to capture strong momentum moves. Works in bull/bear by following major trends with volume confirmation.
 """
 
 import numpy as np
@@ -14,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,106 +19,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
+    # Get 1w data for trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend filter
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 1w EMA55 for trend filter
+    ema55_1w = pd.Series(df_1w['close'].values).ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema55_1w_aligned = align_htf_to_ltf(prices, df_1w, ema55_1w)
     
-    # KAMA calculation (ER = 10, fast = 2, slow = 30)
-    change = np.abs(np.diff(close, k=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Handle first 10 elements
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start KAMA at index 9
-    for i in range(10, n):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Williams Alligator: SMA(13,8), SMA(8,5), SMA(5,3) on median price
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Handle first element
-    rsi = np.concatenate([np.array([np.nan]), rsi])
-    
-    # Choppiness Index (14-period)
-    atr1 = np.abs(high - low)
-    atr2 = np.abs(high - np.roll(close, 1))
-    atr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(atr1, np.maximum(atr2, atr3))
-    # First element
-    tr[0] = atr1[0]
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = np.where((highest_high - lowest_low) != 0,
-                    100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14),
-                    50)
+    # Volume spike: current volume > 2.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 60  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
+        if np.isnan(ema55_1w_aligned[i]) or np.isnan(vol_ma[i]) or \
+           np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
             signals[i] = 0.0
             continue
         
-        trend = ema34_1w_aligned[i]
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        chop_val = chop[i]
-        
-        # Market regime: chop > 61.8 = range (mean revert), chop < 38.2 = trending (trend follow)
-        is_ranging = chop_val > 61.8
-        is_trending = chop_val < 38.2
+        trend = ema55_1w_aligned[i]
+        vol_ok = vol_spike[i]
+        # Alligator alignment: lips > teeth > jaw (bullish) or lips < teeth < jaw (bearish)
+        bullish_align = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_align = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:
-            # Enter long in trending market: price > KAMA + RSI > 50
-            # Enter short in trending market: price < KAMA + RSI < 50
-            # In ranging market: mean reversion at RSI extremes
-            if is_trending:
-                if close[i] > kama_val and rsi_val > 50:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < kama_val and rsi_val < 50:
-                    signals[i] = -0.25
-                    position = -1
-            elif is_ranging:
-                # Mean reversion: buy oversold, sell overbought
-                if rsi_val < 30:
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi_val > 70:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long on bullish alignment + volume spike + above weekly trend
+            if bullish_align and vol_ok and close[i] > trend:
+                signals[i] = 0.25
+                position = 1
+            # Enter short on bearish alignment + volume spike + below weekly trend
+            elif bearish_align and vol_ok and close[i] < trend:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: trend change or RSI overbought in range
-            if (is_trending and close[i] < kama_val) or (is_ranging and rsi_val > 70):
+            # Exit long on bearish alignment or below weekly trend
+            if bearish_align or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend change or RSI oversold in range
-            if (is_trending and close[i] > kama_val) or (is_ranging and rsi_val < 30):
+            # Exit short on bullish alignment or above weekly trend
+            if bullish_align or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_Chop_Filter"
+name = "1d_Williams_Alligator_Volume_Spike_1wTrend"
 timeframe = "1d"
 leverage = 1.0
