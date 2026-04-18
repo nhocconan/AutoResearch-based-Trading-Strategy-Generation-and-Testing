@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-1d Bollinger Band Width Regime + RSI Mean Reversion with Volume Confirmation
-Trades Bollinger Band squeezes in low volatility regimes with RSI extremes.
-Designed for low trade frequency and works in both bull and bear markets.
+6h Time-Based Momentum with Volume Confirmation and 12h Trend Filter
+Enters long/short at specific UTC hours when momentum typically accelerates,
+filtered by 12h EMA trend and volume spikes. Designed to work in both bull
+and bear markets by capturing institutional session momentum.
 """
 
 import numpy as np
@@ -14,93 +15,66 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Calculate 12h EMA34 for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Bollinger Band Width (normalized)
-    bb_width = (upper_bb - lower_bb) / sma_20
+    # Volume spike detection (1.5x 24-period average - 6 days worth)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # RSI (14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align to 1d timeframe (no additional delay needed for BB width and RSI)
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
-    
-    # Volume spike (2x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Pre-compute hour filter (UTC 8-16 = London/NY overlap)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 16)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 40  # need enough history for calculations
+    start_idx = 50  # need enough history for EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(bb_width_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(sma_20_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        bb_width_val = bb_width_aligned[i]
-        rsi_val = rsi_aligned[i]
-        sma_val = sma_20_aligned[i]
-        
-        # Regime filter: low volatility (BB width < 20th percentile lookback)
-        if i >= 60:
-            bb_width_lookback = bb_width_aligned[max(0, i-60):i]
-            bb_width_percentile = np.percentile(bb_width_lookback, 20) if len(bb_width_lookback) > 0 else 0.1
-            low_vol_regime = bb_width_val < bb_width_percentile
-        else:
-            low_vol_regime = False
+        ema_trend = ema_34_12h_aligned[i]
         
         if position == 0:
-            # Long: RSI oversold (<30) + low volatility regime + price near lower BB + volume spike
-            if (rsi_val < 30 and 
-                low_vol_regime and 
-                price <= sma_val and 
+            # Long: in session, price above 12h EMA, volume spike
+            if (in_session[i] and 
+                price > ema_trend and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) + low volatility regime + price near upper BB + volume spike
-            elif (rsi_val > 70 and 
-                  low_vol_regime and 
-                  price >= sma_val and 
+            # Short: in session, price below 12h EMA, volume spike
+            elif (in_session[i] and 
+                  price < ema_trend and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI > 50 or price > upper BB
-            if rsi_val > 50 or price >= upper_bb[np.sum(df_1d['close'].values <= price) if len(df_1d['close'].values) > 0 else 0]:
+            # Long exit: price crosses below 12h EMA or outside session
+            if price < ema_trend or not in_session[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI < 50 or price < lower BB
-            if rsi_val < 50 or price <= lower_bb[np.sum(df_1d['close'].values <= price) if len(df_1d['close'].values) > 0 else 0]:
+            # Short exit: price crosses above 12h EMA or outside session
+            if price > ema_trend or not in_session[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_BBWidthRegime_RSI_MeanRev_Volume"
-timeframe = "1d"
+name = "6h_SessionMomentum_Volume_12hEMA"
+timeframe = "6h"
 leverage = 1.0
