@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot R1/S1 Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Camarilla pivot levels (R1/S1) act as key support/resistance. Breaking above R1 or below S1 with volume confirmation and 1d EMA trend filter captures institutional breakouts. Works in bull markets via upward breaks and in bear markets via downward breaks. Low trade frequency due to strict pivot-based entry.
+4h Ehlers Fisher Transform with 12h Trend Filter and Volume Confirmation
+Hypothesis: Ehlers Fisher Transform (EFT) detects extreme price reversals with minimal lag.
+In trending markets (12h EMA34), EFT crossovers signal continuation; in ranging markets,
+they signal reversals. Volume confirms breakout strength. Designed for low trade frequency
+(~25-40/year) to avoid fee drag while capturing major moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels: R1, S1 based on previous day's range"""
-    # Camarilla formula: R1 = close + (high - low) * 1.1/12
-    #                  S1 = close - (high - low) * 1.1/12
-    range_hl = high - low
-    R1 = close + range_hl * 1.1 / 12
-    S1 = close - range_hl * 1.1 / 12
-    return R1, S1
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,77 +21,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivots on 1d (based on previous day's high/low/close)
-    # We need to shift by 1 to use previous day's data for current day's levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    # 12h EMA34 for trend filter
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Calculate pivots using previous day's data
-    R1_1d, S1_1d = calculate_camarilla(high_1d[:-1], low_1d[:-1], close_1d[:-1])
-    # Prepend first value to maintain same length (no pivot for first day)
-    R1_1d = np.concatenate([[np.nan], R1_1d])
-    S1_1d = np.concatenate([[np.nan], S1_1d])
+    # Ehlers Fisher Transform (length=10)
+    # Price = (High + Low) / 2
+    hl2 = (high + low) / 2
+    # Normalize price to [-1, 1] using 10-period min/max
+    min_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    max_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    # Avoid division by zero
+    range_hl = max_high - min_low
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    # Normalized price: -1 to 1
+    price_norm = 2 * ((hl2 - min_low) / range_hl) - 1
+    # Clamp to avoid math domain errors
+    price_norm = np.clip(price_norm, -0.999, 0.999)
+    # Fisher Transform: 0.5 * ln((1 + x) / (1 - x))
+    fish = 0.5 * np.log((1 + price_norm) / (1 - price_norm))
+    # Smoothed Fisher (3-period EMA)
+    fish_smooth = pd.Series(fish).ewm(span=3, adjust=False, min_periods=3).mean().values
+    # Trigger line (1-period delay)
+    fish_trigger = np.roll(fish_smooth, 1)
+    fish_trigger[0] = 0  # No trigger for first bar
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d data to 12h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.8)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup for indicators
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(fish_smooth[i]) or np.isnan(fish_trigger[i]):
             signals[i] = 0.0
             continue
         
-        r1_level = R1_1d_aligned[i]
-        s1_level = S1_1d_aligned[i]
-        trend = ema34_1d_aligned[i]
+        trend = ema34_12h_aligned[i]
         vol_ok = vol_confirm[i]
+        fish_val = fish_smooth[i]
+        fish_trig = fish_trigger[i]
         
         if position == 0:
-            # Enter long: price breaks above R1 (resistance) with volume + uptrend
-            if (not np.isnan(r1_level) and 
-                vol_ok and 
-                close[i] > r1_level and 
-                close[i] > trend):
+            # Enter long: Fisher crosses above trigger with volume + uptrend
+            if fish_val > fish_trig and vol_ok and close[i] > trend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 (support) with volume + downtrend
-            elif (not np.isnan(s1_level) and 
-                  vol_ok and 
-                  close[i] < s1_level and 
-                  close[i] < trend):
+            # Enter short: Fisher crosses below trigger with volume + downtrend
+            elif fish_val < fish_trig and vol_ok and close[i] < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below R1 or trend turns down
-            if (not np.isnan(r1_level) and close[i] < r1_level) or close[i] < trend:
+            # Exit long: Fisher crosses below trigger or trend turns down
+            if fish_val < fish_trig or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above S1 or trend turns up
-            if (not np.isnan(s1_level) and close[i] > s1_level) or close[i] > trend:
+            # Exit short: Fisher crosses above trigger or trend turns up
+            if fish_val > fish_trig or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Ehlers_Fisher_Transform_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
