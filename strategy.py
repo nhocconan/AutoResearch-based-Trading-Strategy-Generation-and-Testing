@@ -1,26 +1,86 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + Volume Spike + ADX Trend Filter
-Hypothesis: Donchian breakouts capture strong trends in both bull and bear markets. Combined with volume spikes (institutional interest) and ADX > 20 (trending market), it filters out false breakouts. Weekly and daily timeframes provide higher timeframe trend confirmation. Low trade frequency (~15-30/year) minimizes fee drag.
+4h RSI Divergence + Volume Confirmation + ADX Trend Filter
+Hypothesis: RSI divergences (hidden and regular) at extremes with volume confirmation and ADX > 25 capture exhaustion moves in both bull and bear markets. Limited trades due to strict divergence and volume requirements.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_donchian_channels(high, low, window):
-    """Calculate Donchian Channels (upper, lower)"""
-    upper = np.full_like(high, np.nan)
-    lower = np.full_like(low, np.nan)
+def calculate_rsi(prices, period=14):
+    """Calculate Relative Strength Index"""
+    delta = np.diff(prices, prepend=prices[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    for i in range(window-1, len(high)):
-        upper[i] = np.max(high[i-window+1:i+1])
-        lower[i] = np.min(low[i-window+1:i+1])
+    avg_gain = np.zeros_like(prices)
+    avg_loss = np.zeros_like(prices)
     
-    return upper, lower
+    # Wilder's smoothing
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
+    
+    for i in range(period+1, len(prices)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-def calculate_adx(high, low, close, period):
-    """Calculate ADX with Wilder smoothing"""
+def find_divergences(price, rsi, lookback=5):
+    """Find bullish and bearish divergences"""
+    n = len(price)
+    bullish_div = np.zeros(n, dtype=bool)
+    bearish_div = np.zeros(n, dtype=bool)
+    
+    for i in range(lookback, n):
+        # Regular bullish divergence: price makes lower low, RSI makes higher low
+        if price[i] < price[i-lookback] and rsi[i] > rsi[i-lookback]:
+            # Check if it's a meaningful low
+            if price[i] == np.min(price[i-lookback:i+1]):
+                bullish_div[i] = True
+        
+        # Regular bearish divergence: price makes higher high, RSI makes lower high
+        if price[i] > price[i-lookback] and rsi[i] < rsi[i-lookback]:
+            # Check if it's a meaningful high
+            if price[i] == np.max(price[i-lookback:i+1]):
+                bearish_div[i] = True
+    
+    return bullish_div, bearish_div
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate RSI on 4h
+    rsi = calculate_rsi(close, 14)
+    
+    # Find divergences
+    bullish_div, bearish_div = find_divergences(close, rsi, lookback=10)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1])
+        else:
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_conf = volume > (vol_ma * 1.5)
+    
+    # ADX for trend strength (avoid choppy markets)
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -38,117 +98,63 @@ def calculate_adx(high, low, close, period):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Wilder smoothing (equivalent to EMA with alpha=1/period)
-    def WilderSmoothing(data, period):
-        result = np.full_like(data, np.nan)
+    # Smoothed values with Wilder smoothing
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
         if len(data) < period:
             return result
-        # First value is simple average
+        # Initial value
         result[period-1] = np.mean(data[:period])
-        # Subsequent values use Wilder smoothing
+        # Wilder smoothing
         for i in range(period, len(data)):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr = WilderSmoothing(tr, period)
-    plus_di = 100 * WilderSmoothing(plus_dm, period) / np.where(atr != 0, atr, 1)
-    minus_di = 100 * WilderSmoothing(minus_dm, period) / np.where(atr != 0, atr, 1)
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / np.where(atr != 0, atr, 1)
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / np.where(atr != 0, atr, 1)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = WilderSmoothing(dx, period)
-    
-    return adx
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Get weekly data for trend filter (higher timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate daily Donchian channels (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donch_upper, donch_lower = calculate_donchian_channels(high_1d, low_1d, 20)
-    donch_upper_aligned = align_htf_to_ltf(prices, df_1d, donch_upper)
-    donch_lower_aligned = align_htf_to_ltf(prices, df_1d, donch_lower)
-    
-    # Calculate ADX on 12h data
-    adx_12h = calculate_adx(high, low, close, 14)
-    
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
-        else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 2.0)
+    adx = wilders_smooth(dx, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(donch_upper_aligned[i]) or 
-            np.isnan(donch_lower_aligned[i]) or 
-            np.isnan(adx_12h[i])):
+        if np.isnan(rsi[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        ema_50_val = ema_50_1w_aligned[i]
-        donch_upper_val = donch_upper_aligned[i]
-        donch_lower_val = donch_lower_aligned[i]
-        adx_val = adx_12h[i]
-        vol_ok = vol_spike[i]
-        
         if position == 0:
-            # Enter long: price breaks above upper Donchian + weekly uptrend + ADX > 20 + volume spike
-            if (close[i] > donch_upper_val and 
-                close[i] > ema_50_val and 
-                adx_val > 20 and 
-                vol_ok):
+            # Enter long: bullish divergence + ADX > 20 + volume confirmation
+            if (bullish_div[i] and 
+                adx[i] > 20 and 
+                vol_conf[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Donchian + weekly downtrend + ADX > 20 + volume spike
-            elif (close[i] < donch_lower_val and 
-                  close[i] < ema_50_val and 
-                  adx_val > 20 and 
-                  vol_ok):
+            # Enter short: bearish divergence + ADX > 20 + volume confirmation
+            elif (bearish_div[i] and 
+                  adx[i] > 20 and 
+                  vol_conf[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below lower Donchian or weekly trend turns down
-            if close[i] < donch_lower_val or close[i] < ema_50_val:
+            # Exit long: bearish divergence or RSI overbought (>70) or ADX weakens
+            if (bearish_div[i] or 
+                rsi[i] > 70 or 
+                adx[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above upper Donchian or weekly trend turns up
-            if close[i] > donch_upper_val or close[i] > ema_50_val:
+            # Exit short: bullish divergence or RSI oversold (<30) or ADX weakens
+            if (bullish_div[i] or 
+                rsi[i] < 30 or 
+                adx[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -156,6 +162,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_VolumeSpike_ADXFilter"
-timeframe = "12h"
+name = "4h_RSI_Divergence_Volume_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
