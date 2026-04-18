@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_Camarilla_Pivot_R1S1_Breakout
-Hypothesis: Uses 4-hour and daily Camarilla pivot levels (R1/S1) for directional bias and 1-hour for precise entry timing.
-Trades breakouts of key support/resistance with volume confirmation to reduce false signals.
-Designed to work in both bull and bear markets by capturing directional moves after consolidation.
-Target: 15-35 trades/year to minimize fee drag while maintaining edge.
+1h_4h1d_Volume_Momentum_Regime_Filter
+Hypothesis: Uses 4h momentum (close > SMA50) for directional bias, 1h volume surge (volume > 2x 20-period average) for entry timing, and daily volatility regime (ATR < 20-period ATR mean) to avoid choppy markets. Designed to capture momentum bursts in both bull and bear markets while filtering false signals. Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,80 +22,79 @@ def generate_signals(prices):
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h Camarilla levels (for trend bias)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 4h SMA50 for trend bias
     close_4h = df_4h['close'].values
+    sma50_4h = np.full(len(close_4h), np.nan)
+    for i in range(50, len(close_4h)):
+        sma50_4h[i] = np.mean(close_4h[i-50:i])
+    sma50_4h_aligned = align_htf_to_ltf(prices, df_4h, sma50_4h)
     
-    rng_4h = high_4h - low_4h
-    r1_4h = close_4h + rng_4h * 1.1 / 12
-    s1_4h = close_4h - rng_4h * 1.1 / 12
-    
-    # Calculate daily Camarilla levels (for stronger support/resistance)
+    # Calculate daily ATR for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])
+    atr_1d = np.full(len(tr1), np.nan)
+    for i in range(20, len(tr1)):
+        atr_1d[i] = np.mean(tr1[i-20:i])
+    atr_mean_1d = np.full(len(atr_1d), np.nan)
+    for i in range(20, len(atr_1d)):
+        atr_mean_1d[i] = np.mean(atr_1d[i-20:i])
+    low_vol_regime = atr_1d < atr_mean_1d  # True when volatility is below average
+    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime.astype(float))
     
-    rng_1d = high_1d - low_1d
-    r1_1d = close_1d + rng_1d * 1.1 / 12
-    s1_1d = close_1d - rng_1d * 1.1 / 12
-    
-    # Align all levels to 1h timeframe (wait for bar close)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # 1h volume confirmation: current volume > 2x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 2.0)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+        if (np.isnan(sma50_4h_aligned[i]) or np.isnan(low_vol_regime_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Long entry: price breaks above both 4h R1 and daily R1 with volume
-            if (close[i] > r1_4h_aligned[i] and close[i] > r1_1d_aligned[i] and 
-                vol_confirm[i]):
+            # Long entry: price above 4h SMA50, volume surge, low volatility regime
+            if (close[i] > sma50_4h_aligned[i] and vol_confirm[i] and 
+                low_vol_regime_aligned[i] > 0.5):
                 signals[i] = 0.20
                 position = 1
-            # Short entry: price breaks below both 4h S1 and daily S1 with volume
-            elif (close[i] < s1_4h_aligned[i] and close[i] < s1_1d_aligned[i] and 
-                  vol_confirm[i]):
+            # Short entry: price below 4h SMA50, volume surge, low volatility regime
+            elif (close[i] < sma50_4h_aligned[i] and vol_confirm[i] and 
+                  low_vol_regime_aligned[i] > 0.5):
                 signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns to 4h pivot or breaks below 4h S1
-            pivot_4h = (high_4h + low_4h + close_4h) / 3
-            pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-            if (not np.isnan(pivot_4h_aligned[i]) and close[i] < pivot_4h_aligned[i]) or \
-               (not np.isnan(s1_4h_aligned[i]) and close[i] < s1_4h_aligned[i]):
+            # Long exit: price crosses below 4h SMA50 or volatility increases
+            if (close[i] < sma50_4h_aligned[i] or low_vol_regime_aligned[i] <= 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price returns to 4h pivot or breaks above 4h R1
-            pivot_4h = (high_4h + low_4h + close_4h) / 3
-            pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-            if (not np.isnan(pivot_4h_aligned[i]) and close[i] > pivot_4h_aligned[i]) or \
-               (not np.isnan(r1_4h_aligned[i]) and close[i] > r1_4h_aligned[i]):
+            # Short exit: price crosses above 4h SMA50 or volatility increases
+            if (close[i] > sma50_4h_aligned[i] or low_vol_regime_aligned[i] <= 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h1d_Camarilla_Pivot_R1S1_Breakout"
+name = "1h_4h1d_Volume_Momentum_Regime_Filter"
 timeframe = "1h"
 leverage = 1.0
