@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_VolumeBreakout
-6h strategy using weekly pivot levels with volume confirmation and daily trend filter.
-- Long: Close breaks above weekly R3 + volume > 1.5x daily avg + daily EMA50 > EMA200
-- Short: Close breaks below weekly S3 + volume > 1.5x daily avg + daily EMA50 < EMA200
-- Exit: Opposite breakout or trend reversal
-Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+12h_Camarilla_Pivot_R1S1_Volume_Spike
+12h strategy using daily Camarilla pivot levels R1/S1 with volume spike confirmation.
+- Long: Close crosses above R1 + volume > 2.0x daily volume MA(30) + price above daily VWAP
+- Short: Close crosses below S1 + volume > 2.0x daily volume MA(30) + price below daily VWAP
+- Exit: Opposite cross of R1/S1 or VWAP cross in opposite direction
+Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (mean reversion at extremes)
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,88 +23,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points (standard formula)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
-    
-    # Align weekly pivot levels to 6h
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    
-    # Get daily data for trend filter and volume average
+    # Get daily data for Camarilla pivots and VWAP
     df_1d = get_htf_data(prices, '1d')
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Camarilla pivot levels for each day
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R1 = Pivot + (Range * 1.1 / 12)
+    # S1 = Pivot - (Range * 1.1 / 12)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = pivot_1d + (range_1d * 1.1 / 12.0)
+    s1_1d = pivot_1d - (range_1d * 1.1 / 12.0)
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align Camarilla levels to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Daily VWAP approximation using close (simplified)
+    vwap_1d = (high_1d + low_1d + close_1d) / 3.0  # typical price as VWAP proxy
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Daily volume moving average (30-period)
+    vol_ma_30 = pd.Series(volume_1d).rolling(window=30, min_periods=30).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need enough for EMA200
+    start_idx = 30  # need enough for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vwap_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Volume confirmation: volume spike > 2.0x average
+        vol_spike = volume[i] > 2.0 * vol_ma_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        # Price relative to VWAP
+        price_above_vwap = close[i] > vwap_aligned[i]
+        price_below_vwap = close[i] < vwap_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > r3_1w_aligned[i]
-        breakdown_down = close[i] < s3_1w_aligned[i]
+        # Camarilla level crosses
+        cross_above_r1 = close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]
+        cross_below_s1 = close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above weekly R3
-            if uptrend and vol_confirm and breakout_up:
+            # Long: cross above R1 + volume spike + price above VWAP
+            if cross_above_r1 and vol_spike and price_above_vwap:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below weekly S3
-            elif downtrend and vol_confirm and breakdown_down:
+            # Short: cross below S1 + volume spike + price below VWAP
+            elif cross_below_s1 and vol_spike and price_below_vwap:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below weekly S3
-            if not uptrend or (vol_confirm and breakdown_down):
+            # Long exit: cross below S1 or price below VWAP
+            if cross_below_s1 or price_below_vwap:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above weekly R3
-            if not downtrend or (vol_confirm and breakout_up):
+            # Short exit: cross above R1 or price above VWAP
+            if cross_above_r1 or price_above_vwap:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -112,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_VolumeBreakout"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_R1S1_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
