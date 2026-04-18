@@ -1,91 +1,89 @@
 #!/usr/bin/env python3
 """
-12h_Williams_Fractal_Breakout_With_Volume_Confirmation
-Hypothesis: Williams Fractal breakouts on 12h chart with volume confirmation and 1d trend filter.
-In bull markets, buy bullish fractal breaks; in bear markets, sell bearish fractal breaks.
-Uses 1d EMA for trend filter to avoid counter-trend trades. Designed for low trade frequency
-(12-37/year) to avoid fee drag while capturing significant momentum moves.
+1d_WeeklyHighLow_Breakout_With_Volume_Filter
+Hypothesis: Breakouts above weekly high or below weekly low on daily chart, 
+filtered by volume spike and weekly trend. Works in bull markets (buy weekly high breaks) 
+and bear markets (sell weekly low breaks). Low trade frequency (~10-25/year) to minimize 
+fee drag while capturing significant momentum moves.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Fractals and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for high/low levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Williams Fractals (requires 2-bar confirmation)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
-    # Add 2 extra bars for confirmation as fractals need 2 future bars to confirm
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Weekly high and low levels
+    weekly_high = high_1w
+    weekly_low = low_1w
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume spike: >1.8x 20-period average
+    # Volume spike: >2.0x 20-period average on daily
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(40, 34*2, 20)  # Warmup for fractals, EMA, volume
+    start_idx = max(34, 20)  # Warmup for EMA and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or
+        if (np.isnan(weekly_high[i]) or 
+            np.isnan(weekly_low[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        bear_fract = bearish_fractal_aligned[i]
-        bull_fract = bullish_fractal_aligned[i]
-        ema34 = ema_34_aligned[i]
+        wh = weekly_high[i]
+        wl = weekly_low[i]
+        ema34 = ema_34_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: bullish fractal break with volume spike and uptrend (price > EMA34)
-            if price > bull_fract and vol_spike and price > ema34:
+            # Long: break above weekly high with volume spike and weekly uptrend
+            if price > wh and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish fractal break with volume spike and downtrend (price < EMA34)
-            elif price < bear_fract and vol_spike and price < ema34:
+            # Short: break below weekly low with volume spike and weekly downtrend
+            elif price < wl and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < bullish fractal level OR trend turns down
-            if price < bull_fract or price < ema34:
+            # Exit: price drops back below weekly high OR weekly trend turns down
+            if price < wh or price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > bearish fractal level OR trend turns up
-            if price > bear_fract or price > ema34:
+            # Exit: price rises back above weekly low OR weekly trend turns up
+            if price > wl or price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Williams_Fractal_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "1d_WeeklyHighLow_Breakout_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
