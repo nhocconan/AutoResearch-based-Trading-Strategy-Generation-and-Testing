@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_ThreeDay_Low_High_Breakout_Volume_Trend
-Hypothesis: Breakouts above the 3-day high or below the 3-day low on daily timeframe with volume confirmation and weekly trend filter capture momentum moves. Works in bull markets via upward breakouts and bear markets via downward breakdowns. Weekly trend filter ensures alignment with higher timeframe momentum to reduce whipsaws. Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
+4h_KAMA_Direction_Volume_Trend_Filter
+Hypothesis: Price follows KAMA (adaptive trend) direction with volume confirmation and EMA trend filter.
+Uses KAMA to capture trend direction in both bull and bear markets, with volume surge to confirm momentum.
+Designed to avoid whipsaws by requiring strong volume on trend entries. Target: 20-25 trades/year (80-100 total over 4 years).
 """
 
 import numpy as np
@@ -13,67 +15,86 @@ def generate_signals(prices):
     if n < 30:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 3-day high and low for breakout levels
-    high_3d = pd.Series(high).rolling(window=3, min_periods=3).max().values
-    low_3d = pd.Series(low).rolling(window=3, min_periods=3).min().values
+    # KAMA (Adaptive Moving Average) - more responsive in trends, stable in ranges
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(close - np.roll(close, 10))
+    change[0:10] = 0
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # temporary fix, will replace below
     
-    # Volume filter: >1.5x 10-day average
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Proper volatility calculation for ER
+    volatility = np.zeros_like(close)
+    for i in range(1, len(close)):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    volatility = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
+    
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # EMA20 trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume filter: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
-    
-    # Weekly trend filter: EMA21 on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 10  # Warmup for volume MA and 3-day high/low
+    start_idx = 20  # Warmup for EMA20 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(high_3d[i]) or np.isnan(low_3d[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_21_1w_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_20[i]) or 
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        high_level = high_3d[i]
-        low_level = low_3d[i]
+        kama_val = kama[i]
+        ema20 = ema_20[i]
         vol_ok = volume_filter[i]
-        weekly_trend = ema_21_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above 3-day high with volume in bullish weekly trend
-            if price > high_level and vol_ok and price > weekly_trend:
+            # Long: price above both KAMA and EMA20 with volume confirmation
+            if price > kama_val and price > ema20 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 3-day low with volume in bearish weekly trend
-            elif price < low_level and vol_ok and price < weekly_trend:
+            # Short: price below both KAMA and EMA20 with volume confirmation
+            elif price < kama_val and price < ema20 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns to 3-day low or weekly trend turns bearish
-            if price < low_3d[i] or price < weekly_trend:
+            # Exit: price crosses below KAMA or EMA20
+            if price < kama_val or price < ema20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price returns to 3-day high or weekly trend turns bullish
-            if price > high_3d[i] or price > weekly_trend:
+            # Exit: price crosses above KAMA or EMA20
+            if price > kama_val or price > ema20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_ThreeDay_Low_High_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "4h_KAMA_Direction_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
