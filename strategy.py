@@ -1,34 +1,41 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h ADX trend filter.
-- Long: price breaks above Donchian upper band, ADX > 25 (trending), volume > 1.5x average
-- Short: price breaks below Donchian lower band, ADX > 25, volume > 1.5x average
-- Exit: opposite Donchian band touch or ADX < 20 (trend weakening)
-- Uses 4h Donchian bands for structure, avoiding whipsaws in ranging markets.
-Designed for 15-40 trades/year (60-160 total) to minimize fee drift.
+Hypothesis: 1h momentum with 4h ADX trend filter and volume spike.
+- Long: 1h RSI > 55, 4h ADX > 25, volume > 2x 20-period average
+- Short: 1h RSI < 45, 4h ADX > 25, volume > 2x 20-period average
+- Exit: RSI crosses 50 (mean reversion) or ADX < 20
+- Uses 4h ADX for trend strength, avoiding choppy markets.
+- Volume spike filters for institutional participation.
+Designed for 15-37 trades/year (60-150 total) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range."""
-    if len(high) < period:
-        return np.full(len(high), np.nan)
+def calculate_rsi(close, period):
+    """Calculate Relative Strength Index."""
+    if len(close) < period + 1:
+        return np.full(len(close), np.nan)
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    atr = np.full(len(tr), np.nan)
-    atr[period] = np.nanmean(tr[1:period+1])
+    avg_gain = np.full(len(close), np.nan)
+    avg_loss = np.full(len(close), np.nan)
     
-    for i in range(period + 1, len(tr)):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    if len(close) >= period + 1:
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        for i in range(period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
     
-    return atr
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_adx(high, low, close, period):
     """Calculate Average Directional Index."""
@@ -97,27 +104,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian bands and ADX
+    # Get 4h data for ADX
     df_4h = get_htf_data(prices, '4h')
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    donchian_high = np.full(len(high_4h), np.nan)
-    donchian_low = np.full(len(low_4h), np.nan)
-    
-    for i in range(19, len(high_4h)):  # 20-period lookback
-        donchian_high[i] = np.max(high_4h[i-19:i+1])
-        donchian_low[i] = np.min(low_4h[i-19:i+1])
-    
-    # Calculate ADX (14-period) on 4h
+    # Calculate 4h ADX (14-period)
     adx_14_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
+    adx_14_4h_1h = align_htf_to_ltf(prices, df_4h, adx_14_4h)
     
-    # Align to 4h timeframe (no shift needed as we're already on 4h)
-    donchian_high_4h = donchian_high
-    donchian_low_4h = donchian_low
-    adx_14_4h_aligned = adx_14_4h
+    # Calculate 1h RSI (14-period)
+    rsi_14 = calculate_rsi(close, 14)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -127,46 +125,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # need Donchian, ADX, and volume MA
+    start_idx = 35  # need RSI, ADX, and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or 
-            np.isnan(adx_14_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_14[i]) or np.isnan(adx_14_4h_1h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 2x 20-period average
+        vol_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high, ADX > 25, volume confirmation
-            if close[i] > donchian_high_4h[i] and adx_14_4h_aligned[i] > 25 and vol_confirmed:
-                signals[i] = 0.25
+            # Long: RSI > 55, ADX > 25, volume spike
+            if rsi_14[i] > 55 and adx_14_4h_1h[i] > 25 and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian low, ADX > 25, volume confirmation
-            elif close[i] < donchian_low_4h[i] and adx_14_4h_aligned[i] > 25 and vol_confirmed:
-                signals[i] = -0.25
+            # Short: RSI < 45, ADX > 25, volume spike
+            elif rsi_14[i] < 45 and adx_14_4h_1h[i] > 25 and vol_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches Donchian low or ADX < 20 (trend weakening)
-            if close[i] <= donchian_low_4h[i] or adx_14_4h_aligned[i] < 20:
+            # Long exit: RSI < 50 or ADX < 20
+            if rsi_14[i] < 50 or adx_14_4h_1h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price touches Donchian high or ADX < 20 (trend weakening)
-            if close[i] >= donchian_high_4h[i] or adx_14_4h_aligned[i] < 20:
+            # Short exit: RSI > 50 or ADX < 20
+            if rsi_14[i] > 50 or adx_14_4h_1h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_ADX14_Volume"
-timeframe = "4h"
+name = "1h_RSI14_ADX14_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
