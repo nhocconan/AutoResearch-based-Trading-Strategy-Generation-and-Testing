@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_WeeklyTrend_VolumeSpike
-Hypothesis: Daily Donchian(20) breakouts with weekly EMA(55) trend filter and volume spikes capture strong trends while avoiding chop. Weekly trend filter reduces false signals in ranging markets. Volume confirmation ensures institutional participation. Designed for low trade frequency (<25/year) to minimize fee drag and work in both bull and bear regimes.
+6h_Ichimoku_Kumo_Twist_TK_Cross
+Hypothesis: Ichimoku Kijun/Tenkan cross with cloud twist (Senkou A/B cross) on daily timeframe acts as a robust trend change signal. Enter on 6h Tenkan/Kijun cross when price is above/below daily cloud and cloud is bullish/bearish. Works in bull via trend continuation and bear via counter-trend reversals at cloud twists.
 """
 
 import numpy as np
@@ -10,77 +10,102 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Ichimoku (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA(55) for trend filter
-    ema_55_1w = pd.Series(df_1w['close']).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema_55_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_55_1w)
+    # Ichimoku components (9, 26, 52 periods)
+    def ichimoku_components(high, low, close):
+        # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+        period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+        period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+        tenkan = (period9_high + period9_low) / 2
+        
+        # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+        period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+        period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+        kijun = (period26_high + period26_low) / 2
+        
+        # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
+        senkou_a = ((tenkan + kijun) / 2)
+        
+        # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods
+        period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+        period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+        senkou_b = ((period52_high + period52_low) / 2)
+        
+        # Chikou Span (Lagging Span): close shifted -22 periods (not used for signals)
+        
+        return tenkan, kijun, senkou_a, senkou_b
     
-    # Calculate Donchian channels (20-period) on daily data
-    # Use rolling window on daily high/low
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = ichimoku_components(high_1d, low_1d, close_1d)
     
-    # Volume spike: 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    
+    # Calculate Ichimoku on 6h for entry signals
+    tenkan_6h, kijun_6h, _, _ = ichimoku_components(high, low, close)
+    
+    # Cloud twist detection: Senkou A/B cross (trend change signal)
+    # Bullish twist: Senkou A crosses above Senkou B
+    # Bearish twist: Senkou A crosses below Senkou B
+    senkou_a_prev = np.roll(senkou_a_1d_aligned, 1)
+    senkou_b_prev = np.roll(senkou_b_1d_aligned, 1)
+    senkou_a_prev[0] = np.nan
+    senkou_b_prev[0] = np.nan
+    
+    bullish_twist = (senkou_a_1d_aligned > senkou_b_1d_aligned) & (senkou_a_prev <= senkou_b_prev)
+    bearish_twist = (senkou_a_1d_aligned < senkou_b_1d_aligned) & (senkou_a_prev >= senkou_b_prev)
+    
+    # Tenkan/Kijun cross signals
+    tenkan_6h_prev = np.roll(tenkan_6h, 1)
+    kijun_6h_prev = np.roll(kijun_6h, 1)
+    tenkan_6h_prev[0] = np.nan
+    kijun_6h_prev[0] = np.nan
+    
+    tk_bullish_cross = (tenkan_6h > kijun_6h) & (tenkan_6h_prev <= kijun_6h_prev)
+    tk_bearish_cross = (tenkan_6h < kijun_6h) & (tenkan_6h_prev >= kijun_6h_prev)
+    
+    # Price position relative to cloud
+    price_above_cloud = close > np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    price_below_cloud = close < np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
     
     signals = np.zeros(n)
-    position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # enough for Donchian(20) and weekly EMA(55)
+    # Start after warmup period for Ichimoku calculations
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(ema_55_1w_aligned[i]) or
-            np.isnan(vol_ma[i])):
-            signals[i] = 0.0
+        # Skip if any values are NaN
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
+            np.isnan(bullish_twist[i]) or np.isnan(bearish_twist[i])):
             continue
-        
-        price = close[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        weekly_trend = ema_55_1w_aligned[i]
-        vol_spike = volume_spike[i]
-        
-        if position == 0:
-            # Long: break above upper Donchian with volume spike and price above weekly EMA
-            if price > upper and vol_spike and price > weekly_trend:
-                signals[i] = 0.25
-                position = 1
-            # Short: break below lower Donchian with volume spike and price below weekly EMA
-            elif price < lower and vol_spike and price < weekly_trend:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Stay long until price breaks below lower Donchian or weekly trend fails
-            if price < lower or price < weekly_trend:
-                signals[i] = 0.0
-                position = 0
-            else:
+            
+        # Bullish setup: price above cloud AND bullish cloud twist OR TK bullish cross in bullish regime
+        if price_above_cloud[i]:
+            if bullish_twist[i] or tk_bullish_cross[i]:
                 signals[i] = 0.25
         
-        elif position == -1:
-            # Stay short until price breaks above upper Donchian or weekly trend fails
-            if price > upper or price > weekly_trend:
-                signals[i] = 0.0
-                position = 0
-            else:
+        # Bearish setup: price below cloud AND bearish cloud twist OR TK bearish cross in bearish regime
+        elif price_below_cloud[i]:
+            if bearish_twist[i] or tk_bearish_cross[i]:
                 signals[i] = -0.25
     
     return signals
 
-name = "1d_Donchian20_WeeklyTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_TK_Cross"
+timeframe = "6h"
 leverage = 1.0
