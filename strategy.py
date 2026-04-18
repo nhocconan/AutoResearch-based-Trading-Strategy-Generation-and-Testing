@@ -1,124 +1,102 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Price relative to 1d EMA(34) with volume confirmation and 1w RSI(14) regime filter.
-- Bull: price > EMA(34) = dynamic support, buy on dips with volume
-- Bear: price < EMA(34) = dynamic resistance, sell on rallies with volume
-- Weekly RSI avoids extremes: long when RSI(1w)<60, short when RSI(1w)>40
-Designed for 12-37 trades/year (50-150 total) to minimize fee drag.
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA(34) trend filter.
+- Long: Close > Donchian Upper(20) + Volume > 1.5x 20-period average + Close > 12h EMA(34)
+- Short: Close < Donchian Lower(20) + Volume > 1.5x 20-period average + Close < 12h EMA(34)
+- Exit: Opposite Donchian break (Lower for long exit, Upper for short exit)
+- Uses 12h EMA(34) as trend filter to avoid counter-trend trades.
+Designed for 20-50 trades/year on 4h to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian Channels: upper = max(high, period), lower = min(low, period)."""
+    upper = np.full(len(high), np.nan)
+    lower = np.full(len(low), np.nan)
+    
+    for i in range(period - 1, len(high)):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average."""
     ema = np.full(len(close), np.nan)
     if len(close) < period:
         return ema
-    ema[period-1] = np.mean(close[:period])
+    ema[period - 1] = np.mean(close[:period])
     for i in range(period, len(close)):
-        ema[i] = (close[i] * 2 / (period + 1)) + ema[i-1] * (1 - 2 / (period + 1))
+        ema[i] = (close[i] * 2 / (period + 1)) + ema[i - 1] * (1 - 2 / (period + 1))
     return ema
-
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    if len(close) < period + 1:
-        return np.full(len(close), np.nan)
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(len(close), np.nan)
-    avg_loss = np.full(len(close), np.nan)
-    
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    
-    rs = np.full(len(close), np.nan)
-    rsi = np.full(len(close), np.nan)
-    
-    for i in range(period, len(close)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100
-    
-    return rsi
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA(34)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for EMA(34)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Get 1w data for RSI(14)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate EMA(34) on 12h
+    ema_34_12h = calculate_ema(close_12h, 34)
     
-    # Calculate EMA(34) on 1d
-    ema_34_1d = calculate_ema(close_1d, 34)
+    # Align to 4h timeframe
+    ema_34_12h_4h = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate RSI(14) on 1w
-    rsi_14_1w = calculate_rsi(close_1w, 14)
-    
-    # Align to 12h timeframe
-    ema_34_1d_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    rsi_14_1w_12h = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
+    # Calculate Donchian Channels (20-period) on 4h
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+        vol_ma[i] = np.mean(volume[i - 20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA calculation
+    start_idx = 20  # need Donchian and volume MA calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1d_12h[i]) or np.isnan(rsi_14_1w_12h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_12h_4h[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3 * 20-period average
-        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price above EMA(34), RSI not overbought, volume confirmation
-            if close[i] > ema_34_1d_12h[i] and rsi_14_1w_12h[i] < 60 and vol_confirmed:
+            # Long: price breaks above Donchian Upper, volume confirmation, uptrend (price > 12h EMA)
+            if close[i] > donchian_upper[i] and vol_confirmed and close[i] > ema_34_12h_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA(34), RSI not oversold, volume confirmation
-            elif close[i] < ema_34_1d_12h[i] and rsi_14_1w_12h[i] > 40 and vol_confirmed:
+            # Short: price breaks below Donchian Lower, volume confirmation, downtrend (price < 12h EMA)
+            elif close[i] < donchian_lower[i] and vol_confirmed and close[i] < ema_34_12h_4h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below EMA(34) or RSI becomes overbought
-            if close[i] <= ema_34_1d_12h[i] or rsi_14_1w_12h[i] >= 70:
+            # Long exit: price breaks below Donchian Lower
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA(34) or RSI becomes oversold
-            if close[i] >= ema_34_1d_12h[i] or rsi_14_1w_12h[i] <= 30:
+            # Short exit: price breaks above Donchian Upper
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_1wRSI_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_12hEMA34"
+timeframe = "4h"
 leverage = 1.0
