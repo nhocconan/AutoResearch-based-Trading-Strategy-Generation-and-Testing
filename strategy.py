@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Bollinger Band Squeeze Breakout with Volume Confirmation and Daily Trend Filter
-Hypothesis: Bollinger Band squeeze (low volatility) followed by breakout with volume 
-confirmation and alignment with daily trend (price above/below daily EMA50) captures 
-explosive moves in both bull and bear markets. Works in ranging markets (squeeze) 
-and trending markets (breakout). Target: 15-25 trades/year to minimize fee drag.
+1h EMA Crossover with 4h Trend Filter and Volume Spike
+Hypothesis: During strong 4h trends (EMA50 > EMA200), 1-hour EMA crossovers (9/21) with volume spikes (1.5x average) capture momentum with controlled frequency. Works in bull/bear by following 4h trend direction.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,76 +18,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma20 + bb_std * std20
-    lower_bb = sma20 - bb_std * std20
-    bb_width = (upper_bb - lower_bb) / sma20  # Normalized width
+    # 1h indicators
+    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Bollinger Band Squeeze: width below 20-period average width
-    avg_width = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < 0.5 * avg_width  # Squeeze when width is less than 50% of average
+    # Volume average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: volume > 2x 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > 2 * vol_ema
-    
-    # Daily trend filter: EMA50 from 1d timeframe
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 4h trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema40_4h = pd.Series(df_4h['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema200_4h = pd.Series(df_4h['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema40_4h_aligned = align_htf_to_ltf(prices, df_4h, ema40_4h)
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators (max of 20,20,20,50)
+    start_idx = 200  # Warmup for 4h EMA200
     
     for i in range(start_idx, n):
-        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(avg_width[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(ema9[i]) or np.isnan(ema21[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema40_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        upper = upper_bb[i]
-        lower = lower_bb[i]
-        is_squeeze = squeeze[i]
-        vol_ok = vol_confirm[i]
-        daily_ema = ema50_1d_aligned[i]
+        # 4h trend direction
+        bullish_trend = ema40_4h_aligned[i] > ema200_4h_aligned[i]
+        bearish_trend = ema40_4h_aligned[i] < ema200_4h_aligned[i]
+        
+        # Volume spike
+        vol_spike = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for breakout after squeeze with volume confirmation
-            if is_squeeze and vol_ok:
-                # Bullish breakout: price above upper BB and above daily EMA50
-                if price > upper and price > daily_ema:
-                    signals[i] = 0.25
-                    position = 1
-                # Bearish breakout: price below lower BB and below daily EMA50
-                elif price < lower and price < daily_ema:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: bullish 4h trend + EMA9 > EMA21 + volume spike
+            if bullish_trend and ema9[i] > ema21[i] and vol_spike:
+                signals[i] = 0.20
+                position = 1
+            # Short: bearish 4h trend + EMA9 < EMA21 + volume spike
+            elif bearish_trend and ema9[i] < ema21[i] and vol_spike:
+                signals[i] = -0.20
+                position = -1
         
         elif position == 1:
-            # Exit if price returns to middle Bollinger Band or squeeze breaks down
-            if price < sma20[i] or (not is_squeeze and price < upper):
+            # Exit: EMA9 < EMA21 or trend change
+            if ema9[i] < ema21[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit if price returns to middle Bollinger Band or squeeze breaks down
-            if price > sma20[i] or (not is_squeeze and price > lower):
+            # Exit: EMA9 > EMA21 or trend change
+            if ema9[i] > ema21[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "6h_Bollinger_Squeeze_Breakout_Volume_DailyTrend"
-timeframe = "6h"
+name = "1h_EMA_Crossover_4Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
