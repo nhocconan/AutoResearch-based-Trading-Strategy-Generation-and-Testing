@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_AntiTrend_Reversion
-Hypothesis: Mean reversion after extreme momentum moves using 6h RSI(2) and 1d ATR filter.
-In both bull and bear markets, price tends to revert after sharp moves. RSI(2) < 10 signals
-oversold (long), > 90 signals overbought (short). Filter trades to only occur when price is
-near the 1d VWAP (mean) and volatility is elevated (ATR > 1.5x ATR(30)) to catch reversals
-after volatility spikes. Position size 0.25 targets 20-40 trades/year.
+12h_Camarilla_R1S1_Breakout_Volume_Trend
+Hypothesis: Trade breakouts of Camarilla R1/S1 levels on 12h timeframe with volume confirmation and 1d EMA trend filter. Camarilla levels act as intraday support/resistance; breakouts above R1 or below S1 with volume indicate institutional participation. The 1d EMA filter ensures trades align with higher timeframe trend, reducing false signals in choppy markets. Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years) to minimize fee drag. Works in both bull and bear markets by filtering counter-trend trades.
 """
 
 import numpy as np
@@ -22,89 +18,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for VWAP and ATR filters
+    # Get 12h data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 6h RSI(2)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 12h calculations
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    rsi_period = 2
+    # Previous 12h bar's OHLC (completed bar)
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h[0] = high_12h[0]
+    prev_low_12h[0] = low_12h[0]
+    prev_close_12h[0] = close_12h[0]
     
-    # Wilder's smoothing
-    if len(gain) >= rsi_period:
-        avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
-        avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
-        for i in range(rsi_period + 1, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
+    # Camarilla levels calculation
+    # Range = (high - low) of previous period
+    range_12h = prev_high_12h - prev_low_12h
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[avg_loss == 0] = 100  # all gains
-    rsi[avg_gain == 0] = 0    # all losses
+    # Camarilla resistance and support levels
+    # R1 = close + (range * 1.1/12)
+    # S1 = close - (range * 1.1/12)
+    camarilla_multiplier = 1.1 / 12
+    r1_12h = prev_close_12h + (range_12h * camarilla_multiplier)
+    s1_12h = prev_close_12h - (range_12h * camarilla_multiplier)
     
-    # 1d VWAP calculation
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    vwap_num = np.cumsum(typical_price_1d * df_1d['volume'].values)
-    vwap_den = np.cumsum(df_1d['volume'].values)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
-    
-    # 1d ATR(30) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA trend filter
     close_1d = df_1d['close'].values
+    ema_period = 34
+    if len(close_1d) >= ema_period:
+        ema_1d = np.zeros_like(close_1d)
+        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (ema_period - 1) / (ema_period + 1))
+    else:
+        ema_1d = np.full_like(close_1d, np.nan)
     
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_1d[0] - low_1d[0]
+    # Align higher timeframe data to 12h
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    atr_period = 30
-    atr = np.zeros_like(tr)
-    if len(tr) >= atr_period:
-        atr[atr_period] = np.mean(tr[1:atr_period+1])
-        for i in range(atr_period + 1, len(tr)):
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
-    
-    # Align 1d indicators to 6h
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)  # RSI is already 6h but aligned for safety
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    
-    # Additional filters: price near VWAP (within 0.5%) and high volatility
-    price_pct_from_vwap = np.abs((close - vwap_aligned) / vwap_aligned) * 100
-    vwap_filter = price_pct_from_vwap < 0.5
-    vol_filter = atr_aligned > (1.5 * np.roll(atr_aligned, 30))  # ATR > 1.5x past 30d ATR
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.zeros_like(volume)
+    vol_period = 20
+    for i in range(vol_period, len(volume)):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 50)  # need enough data for ATR and VWAP
+    start_idx = max(50, vol_period, ema_period)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_aligned[i]) or np.isnan(vwap_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or np.isnan(vwap_filter[i]) or
-            np.isnan(vol_filter[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        if rsi_aligned[i] < 10 and vwap_filter[i] and vol_filter[i]:
-            # Oversold + near VWAP + high volatility -> long
-            signals[i] = 0.25
-        elif rsi_aligned[i] > 90 and vwap_filter[i] and vol_filter[i]:
-            # Overbought + near VWAP + high volatility -> short
-            signals[i] = -0.25
-        else:
-            signals[i] = 0.0
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        if position == 0:
+            # Long: price breaks above R1 with volume and above 1d EMA
+            if close[i] > r1_12h_aligned[i] and vol_confirm and close[i] > ema_1d_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below S1 with volume and below 1d EMA
+            elif close[i] < s1_12h_aligned[i] and vol_confirm and close[i] < ema_1d_aligned[i]:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: price closes below S1 (reverse signal) or below 1d EMA
+            if close[i] < s1_12h_aligned[i] or close[i] < ema_1d_aligned[i]:
+                signals[i] = -0.25  # reverse to short
+                position = -1
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price closes above R1 (reverse signal) or above 1d EMA
+            if close[i] > r1_12h_aligned[i] or close[i] > ema_1d_aligned[i]:
+                signals[i] = 0.25  # reverse to long
+                position = 1
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_AntiTrend_Reversion"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
