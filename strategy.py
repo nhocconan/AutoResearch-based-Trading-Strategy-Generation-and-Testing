@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Confirmation and Trend Filter (HMA)
-Hypothesis: Donchian channel breakouts on 4h timeframe capture genuine momentum moves.
-Volume confirmation ensures institutional participation, while 1d HMA trend filter ensures
-we only trade in the direction of higher timeframe trend, reducing false breakouts.
-This combination works in both bull and bear markets by focusing on breakouts with
-volume and trend alignment. Target: 20-40 trades/year to minimize fee drag.
+1d Weekly Pivot Breakout with Volume Confirmation and Trend Filter
+Hypothesis: Weekly pivot levels act as strong support/resistance on daily charts.
+Breakouts above R1 or below S1 with volume confirmation and weekly trend alignment
+capture institutional moves while avoiding false breakouts. Designed for 1d timeframe
+to work in both bull and bear markets by filtering with weekly trend and volume.
+Target: 10-25 trades/year to minimize fee drag on higher timeframe.
 """
 
 import numpy as np
@@ -22,79 +22,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max()
-    lower = low_series.rolling(window=20, min_periods=20).min()
+    # Calculate weekly pivot points from prior week
+    # Using weekly high, low, close from previous week
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Volume filter: 1.5x 20-period average
+    # Weekly high, low, close from previous week (already completed)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    # Pivot point calculation
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    
+    # Align to daily timeframe (wait for weekly bar to close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Weekly trend filter: EMA34 on weekly close
+    weekly_ema34 = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_ema34_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema34)
+    
+    # Daily volume filter: 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
-    
-    # 1d HMA trend filter (Hull Moving Average)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
-        hma_1d = np.full(len(prices), np.nan)
-    else:
-        # Calculate HMA: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-        def wma(values, window):
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights/weights.sum(), mode='valid')
-        
-        close_1d = df_1d['close'].values
-        n = 21
-        half_n = n // 2
-        sqrt_n = int(np.sqrt(n))
-        
-        wma_full = wma(close_1d, n)
-        wma_half = wma(close_1d, half_n)
-        wma_2x_minus = 2 * wma_half - wma_full
-        hma_raw = wma(wma_2x_minus, sqrt_n)
-        
-        # Align to lower timeframe with proper delay
-        hma_1d_raw = np.full(len(close_1d), np.nan)
-        hma_1d_raw[sqrt_n-1:sqrt_n-1+len(hma_raw)] = hma_raw
-        hma_1d = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup for Donchian and volume
+    start_idx = 40  # Warmup for weekly data and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(hma_1d[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(weekly_ema34_aligned[i]) or
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper_band = upper[i]
-        lower_band = lower[i]
+        weekly_trend = weekly_ema34_aligned[i]
         vol_ok = volume_filter[i]
-        hma_trend = hma_1d[i]
         
         if position == 0:
-            # Long: break above upper Donchian with volume and uptrend
-            if price > upper_band and vol_ok and price > hma_trend:
+            # Long: break above R1 with volume and weekly uptrend
+            if price > r1_aligned[i] and vol_ok and price > weekly_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian with volume and downtrend
-            elif price < lower_band and vol_ok and price < hma_trend:
+            # Short: break below S1 with volume and weekly downtrend
+            elif price < s1_aligned[i] and vol_ok and price < weekly_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price returns to lower band or trend changes
-            if price < lower_band or price < hma_trend:
+            # Exit long if price returns to pivot or weekly trend breaks down
+            if price < pivot_aligned[i] or price < weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns to upper band or trend changes
-            if price > upper_band or price > hma_trend:
+            # Exit short if price returns to pivot or weekly trend breaks up
+            if price > pivot_aligned[i] or price > weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_HMA_Trend"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_R1S1_Breakout_With_Volume_and_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
