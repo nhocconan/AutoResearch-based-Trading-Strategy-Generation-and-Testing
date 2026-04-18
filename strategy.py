@@ -1,7 +1,3 @@
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA200 trend filter. 
-# Works in bull markets by catching breakouts and in bear markets by filtering shorts against long-term trend.
-# Target: 20-40 trades/year to avoid fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -9,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,23 +13,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for trend filter
+    # Get 1d data for ATR and close
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA200 on daily data
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate ATR(14) on daily
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr2[1]  # fix first element
+    tr3[0] = tr3[1]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align daily EMA200 to 4h timeframe
-    ema200_4h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align daily ATR to 4h timeframe
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Calculate EMA(34) on 12h close
+    close_12h_series = pd.Series(close_12h)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 12h EMA34 to 4h timeframe
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # Calculate 4h Bollinger Bands (20, 2)
+    close_series = pd.Series(close)
+    bb_middle = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    bb_std = close_series.ewm(span=20, adjust=False, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -43,12 +57,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 200, 20)  # need Donchian, EMA200, volume MA
+    start_idx = max(34, 20, 20)  # need EMA34, BB, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema200_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_4h[i]) or np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -56,15 +70,15 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above Donchian high, above daily EMA200, with volume
-            if (close[i] > highest_high[i] and 
-                close[i] > ema200_4h[i] and 
+            # Long entry: price touches lower BB, EMA34 trending up, with volume
+            if (close[i] <= bb_lower[i] and 
+                ema34_12h_aligned[i] > ema34_12h_aligned[i-1] and 
                 vol_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low, below daily EMA200, with volume
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema200_4h[i] and 
+            # Short entry: price touches upper BB, EMA34 trending down, with volume
+            elif (close[i] >= bb_upper[i] and 
+                  ema34_12h_aligned[i] < ema34_12h_aligned[i-1] and 
                   vol_confirmed):
                 signals[i] = -0.25
                 position = -1
@@ -72,16 +86,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or crosses below daily EMA200
-            if close[i] < lowest_low[i] or close[i] < ema200_4h[i]:
+            # Long exit: price crosses above middle BB or ATR-based stop
+            if close[i] >= bb_middle[i] or close[i] < high[i-1] - 2.0 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or crosses above daily EMA200
-            if close[i] > highest_high[i] or close[i] > ema200_4h[i]:
+            # Short exit: price crosses below middle BB or ATR-based stop
+            if close[i] <= bb_middle[i] or close[i] > low[i-1] + 2.0 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA200_Volume_Filter"
+name = "4h_Bollinger_Touch_EMA34_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
