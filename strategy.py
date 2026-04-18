@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_R1S1_Breakout_Volume_Filter_v1"
-timeframe = "12h"
+name = "1h_4h1d_Pivot_R1S1_Breakout_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,68 +17,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot levels
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot and R1/S1 from previous daily bar
-    prev_close_d = df_1d['close'].shift(1).values
-    prev_high_d = df_1d['high'].shift(1).values
-    prev_low_d = df_1d['low'].shift(1).values
+    # 4h pivot levels from previous 4h bar
+    prev_close_4h = df_4h['close'].shift(1).values
+    prev_high_4h = df_4h['high'].shift(1).values
+    prev_low_4h = df_4h['low'].shift(1).values
+    pivot_4h = (prev_high_4h + prev_low_4h + prev_close_4h) / 3
+    range_4h = prev_high_4h - prev_low_4h
+    R1_4h = pivot_4h + range_4h * 0.1
+    S1_4h = pivot_4h - range_4h * 0.1
     
-    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
-    range_d = prev_high_d - prev_low_d
-    R1_d = pivot_d + (range_d * 1.1 / 2)  # R1 = pivot + 0.55*range
-    S1_d = pivot_d - (range_d * 1.1 / 2)  # S1 = pivot - 0.55*range
+    # 1d pivot levels from previous 1d bar
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    range_1d = prev_high_1d - prev_low_1d
+    R1_1d = pivot_1d + range_1d * 0.1
+    S1_1d = pivot_1d - range_1d * 0.1
     
-    # Align daily R1/S1 to 12h (wait for daily close)
-    R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
-    S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
+    # Align HTF pivot levels to 1h (wait for HTF close)
+    R1_4h_aligned = align_htf_to_ltf(prices, df_4h, R1_4h)
+    S1_4h_aligned = align_htf_to_ltf(prices, df_4h, S1_4h)
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
-    # Volume filter: current volume > 2.0 * 20-period average (10 days)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    # Volume filter: current volume > 2.0 * 24-period average (1 day)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (2.0 * vol_ma_24)
+    
+    # Session filter: 8-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(R1_4h_aligned[i]) or np.isnan(S1_4h_aligned[i]) or
+            np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
+        # Check session filter
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         close_val = close[i]
-        R1_val = R1_d_aligned[i]
-        S1_val = S1_d_aligned[i]
+        R1_4h_val = R1_4h_aligned[i]
+        S1_4h_val = S1_4h_aligned[i]
+        R1_1d_val = R1_1d_aligned[i]
+        S1_1d_val = S1_1d_aligned[i]
         vol_filter = volume_filter[i]
         
+        # Entry conditions: break of both 4h and 1d R1/S1 with volume
         if position == 0:
-            # Long: break above R1 with volume
-            if close_val > R1_val and vol_filter:
-                signals[i] = 0.25
+            # Long: break above both R1 levels
+            if close_val > R1_4h_val and close_val > R1_1d_val and vol_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S1 with volume
-            elif close_val < S1_val and vol_filter:
-                signals[i] = -0.25
+            # Short: break below both S1 levels
+            elif close_val < S1_4h_val and close_val < S1_1d_val and vol_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below pivot
-            if close_val < pivot_d[i]:
+            # Long exit: price falls back below either S1 level
+            if close_val < S1_4h_val or close_val < S1_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price rises back above pivot
-            if close_val > pivot_d[i]:
+            # Short exit: price rises back above either R1 level
+            if close_val > R1_4h_val or close_val > R1_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
