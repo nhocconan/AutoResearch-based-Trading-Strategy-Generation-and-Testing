@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,7 +18,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate 20-period Donchian channels on daily (upper and lower bands)
     upper_channel = np.full_like(close_1d, np.nan)
@@ -46,9 +45,9 @@ def generate_signals(prices):
     ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
     rsi_4h = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Calculate 4h volume spike indicator (volume > 1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Calculate 4h volume spike indicator (volume > 1.8x 30-period average)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -100,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_RSI_VolumeFilter_v1"
+name = "4h_Donchian20_1dEMA34_RSI_VolumeFilter_v2"
 timeframe = "4h"
 leverage = 1.0
