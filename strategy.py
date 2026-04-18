@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_R1_S1_Breakout_Volume_ADXFilter_v1
-Hypothesis: Trade daily pivot breakouts on 6h with volume and ADX confirmation. 
-Enter long when price breaks above R1 with volume > 1.5x average and ADX > 20 (trending). 
-Enter short when price breaks below S1 with volume > 1.5x average and ADX > 20. 
-Exit when price crosses the daily pivot point (PP) or ADX < 15 (range). 
-Uses daily pivot levels calculated from prior day's OHLC. 
-Works in bull/bear by following institutional pivot levels with trend filter. 
-Targets 15-25 trades/year via strict breakout conditions + volume + ADX filter.
+4h_TrendBreakout_VolumeSpike_1dEMA34
+Hypothesis: Trade breakouts from 4h Donchian channels (20) with 1d EMA34 trend filter and volume spike confirmation. Works in bull markets by catching breakouts and in bear markets by filtering trades to only those aligned with higher timeframe trend (1d EMA34). Volume spike ensures institutional participation. Targets 20-40 trades/year via strict breakout + volume + trend confluence. Uses ATR-based stoploss via signal=0 when price closes against position by 2x ATR.
 """
 
 import numpy as np
@@ -16,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,122 +18,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate daily pivot points (PP, R1, S1) from prior day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot Point = (H + L + C) / 3
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*PP - L
-    r1_1d = 2 * pp_1d - low_1d
-    # S1 = 2*PP - H
-    s1_1d = 2 * pp_1d - high_1d
+    # 1d EMA34
+    ema_period = 34
+    ema_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (1 - 2 / (ema_period + 1)))
     
-    # Align daily pivot levels to 6h timeframe (use prior day's levels)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align 1d EMA34 to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # ADX(14) on 6h
-    period = 14
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First TR
+    # 4h Donchian channel (20)
+    lookback = 20
+    upper = np.full_like(high, np.nan)
+    lower = np.full_like(low, np.nan)
     
-    # Directional Movement
-    up_move = np.diff(high, prepend=high[0])
-    down_move = -np.diff(low, prepend=low[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    for i in range(lookback-1, len(high)):
+        upper[i] = np.max(high[i-lookback+1:i+1])
+        lower[i] = np.min(low[i-lookback+1:i+1])
     
-    # Smoothed values
-    atr = np.zeros_like(tr)
-    plus_di = np.zeros_like(tr)
-    minus_di = np.zeros_like(tr)
+    # ATR for stoploss (20 period)
+    atr_period = 20
+    tr = np.zeros_like(high)
+    atr = np.full_like(high, np.nan)
     
-    if len(tr) >= period:
-        # Initial averages
-        atr[period-1] = np.mean(tr[:period])
-        plus_dm_sum = np.sum(plus_dm[:period])
-        minus_dm_sum = np.sum(minus_dm[:period])
-        
-        # Wilder smoothing
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-            plus_dm_sum = plus_dm_sum - (plus_dm_sum / period) + plus_dm[i]
-            minus_dm_sum = minus_dm_sum - (minus_dm_sum / period) + minus_dm[i]
-            plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
-            minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
-        
-        # DX and ADX
-        dx = np.zeros_like(tr)
-        for i in range(period, len(tr)):
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        adx = np.zeros_like(tr)
-        if len(tr) >= 2 * period - 1:
-            adx[2*period-2] = np.mean(dx[period-1:2*period-1])
-            for i in range(2*period-1, len(tr)):
-                adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-    else:
-        adx = np.zeros_like(tr)
+    for i in range(len(high)):
+        if i == 0:
+            tr[i] = high[i] - low[i]
+        else:
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Volume confirmation: volume > 1.5x 24-period average
-    vol_ma = np.zeros_like(volume)
-    vol_period = 24
+    if len(tr) >= atr_period:
+        atr[atr_period-1] = np.mean(tr[:atr_period])
+        for i in range(atr_period, len(tr)):
+            atr[i] = (tr[i] + (atr_period-1) * atr[i-1]) / atr_period
+    
+    # Volume spike: volume > 2x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    vol_period = 20
+    
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
-    else:
-        vol_ma[:] = np.mean(volume) if len(volume) > 0 else 0
+            vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, vol_period, 2*period-1)  # Ensure ADX and vol MA are ready
+    start_idx = max(lookback, vol_period, ema_period, atr_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: break above R1 + volume + ADX > 20
-            if close[i] > r1_aligned[i] and vol_confirm and adx[i] > 20:
+            # Long: price breaks above upper Donchian + above 1d EMA34 + volume spike
+            if close[i] > upper[i] and close[i] > ema_1d_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + volume + ADX > 20
-            elif close[i] < s1_aligned[i] and vol_confirm and adx[i] > 20:
+            # Short: price breaks below lower Donchian + below 1d EMA34 + volume spike
+            elif close[i] < lower[i] and close[i] < ema_1d_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: cross below PP or ADX < 15 (range)
-            if close[i] < pp_aligned[i] or adx[i] < 15:
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long: hold unless stoploss or reversal
+            if close[i] < ema_1d_aligned[i] or close[i] < (high[i-max(1, lookback//2)] - 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: cross above PP or ADX < 15 (range)
-            if close[i] > pp_aligned[i] or adx[i] < 15:
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short: hold unless stoploss or reversal
+            if close[i] > ema_1d_aligned[i] or close[i] > (low[i-max(1, lookback//2)] + 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_ADXFilter_v1"
-timeframe = "6h"
+name = "4h_TrendBreakout_VolumeSpike_1dEMA34"
+timeframe = "4h"
 leverage = 1.0
