@@ -1,117 +1,126 @@
-# 6h_Pivot_Reversal_12hTrend_Filter
-# Hypothesis: Daily pivot reversals during trending 12h markets capture short-term mean reversion within larger trends.
-# Works in bull/bear by using 12h trend direction (via EMA34) to filter pivot reversals (fade at R1/S1, breakout at R4/S4).
-# Volume confirmation ensures institutional participation. Targets 15-30 trades/year.
+#!/usr/bin/env python3
+"""
+4h Williams Fractal Breakout + Volume Spike + ADX Trend Filter
+Hypothesis: Williams Fractals identify key support/resistance levels. Breakouts above/below these levels with volume confirmation and ADX > 25 capture strong trending moves. Works in both bull (breakouts to new highs) and bear (breakdowns to new lows) markets. Low trade frequency due to strict fractal confirmation and volume filter.
+"""
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_pivots(high, low, close):
-    """Calculate standard pivot points and support/resistance levels"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    r4 = 3 * pivot - 2 * low
-    s4 = 3 * pivot - 2 * high
-    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter and pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data for Williams Fractals and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate EMA34 on 12h for trend filter
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Calculate Williams Fractals on 1d (need 2 extra bars for confirmation)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
     
-    # Calculate pivots on 12h using previous bar's data (standard pivot calculation)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    pivot_12h, r1_12h, r2_12h, r3_12h, r4_12h, s1_12h, s2_12h, s3_12h, s4_12h = calculate_pivots(
-        high_12h[:-1], low_12h[:-1], close_12h[:-1]  # Use previous bar for today's pivot
-    )
-    # Align pivot levels to 6h timeframe
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
+    # Apply additional delay for fractal confirmation (needs 2 future 1d bars)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
+    # Calculate ADX on 1d for trend filter
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values with Wilder smoothing
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values use Wilder smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_1d = wilders_smooth(tr, 14)
+    plus_di_1d = 100 * wilders_smooth(plus_dm, 14) / np.where(atr_1d != 0, atr_1d, 1)
+    minus_di_1d = 100 * wilders_smooth(minus_dm, 14) / np.where(atr_1d != 0, atr_1d, 1)
+    dx_1d = np.where((plus_di_1d + minus_di_1d) != 0, 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d), 0)
+    adx_1d = wilders_smooth(dx_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume spike: current volume > 2.0x 20-period average (using 1d volume)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = np.zeros_like(vol_1d)
+    for i in range(len(vol_1d)):
         if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
+            vol_ma_1d[i] = np.mean(vol_1d[max(0, i-19):i+1]) if i >= 0 else vol_1d[i]
         else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 2.0)
+            vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_spike_1d = vol_1d > (vol_ma_1d * 2.0)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Warmup for EMA34
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_12h_aligned[i]) or np.isnan(pivot_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 12h EMA34
-        uptrend = close[i] > ema34_12h_aligned[i]
-        downtrend = close[i] < ema34_12h_aligned[i]
-        vol_ok = vol_spike[i]
+        bullish_fractal_level = bullish_fractal_aligned[i]
+        bearish_fractal_level = bearish_fractal_aligned[i]
+        adx_val = adx_1d_aligned[i]
+        vol_ok = vol_spike_1d_aligned[i]
         
         if position == 0:
-            # Long setup: 
-            # 1. In uptrend (price > EMA34) AND price crosses above S1 (bounce from support)
-            # 2. OR in downtrend (price < EMA34) AND price breaks above R4 (strong breakout)
-            if (uptrend and close[i] > s1_12h_aligned[i] and close[i-1] <= s1_12h_aligned[i]) or \
-               (downtrend and close[i] > r4_12h_aligned[i] and close[i-1] <= r4_12h_aligned[i]):
-                if vol_ok:
-                    signals[i] = 0.25
-                    position = 1
-            
-            # Short setup:
-            # 1. In downtrend (price < EMA34) AND price crosses below R1 (rejection at resistance)
-            # 2. OR in uptrend (price > EMA34) AND price breaks below S4 (strong breakdown)
-            elif (downtrend and close[i] < r1_12h_aligned[i] and close[i-1] >= r1_12h_aligned[i]) or \
-                 (uptrend and close[i] < s4_12h_aligned[i] and close[i-1] >= s4_12h_aligned[i]):
-                if vol_ok:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: price breaks above bullish fractal (resistance) + ADX > 25 + volume spike
+            if (close[i] > bullish_fractal_level and 
+                adx_val > 25 and 
+                vol_ok):
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price breaks below bearish fractal (support) + ADX > 25 + volume spike
+            elif (close[i] < bearish_fractal_level and 
+                  adx_val > 25 and 
+                  vol_ok):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price crosses below pivot (mean reversion) or trend breaks down
-            if close[i] < pivot_12h_aligned[i] or (downtrend and close[i] < ema34_12h_aligned[i]):
+            # Exit long: price crosses below bullish fractal or ADX weakens
+            if close[i] < bullish_fractal_level or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above pivot (mean reversion) or trend breaks up
-            if close[i] > pivot_12h_aligned[i] or (uptrend and close[i] > ema34_12h_aligned[i]):
+            # Exit short: price crosses above bearish fractal or ADX weakens
+            if close[i] > bearish_fractal_level or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_Reversal_12hTrend_Filter"
-timeframe = "6h"
+name = "4h_Williams_Fractal_Breakout_VolumeSpike_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
