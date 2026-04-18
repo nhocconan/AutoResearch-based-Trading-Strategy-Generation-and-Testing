@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,26 +13,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 50-period EMA on weekly for trend filter
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Get daily data for entry signals
+    # Get daily data for indicators (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channels on daily
+    # Calculate 20-period Donchian channels on daily (upper and lower bands)
     upper_channel = np.full_like(close_1d, np.nan)
     lower_channel = np.full_like(close_1d, np.nan)
     
     for i in range(19, len(close_1d)):
         upper_channel[i] = np.max(high_1d[i-19:i+1])
         lower_channel[i] = np.min(low_1d[i-19:i+1])
+    
+    # Calculate 34-period EMA on daily for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate 14-day RSI for momentum filter
     delta = np.diff(close_1d, prepend=close_1d[0])
@@ -43,61 +40,59 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Align weekly EMA to daily
-    ema_50_1d = align_htf_to_ltf(df_1d, df_1w, ema_50)
+    # Align all daily data to 12h timeframe (primary)
+    upper_channel_12h = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_channel_12h = align_htf_to_ltf(prices, df_1d, lower_channel)
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34)
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Align daily indicators to 1d timeframe (we're already on daily, but keep consistent)
-    upper_channel_1d = upper_channel
-    lower_channel_1d = lower_channel
-    rsi_1d = rsi
-    
-    # Calculate daily volume spike (volume > 2x 20-period average)
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = df_1d['volume'].values > (2.0 * vol_ma_1d)
+    # Calculate 12h volume spike indicator (volume > 1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 19, 14) + 1
+    start_idx = max(19, 34) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_1d[i]) or np.isnan(upper_channel_1d[i]) or 
-            np.isnan(lower_channel_1d[i]) or np.isnan(rsi_1d[i])):
+        if (np.isnan(upper_channel_12h[i]) or np.isnan(lower_channel_12h[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(rsi_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend = close_1d[i] > ema_50_1d[i]
-        downtrend = close_1d[i] < ema_50_1d[i]
+        # Trend filter: price above/below EMA
+        uptrend = close[i] > ema_34_12h[i]
+        downtrend = close[i] < ema_34_12h[i]
         
-        # RSI filter: avoid extremes
-        rsi_not_extreme = (rsi_1d[i] > 30) and (rsi_1d[i] < 70)
+        # RSI filter: avoid overbought/oversold extremes
+        rsi_not_extreme = (rsi_12h[i] > 30) and (rsi_12h[i] < 70)
         
         # Volume confirmation: require volume spike
-        vol_confirmed = volume_spike_1d[i]
+        vol_confirmed = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian with uptrend, RSI not extreme, volume spike
-            if close_1d[i] > upper_channel_1d[i] and uptrend and rsi_not_extreme and vol_confirmed:
+            # Long: price breaks above upper Donchian channel with uptrend, RSI not extreme, and volume spike
+            if close[i] > upper_channel_12h[i] and uptrend and rsi_not_extreme and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with downtrend, RSI not extreme, volume spike
-            elif close_1d[i] < lower_channel_1d[i] and downtrend and rsi_not_extreme and vol_confirmed:
+            # Short: price breaks below lower Donchian channel with downtrend, RSI not extreme, and volume spike
+            elif close[i] < lower_channel_12h[i] and downtrend and rsi_not_extreme and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below lower Donchian OR trend reverses OR RSI overbought
-            if (close_1d[i] < lower_channel_1d[i]) or (not uptrend) or (rsi_1d[i] >= 70):
+            # Long exit: price crosses below lower Donchian channel OR trend reverses OR RSI overbought
+            if (close[i] < lower_channel_12h[i]) or (not uptrend) or (rsi_12h[i] >= 70):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above upper Donchian OR trend reverses OR RSI oversold
-            if (close_1d[i] > upper_channel_1d[i]) or (not downtrend) or (rsi_1d[i] <= 30):
+            # Short exit: price crosses above upper Donchian channel OR trend reverses OR RSI oversold
+            if (close[i] > upper_channel_12h[i]) or (not downtrend) or (rsi_12h[i] <= 30):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -105,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_RSI_VolumeFilter_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA34_RSI_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
