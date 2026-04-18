@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Spike and Daily Trend Filter
-Hypothesis: Donchian(20) breakouts on 12h timeframe capture momentum in trending markets.
-Volume confirmation filters false breakouts, daily EMA50 filter ensures alignment with higher timeframe trend.
-Designed for 12-37 trades/year on 12h timeframe with low frequency to minimize fee drag.
+4h Donchian Breakout with Volume Spike and Daily EMA Trend Filter
+Hypothesis: Donchian(20) breakouts capture momentum. Volume spike confirms institutional interest.
+Daily EMA50 filter ensures trades align with higher-timeframe trend. Works in bull/bear via trend filter.
+Target: 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -20,22 +20,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter (once before loop)
+    # Get daily data for EMA trend filter (once before loop)
     df_d = get_htf_data(prices, '1d')
     
     # Daily EMA50 for trend filter
     ema_50 = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_aligned = align_htf_to_ltf(prices, df_d, ema_50)
     
-    # Donchian channels (20-period) on 12h
+    # Donchian channels (20-period) on 4h
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike: 2x 20-period average on 12h
+    # Volume spike: 2x 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # ATR for stop loss (12h ATR)
+    # ATR for stop loss (14-period ATR on 4h)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -66,11 +66,11 @@ def generate_signals(prices):
         atr_val = atr[i]
         
         if position == 0:
-            # Long: break above upper Donchian with volume spike and price above EMA50 (uptrend)
+            # Long: break above upper Donchian with volume spike and price above daily EMA50 (uptrend)
             if price > upper and volume_spike[i] and price > ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian with volume spike and price below EMA50 (downtrend)
+            # Short: break below lower Donchian with volume spike and price below daily EMA50 (downtrend)
             elif price < lower and volume_spike[i] and price < ema:
                 signals[i] = -0.25
                 position = -1
@@ -79,7 +79,7 @@ def generate_signals(prices):
             # Long position
             signals[i] = 0.25
             # Exit: price returns to lower Donchian or ATR trailing stop
-            if price < lower or price < (high[i] - 2.0 * atr_val):
+            if price <= lower or price < (high[i] - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         
@@ -87,12 +87,12 @@ def generate_signals(prices):
             # Short position
             signals[i] = -0.25
             # Exit: price returns to upper Donchian or ATR trailing stop
-            if price > upper or price > (low[i] + 2.0 * atr_val):
+            if price >= upper or price > (low[i] + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Donchian_Breakout_VolumeSpike_EMA50"
-timeframe = "12h"
+name = "4h_DonchianBreakout_VolumeSpike_DailyEMA50"
+timeframe = "4h"
 leverage = 1.0
