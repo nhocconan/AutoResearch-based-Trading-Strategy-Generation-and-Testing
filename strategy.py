@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-4h_KAMA_RSI_Trend_Pullback
-Hypothesis: Buy when price pulls back to KAMA(10) in a rising trend (KAMA rising) with RSI < 40; short when price pulls back to KAMA in a falling trend (KAMA falling) with RSI > 60. Uses KAMA for adaptive trend following and RSI for mean-reversion entries. Designed for low trade frequency (<50/year) to minimize fee drag while capturing high-probability mean-reversion moves within the trend. Works in both bull and bear markets by trading with the trend on pullbacks.
+1d_KAMA_Trend_Filter
+Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) to capture adaptive trend direction, enter long when price crosses above KAMA with volume confirmation and bullish market regime (ADX > 20), short when price crosses below KAMA with volume confirmation and bearish regime (ADX > 20). Exit on opposite KAMA cross. Designed for low trade frequency to minimize fee drag while capturing sustained trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,111 +13,121 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) parameters
-    fast_sc = 2 / (2 + 1)   # EMA(2) for fast
-    slow_sc = 2 / (30 + 1)  # EMA(30) for slow
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio and smoothing constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    # KAMA parameters
+    fast = 2
+    slow = 30
+    lookback = 10
     
-    # Proper ER calculation
-    er = np.zeros_like(close)
-    for i in range(10, n):  # ER needs 10 periods
-        if i >= 10:
-            net_change = np.abs(close[i] - close[i-10])
-            total_change = np.sum(np.abs(np.diff(close[i-10:i+1])))
-            if total_change > 0:
-                er[i] = net_change / total_change
-            else:
-                er[i] = 0
+    # Calculate efficiency ratio
+    change = np.abs(np.diff(close_1d, lookback))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)
+    er = np.zeros_like(close_1d)
+    er[lookback:] = change[lookback:] / volatility[lookback:]
+    er[volatility == 0] = 0
     
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate smoothing constant
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
     
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align KAMA to 1d timeframe (already on 1d, but need to align to original price index)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[13] = np.mean(gain[1:14])  # first average
-    avg_loss[13] = np.mean(loss[1:14])
+    # Volume spike: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # ADX trend strength filter (using 1d data)
+    # Calculate +DM, -DM, TR
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Pad arrays to match length
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
     
-    # Volume confirmation: >1.5x 20-period average
-    vol_ma = np.zeros_like(volume)
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_conf = volume > (1.5 * vol_ma)
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    adx_period = 14
+    atr = wilders_smoothing(tr, adx_period)
+    plus_di = 100 * wilders_smoothing(plus_dm, adx_period) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, adx_period) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, adx_period)
+    
+    # Align ADX to 1d timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 14)  # need RSI and volume MA
+    start_idx = max(50, 20)  # Need KAMA, volume MA, and ADX
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or
-            np.isnan(volume_conf[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(volume_spike[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        vol_conf = volume_conf[i]
+        kama_val = kama_aligned[i]
+        vol_spike = volume_spike[i]
+        adx_val = adx_aligned[i]
         
-        # Trend detection: KAMA slope over 3 periods
-        if i >= 3:
-            kama_slope = kama[i] - kama[i-3]
-        else:
-            kama_slope = 0
-        
-        if position == 0:
-            # Long: pullback to KAMA in uptrend with oversold RSI
-            if kama_slope > 0 and price <= kama_val * 1.005 and rsi_val < 40 and vol_conf:
+        # Only trade when ADX indicates trending market (ADX > 20)
+        if adx_val > 20:
+            if position == 0:
+                # Long: price crosses above KAMA with volume spike
+                if price > kama_val and close[i-1] <= kama_aligned[i-1] and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price crosses below KAMA with volume spike
+                elif price < kama_val and close[i-1] >= kama_aligned[i-1] and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
+            
+            elif position == 1:
                 signals[i] = 0.25
-                position = 1
-            # Short: pullback to KAMA in downtrend with overbought RSI
-            elif kama_slope < 0 and price >= kama_val * 0.995 and rsi_val > 60 and vol_conf:
+                # Exit: price crosses below KAMA
+                if price < kama_val and close[i-1] >= kama_aligned[i-1]:
+                    signals[i] = 0.0
+                    position = 0
+            
+            elif position == -1:
                 signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            signals[i] = 0.25
-            # Exit: trend change or overbought
-            if kama_slope <= 0 or rsi_val > 70:
-                signals[i] = 0.0
-                position = 0
-        
-        elif position == -1:
-            signals[i] = -0.25
-            # Exit: trend change or oversold
-            if kama_slope >= 0 or rsi_val < 30:
-                signals[i] = 0.0
-                position = 0
+                # Exit: price crosses above KAMA
+                if price > kama_val and close[i-1] <= kama_aligned[i-1]:
+                    signals[i] = 0.0
+                    position = 0
+        else:
+            # In ranging market (ADX <= 20), stay flat
+            signals[i] = 0.0
+            position = 0
     
     return signals
 
-name = "4h_KAMA_RSI_Trend_Pullback"
-timeframe = "4h"
+name = "1d_KAMA_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
