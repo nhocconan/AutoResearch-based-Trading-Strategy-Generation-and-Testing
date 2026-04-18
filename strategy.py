@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 12h Trend and Volume Filter
-Hypothesis: Price breaking 20-period Donchian channels captures momentum moves.
-Combined with 12h EMA trend filter and volume confirmation to avoid false breakouts.
-Works in both bull and bear markets by only taking trades in direction of higher timeframe trend.
-Target: 25-35 trades/year to minimize fee decay while capturing strong trending moves.
+1h RSI Divergence with 4h Trend and Volume Filter
+Hypothesis: RSI divergence on 1h combined with 4h EMA trend filter captures
+mean-reversion opportunities in range-bound markets while avoiding trend traps.
+Volume filter ensures institutional participation. Works in both bull and bear
+markets by only taking divergence signals aligned with higher timeframe trend.
+Target: 15-35 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,18 +22,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    # 12h EMA34 for trend filter
-    ema34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # 4h EMA34 for trend filter
+    ema34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate RSI(14) on 1h
+    delta = pd.Series(close).diff().values
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume filter: current volume > 1.5x 20-period volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -41,48 +48,67 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators
+    start_idx = 50  # Warmup for RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        trend = ema34_12h_aligned[i]
-        upper = high_20[i]
-        lower = low_20[i]
+        trend = ema34_4h_aligned[i]
+        rsi_val = rsi[i]
         vol_ok = vol_filter[i]
         
+        # Check for bullish RSI divergence (price makes lower low, RSI makes higher low)
+        bullish_div = False
+        if i >= 20:  # Need lookback for divergence
+            # Find recent low in price
+            price_low_idx = np.argmin(low[i-20:i]) + i - 20
+            price_low_prev_idx = np.argmin(low[i-40:i-20]) + i - 40
+            if (low[price_low_idx] < low[price_low_prev_idx] and 
+                rsi[price_low_idx] > rsi[price_low_prev_idx]):
+                bullish_div = True
+        
+        # Check for bearish RSI divergence (price makes higher high, RSI makes lower high)
+        bearish_div = False
+        if i >= 20:
+            # Find recent high in price
+            price_high_idx = np.argmax(high[i-20:i]) + i - 20
+            price_high_prev_idx = np.argmax(high[i-40:i-20]) + i - 40
+            if (high[price_high_idx] > high[price_high_prev_idx] and 
+                rsi[price_high_idx] < rsi[price_high_prev_idx]):
+                bearish_div = True
+        
         if position == 0:
-            # Long: price breaks above upper Donchian with volume, in uptrend
-            if price > upper and vol_ok and price > trend:
-                signals[i] = 0.25
+            # Long: bullish divergence in uptrend (4h EMA up) with volume
+            if bullish_div and price > trend and vol_ok:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below lower Donchian with volume, in downtrend
-            elif price < lower and vol_ok and price < trend:
-                signals[i] = -0.25
+            # Short: bearish divergence in downtrend (4h EMA down) with volume
+            elif bearish_div and price < trend and vol_ok:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit if price returns below lower Donchian or trend weakens
-            if price < lower or price < trend:
+            # Exit: RSI overbought or trend breaks down
+            if rsi_val > 70 or price < trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit if price returns above upper Donchian or trend weakens
-            if price > upper or price > trend:
+            # Exit: RSI oversold or trend breaks up
+            if rsi_val < 30 or price > trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_RSI_Divergence_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
