@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need enough data for calculations
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,109 +13,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly calculations (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for HTF trend (primary: 4h)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate weekly high, low, close using previous 5 trading days (approximation)
-    weekly_high = np.full_like(high_1d, np.nan)
-    weekly_low = np.full_like(low_1d, np.nan)
-    weekly_close = np.full_like(close_1d, np.nan)
+    # Calculate 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    for i in range(len(high_1d)):
-        if i >= 5:
-            weekly_high[i] = np.max(high_1d[i-5:i])
-            weekly_low[i] = np.min(low_1d[i-5:i])
-            weekly_close[i] = close_1d[i-1]  # Previous day's close as weekly close
+    # Calculate 4h Donchian(20) breakout levels
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate weekly pivot points: P = (H + L + C)/3
-    weekly_p = (weekly_high + weekly_low + weekly_close) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    weekly_r1 = 2 * weekly_p - weekly_low
-    weekly_s1 = 2 * weekly_p - weekly_high
-    # R2 = P + (H - L), S2 = P - (H - L)
-    weekly_r2 = weekly_p + (weekly_high - weekly_low)
-    weekly_s2 = weekly_p - (weekly_high - weekly_low)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    weekly_r3 = weekly_high + 2 * (weekly_p - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_p)
+    # Donchian upper/lower bands (20-period)
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly pivot levels to 1d timeframe
-    wp_aligned = align_htf_to_ltf(prices, df_1d, weekly_p)
-    wr1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    ws1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    wr2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
-    ws2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
-    wr3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
-    ws3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
+    # Align Donchian levels to 4h timeframe
+    donchian_upper_4h = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_4h = align_htf_to_ltf(prices, df_4h, donchian_lower)
     
-    # Calculate 1d ATR (14-period) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate 4h volume spike (volume > 2.0x 20-period average)
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_spike_4h = volume_4h > (2.0 * vol_ma_4h)
+    volume_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h.astype(float))
+    
+    # Calculate 4h ATR(14) for stop loss
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ATR to 1d
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 1d volume spike (volume > 1.8x 20-period average for stricter filter)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (1.8 * vol_ma_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for enough data for all indicators
+    start_idx = 60  # Wait for enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(wr3_aligned[i]) or
-            np.isnan(ws3_aligned[i]) or
-            np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(donchian_upper_4h[i]) or
+            np.isnan(donchian_lower_4h[i]) or
+            np.isnan(ema_34_12h_aligned[i]) or
+            np.isnan(atr_4h_aligned[i]) or
+            np.isnan(volume_spike_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above its 30-period average
-        if i >= 30:
-            atr_ma_1d = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
-            atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
-            vol_filter = atr_1d_aligned[i] > atr_ma_1d_aligned[i] if not np.isnan(atr_ma_1d_aligned[i]) else False
-        else:
-            vol_filter = False
-        
-        # Only trade with volume spike and volatility filter
-        trade_allowed = volume_spike_1d_aligned[i] and vol_filter
-        
         if position == 0:
-            # Long: price touches or goes below S3 (strong support) with volume spike
-            if trade_allowed and close[i] <= ws3_aligned[i]:
+            # Long: price breaks above Donchian upper with volume spike and uptrend
+            if (close[i] > donchian_upper_4h[i] and 
+                volume_spike_4h_aligned[i] and 
+                close[i] > ema_34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or goes above R3 (strong resistance) with volume spike
-            elif trade_allowed and close[i] >= wr3_aligned[i]:
+            # Short: price breaks below Donchian lower with volume spike and downtrend
+            elif (close[i] < donchian_lower_4h[i] and 
+                  volume_spike_4h_aligned[i] and 
+                  close[i] < ema_34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches midpoint between S2 and S3 or shows weakness
-            midpoint_s2_s3 = (ws2_aligned[i] + ws3_aligned[i]) / 2.0
-            if close[i] >= midpoint_s2_s3:
+            # Long exit: price closes below Donchian lower or trailing stop
+            if (close[i] < donchian_lower_4h[i] or 
+                close[i] < (high[max(0, i-1)] - 2.0 * atr_4h_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches midpoint between R2 and R3 or shows weakness
-            midpoint_r2_r3 = (wr2_aligned[i] + wr3_aligned[i]) / 2.0
-            if close[i] <= midpoint_r2_r3:
+            # Short exit: price closes above Donchian upper or trailing stop
+            if (close[i] > donchian_upper_4h[i] or 
+                close[i] > (low[max(0, i-1)] + 2.0 * atr_4h_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R3_S3_StrictVolume"
-timeframe = "1d"
+name = "4h_Donchian20_12hEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
