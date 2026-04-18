@@ -3,84 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high, 1w EMA(21) is rising, and volume > 1.5x SMA(20)
-# Short when price breaks below Donchian(20) low, 1w EMA(21) is falling, and volume > 1.5x SMA(20)
-# Exit when price reverses to the opposite Donchian boundary or volume drops.
-# Uses price channel breakout for entry, weekly trend for direction, and volume filter to avoid false breakouts.
-# Designed for ~15-25 trades/year per symbol.
-name = "1d_Donchian20_Volume_1wTrend"
-timeframe = "1d"
+# Hypothesis: 6h Williams Alligator with 1d trend filter.
+# Long when: Alligator lines aligned bullish (jaw < teeth < lips) and price above 1d EMA(50)
+# Short when: Alligator lines aligned bearish (jaw > teeth > lips) and price below 1d EMA(50)
+# Exit when Alligator alignment breaks or price crosses 1d EMA(50) in opposite direction.
+# Williams Alligator uses smoothed median prices (SMMA) for jaw(13,8), teeth(8,5), lips(5,3).
+# Designed to catch trends with low noise, suitable for 6h timeframe with ~15-30 trades/year.
+name = "6h_WilliamsAlligator_1dEMA50"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # 1d Donchian channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate median price (typical price simplified)
+    median_price = (high + low) / 2.0
     
-    # 1d volume filter
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Williams Alligator: three SMMA lines
+    def smma(arr, period):
+        """Smoothed Moving Average - similar to Wilder's smoothing"""
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev_smma * (period-1) + current_price) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_21_prev = np.roll(ema_1w_21, 1)
-    ema_1w_21_prev[0] = ema_1w_21[0]
-    ema_1w_rising = ema_1w_21 > ema_1w_21_prev
-    ema_1w_falling = ema_1w_21 < ema_1w_21_prev
-    ema_1w_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_rising)
-    ema_1w_falling_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_falling)
+    jaw = smma(median_price, 13)  # Blue line
+    teeth = smma(median_price, 8)  # Red line
+    lips = smma(median_price, 5)   # Green line
+    
+    # 1d EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for indicator calculations
+    # Start after Alligator warmup (max period 13) + 1d EMA warmup
+    start_idx = max(13, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_sma[i]) or np.isnan(ema_1w_rising_aligned[i]) or 
-            np.isnan(ema_1w_falling_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_sma_val = vol_sma[i]
-        ema_rising = ema_1w_rising_aligned[i]
-        ema_falling = ema_1w_falling_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema_50 = ema_50_1d_aligned[i]
+        
+        # Alligator alignment conditions
+        bullish_aligned = jaw_val < teeth_val < lips_val
+        bearish_aligned = jaw_val > teeth_val > lips_val
         
         if position == 0:
-            # Long: break above Donchian high, weekly EMA rising, volume > 1.5x SMA
-            if price > donchian_high[i] and ema_rising and vol > 1.5 * vol_sma_val:
+            # Long: bullish alignment and price above 1d EMA50
+            if bullish_aligned and price > ema_50:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low, weekly EMA falling, volume > 1.5x SMA
-            elif price < donchian_low[i] and ema_falling and vol > 1.5 * vol_sma_val:
+            # Short: bearish alignment and price below 1d EMA50
+            elif bearish_aligned and price < ema_50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or volume drops below SMA
-            if price < donchian_low[i] or vol < vol_sma_val:
+            # Long exit: alignment breaks bearish or price crosses below 1d EMA50
+            if not bullish_aligned or price < ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or volume drops below SMA
-            if price > donchian_high[i] or vol < vol_sma_val:
+            # Short exit: alignment breaks bullish or price crosses above 1d EMA50
+            if not bearish_aligned or price > ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
