@@ -1,35 +1,30 @@
 #!/usr/bin/env python3
 """
-1d KAMA Trend + Volume Spike + ADX Trend Filter
-Hypothesis: KAMA adapts to market efficiency, providing smooth trend direction. Combined with volume spikes (institutional interest) and ADX > 25 (trending market), it captures strong moves in both bull and bear markets. Low trade frequency due to strict multi-condition entry.
+4h Donchian Breakout + Volume Spike + ATR Filter (Modified)
+Hypothesis: Donchian channel breakouts capture momentum in trending markets, while volume spikes confirm institutional participation. ATR-based stops manage risk. This combination works in both bull and bear markets by catching strong moves, with tight entry conditions to limit trades and reduce fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_length=10, fast_ema=2, slow_ema=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # For array calculation, we need to compute ER per point
-    er = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < er_length:
-            er[i] = 0
-        else:
-            change_sum = np.sum(change[i-er_length+1:i+1])
-            volatility_sum = np.sum(np.abs(np.diff(close[i-er_length+1:i+1])))
-            if volatility_sum > 0:
-                er[i] = change_sum / volatility_sum
-            else:
-                er[i] = 0
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
+def calculate_atr(high, low, close, period=14):
+    """Calculate Average True Range"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = np.zeros_like(tr)
+    if len(tr) < period:
+        return atr
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    return atr
 
 def generate_signals(prices):
     n = len(prices)
@@ -41,100 +36,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (KAMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for volume average and trend context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate KAMA on 1w for trend filter
-    close_1w = df_1w['close'].values
-    kama_1w = calculate_kama(close_1w, er_length=10, fast_ema=2, slow_ema=30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
-    
-    # Calculate ADX on 1d data
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    def smooth_series(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values use Wilder smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = smooth_series(tr, 14)
-    plus_di = 100 * smooth_series(plus_dm, 14) / np.where(atr != 0, atr, 1)
-    minus_di = 100 * smooth_series(minus_dm, 14) / np.where(atr != 0, atr, 1)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = smooth_series(dx, 14)
-    
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
+    # Calculate 20-period average volume on 1d for spike detection
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = np.zeros_like(vol_1d)
+    for i in range(len(vol_1d)):
         if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
+            vol_ma_1d[i] = np.mean(vol_1d[max(0, i-19):i+1]) if i >= 0 else vol_1d[i]
         else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 2.0)
+            vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Calculate ATR on 4h for stoploss and volatility filter
+    atr = calculate_atr(high, low, close, 14)
+    
+    # Calculate Donchian channels (20-period) on 4h
+    donchian_high = np.zeros_like(high)
+    donchian_low = np.zeros_like(low)
+    for i in range(len(high)):
+        if i < 20:
+            donchian_high[i] = np.max(high[max(0, i-19):i+1])
+            donchian_low[i] = np.min(low[max(0, i-19):i+1])
+        else:
+            donchian_high[i] = np.max(high[i-19:i+1])
+            donchian_low[i] = np.min(low[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 30  # Warmup for Donchian and ATR
     
     for i in range(start_idx, n):
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             signals[i] = 0.0
             continue
         
-        kama_val = kama_1w_aligned[i]
-        adx_val = adx[i]
-        vol_ok = vol_spike[i]
+        vol_ma = vol_ma_1d_aligned[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Enter long: price above KAMA (uptrend) + ADX > 25 + volume spike
-            if (close[i] > kama_val and 
-                adx_val > 25 and 
-                vol_ok):
+            # Enter long: price breaks above Donchian high + volume spike
+            if (close[i] > donchian_high[i] and 
+                volume[i] > vol_ma * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA (downtrend) + ADX > 25 + volume spike
-            elif (close[i] < kama_val and 
-                  adx_val > 25 and 
-                  vol_ok):
+            # Enter short: price breaks below Donchian low + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  volume[i] > vol_ma * 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below KAMA or ADX weakens
-            if close[i] < kama_val or adx_val < 20:
+            # Exit long: price crosses below Donchian low or ATR-based stop
+            if (close[i] < donchian_low[i] or 
+                close[i] < high[max(0, i-1):i+1].max() - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above KAMA or ADX weakens
-            if close[i] > kama_val or adx_val < 20:
+            # Exit short: price crosses above Donchian high or ATR-based stop
+            if (close[i] > donchian_high[i] or 
+                close[i] > low[max(0, i-1):i+1].min() + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -142,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_VolumeSpike_ADXFilter"
-timeframe = "1d"
+name = "4h_Donchian_Breakout_VolumeSpike_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
