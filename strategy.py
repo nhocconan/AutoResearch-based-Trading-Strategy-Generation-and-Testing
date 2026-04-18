@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian(20) breakout with volume confirmation and 1-day ADX trend filter.
-Long: price breaks above Donchian upper band, ADX > 25, volume > 1.5x average.
-Short: price breaks below Donchian lower band, ADX > 25, volume > 1.5x average.
-Exit: opposite Donchian band touch or ADX < 20 (trend weakening).
-Uses 1-day Donchian bands for structure, avoiding whipsaws in ranging markets.
-Designed for 20-50 trades/year (80-200 total) to minimize fee drag.
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter.
+- Long: price breaks above Donchian upper band, ADX > 25 (trending), volume > 1.5x average
+- Short: price breaks below Donchian lower band, ADX > 25, volume > 1.5x average
+- Exit: opposite Donchian band touch or ADX < 20 (trend weakening)
+- Uses 4h as primary timeframe to target 20-50 trades/year (80-200 total over 4 years)
+- Designed to work in both bull and bear markets via ADX trend filter and volatility-based stops
 """
 
 import numpy as np
@@ -142,11 +142,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above Donchian high, ADX > 25, volume confirmation
             if close[i] > donchian_high_4h[i] and adx_14_1d_4h[i] > 25 and vol_confirmed:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below Donchian low, ADX > 25, volume confirmation
             elif close[i] < donchian_low_4h[i] and adx_14_1d_4h[i] > 25 and vol_confirmed:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -155,7 +155,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Short exit: price touches Donchian high or ADX < 20 (trend weakening)
@@ -163,7 +163,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
