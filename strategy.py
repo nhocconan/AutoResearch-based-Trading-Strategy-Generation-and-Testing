@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Trix_Volume_Trend
-Hypothesis: TRIX (triple exponential average momentum) on 12h timeframe identifies momentum shifts, 
-combined with volume confirmation on 4h and price position relative to 1d VWAP for entry timing. 
-In bull markets: long when TRIX turns positive with volume and price above VWAP. 
-In bear markets: short when TRIX turns negative with volume and price below VWAP. 
-Uses 1d VWAP as dynamic support/resistance to avoid whipsaws. Targets 20-30 trades/year by 
-requiring TRIX zero-cross, volume > 1.5x 20-period average, and price on correct side of VWAP.
+1h_Pullback_to_4h_EMA_with_Volume_and_Session
+Hypothesis: In trending markets (defined by 4h EMA21), price pulls back to the 4h EMA on 1h timeframe, offering high-probability entries. We enter long when price touches or crosses above the 4h EMA21 with volume confirmation (>1.5x 20-period average) during active hours (08-20 UTC). Short when price touches or crosses below the 4h EMA21 with volume confirmation. Uses 1d ADX>25 to filter for trending conditions only, avoiding whipsaws in ranging markets. Targets 15-30 trades/year by requiring multiple confluence factors. Works in bull markets by buying EMA pullbacks in uptrends, and in bear markets by selling EMA pullbacks in downtrends.
 """
 
 import numpy as np
@@ -23,61 +18,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for TRIX calculation
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 4h data for EMA21 (trend filter)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate TRIX: triple EMA of close, then percent change
-    # EMA1
-    ema1 = np.full_like(close_12h, np.nan)
-    ema1[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        ema1[i] = 0.15 * close_12h[i] + 0.85 * ema1[i-1]  # alpha = 2/(12+1) for 12-period EMA
+    # Calculate EMA21 on 4h close
+    ema_4h = np.full_like(close_4h, np.nan)
+    if len(close_4h) >= 21:
+        ema_4h[20] = np.mean(close_4h[:21])  # simple average for first value
+        multiplier = 2 / (21 + 1)
+        for i in range(21, len(close_4h)):
+            ema_4h[i] = close_4h[i] * multiplier + ema_4h[i-1] * (1 - multiplier)
     
-    # EMA2 of EMA1
-    ema2 = np.full_like(close_12h, np.nan)
-    ema2[0] = ema1[0]
-    for i in range(1, len(close_12h)):
-        ema2[i] = 0.15 * ema1[i] + 0.85 * ema2[i-1]
+    # Align 4h EMA21 to 1h timeframe (wait for bar close)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # EMA3 of EMA2
-    ema3 = np.full_like(close_12h, np.nan)
-    ema3[0] = ema2[0]
-    for i in range(1, len(close_12h)):
-        ema3[i] = 0.15 * ema2[i] + 0.85 * ema3[i-1]
-    
-    # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
-    trix = np.full_like(close_12h, np.nan)
-    for i in range(1, len(close_12h)):
-        if ema3[i-1] != 0:
-            trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
-    
-    # Align TRIX to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
-    
-    # Get 1d data for VWAP calculation
+    # Get 1d data for ADX25 (trend strength filter)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate typical price and VWAP for each 1d bar
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_1d = np.full_like(close_1d, np.nan)
-    cum_tp_vol = 0.0
-    cum_vol = 0.0
+    # Calculate ADX on 1d data
+    def calculate_adx(high, low, close, period=14):
+        if len(high) < period + 1:
+            return np.full_like(high, np.nan)
+        
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[np.nan], dm_plus])
+        dm_minus = np.concatenate([[np.nan], dm_minus])
+        
+        # Smoothed values
+        atr = np.full_like(high, np.nan)
+        dm_plus_smooth = np.full_like(high, np.nan)
+        dm_minus_smooth = np.full_like(high, np.nan)
+        
+        if len(high) >= period:
+            # First values: simple average
+            atr[period-1] = np.nanmean(tr[1:period+1])
+            dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period+1])
+            dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period+1])
+            
+            # Wilder smoothing
+            for i in range(period, len(high)):
+                atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
+        
+        # Directional Indicators
+        di_plus = np.full_like(high, np.nan)
+        di_minus = np.full_like(high, np.nan)
+        dx = np.full_like(high, np.nan)
+        
+        for i in range(period, len(high)):
+            if atr[i] != 0:
+                di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
+                di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
+                if di_plus[i] + di_minus[i] != 0:
+                    dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+        
+        # ADX: smoothed DX
+        adx = np.full_like(high, np.nan)
+        if len(high) >= 2 * period - 1:
+            adx[2*period-2] = np.nanmean(dx[period:2*period])
+            for i in range(2*period-1, len(high)):
+                adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+        
+        return adx
     
-    for i in range(len(close_1d)):
-        cum_tp_vol += typical_price_1d[i] * volume_1d[i]
-        cum_vol += volume_1d[i]
-        if cum_vol != 0:
-            vwap_1d[i] = cum_tp_vol / cum_vol
-        else:
-            vwap_1d[i] = typical_price_1d[i]
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align VWAP to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Align 1d ADX to 1h timeframe (wait for bar close)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -85,52 +108,59 @@ def generate_signals(prices):
         vol_ma[i] = np.mean(volume[i-20:i])
     vol_confirm = volume > (vol_ma * 1.5)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA
+    start_idx = max(50, 20)  # need EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(trix_aligned[i]) or np.isnan(vwap_aligned[i]) or 
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade in trending markets (ADX > 25) and during session
+        if not (adx_1d_aligned[i] > 25 and session_filter[i]):
+            signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Long entry: TRIX turns positive (above zero), with volume, and price above VWAP
-            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and vol_confirm[i] and 
-                close[i] > vwap_aligned[i]):
-                signals[i] = 0.25
+            # Long entry: price crosses above 4h EMA21 with volume confirmation
+            if (close[i] > ema_4h_aligned[i] and close[i-1] <= ema_4h_aligned[i-1] and 
+                vol_confirm[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short entry: TRIX turns negative (below zero), with volume, and price below VWAP
-            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and vol_confirm[i] and 
-                  close[i] < vwap_aligned[i]):
-                signals[i] = -0.25
+            # Short entry: price crosses below 4h EMA21 with volume confirmation
+            elif (close[i] < ema_4h_aligned[i] and close[i-1] >= ema_4h_aligned[i-1] and 
+                  vol_confirm[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: TRIX turns negative or price falls below VWAP
-            if (trix_aligned[i] < 0 or 
-                close[i] < vwap_aligned[i]):
+            # Long exit: price crosses below 4h EMA21 (trend change)
+            if close[i] < ema_4h_aligned[i] and close[i-1] >= ema_4h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: TRIX turns positive or price rises above VWAP
-            if (trix_aligned[i] > 0 or 
-                close[i] > vwap_aligned[i]):
+            # Short exit: price crosses above 4h EMA21 (trend change)
+            if close[i] > ema_4h_aligned[i] and close[i-1] <= ema_4h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_12h_1d_Trix_Volume_Trend"
-timeframe = "4h"
+name = "1h_Pullback_to_4h_EMA_with_Volume_and_Session"
+timeframe = "1h"
 leverage = 1.0
