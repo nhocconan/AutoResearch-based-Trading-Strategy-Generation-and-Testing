@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v3"
-timeframe = "4h"
+name = "6h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,22 +31,22 @@ def generate_signals(prices):
     R1_d = pivot_d + range_d
     S1_d = pivot_d - range_d
     
-    # ATR(14) for stop filter
+    # ATR(14) for volatility filter
     tr1 = prev_high_d - prev_low_d
     tr2 = np.abs(prev_high_d - prev_close_d)
     tr3 = np.abs(prev_low_d - prev_close_d)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align to 4h
+    # Align to 6h
     R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
     S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
     pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
     atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
     
-    # Volume filter: current volume > 2.0 * 24-period average (24 * 4h = 4 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma_24)
+    # Volume filter: current volume > 2.0 * 4-period average (4 * 6h = 1 day)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_filter = volume > (2.0 * vol_ma_4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,7 +57,7 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
             np.isnan(pivot_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+            np.isnan(vol_ma_4[i])):
             signals[i] = 0.0
             continue
         
