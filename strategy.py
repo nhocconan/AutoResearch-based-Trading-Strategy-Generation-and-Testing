@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Supertrend_RSI_Regime_v1
-Hypothesis: Combine Supertrend trend filter with RSI mean reversion on 6h timeframe, using 1d ADX regime filter to avoid whipsaws. Supertrend provides clear trend direction, RSI(14) < 30 or > 70 signals mean-reversion entries in the direction of trend, and ADX > 25 ensures we only trade in trending markets. This approach works in both bull (trend following + pullbacks) and bear (shorting rallies in downtrends) markets. Target: 20-50 trades/year to minimize fee drag.
+4h_VolumeWeighted_KAMA_Reversal_v1
+Hypothesis: Combine KAMA (Kaufman Adaptive Moving Average) with volume-weighted price to identify trend exhaustion points. In both bull and bear markets, sharp price moves with declining volume often precede reversals. Volume-weighted KAMA adapts faster during high-volume moves and slower during low-volume consolidations, providing early reversal signals. Uses 1d ADX for regime filtering to avoid whipsaws in low-trend environments. Designed for low trade frequency (<25/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -18,174 +18,142 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Supertrend calculation (ATR=10, multiplier=3.0)
-    atr_period = 10
-    multiplier = 3.0
+    # Calculate Volume-Weighted Close (VWC)
+    vwc = (close * volume) / (volume + 1e-10)
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Kaufman Adaptive Moving Average (KAMA) on VWC
+    # KAMA parameters: ER period=10, Fast SC=2, Slow SC=30
+    er_period = 10
+    fast_sc = 2
+    slow_sc = 30
     
-    # ATR
-    atr = np.zeros(n)
-    atr[atr_period-1] = np.mean(tr[:atr_period])
-    for i in range(atr_period, n):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(vwc, prepend=vwc[0]))
+    direction = np.abs(np.subtract(vwc, np.roll(vwc, er_period)))
+    volatility = np.cumsum(change)
+    volatility = np.where(np.arange(len(vwc)) < er_period, 
+                         np.full_like(volatility, np.nan), 
+                         volatility - np.roll(volatility, er_period))
+    er = np.where(volatility != 0, direction / volatility, 0)
     
-    # Supertrend basic upper/lower bands
-    hl2 = (high + low) / 2
-    upper_basic = hl2 + multiplier * atr
-    lower_basic = hl2 - multiplier * atr
+    # Calculate Smoothing Constant (SC)
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
     
-    # Supertrend final bands and direction
-    upper_final = np.zeros(n)
-    lower_final = np.zeros(n)
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    
-    upper_final[0] = upper_basic[0]
-    lower_final[0] = lower_basic[0]
-    supertrend[0] = lower_final[0]
-    trend[0] = 1
-    
+    # Calculate KAMA
+    kama = np.full_like(vwc, np.nan)
+    kama[0] = vwc[0]
     for i in range(1, n):
-        if close[i] <= upper_final[i-1]:
-            upper_final[i] = upper_basic[i]
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (vwc[i] - kama[i-1])
         else:
-            upper_final[i] = upper_final[i-1]
-            
-        if close[i] >= lower_final[i-1]:
-            lower_final[i] = lower_basic[i]
-        else:
-            lower_final[i] = lower_final[i-1]
-        
-        if supertrend[i-1] == upper_final[i-1] and close[i] <= upper_final[i]:
-            supertrend[i] = lower_final[i]
-            trend[i] = -1
-        elif supertrend[i-1] == lower_final[i-1] and close[i] >= lower_final[i]:
-            supertrend[i] = upper_final[i]
-            trend[i] = 1
-        else:
-            supertrend[i] = supertrend[i-1]
-            trend[i] = trend[i-1]
+            kama[i] = kama[i-1]
     
-    # RSI(14)
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
-    avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
-    
-    for i in range(rsi_period, n):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 1d ADX regime filter (trend strength)
+    # 1d ADX for regime filtering (trend strength)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # ADX calculation
+    # Calculate ADX components
+    tr1 = np.subtract(high_1d, low_1d)
+    tr2 = np.subtract(np.abs(high_1d), np.abs(np.roll(close_1d, 1)))
+    tr3 = np.subtract(np.abs(low_1d), np.abs(np.roll(close_1d, 1)))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.where(np.arange(len(tr)) == 0, high_1d[0] - low_1d[0], tr)
+    
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    
+    # Smooth TR, +DM, -DM
+    atr_period = 14
+    atr = np.full_like(high_1d, np.nan)
+    plus_dm_smooth = np.full_like(high_1d, np.nan)
+    minus_dm_smooth = np.full_like(high_1d, np.nan)
+    
+    # Initial values
+    if len(high_1d) >= atr_period:
+        atr[atr_period-1] = np.nansum(tr[:atr_period])
+        plus_dm_smooth[atr_period-1] = np.nansum(plus_dm[:atr_period])
+        minus_dm_smooth[atr_period-1] = np.nansum(minus_dm[:atr_period])
+    
+    # Wilder's smoothing
+    for i in range(atr_period, len(high_1d)):
+        atr[i] = atr[i-1] - (atr[i-1] / atr_period) + tr[i]
+        plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / atr_period) + plus_dm[i]
+        minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / atr_period) + minus_dm[i]
+    
+    # Calculate DI and DX
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # Calculate ADX (smoothed DX)
     adx_period = 14
-    tr1_d = high_1d[1:] - low_1d[1:]
-    tr2_d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))])
-    
-    # Directional Movement
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    # Smoothed values
-    tr_smooth = np.zeros_like(tr_d)
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
-    
-    tr_smooth[adx_period-1] = np.sum(tr_d[:adx_period])
-    plus_dm_smooth[adx_period-1] = np.sum(plus_dm[:adx_period])
-    minus_dm_smooth[adx_period-1] = np.sum(minus_dm[:adx_period])
-    
-    for i in range(adx_period, len(tr_d)):
-        tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / adx_period) + tr_d[i]
-        plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / adx_period) + plus_dm[i]
-        minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / adx_period) + minus_dm[i]
-    
-    # Avoid division by zero
-    plus_di = np.divide(plus_dm_smooth, tr_smooth, out=np.zeros_like(plus_dm_smooth), where=tr_smooth!=0) * 100
-    minus_di = np.divide(minus_dm_smooth, tr_smooth, out=np.zeros_like(minus_dm_smooth), where=tr_smooth!=0) * 100
-    dx = np.divide(np.abs(plus_di - minus_di), (plus_di + minus_di), out=np.zeros_like(plus_di), where=(plus_di + minus_di)!=0) * 100
-    
-    adx = np.zeros(len(dx))
+    adx = np.full_like(dx, np.nan)
     if len(dx) >= adx_period:
-        adx[adx_period-1] = np.mean(dx[:adx_period])
+        adx[adx_period-1] = np.nansum(dx[:adx_period])
         for i in range(adx_period, len(dx)):
-            adx[i] = (adx[i-1] * (adx_period-1) + dx[i]) / adx_period
+            adx[i] = adx[i-1] - (adx[i-1] / adx_period) + dx[i]
     
-    # Align ADX to 6h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume confirmation: >1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Volume spike detection: current volume > 2x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ma[20:] = vol_series.rolling(window=20, min_periods=20).mean().values[20:]
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, rsi_period, adx_period, atr_period)  # Ensure indicators are ready
+    start_idx = max(50, er_period, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or 
+        if (np.isnan(kama[i]) or 
             np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_spike[i]) or
-            np.isnan(supertrend[i])):
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        st = supertrend[i]
-        rsi_val = rsi[i]
+        kama_val = kama[i]
         adx_val = adx_aligned[i]
         vol_spike = volume_spike[i]
         
+        # Regime filter: only trade when ADX > 25 (trending market)
+        if adx_val < 25:
+            signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Long: uptrend + RSI oversold + volume spike + strong trend (ADX>25)
-            if st == lower_final[i] and rsi_val < 30 and vol_spike and adx_val > 25:
+            # Long: price crosses above KAMA with volume spike
+            if price > kama_val and close[i-1] <= kama_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + RSI overbought + volume spike + strong trend (ADX>25)
-            elif st == upper_final[i] and rsi_val > 70 and vol_spike and adx_val > 25:
+            # Short: price crosses below KAMA with volume spike
+            elif price < kama_val and close[i-1] >= kama_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: trend change or RSI overbought
-            if st == upper_final[i] or rsi_val > 70:
+            # Exit: price crosses below KAMA or volume drops significantly
+            if price < kama_val or (volume[i] < 0.5 * vol_ma[i] and not np.isnan(vol_ma[i])):
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: trend change or RSI oversold
-            if st == lower_final[i] or rsi_val < 30:
+            # Exit: price crosses above KAMA or volume drops significantly
+            if price > kama_val or (volume[i] < 0.5 * vol_ma[i] and not np.isnan(vol_ma[i])):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Supertrend_RSI_Regime_v1"
-timeframe = "6h"
+name = "4h_VolumeWeighted_KAMA_Reversal_v1"
+timeframe = "4h"
 leverage = 1.0
