@@ -13,93 +13,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
+    # Get 1D data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot (from prior week's data)
-    # Resample daily to weekly manually by grouping 5-day periods
-    weeks_high = []
-    weeks_low = []
-    weeks_close = []
+    # Calculate 20-day Donchian channels
+    high_20d = np.full(len(high_1d), np.nan)
+    low_20d = np.full(len(low_1d), np.nan)
+    for i in range(20, len(high_1d)):
+        high_20d[i] = np.max(high_1d[i-20:i])
+        low_20d[i] = np.min(low_1d[i-20:i])
     
-    for i in range(0, len(high_1d), 5):
-        end = min(i + 5, len(high_1d))
-        weeks_high.append(np.max(high_1d[i:end]))
-        weeks_low.append(np.min(low_1d[i:end]))
-        weeks_close.append(close_1d[end-1])
+    # Align Donchian channels to 12h timeframe
+    high_20d_12h = align_htf_to_ltf(prices, df_1d, high_20d)
+    low_20d_12h = align_htf_to_ltf(prices, df_1d, low_20d)
     
-    # Calculate weekly pivot points
-    weeks_high = np.array(weeks_high)
-    weeks_low = np.array(weeks_low)
-    weeks_close = np.array(weeks_close)
+    # Get 1W data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Pivot = (H + L + C)/3
-    weekly_pivot = (weeks_high + weeks_low + weeks_close) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    weekly_r1 = 2 * weekly_pivot - weeks_low
-    weekly_s1 = 2 * weekly_pivot - weeks_high
-    # R2 = P + (H - L), S2 = P - (H - L)
-    weekly_r2 = weekly_pivot + (weeks_high - weeks_low)
-    weekly_s2 = weekly_pivot - (weeks_high - weeks_low)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    weekly_r3 = weeks_high + 2 * (weekly_pivot - weeks_low)
-    weekly_s3 = weeks_low - 2 * (weeks_high - weeks_pivot)
+    # Calculate 34-week EMA for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align weekly levels to 6h timeframe (with 1-week delay for confirmation)
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot, additional_delay_bars=5)
-    weekly_r1_6h = align_htf_to_ltf(prices, df_1d, weekly_r1, additional_delay_bars=5)
-    weekly_s1_6h = align_htf_to_ltf(prices, df_1d, weekly_s1, additional_delay_bars=5)
-    weekly_r2_6h = align_htf_to_ltf(prices, df_1d, weekly_r2, additional_delay_bars=5)
-    weekly_s2_6h = align_htf_to_ltf(prices, df_1d, weekly_s2, additional_delay_bars=5)
-    weekly_r3_6h = align_htf_to_ltf(prices, df_1d, weekly_r3, additional_delay_bars=5)
-    weekly_s3_6h = align_htf_to_ltf(prices, df_1d, weekly_s3, additional_delay_bars=5)
+    # Align weekly EMA34 to 12h timeframe
+    ema34_1w_12h = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Calculate 12h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirmed = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA
+    start_idx = max(20, 34, 20)  # need Donchian, EMA34, RSI, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_pivot_6h[i]) or np.isnan(weekly_r1_6h[i]) or 
-            np.isnan(weekly_s1_6h[i]) or np.isnan(weekly_r2_6h[i]) or 
-            np.isnan(weekly_s2_6h[i]) or np.isnan(weekly_r3_6h[i]) or 
-            np.isnan(weekly_s3_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(high_20d_12h[i]) or np.isnan(low_20d_12h[i]) or 
+            np.isnan(ema34_1w_12h[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 0:
-            # Long entry: price breaks above weekly R3 with volume
-            if close[i] > weekly_r3_6h[i] and vol_confirmed[i]:
+            # Long entry: price breaks above 20-day high, weekly trend up, RSI not overbought, with volume
+            if (close[i] > high_20d_12h[i] and 
+                ema34_1w_12h[i] > ema34_1w_12h[i-1] and 
+                rsi[i] < 70 and 
+                vol_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below weekly S3 with volume
-            elif close[i] < weekly_s3_6h[i] and vol_confirmed[i]:
+            # Short entry: price breaks below 20-day low, weekly trend down, RSI not oversold, with volume
+            elif (close[i] < low_20d_12h[i] and 
+                  ema34_1w_12h[i] < ema34_1w_12h[i-1] and 
+                  rsi[i] > 30 and 
+                  vol_confirmed):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price falls back below weekly pivot
-            if close[i] < weekly_pivot_6h[i]:
+            # Long exit: price breaks below 20-day low or RSI overbought
+            if close[i] < low_20d_12h[i] or rsi[i] > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above weekly pivot
-            if close[i] > weekly_pivot_6h[i]:
+            # Short exit: price breaks above 20-day high or RSI oversold
+            if close[i] > high_20d_12h[i] or rsi[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_Breakout_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyEMA34_RSI_Volume"
+timeframe = "12h"
 leverage = 1.0
