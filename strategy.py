@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_R1S1_Breakout_WeeklyTrend_Volume
-Hypothesis: Daily breakouts above weekly R1 or below S1 pivot levels, filtered by weekly trend (EMA34) and volume spikes.
-Focuses on high-probability breakouts in trending markets, avoiding false signals in ranges. Designed for low frequency
-(10-25 trades/year) to minimize fee drag and improve generalization across bull/bear markets.
+4h_KAMA_Direction_RSI_Extreme_Volume
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction.
+Combine with RSI extremes (<30 or >70) and volume confirmation to capture
+trend reversals after exhaustion. Low-frequency design avoids whipsaws in
+choppy markets while capturing strong directional moves. Works in bull via
+trend continuation and in bear via mean-reversion bounces from oversold/overbought.
 """
 
 import numpy as np
@@ -20,44 +22,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and pivot levels
-    df_1w = get_htf_data(prices, '1w')
+    # KAMA trend filter (1h)
+    df_1h = get_htf_data(prices, '1h')
+    close_1h = df_1h['close'].values
     
-    # Calculate weekly EMA34 trend filter
-    close_1w = df_1w['close'].values
-    ema34_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 34:
-        ema34_1w[33] = np.mean(close_1w[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1w)):
-            ema34_1w[i] = close_1w[i] * alpha + ema34_1w[i-1] * (1 - alpha)
+    # Efficiency Ratio and KAMA calculation
+    er = np.full(len(close_1h), np.nan)
+    for i in range(10, len(close_1h)):
+        change = abs(close_1h[i] - close_1h[i-10])
+        volatility = np.sum(np.abs(np.diff(close_1h[i-10:i+1])))
+        if volatility != 0:
+            er[i] = change / volatility
+        else:
+            er[i] = 1.0
     
-    # Calculate weekly pivot levels (R1, S1 from prior week)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.full(len(close_1h), np.nan)
+    if len(close_1h) > 0:
+        kama[0] = close_1h[0]
+        for i in range(1, len(close_1h)):
+            kama[i] = kama[i-1] + sc[i] * (close_1h[i] - kama[i-1])
     
-    r1 = np.full(len(close_1w), np.nan)  # Weekly R1
-    s1 = np.full(len(close_1w), np.nan)  # Weekly S1
+    kama_1h_aligned = align_htf_to_ltf(prices, df_1h, kama)
     
-    for i in range(1, len(close_1w)):
-        ph = high_1w[i-1]
-        pl = low_1w[i-1]
-        pc = close_1w[i-1]
-        diff = ph - pl
-        r1[i] = pc + 1.0 * diff  # R1
-        s1[i] = pc - 1.0 * diff  # S1
+    # RSI (14) on 4h close
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align weekly data to daily timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:14])
+            avg_loss[i] = np.mean(loss[0:14])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
     
-    # Volume spike: current volume > 2.0 x 20-period average
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,34 +75,32 @@ def generate_signals(prices):
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_1h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above weekly R1 with volume spike and weekly uptrend
-            if (close[i] > r1_aligned[i] and vol_spike[i] and 
-                close[i] > ema34_1w_aligned[i]):
+            # Long: price above KAMA (uptrend) + RSI oversold + volume
+            if (close[i] > kama_1h_aligned[i] and rsi[i] < 30 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S1 with volume spike and weekly downtrend
-            elif (close[i] < s1_aligned[i] and vol_spike[i] and 
-                  close[i] < ema34_1w_aligned[i]):
+            # Short: price below KAMA (downtrend) + RSI overbought + volume
+            elif (close[i] < kama_1h_aligned[i] and rsi[i] > 70 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below weekly S1 or weekly trend turns down
-            if (close[i] < s1_aligned[i] or close[i] < ema34_1w_aligned[i]):
+            # Long exit: RSI overbought or price breaks below KAMA
+            if (rsi[i] > 70 or close[i] < kama_1h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above weekly R1 or weekly trend turns up
-            if (close[i] > r1_aligned[i] or close[i] > ema34_1w_aligned[i]):
+            # Short exit: RSI oversold or price breaks above KAMA
+            if (rsi[i] < 30 or close[i] > kama_1h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1S1_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_KAMA_Direction_RSI_Extreme_Volume"
+timeframe = "4h"
 leverage = 1.0
