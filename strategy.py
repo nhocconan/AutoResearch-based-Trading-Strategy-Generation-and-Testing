@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_R2S2_Breakout_Volume_Trend_Filter
-Hypothesis: Camarilla pivot levels R1/S1 and R2/S2 from daily timeframe act as strong support/resistance.
-Breakouts above R2 or below S2 with volume confirmation and daily EMA trend filter capture
-institutional move initiation. Works in bull/bear by following institutional flow.
-Target: 12-30 trades/year (48-120 total over 4 years) to balance opportunity and fee drag.
+6h_Keltner_Breakout_Aroon_Volume_Filter
+Hypothesis: Keltner Channel breakouts combined with Aroon trend strength and volume confirmation
+capture momentum moves in both bull and bear markets. Aroon filters out weak breakouts,
+ensuring only strong trends are traded. Volume confirms institutional participation.
+Target: 15-25 trades/year (60-100 total over 4 years) to avoid fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,98 +21,121 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for Camarilla calculation
+    # 1-day data for Keltner and Aroon
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Keltner Channel (10, 1.5) - typical settings
+    # Upper = EMA(10) + 1.5 * ATR(10)
+    # Lower = EMA(10) - 1.5 * ATR(10)
+    close_1d = df_1d['close']
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # R2 = C + (H-L)*1.1/6, S2 = C - (H-L)*1.1/6
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    r2 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    s2 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    # EMA(10)
+    ema_10 = close_1d.ewm(span=10, adjust=False, min_periods=10).mean()
     
-    # Align to 12h timeframe (waits for 1-day bar to close)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    # ATR(10)
+    tr1 = high_1d - low_1d
+    tr2 = abs(high_1d - close_1d.shift(1))
+    tr3 = abs(low_1d - close_1d.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_10 = tr.ewm(span=10, adjust=False, min_periods=10).mean()
     
-    # Volume filter: >1.5x 20-period average
+    keltner_up = ema_10 + 1.5 * atr_10
+    keltner_low = ema_10 - 1.5 * atr_10
+    
+    # Aroon(25) - measures trend strength
+    # Aroon Up = ((25 - days since 25-period high) / 25) * 100
+    # Aroon Down = ((25 - days since 25-period low) / 25) * 100
+    high_25 = high_1d.rolling(window=25, min_periods=25).max()
+    low_25 = low_1d.rolling(window=25, min_periods=25).min()
+    
+    # Days since high/low
+    since_high = 25 - high_1d.rolling(window=25, min_periods=1).apply(
+        lambda x: 25 - np.argmax(x[::-1]) - 1, raw=True
+    )
+    since_low = 25 - low_1d.rolling(window=25, min_periods=1).apply(
+        lambda x: 25 - np.argmin(x[::-1]) - 1, raw=True
+    )
+    
+    aroon_up = ((25 - since_high) / 25) * 100
+    aroon_down = ((25 - since_low) / 25) * 100
+    
+    # Align to 6h timeframe
+    keltner_up_6h = align_htf_to_ltf(prices, df_1d, keltner_up.values)
+    keltner_low_6h = align_htf_to_ltf(prices, df_1d, keltner_low.values)
+    aroon_up_6h = align_htf_to_ltf(prices, df_1d, aroon_up.values)
+    aroon_down_6h = align_htf_to_ltf(prices, df_1d, aroon_down.values)
+    
+    # Volume filter: >1.3x 20-period average (more lenient than 1.5x to increase trades slightly)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
-    
-    # 1-day EMA trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     bars_since_entry = 0
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 25  # Warmup for Aroon
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(r2_12h[i]) or
-            np.isnan(s2_12h[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
+        if (np.isnan(keltner_up_6h[i]) or np.isnan(keltner_low_6h[i]) or
+            np.isnan(aroon_up_6h[i]) or np.isnan(aroon_down_6h[i]) or
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             bars_since_entry = 0
             continue
         
         price = close[i]
-        r1_val = r1_12h[i]
-        s1_val = s1_12h[i]
-        r2_val = r2_12h[i]
-        s2_val = s2_12h[i]
+        kup = keltner_up_6h[i]
+        klow = keltner_low_6h[i]
+        aroon_up_val = aroon_up_6h[i]
+        aroon_down_val = aroon_down_6h[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_1d_12h[i]
         
         if position == 0:
-            # Long: break above R2 with volume in uptrend
-            if price > r2_val and vol_ok and price > ema_trend:
+            # Long: break above upper Keltner with strong Aroon Up and volume
+            if price > kup and aroon_up_val > 70 and aroon_down_val < 30 and vol_ok:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: break below S2 with volume in downtrend
-            elif price < s2_val and vol_ok and price < ema_trend:
+            # Short: break below lower Keltner with strong Aroon Down and volume
+            elif price < klow and aroon_down_val > 70 and aroon_up_val < 30 and vol_ok:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         
         elif position == 1:
             bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day)
-            if bars_since_entry < 2:
+            # Minimum holding period: 3 bars (1.5 days) to avoid whipsaw
+            if bars_since_entry < 3:
                 signals[i] = 0.25
             else:
                 signals[i] = 0.25
-                # Exit: price returns to S1 or trend reverses
-                if price < s1_val or price < ema_trend:
+                # Exit: price returns to middle of Keltner or Aroon weakens
+                middle_keltner = (kup + klow) / 2
+                if price < middle_keltner or aroon_up_val < 50:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
         
         elif position == -1:
             bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day)
-            if bars_since_entry < 2:
+            # Minimum holding period: 3 bars (1.5 days)
+            if bars_since_entry < 3:
                 signals[i] = -0.25
             else:
                 signals[i] = -0.25
-                # Exit: price returns to R1 or trend reverses
-                if price > r1_val or price > ema_trend:
+                # Exit: price returns to middle of Keltner or Aroon weakens
+                middle_keltner = (kup + klow) / 2
+                if price > middle_keltner or aroon_down_val < 50:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_R2S2_Breakout_Volume_Trend_Filter"
-timeframe = "12h"
+name = "6h_Keltner_Breakout_Aroon_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
