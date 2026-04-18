@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_WickReversal_Volume
-Hypothesis: Trade reversals at daily candle wicks in the direction of 4h momentum, confirmed by volume spikes. Long when 4h close > daily low and 4h momentum > 0 with volume > 1.5x average. Short when 4h close < daily high and 4h momentum < 0 with volume > 1.5x average. Works in bull/bear by capturing rejection at daily extremes. Target ~20 trades/year to minimize fee drag.
+4h_Pivot_R1_S1_Breakout_Volume_ATRFilter
+Hypothesis: Trade breakouts above/below daily Camarilla R1/S1 levels with volume confirmation (>1.5x 20-period average) and ATR-based trend filter (close > EMA34). Uses 12h timeframe for context. Position size 0.25 targeting ~30 trades/year to minimize fee drag. Works in bull/bear by trading breakouts with EMA trend filter and volume confirmation.
 """
 
 import numpy as np
@@ -18,29 +18,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily high/low
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily high/low (previous day's values)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Previous day's values (completed day)
-    prev_daily_high = np.roll(daily_high, 1)
-    prev_daily_low = np.roll(daily_low, 1)
-    prev_daily_high[0] = daily_high[0]
-    prev_daily_low[0] = daily_low[0]
+    # 1d calculations (previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align daily levels to 4h timeframe
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_low)
+    # Previous 1d bar's OHLC (completed day)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    # 4h momentum (close - open) - positive = bullish, negative = bearish
-    momentum = close - prices['open'].values
+    # Daily Camarilla levels (based on previous day)
+    R1 = np.full_like(high_1d, np.nan)
+    S1 = np.full_like(low_1d, np.nan)
+    
+    for i in range(1, len(high_1d)):
+        range_ = prev_high_1d[i] - prev_low_1d[i]
+        R1[i] = prev_close_1d[i] + range_ * 1.1 / 12
+        S1[i] = prev_close_1d[i] - range_ * 1.1 / 12
+    
+    # 12h EMA trend filter (34-period)
+    close_12h = df_12h['close'].values
+    ema_period = 34
+    ema_12h = np.full_like(close_12h, np.nan)
+    
+    if len(close_12h) >= ema_period:
+        ema_12h[ema_period - 1] = np.mean(close_12h[:ema_period])
+        for i in range(ema_period, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 2 / (ema_period + 1)) + (ema_12h[i-1] * (ema_period - 1) / (ema_period + 1))
+    
+    # Align daily Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
+    
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
@@ -52,8 +78,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -61,33 +87,33 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: 4h close above daily low with bullish momentum and volume
-            if close[i] > daily_low_aligned[i] and momentum[i] > 0 and vol_confirm:
+            # Long: price breaks above R1 with volume and above 12h EMA
+            if close[i] > R1_aligned[i] and vol_confirm and close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: 4h close below daily high with bearish momentum and volume
-            elif close[i] < daily_high_aligned[i] and momentum[i] < 0 and vol_confirm:
+            # Short: price breaks below S1 with volume and below 12h EMA
+            elif close[i] < S1_aligned[i] and vol_confirm and close[i] < ema_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below daily low or momentum turns bearish
-            if close[i] < daily_low_aligned[i] or momentum[i] < 0:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price closes below S1 (reverse signal) or below 12h EMA
+            if close[i] < S1_aligned[i] or close[i] < ema_12h_aligned[i]:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above daily high or momentum turns bullish
-            if close[i] > daily_high_aligned[i] or momentum[i] > 0:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price closes above R1 (reverse signal) or above 12h EMA
+            if close[i] > R1_aligned[i] or close[i] > ema_12h_aligned[i]:
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_1d_WickReversal_Volume"
+name = "4h_Pivot_R1_S1_Breakout_Volume_ATRFilter"
 timeframe = "4h"
 leverage = 1.0
