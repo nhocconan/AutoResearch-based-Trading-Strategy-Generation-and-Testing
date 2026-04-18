@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
-# Donchian breakout captures trend continuation; ADX > 25 ensures strong trend (avoids chop).
-# Volume spike (2x 20-bar avg) confirms breakout conviction.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 20-50 trades/year to minimize fee drag in 4h timeframe.
-name = "4h_Donchian20_ADX14_Volume"
+# Hypothesis: 4h Williams Alligator with 1d KAMA trend filter and volume spike confirmation.
+# Williams Alligator (Jaw/Teeth/Lips) identifies trend presence via SMAs.
+# Trend: Jaw (13), Teeth (8), Lips (5) - aligned = trending, tangled = ranging.
+# KAMA on 1d filters for adaptive trend direction, reducing whipsaw.
+# Volume spike confirms breakout strength.
+# Designed for low trade frequency (15-40/year) to minimize fee drag.
+name = "4h_WilliamsAlligator_1dKAMA_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,41 +23,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX filter (ONCE before loop)
+    # Get 1d data for KAMA trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Alligator: SMAs of median price
+    median_price = (high + low) / 2.0
+    median_series = pd.Series(median_price)
+    jaw = median_series.rolling(window=13, min_periods=13).mean().shift(8).values  # 13-period, shifted 8
+    teeth = median_series.rolling(window=8, min_periods=8).mean().shift(5).values   # 8-period, shifted 5
+    lips = median_series.rolling(window=5, min_periods=5).mean().shift(3).values    # 5-period, shifted 3
     
-    # Calculate ADX components on 1d
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
+    # KAMA on 1d close
     close_1d = pd.Series(df_1d['close'].values)
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = abs(high_1d - close_1d.shift(1))
-    tr3 = abs(low_1d - close_1d.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Movement
-    plus_dm = high_1d.diff()
-    minus_dm = low_1d.diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    
-    # Directional Indicators
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr_1d)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr_1d)
-    
-    # ADX
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Efficiency Ratio
+    change = abs(close_1d.diff(10)).values
+    volatility = close_1d.diff().abs().rolling(window=10, min_periods=10).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama_1d = np.zeros_like(close_1d)
+    kama_1d[0] = close_1d.iloc[0]
+    for i in range(1, len(close_1d)):
+        kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d.iloc[i] - kama_1d[i-1])
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
     # Volume spike: current volume > 2.0 * 20-period average volume
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,35 +58,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(kama_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Alligator alignment: Jaw > Teeth > Lips = uptrend, reverse = downtrend
+        alligator_long = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        alligator_short = jaw[i] < teeth[i] and teeth[i] < lips[i]
+        
+        # KAMA trend: price above/below KAMA
+        price_above_kama = close[i] > kama_1d_aligned[i]
+        price_below_kama = close[i] < kama_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band AND strong trend AND volume spike
-            if close[i] > high_max[i] and strong_trend and volume_spike[i]:
+            # Long: Alligator aligned up AND price above KAMA AND volume spike
+            if alligator_long and price_above_kama and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band AND strong trend AND volume spike
-            elif close[i] < low_min[i] and strong_trend and volume_spike[i]:
+            # Short: Alligator aligned down AND price below KAMA AND volume spike
+            elif alligator_short and price_below_kama and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below lower Donchian band OR trend weakens
-            if close[i] < low_min[i] or not strong_trend:
+            # Long exit: Alligator loses alignment OR price crosses below KAMA
+            if not alligator_long or not price_above_kama:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above upper Donchian band OR trend weakens
-            if close[i] > high_max[i] or not strong_trend:
+            # Short exit: Alligator loses alignment OR price crosses above KAMA
+            if not alligator_short or not price_below_kama:
                 signals[i] = 0.0
                 position = 0
             else:
