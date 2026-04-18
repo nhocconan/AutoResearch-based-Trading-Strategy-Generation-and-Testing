@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_Strict
-Strategy: 4h Camarilla pivot R1/S1 breakout with volume confirmation and ADX trend filter.
-Long: Price breaks above R1 with volume spike in uptrend (ADX > 25).
-Short: Price breaks below S1 with volume spike in downtrend (ADX > 25).
-Uses 1D Camarilla levels for structure, volume spike for confirmation, ADX for regime.
-Designed for 4h timeframe: ~20-30 trades/year per symbol (80-120 total over 4 years).
-Works in bull/bear via ADX trend filter - only trades in trending regimes.
+4h_RSI_Trend_Squeeze_v1
+Strategy: 4h RSI with trend filter and volatility squeeze filter.
+Long: RSI(14) crosses above 50 in uptrend during low volatility (BBW < 20th percentile).
+Short: RSI(14) crosses below 50 in downtrend during low volatility (BBW < 20th percentile).
+Exit: RSI crosses back below/above 50 or volatility expands (BBW > 50th percentile).
+Designed for 4h timeframe: ~20-40 trades/year per symbol (80-160 total over 4 years).
+Works in bull/bear via trend filter and volatility regime filter.
 """
 
 import numpy as np
@@ -18,122 +18,92 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for trend filter and volatility regime
     df_1d = get_htf_data(prices, '1d')
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day
-    # R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12
-    rng = high_1d - low_1d
-    r1 = close_1d + rng * 1.1 / 12
-    s1 = close_1d - rng * 1.1 / 12
+    # Daily EMA100 for trend filter
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # ADX calculation for trend filter (14-period)
-    # +DM, -DM, TR
-    high_1440 = high  # 4h data, but we need daily equivalent for ADX
-    low_1440 = low
-    close_1440 = close
+    # Daily Bollinger Bands for volatility regime (20, 2)
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + 2 * std_20_1d
+    lower_bb_1d = sma_20_1d - 2 * std_20_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
     
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Percentiles for volatility regime (use expanding window to avoid look-ahead)
+    bb_width_series = pd.Series(bb_width_1d)
+    bb_width_pct_20 = bb_width_series.expanding(min_periods=50).quantile(0.20).values
+    bb_width_pct_50 = bb_width_series.expanding(min_periods=50).quantile(0.50).values
     
-    # Calculate +DM and -DM
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    bb_width_pct_20_aligned = align_htf_to_ltf(prices, df_1d, bb_width_pct_20)
+    bb_width_pct_50_aligned = align_htf_to_ltf(prices, df_1d, bb_width_pct_50)
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smooth(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) >= period:
-            # First value is simple average
-            result[period-1] = np.nansum(x[:period]) / period
-            # Subsequent values: smoothed = prev_smooth - (prev_smooth/period) + current
-            for i in range(period, len(x)):
-                if not np.isnan(result[i-1]):
-                    result[i] = result[i-1] - (result[i-1]/period) + x[i]
-        return result
-    
-    period = 14
-    tr_smooth = wilders_smooth(tr, period)
-    plus_dm_smooth = wilders_smooth(plus_dm, period)
-    minus_dm_smooth = wilders_smooth(minus_dm, period)
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smooth(dx, period)
-    
-    # Align Camarilla levels and ADX to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 4h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # need enough for ADX smoothing
+    start_idx = 100  # need enough for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_100_aligned[i]) or np.isnan(bb_width_pct_20_aligned[i]) or 
+            np.isnan(bb_width_pct_50_aligned[i]) or np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Trend condition
+        uptrend = close[i] > ema_100_aligned[i]
+        downtrend = close[i] < ema_100_aligned[i]
         
-        # Volume confirmation: volume > 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volatility squeeze condition (low volatility)
+        low_volatility = bb_width_1d[i] < bb_width_pct_20_aligned[i]
+        high_volatility = bb_width_1d[i] > bb_width_pct_50_aligned[i]
         
-        # Breakout conditions
-        breakout_long = close[i] > r1_aligned[i]
-        breakout_short = close[i] < s1_aligned[i]
+        # RSI conditions
+        rsi_cross_up = rsi_values[i] > 50 and rsi_values[i-1] <= 50
+        rsi_cross_down = rsi_values[i] < 50 and rsi_values[i-1] >= 50
         
         if position == 0:
-            # Long: uptrend + volume + breakout above R1
-            if trending and vol_confirm and breakout_long:
+            # Long: uptrend + low volatility + RSI cross up
+            if uptrend and low_volatility and rsi_cross_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakout below S1
-            elif trending and vol_confirm and breakout_short:
+            # Short: downtrend + low volatility + RSI cross down
+            elif downtrend and low_volatility and rsi_cross_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend ends, volume confirmation, or breakdown below S1
-            if not trending or vol_confirm or close[i] < s1_aligned[i]:
+            # Long exit: trend change, volatility expansion, or RSI cross down
+            if not uptrend or high_volatility or rsi_cross_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend ends, volume confirmation, or breakout above R1
-            if not trending or vol_confirm or close[i] > r1_aligned[i]:
+            # Short exit: trend change, volatility expansion, or RSI cross up
+            if not downtrend or high_volatility or rsi_cross_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -141,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Strict"
+name = "4h_RSI_Trend_Squeeze_v1"
 timeframe = "4h"
 leverage = 1.0
