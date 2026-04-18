@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_TrendFilter
-Hypothesis: Combines daily Camarilla pivot breakouts (R1/S1) with a 4h EMA trend filter.
-In bull markets (price > 4h EMA34), take long breakouts of R1; in bear markets (price < 4h EMA34),
-take short breakdowns of S1. Volume confirmation reduces false signals. Targets 20-30 trades/year
-by requiring trend alignment, reducing whipsaw in sideways markets. Works in both regimes by
-trading with the intermediate-term trend.
+4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Tight
+Hypothesis: Uses daily Camarilla pivot levels R1/S1 as entry triggers with volume confirmation and a 2-bar hold requirement.
+Reduces overtrading by requiring price to close outside the level for 2 consecutive bars before entering.
+Targets 20-30 trades/year to minimize fee drift. Works in both bull and bear markets by trading breakouts of key daily support/resistance.
 """
 
 import numpy as np
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -39,10 +37,6 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 4h EMA34 for trend filter
-    close_series = pd.Series(close)
-    ema_34 = close_series.ewm(span=34, adjust=False, min_periods=34).values
-    
     # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
@@ -51,53 +45,77 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    consecutive_outside = 0  # count of consecutive bars outside the level
     
-    start_idx = max(34, 20)  # Ensure EMA and volume MA are valid
+    start_idx = 20
     
     for i in range(start_idx, n):
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34[i]) or np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
+            consecutive_outside = 0
             continue
         
+        # Check if price is outside R1 or S1
+        outside_r1 = close[i] > r1_aligned[i]
+        outside_s1 = close[i] < s1_aligned[i]
+        
         if position == 0:
-            # Long: price > EMA34 (bullish trend) AND break above R1 with volume
-            if close[i] > ema_34[i] and close[i] > r1_aligned[i] and vol_confirm[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price < EMA34 (bearish trend) AND break below S1 with volume
-            elif close[i] < ema_34[i] and close[i] < s1_aligned[i] and vol_confirm[i]:
-                signals[i] = -0.25
-                position = -1
+            # Require 2 consecutive closes outside the level to enter
+            if outside_r1:
+                consecutive_outside += 1
+                if consecutive_outside >= 2 and vol_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
+                    consecutive_outside = 0  # reset after entry
+                else:
+                    signals[i] = 0.0
+            elif outside_s1:
+                consecutive_outside += 1
+                if consecutive_outside >= 2 and vol_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
+                    consecutive_outside = 0  # reset after entry
+                else:
+                    signals[i] = 0.0
+            else:
+                consecutive_outside = 0
+                signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses below EMA34 (trend change) or returns to daily pivot
+            # Long exit: price returns to daily pivot or breaks below S1
             pivot_1d = (high_1d + low_1d + close_1d) / 3
             pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
             if not np.isnan(pivot_aligned[i]) and close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif close[i] < ema_34[i]:  # Trend filter exit
-                signals[i] = 0.0
-                position = 0
+                consecutive_outside = 0
             else:
                 signals[i] = 0.25
+                # Reset counter if still outside R1
+                if outside_r1:
+                    consecutive_outside = 0
+                else:
+                    consecutive_outside += 1
         
         elif position == -1:
-            # Short exit: price crosses above EMA34 (trend change) or returns to daily pivot
+            # Short exit: price returns to daily pivot or breaks above R1
             pivot_1d = (high_1d + low_1d + close_1d) / 3
             pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
             if not np.isnan(pivot_aligned[i]) and close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif close[i] > ema_34[i]:  # Trend filter exit
-                signals[i] = 0.0
-                position = 0
+                consecutive_outside = 0
             else:
                 signals[i] = -0.25
+                # Reset counter if still outside S1
+                if outside_s1:
+                    consecutive_outside = 0
+                else:
+                    consecutive_outside += 1
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_TrendFilter"
+name = "4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Tight"
 timeframe = "4h"
 leverage = 1.0
