@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1S1_Breakout_VolumeSpike_12hEMA34_v2
-Hypothesis: Camarilla R1/S1 breakouts with volume spike and 12h EMA34 trend filter capture directional momentum across regimes. Designed for 20-35 trades/year to avoid fee drag.
+1h_Camillo_Momentum_VolumeRegime
+Hypothesis: 1h momentum breakouts confirmed by 4h trend (EMA34) and volume regime (ATR-based) with session filter (08-20 UTC). Designed for 15-25 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,69 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close']
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 4h EMA34 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close']
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
-    close_1d = df_1d['close']
+    # ATR(14) for volatility regime
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    vol_regime = atr > atr_ma  # High volatility regime
     
-    camarilla_range = (high_1d - low_1d)
-    r1_level = close_1d + (1.1 * camarilla_range) / 12
-    s1_level = close_1d - (1.1 * camarilla_range) / 12
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
-    
-    # Volume spike: >2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_4h_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(atr_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        ema_trend = ema_34_12h_aligned[i]
-        vol_spike = volume_spike[i]
+        ema_trend = ema_34_4h_aligned[i]
+        vol_reg = vol_regime[i]
+        sess = session_filter[i]
         
         if position == 0:
-            if price > r1 and price > ema_trend and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            elif price < s1 and price < ema_trend and vol_spike:
-                signals[i] = -0.25
-                position = -1
+            if sess and vol_reg:
+                # Momentum breakout: price > EMA and rising
+                if price > ema_trend and close[i] > close[i-1]:
+                    signals[i] = 0.20
+                    position = 1
+                elif price < ema_trend and close[i] < close[i-1]:
+                    signals[i] = -0.20
+                    position = -1
         
         elif position == 1:
-            signals[i] = 0.25
-            if price < s1 or price < ema_trend:
+            signals[i] = 0.20
+            # Exit: price crosses below EMA or low volatility
+            if price < ema_trend or not vol_reg:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            signals[i] = -0.25
-            if price > r1 or price > ema_trend:
+            signals[i] = -0.20
+            # Exit: price crosses above EMA or low volatility
+            if price > ema_trend or not vol_reg:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Pivot_R1S1_Breakout_VolumeSpike_12hEMA34_v2"
-timeframe = "4h"
+name = "1h_Camillo_Momentum_VolumeRegime"
+timeframe = "1h"
 leverage = 1.0
