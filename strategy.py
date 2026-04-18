@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_With_Volume_and_ADX_Trend_Filter
-Hypothesis: Buy when price breaks above Donchian upper band (20) with volume surge and strong ADX trend; short when breaks below lower band. Donchian channels capture breakouts effectively in both trending and ranging markets. Volume confirms institutional participation, and ADX ensures we only trade during strong trends, reducing whipsaw in sideways markets. Designed for low trade frequency (<30/year) to minimize fee drag while capturing high-probability trend continuations.
+4h_Keltner_Channel_Breakout_With_Volume_and_12hEMA34
+Hypothesis: Buy when price breaks above upper Keltner channel with volume spike and above 12h EMA34; short when breaks below lower Keltner channel with volume spike and below 12h EMA34. Keltner channels use ATR for volatility, adapting to market conditions. Volume confirms institutional participation, and 12h EMA34 ensures alignment with medium-term trend. Designed for low trade frequency to minimize fee drag while capturing high-probability breakouts in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,92 +18,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Keltner Channel parameters
+    atr_period = 10
+    kc_mult = 2.0
     
-    # Volume spike: >2.5x 20-period average (stricter to reduce trades)
+    # Calculate ATR
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # EMA middle line
+    ema_period = 20
+    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    
+    # Keltner channels
+    upper = ema + (kc_mult * atr)
+    lower = ema - (kc_mult * atr)
+    
+    # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # ADX trend filter (14-period) - only trade when trend is strong
-    # Calculate +DM, -DM, TR
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    
-    up_move = high_series.diff()
-    down_move = low_series.diff().multiply(-1)
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift())
-    tr3 = abs(low_series - close_series.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Smoothed values
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # DI values
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Strong trend filter: ADX > 25
-    strong_trend = adx > 25
+    # 12h EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 40  # Need all indicators
+    start_idx = max(40, atr_period, ema_period)  # Need indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or
+        if (np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(strong_trend[i])):
+            np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = high_roll[i]
-        lower = low_roll[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
         vol_spike = volume_spike[i]
-        trend_strong = strong_trend[i]
+        ema_12h_val = ema_12h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper band with volume surge and strong trend
-            if price > upper and vol_spike and trend_strong:
+            # Long: price > upper Keltner with volume spike and above 12h EMA34
+            if price > upper_val and vol_spike and price > ema_12h_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band with volume surge and strong trend
-            elif price < lower and vol_spike and trend_strong:
+            # Short: price < lower Keltner with volume spike and below 12h EMA34
+            elif price < lower_val and vol_spike and price < ema_12h_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price breaks below lower band or trend weakens
-            if price < lower or not trend_strong:
+            # Exit: price < lower or below 12h EMA34
+            if price < lower_val or price < ema_12h_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price breaks above upper band or trend weakens
-            if price > upper or not trend_strong:
+            # Exit: price > upper or above 12h EMA34
+            if price > upper_val or price > ema_12h_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian_Breakout_With_Volume_and_ADX_Trend_Filter"
+name = "4h_Keltner_Channel_Breakout_With_Volume_and_12hEMA34"
 timeframe = "4h"
 leverage = 1.0
