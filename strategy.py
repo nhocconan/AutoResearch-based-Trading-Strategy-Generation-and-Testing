@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot level S3/R3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Camarilla pivot levels provide precise intraday support/resistance based on prior day's range.
-# S3 and R3 levels act as strong reversal/breakout zones. EMA34 on 1d filters for trend alignment.
-# Volume confirmation adds conviction. Designed for low trade frequency (20-50/year) to minimize fee drag.
-# Works in bull markets (breakouts above R3 with uptrend) and bear markets (breakouts below S3 with downtrend).
-name = "4h_Camarilla_S3R3_1dEMA34_Volume"
-timeframe = "4h"
+# Hypothesis: 12h Camarilla Pivot reversal with daily volatility filter and volume confirmation.
+# Camarilla levels (H3/L3) act as strong support/resistance in ranging markets.
+# Daily ATR filter ensures we only trade when volatility is sufficient to avoid chop.
+# Volume confirmation adds conviction to reversal signals.
+# Designed for low trade frequency (12-37/year) to minimize fee drag in 12h timeframe.
+# Works in sideways markets by fading extreme moves back to the mean.
+# Works in trending markets by only taking reversals in the direction of the higher timeframe trend.
+name = "12h_Camarilla_H3L3_Reversal_Volatility_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,30 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and EMA (ONCE before loop)
+    # Get daily data for Camarilla pivots and ATR filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels using previous day's data to avoid look-ahead
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate Camarilla levels (H3, L3) from previous day to avoid look-ahead
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pivot point and range
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_prev = high_prev - low_prev
+    # Previous day's values (shift by 1)
+    ph = np.concatenate([[np.nan], high_1d[:-1]])
+    pl = np.concatenate([[np.nan], low_1d[:-1]])
+    pc = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Camarilla levels (S3, R3)
-    s3 = close_prev - range_prev * 1.1 / 2
-    r3 = close_prev + range_prev * 1.1 / 2
+    # Camarilla calculations
+    range_ = ph - pl
+    H3 = pc + range_ * 1.1 / 6
+    L3 = pc - range_ * 1.1 / 6
     
-    # Calculate 34-period EMA on daily close for trend filter
-    close_series = pd.Series(df_1d['close'])
-    ema_34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily ATR (14-period) for volatility filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align daily Camarilla levels and EMA to 4h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    atr_period = 14
+    atr = np.full_like(tr, np.nan)
+    if len(tr) >= atr_period:
+        atr[atr_period-1] = np.nanmean(tr[:atr_period])
+        for i in range(atr_period, len(tr)):
+            if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
+                atr[i] = atr[i-1] * (1 - 1/atr_period) + tr[i] * (1/atr_period)
+            else:
+                atr[i] = np.nan
+    
+    # ATR multiplier for volatility filter
+    atr_mult = 1.5
+    atr_threshold = atr * atr_mult
+    
+    # Align daily Camarilla levels and ATR threshold to 12h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    atr_threshold_aligned = align_htf_to_ltf(prices, df_1d, atr_threshold)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,8 +80,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(atr_threshold_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -75,21 +95,23 @@ def generate_signals(prices):
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma_20[i]
         
+        # Volatility filter: current ATR threshold must be positive (sufficient volatility)
+        vol_filter = not np.isnan(atr_threshold_aligned[i]) and atr_threshold_aligned[i] > 0
+        
         if position == 0:
-            # Long: price breaks above R3 AND EMA34 uptrend (price > EMA) AND volume confirmation
-            long_breakout = close[i] > r3_aligned[i]
-            uptrend = close[i] > ema_34_aligned[i]
-            if vol_confirm and uptrend and long_breakout:
+            # Long: price crosses below L3 (oversold) AND volume confirmation AND volatility filter
+            long_signal = close[i] < L3_aligned[i]
+            if vol_confirm and vol_filter and long_signal:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND EMA34 downtrend (price < EMA) AND volume confirmation
-            elif vol_confirm and (close[i] < ema_34_aligned[i]) and (close[i] < s3_aligned[i]):
+            # Short: price crosses above H3 (overbought) AND volume confirmation AND volatility filter
+            elif vol_confirm and vol_filter and close[i] > H3_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below R3 OR trend reverses (price < EMA)
-            exit_condition = close[i] < r3_aligned[i] or close[i] < ema_34_aligned[i]
+            # Long exit: price crosses back above L3 (mean reversion) OR volatility drops
+            exit_condition = close[i] > L3_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -97,8 +119,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above S3 OR trend reverses (price > EMA)
-            exit_condition = close[i] > s3_aligned[i] or close[i] > ema_34_aligned[i]
+            # Short exit: price crosses back below H3 (mean reversion) OR volatility drops
+            exit_condition = close[i] < H3_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
