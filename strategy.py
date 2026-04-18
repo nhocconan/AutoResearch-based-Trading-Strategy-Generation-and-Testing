@@ -1,12 +1,7 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-6h_ElderRay_Energy_Index_With_WeeklyTrend_v1
-Hypothesis: Elder Ray (Bull Power, Bear Power) combined with weekly trend filter and volume confirmation. 
-In bull markets (weekly close > weekly SMA50): buy when Bull Power > 0 and rising with volume. 
-In bear markets (weekly close < weekly SMA50): sell when Bear Power < 0 and falling with volume. 
-Elder Ray measures bull/bear power behind price moves; weekly trend filters for major regime; 
-volume confirms institutional participation. Designed for low frequency (12-30 trades/year) to 
-minimize fee drag while capturing strong directional moves in both bull and bear regimes.
+12h_Camarilla_Pivot_R1S1_Breakout_With_1dTrend
+Hypothesis: On 12h timeframe, breakouts above/below Camarilla R1/S1 levels with volume confirmation and 1d EMA100 trend filter. This combines daily trend context with intraday breakout precision, reducing false signals in chop while capturing strong directional moves. Designed for low trade frequency (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -15,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,70 +18,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter: SMA50 on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    weekly_close = df_1w['close'].values
-    weekly_sma50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
-    weekly_sma50_aligned = align_htf_to_ltf(prices, df_1w, weekly_sma50)
+    # Daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate Camarilla R1 and S1 from previous day
+    rang = phigh - plow
+    r1 = pclose + rang * 1.1 / 12
+    s1 = pclose - rang * 1.1 / 12
     
-    # Smooth Elder Ray signals with 5-period EMA to reduce noise
-    bull_power_smooth = pd.Series(bull_power).ewm(span=5, adjust=False, min_periods=5).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Align to 12h timeframe (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: >1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirmed = volume > (1.8 * vol_ma)
+    # 1d EMA100 trend filter
+    ema_1d = pd.Series(pclose).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 50  # Need enough data for weekly SMA50 and smoothing
+    start_idx = 100  # Need EMA100 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_sma50_aligned[i]) or
-            np.isnan(bull_power_smooth[i]) or
-            np.isnan(bear_power_smooth[i]) or
-            np.isnan(volume_confirmed[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        weekly_trend_up = weekly_close.iloc[i] > weekly_sma50.iloc[i] if hasattr(weekly_close, 'iloc') else weekly_close[i] > weekly_sma50[i]
-        weekly_trend_down = weekly_close.iloc[i] < weekly_sma50.iloc[i] if hasattr(weekly_close, 'iloc') else weekly_close[i] < weekly_sma50[i]
-        bull_signal = bull_power_smooth[i] > 0 and bull_power_smooth[i] > bull_power_smooth[i-1]
-        bear_signal = bear_power_smooth[i] < 0 and bear_power_smooth[i] < bear_power_smooth[i-1]
-        vol_ok = volume_confirmed[i]
+        price = close[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_1d_val = ema_1d_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long in uptrend: rising bull power with volume
-            if weekly_trend_up and bull_signal and vol_ok:
+            # Long: price > R1 with volume spike and above 1d EMA100
+            if price > r1_val and vol_spike and price > ema_1d_val:
                 signals[i] = 0.25
                 position = 1
-            # Short in downtrend: falling bear power with volume
-            elif weekly_trend_down and bear_signal and vol_ok:
+            # Short: price < S1 with volume spike and below 1d EMA100
+            elif price < s1_val and vol_spike and price < ema_1d_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: bull power turns negative or weekly trend fails
-            if bull_power_smooth[i] <= 0 or not weekly_trend_up:
+            # Exit: price < S1 or below 1d EMA100
+            if price < s1_val or price < ema_1d_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: bear power turns positive or weekly trend fails
-            if bear_power_smooth[i] >= 0 or not weekly_trend_down:
+            # Exit: price > R1 or above 1d EMA100
+            if price > r1_val or price > ema_1d_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_ElderRay_Energy_Index_With_WeeklyTrend_v1"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_R1S1_Breakout_With_1dTrend"
+timeframe = "12h"
 leverage = 1.0
