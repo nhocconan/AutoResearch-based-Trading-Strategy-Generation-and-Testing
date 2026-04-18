@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Volume Spike and 1-week Trend Filter
-Strategy: Enter long when price breaks above weekly Donchian high with volume
-          and price > daily close (bullish bias). Enter short when price breaks
-          below weekly Donchian low with volume and price < daily close.
-          Exit when price returns to weekly midpoint.
-          Uses weekly Donchian channels for trend and daily close for bias.
-          Designed for low trade frequency with clear breakout edge.
+12h Williams %R Extreme Reversal + Volume Spike + 1d EMA34 Trend Filter
+Strategy: Enter long when Williams %R crosses above -20 from below with volume spike
+          and price > 1d EMA34 (bullish trend). Enter short when Williams %R crosses
+          below -80 from above with volume spike and price < 1d EMA34 (bearish trend).
+          Exit when Williams %R returns to -50 (neutral) or trend weakens.
+          Williams %R identifies overbought/oversold conditions; extreme readings
+          often precede reversals. Works in both bull (buy oversold) and bear (sell overbought).
+          Designed for low trade frequency with clear reversal edge.
 """
 
 import numpy as np
@@ -23,23 +24,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Williams %R calculation and trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Donchian channels (20-period)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate Williams %R on daily data: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    close_1d = df_1d['close'].values
     
-    # Weekly Donchian high and low (20-period)
-    donchian_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Avoid division by zero
+    rr = high_14 - low_14
+    williams_r = np.where(rr != 0, ((high_14 - close_1d) / rr) * -100, -50)
     
-    # Align weekly levels to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align daily indicators to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,53 +51,52 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # need enough history for calculations
+    start_idx = 50  # need enough history for Williams %R calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        mid = donchian_mid_aligned[i]
+        williams_r_val = williams_r_aligned[i]
+        ema_34 = ema_34_1d_aligned[i]
+        
+        # Williams %R cross signals
+        williams_r_prev = williams_r_aligned[i-1] if i > 0 else williams_r_val
         
         if position == 0:
-            # Long: break above weekly Donchian high with volume spike and above weekly close (bullish bias)
-            if (price > upper and volume_spike[i] and price > weekly_close[-1] if len(weekly_close) > 0 else True):
-                # Simplified: use price > weekly close as bias, but since we don't have weekly close aligned,
-                # use price > open as simple bullish bias (price above open suggests buying pressure)
-                if price > prices['open'].iloc[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: break below weekly Donchian low with volume spike and below weekly close (bearish bias)
-            elif (price < lower and volume_spike[i] and price < weekly_close[-1] if len(weekly_close) > 0 else True):
-                if price < prices['open'].iloc[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Williams %R crosses above -20 from below with volume spike and above daily EMA34
+            if (williams_r_prev <= -20 and williams_r_val > -20 and 
+                volume_spike[i] and price > ema_34):
+                signals[i] = 0.25
+                position = 1
+            # Short: Williams %R crosses below -80 from above with volume spike and below daily EMA34
+            elif (williams_r_prev >= -80 and williams_r_val < -80 and 
+                  volume_spike[i] and price < ema_34):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: price returns to weekly midpoint
-            if price <= mid:
+            # Exit: Williams %R returns to -50 (neutral) or below EMA34 (trend change)
+            if williams_r_val >= -50 or price < ema_34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: price returns to weekly midpoint
-            if price >= mid:
+            # Exit: Williams %R returns to -50 (neutral) or above EMA34 (trend change)
+            if williams_r_val <= -50 or price > ema_34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Donchian_Breakout_VolumeSpike_WeeklyTrend"
-timeframe = "1d"
+name = "12h_WilliamsR_Extreme_Reversal_VolumeSpike_1dEMA34"
+timeframe = "12h"
 leverage = 1.0
