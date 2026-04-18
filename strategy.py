@@ -1,104 +1,85 @@
 #!/usr/bin/env python3
-"""
-12h_RSI_25_75_Momentum_V1
-Momentum strategy using RSI(14) on 12h timeframe with daily trend filter.
-- Long: RSI crosses above 25 (from below) + daily EMA50 > EMA200
-- Short: RSI crosses below 75 (from above) + daily EMA50 < EMA200
-- Exit: Opposite RSI cross or trend reversal
-Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
-Works in bull markets (momentum continuation) and bear markets (mean reversion from extremes)
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for ATR and volatility regime
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Daily ATR(14) for volatility regime
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily EMA data to 12h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Daily volatility regime: high volatility when ATR > 1.5x 50-day ATR mean
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    high_vol_regime = atr_14 > (1.5 * atr_ma_50)
     
-    # Calculate RSI(14) on 12h close prices
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # 12h ATR(10) for stop loss and position sizing
+    tr1_12h = high[1:] - low[1:]
+    tr2_12h = np.abs(high[1:] - close[:-1])
+    tr3_12h = np.abs(low[1:] - close[:-1])
+    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
+    atr_10_12h = pd.Series(tr_12h).rolling(window=10, min_periods=10).mean().values
     
-    # Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # first average of first 14 periods
-    avg_loss[13] = np.mean(loss[1:14])
+    # 12h Donchian(20) breakout levels
+    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    # For periods where avg_loss is zero, RSI = 100
-    rsi = np.where(avg_loss == 0, 100, rsi)
-    # For periods where avg_gain is zero, RSI = 0
-    rsi = np.where(avg_gain == 0, 0, rsi)
+    # Align daily volatility regime to 12h
+    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200 and RSI
+    start_idx = max(50, 20)  # need enough for ATR and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(donch_high_20[i]) or np.isnan(donch_low_20[i]) or 
+            np.isnan(atr_10_12h[i]) or np.isnan(high_vol_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
-        
-        # RSI conditions (using previous bar for crossover detection)
-        rsi_prev = rsi[i-1]
-        rsi_curr = rsi[i]
-        rsi_cross_up_25 = (rsi_prev <= 25) and (rsi_curr > 25)
-        rsi_cross_down_75 = (rsi_prev >= 75) and (rsi_curr < 75)
+        vol_regime = high_vol_regime_aligned[i] > 0.5
         
         if position == 0:
-            # Long: uptrend + RSI crosses above 25 (from oversold)
-            if uptrend and rsi_cross_up_25:
+            # Enter long on Donchian breakout in high volatility regime
+            if vol_regime and close[i] > donch_high_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + RSI crosses below 75 (from overbought)
-            elif downtrend and rsi_cross_down_75:
+            # Enter short on Donchian breakdown in high volatility regime
+            elif vol_regime and close[i] < donch_low_20[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or RSI crosses below 75 (overbought)
-            if not uptrend or rsi_cross_down_75:
+            # Long exit: reverse signal or volatility contraction
+            if not vol_regime or close[i] < donch_low_20[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or RSI crosses above 25 (oversold)
-            if not downtrend or rsi_cross_up_25:
+            # Short exit: reverse signal or volatility contraction
+            if not vol_regime or close[i] > donch_high_20[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -106,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI_25_75_Momentum_V1"
+name = "12h_Donchian20_VolRegime_Breakout"
 timeframe = "12h"
 leverage = 1.0
