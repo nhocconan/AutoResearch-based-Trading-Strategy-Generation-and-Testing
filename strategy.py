@@ -1,33 +1,21 @@
 #!/usr/bin/env python3
 """
-4h_WilliamsAlligator_Trend - Williams Alligator (SMMA) trend filter with price action confirmation
-Williams Alligator: Jaw (13-period SMMA, 8-shift), Teeth (8-period SMMA, 5-shift), Lips (5-period SMMA, 3-shift)
-Trend: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-Entry: Price closes above/below Alligator in trend direction + volume confirmation
-Exit: Opposite signal or price crosses middle (Teeth) line
-Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
-Works in bull markets (trend following) and bear markets (trend following)
+12h_Donchian_Breakout_Volume_Trend_v1
+12h strategy using Donchian channel breakout with volume confirmation and trend filter.
+- Long: Price breaks above upper Donchian(20) + volume > 1.5x average + price > 200 EMA
+- Short: Price breaks below lower Donchian(20) + volume > 1.5x average + price < 200 EMA
+- Exit: Opposite signal or price crosses 200 EMA
+Designed for ~12-30 trades/year per symbol (48-120 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(source, length):
-    """Smoothed Moving Average (SMMA) - also called Wilder's smoothing"""
-    if length < 1:
-        return source.copy()
-    result = np.full_like(source, np.nan, dtype=np.float64)
-    # First value is simple average
-    result[length-1] = np.mean(source[:length])
-    # Subsequent values: SMMA = (Prev SMMA * (length-1) + Current Price) / length
-    for i in range(length, len(source)):
-        result[i] = (result[i-1] * (length-1) + source[i]) / length
-    return result
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -35,82 +23,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator (more stable on higher timeframe)
-    df_1d = get_htf_data(prices, '1d')
+    # Donchian channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Williams Alligator components on 1D
-    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2.0
-    jaw = smma(median_1d, 13)  # Jaw: 13-period SMMA
-    teeth = smma(median_1d, 8)   # Teeth: 8-period SMMA  
-    lips = smma(median_1d, 5)    # Lips: 5-period SMMA
-    
-    # Apply shifts as per Williams Alligator definition
-    jaw = np.roll(jaw, 8)   # Jaw shifted 8 bars forward
-    teeth = np.roll(teeth, 5) # Teeth shifted 5 bars forward
-    lips = np.roll(lips, 3)   # Lips shifted 3 bars forward
-    
-    # Align to 4H timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Volume confirmation (20-period average on 4H)
+    # Volume spike filter (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for dynamic sizing (optional filter)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 200 EMA trend filter
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for Alligator calculation
+    start_idx = 50  # need 20 for Donchian + 200 for EMA + buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_200[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator trend detection
-        # Uptrend: Lips > Teeth > Jaw
-        # Downtrend: Lips < Teeth < Jaw
-        uptrend = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        downtrend = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > highest_high[i]
+        breakdown_down = close[i] < lowest_low[i]
         
-        # Price position relative to Alligator
-        price_above_alligator = close[i] > lips_aligned[i] and close[i] > teeth_aligned[i] and close[i] > jaw_aligned[i]
-        price_below_alligator = close[i] < lips_aligned[i] and close[i] < teeth_aligned[i] and close[i] < jaw_aligned[i]
+        # Volume spike filter
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
         
-        # Volume confirmation
-        volume_ok = volume[i] > 1.5 * vol_ma[i]
+        # Trend filter
+        bull_trend = close[i] > ema_200[i]
+        bear_trend = close[i] < ema_200[i]
         
         if position == 0:
-            # Long: Uptrend + price above Alligator + volume
-            if uptrend and price_above_alligator and volume_ok:
+            # Long: bull trend + breakout above upper band + volume spike
+            if bull_trend and breakout_up and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Downtrend + price below Alligator + volume
-            elif downtrend and price_below_alligator and volume_ok:
+            # Short: bear trend + breakdown below lower band + volume spike
+            elif bear_trend and breakdown_down and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change or price crosses below Teeth (middle line)
-            if not uptrend or close[i] < teeth_aligned[i]:
+            # Long exit: trend change or price breaks below lower band
+            if not bull_trend or breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change or price crosses above Teeth (middle line)
-            if not downtrend or close[i] > teeth_aligned[i]:
+            # Short exit: trend change or price breaks above upper band
+            if not bear_trend or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -118,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_Trend"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
