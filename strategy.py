@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Turtle_Soup_Reversal_With_1d_Trend_Filter
-Hypothesis: Turtle Soup reversals (false breakouts of prior 6h highs/lows) combined with 1d EMA200 trend filter capture mean-reversion in chop and trend continuation in strong moves. Works in both bull/bear via trend alignment.
+12h_KAMA_Trend_With_1d_Trend_Filter
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a smooth trend line that reduces whipsaws in ranging markets. Combined with a 1-day EMA trend filter and volume confirmation, this strategy aims to capture medium-term trends while avoiding false breakouts. Designed for 12-hour timeframe with ~15-30 trades/year to minimize fee drag and work in both bull and bear markets via adaptive trend filtering.
 """
 
 import numpy as np
@@ -10,68 +10,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day EMA200 trend filter
+    # KAMA parameters
+    er_length = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Handle edge case for volatility calculation
+    volatility_padded = np.concatenate([np.zeros(er_length-1), volatility])
+    er = np.where(volatility_padded != 0, change / volatility_padded, 0)
+    er = np.concatenate([np.full(er_length-1, np.nan), er])
+    
+    # Smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[er_length-1] = close[er_length-1]  # Seed
+    
+    for i in range(er_length, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 1-day EMA trend filter (34-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Prior 6-bar high/low for Turtle Soup setup
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    high_shift[0] = high[0]
-    low_shift[0] = low[0]
-    
-    # 6-bar rolling max/min of prior high/low
-    roll_max = pd.Series(high_shift).rolling(window=6, min_periods=6).max().values
-    roll_min = pd.Series(low_shift).rolling(window=6, min_periods=6).min().values
+    # Volume filter: >1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Warmup for EMA200
+    start_idx = max(30, 20)  # Warmup for KAMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_200_aligned[i]) or np.isnan(roll_max[i]) or np.isnan(roll_min[i]):
+        if (np.isnan(kama[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend = ema_200_aligned[i]
-        prior_high = roll_max[i]
-        prior_low = roll_min[i]
+        kama_val = kama[i]
+        ema_trend = ema_1d_aligned[i]
+        vol_ok = volume_filter[i]
         
         if position == 0:
-            # Turtle Soup Long: false breakdown below prior low, then reversal up
-            if low[i] < prior_low and close[i] > prior_low and close[i] > ema_trend:
+            # Long: price above KAMA and EMA1d with volume
+            if price > kama_val and price > ema_trend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Turtle Soup Short: false breakout above prior high, then reversal down
-            elif high[i] > prior_high and close[i] < prior_high and close[i] < ema_trend:
+            # Short: price below KAMA and EMA1d with volume
+            elif price < kama_val and price < ema_trend and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long on close below prior low or trend reversal
-            if close[i] < prior_low or close[i] < ema_trend:
+            # Exit long if price crosses below KAMA or trend fails
+            if price < kama_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short on close above prior high or trend reversal
-            if close[i] > prior_high or close[i] > ema_trend:
+            # Exit short if price crosses above KAMA or trend fails
+            if price > kama_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -79,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Turtle_Soup_Reversal_With_1d_Trend_Filter"
-timeframe = "6h"
+name = "12h_KAMA_Trend_With_1d_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
