@@ -16,7 +16,7 @@ def generate_signals(prices):
     # Get 1d data for calculations (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ATR (14-period) for volatility filter
+    # Calculate 1d ATR (14-period)
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
     tr3 = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
@@ -25,7 +25,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d ADX (14-period) for trend strength
+    # Calculate 1d ADX (14-period)
     up_move = df_1d['high'] - np.roll(df_1d['high'], 1)
     down_move = np.roll(df_1d['low'], 1) - df_1d['low']
     up_move[0] = np.nan
