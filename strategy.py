@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Weekly Pivot Breakout with Volume Confirmation
-# Buy when price breaks above weekly pivot point (PP) with volume > 1.5x 48-period average
-# Sell when price breaks below weekly pivot point (PP) with volume > 1.5x 48-period average
-# Weekly pivot calculated from prior week's high/low/close: PP = (H+L+C)/3
-# Volume filter ensures breakout conviction; 48-period MA = 6h * 8 = 2 days
-# Designed for ~20-35 trades/year per symbol (~80-140 total over 4 years)
-# Works in bull (breakouts up) and bear (breakouts down) via symmetric logic
-name = "6s_WeeklyPivot_Breakout_Volume"
-timeframe = "6h"
+# Hypothesis: 12h Williams %R with 1d trend filter and volume confirmation.
+# Williams %R measures overbought/oversold levels. Long when %R crosses above -80 from below (oversold bounce).
+# Short when %R crosses below -20 from above (overbought reversal).
+# Uses 1d EMA(50) as trend filter: only long when price > EMA, only short when price < EMA.
+# Volume filter: current volume > 1.5x 24-period average (24 * 1h = 1 day equivalent).
+# Designed for ~15-30 trades/year per symbol with low turnover to minimize fee drag.
+name = "12h_WilliamsR_1dEMA50_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,58 +23,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_w = get_htf_data(prices, '1w')
+    # 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot point: PP = (H + L + C)/3
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
-    pp_w = (high_w + low_w + close_w) / 3.0
+    # EMA(50) on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align weekly pivot to 6h timeframe (wait for weekly bar to close)
-    pp_w_aligned = align_htf_to_ltf(prices, df_w, pp_w)
+    # Williams %R (14-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Volume filter: current volume > 1.5 * 48-period average (48 * 6h = 12 days)
-    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
-    volume_filter = volume > (1.5 * vol_ma_48)
+    # Volume filter: current volume > 1.5 * 24-period average (24 * 1h = 1 day)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_w_aligned[i]) or np.isnan(vol_ma_48[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        pp_val = pp_w_aligned[i]
+        ema_val = ema_50_1d_aligned[i]
+        wr = williams_r[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above weekly pivot with volume confirmation
-            if close_val > pp_val and vol_filter:
+            # Long: Williams %R crosses above -80 from below (bullish reversal) with trend and volume
+            if wr > -80 and williams_r[i-1] <= -80 and close_val > ema_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly pivot with volume confirmation
-            elif close_val < pp_val and vol_filter:
+            # Short: Williams %R crosses below -20 from above (bearish reversal) with trend and volume
+            elif wr < -20 and williams_r[i-1] >= -20 and close_val < ema_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below weekly pivot
-            if close_val < pp_val:
+            # Long exit: Williams %R crosses below -50 (momentum fading) or trend fails
+            if wr < -50 or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above weekly pivot
-            if close_val > pp_val:
+            # Short exit: Williams %R crosses above -50 (momentum fading) or trend fails
+            if wr > -50 or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
