@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,40 +13,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for multiple indicators
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4H data for trend
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate 1D EMA200 (trend filter)
-    close_1d_series = pd.Series(df_1d['close'])
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate 4H EMA200 for trend filter
+    close_4h_series = pd.Series(close_4h)
+    ema200_4h = close_4h_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 1D ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Align 4H EMA200 to 12H timeframe
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    
+    # Calculate 12H Donchian(20) channels
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
+    
+    # Calculate 12H ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-14:i])
     
-    # Calculate 12h EMA34 for trend direction
-    close_series = pd.Series(close)
-    ema34_12h = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Calculate 12h RSI(14) for overbought/oversold
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate 12h volume moving average (20-period)
+    # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -54,52 +48,51 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 200, 20)  # need EMA34, EMA200, volume MA
+    start_idx = max(200, 20, 14, 20)  # need EMA200, Donchian, ATR, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema200_12h[i]) or np.isnan(ema34_12h[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_12h[i])):
+        if (np.isnan(ema200_4h_aligned[i]) or np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
+        
+        # Volatility filter: ATR > 0.5 * 20-period average ATR
+        atr_ma = np.mean(tr[max(0, i-20):i]) if i >= 20 else np.nan
+        vol_filter = not np.isnan(atr_ma) and atr[i] > 0.5 * atr_ma
         
         # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Volatility filter: ATR > 0.5% of price (avoid choppy low-vol periods)
-        vol_filter = atr_12h[i] > 0.005 * close[i]
-        
         if position == 0:
-            # Long entry: price above daily EMA200, EMA34 trending up, RSI not overbought, with volume and vol filter
-            if (close[i] > ema200_12h[i] and 
-                ema34_12h[i] > ema34_12h[i-1] and 
-                rsi[i] < 65 and 
-                vol_confirmed and
-                vol_filter):
+            # Long entry: price breaks above Donchian high, above 4H EMA200, with vol/vol filters
+            if (close[i] > donch_high[i] and 
+                close[i] > ema200_4h_aligned[i] and 
+                vol_filter and 
+                vol_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below daily EMA200, EMA34 trending down, RSI not oversold, with volume and vol filter
-            elif (close[i] < ema200_12h[i] and 
-                  ema34_12h[i] < ema34_12h[i-1] and 
-                  rsi[i] > 35 and 
-                  vol_confirmed and
-                  vol_filter):
+            # Short entry: price breaks below Donchian low, below 4H EMA200, with vol/vol filters
+            elif (close[i] < donch_low[i] and 
+                  close[i] < ema200_4h_aligned[i] and 
+                  vol_filter and 
+                  vol_confirmed):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses below EMA34 or RSI overbought or volatility drops
-            if close[i] < ema34_12h[i] or rsi[i] > 70 or not vol_filter:
+            # Long exit: price crosses below Donchian low or ATR drops too low
+            if close[i] < donch_low[i] or (not np.isnan(atr_ma) and atr[i] < 0.3 * atr_ma):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA34 or RSI oversold or volatility drops
-            if close[i] > ema34_12h[i] or rsi[i] < 30 or not vol_filter:
+            # Short exit: price crosses above Donchian high or ATR drops too low
+            if close[i] > donch_high[i] or (not np.isnan(atr_ma) and atr[i] < 0.3 * atr_ma):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +100,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA200_EMA34_RSI_Volume_VolFilter"
+name = "12h_Donchian20_4hEMA200_VolATR_Filter"
 timeframe = "12h"
 leverage = 1.0
+EOF
