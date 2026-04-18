@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Ichimoku Cloud Breakout with Weekly Volume Filter
-Hypothesis: Ichimoku cloud acts as dynamic support/resistance. Breaking above/below cloud with volume confirmation captures strong momentum moves. Weekly volume filter ensures institutional participation, working in both bull (breakouts) and bear (breakdowns) markets. Targets 15-25 trades/year on 12h timeframe to minimize fee drag.
+1d RSI Reversal with Weekly Trend Filter and Volume Confirmation
+Hypothesis: RSI extremes on daily timeframe combined with weekly trend direction
+provide high-probability reversal entries in both bull and bear markets.
+Volume confirmation filters out weak moves. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -10,93 +12,71 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for volume filter (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get weekly data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Weekly average volume
-    weekly_vol_avg = pd.Series(df_weekly['volume'].values).rolling(window=4, min_periods=4).mean().values
-    weekly_vol_avg_aligned = align_htf_to_ltf(prices, df_weekly, weekly_vol_avg)
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2.0
+    # Daily RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2.0
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2.0
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2.0
-    
-    # Chikou Span (Lagging Span): close plotted 26 periods behind
-    # For signal, we use current close vs cloud ahead
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a, senkou_b)
-    cloud_bottom = np.minimum(senkou_a, senkou_b)
-    
-    # Volume filter: current volume > 1.5x weekly average volume
-    vol_filter = volume > (weekly_vol_avg_aligned * 1.5)
+    # Daily volume filter: current volume > 1.8x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Warmup for Ichimoku (52 periods + buffer)
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(weekly_vol_avg_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
+        rsi_val = rsi[i]
         vol_ok = vol_filter[i]
-        
-        # Bullish: price above cloud (both spans)
-        above_cloud = price > cloud_top[i] and price > cloud_bottom[i]
-        # Bearish: price below cloud (both spans)
-        below_cloud = price < cloud_top[i] and price < cloud_bottom[i]
+        weekly_trend = ema50_1w_aligned[i]
+        price = close[i]
         
         if position == 0:
-            # Long: price breaks above cloud with volume
-            if above_cloud and vol_ok:
+            # Long: RSI oversold in uptrend (weekly)
+            if rsi_val < 30 and vol_ok and price > weekly_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below cloud with volume
-            elif below_cloud and vol_ok:
+            # Short: RSI overbought in downtrend (weekly)
+            elif rsi_val > 70 and vol_ok and price < weekly_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if price re-enters cloud
-            if not above_cloud:  # price <= cloud_top or >= cloud_bottom (inside or below cloud)
+            # Exit: RSI returns to neutral or trend changes
+            if rsi_val > 50 or price < weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price re-enters cloud
-            if not below_cloud:  # price >= cloud_bottom or <= cloud_top (inside or above cloud)
+            # Exit: RSI returns to neutral or trend changes
+            if rsi_val < 50 or price > weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Ichimoku_Cloud_Breakout_WeeklyVolume"
-timeframe = "12h"
+name = "1d_RSI_Reversal_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
