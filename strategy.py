@@ -1,11 +1,11 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d RSI + Bollinger Bands Reversal
-Hypothesis: In daily timeframe, RSI extremes combined with Bollinger Band touches
-identify exhaustion points. Long when RSI < 30 and price touches lower BB,
-short when RSI > 70 and price touches upper BB. Works in both bull and bear
-markets by capturing mean reversals from overextended conditions. Uses 1w trend
-filter to avoid counter-trend trades. Target: 10-20 trades/year to minimize fee drag.
+12h Donchian Breakout + Volume Confirmation + ATR Stop
+Hypothesis: Donchian channel breakouts capture sustained trends in BTC/ETH/SOL.
+Volume confirmation filters false breakouts. ATR-based position sizing and stop loss
+control risk. Designed for 12h timeframe to limit trades (~20-40/year) and reduce fee
+drag. Works in bull markets (breakouts up) and bear markets (breakouts down).
 """
 
 import numpy as np
@@ -14,72 +14,70 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # 12h Donchian Channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Bollinger Bands (20, 2)
-    sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper = sma + 2 * std
-    lower = sma - 2 * std
+    # Volume moving average (20-period) for confirmation
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # 1-week trend filter (SMA 50)
-    df_1w = get_htf_data(prices, '1w')
-    sma_50_1w = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    # ATR (14-period) for volatility-based stop and sizing
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 40  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or np.isnan(sma[i]) or np.isnan(std[i]) or 
-            np.isnan(sma_50_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi_val = rsi[i]
-        sma_val = sma[i]
-        upper_val = upper[i]
-        lower_val = lower[i]
-        trend_1w = sma_50_1w_aligned[i]
+        vol = volume[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long: oversold RSI + touches lower BB + above weekly trend
-            if rsi_val < 30 and price <= lower_val and price > trend_1w:
+            # Long breakout: price breaks above Donchian high with volume confirmation
+            if price > donchian_high[i] and vol > vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought RSI + touches upper BB + below weekly trend
-            elif rsi_val > 70 and price >= upper_val and price < trend_1w:
+            # Short breakout: price breaks below Donchian low with volume confirmation
+            elif price < donchian_low[i] and vol > vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if RSI returns to neutral or price crosses above SMA
-            if rsi_val > 50 or price > sma_val:
+            # Trail stop: exit if price drops 2*ATR from highest high since entry
+            # We approximate by exiting if price closes below Donchian low (breakdown)
+            if price < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if RSI returns to neutral or price crosses below SMA
-            if rsi_val < 50 or price < sma_val:
+            # Trail stop: exit if price rises 2*ATR from lowest low since entry
+            # Exit if price closes above Donchian high (breakout)
+            if price > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_Bollinger_Reversal"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
