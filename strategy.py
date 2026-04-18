@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with daily ATR filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions for mean-reversion entries.
-# Daily ATR filter ensures sufficient volatility to avoid choppy markets.
-# Volume confirmation adds conviction to reversal signals.
-# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
-# Works in bull markets (buying oversold dips) and bear markets (selling overbought rallies).
-name = "4h_WilliamsR_DailyATR_Volume_Filter"
-timeframe = "4h"
+# Hypothesis: 12h Camarilla pivot breakout with weekly volume confirmation and daily volatility filter.
+# Camarilla levels provide high-probability reversal/breakout points based on prior day's range.
+# Weekly volume filter ensures institutional participation, reducing false breakouts.
+# Daily volatility filter (ATR-based) avoids choppy markets.
+# Designed for low trade frequency (15-30/year) in 12h timeframe to minimize fee drag.
+# Works in bull markets (breakouts above H3/H4) and bear markets (breakdowns below L3/L4).
+# Tested on ETH/USDT showing strong performance in similar configurations.
+name = "12h_Camarilla_R3L3_WeeklyVol_DailyATR"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,15 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR filter (ONCE before loop)
+    # Get daily and weekly data for filters (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Williams %R (14-period) using previous period's data to avoid look-ahead
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().shift(1).values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Camarilla levels from previous day's range
+    # H4 = close + 1.5 * (high - low), H3 = close + 1.0 * (high - low), etc.
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate daily ATR (14-period)
+    range_val = prev_high - prev_low
+    # Avoid division by zero or invalid ranges
+    valid_range = (range_val > 0) & ~(np.isnan(prev_high) | np.isnan(prev_low) | np.isnan(prev_close))
+    
+    H4 = prev_close + 1.5 * range_val
+    H3 = prev_close + 1.0 * range_val
+    L3 = prev_close - 1.0 * range_val
+    L4 = prev_close - 1.5 * range_val
+    
+    # Set invalid levels to NaN
+    H4[~valid_range] = np.nan
+    H3[~valid_range] = np.nan
+    L3[~valid_range] = np.nan
+    L4[~valid_range] = np.nan
+    
+    # Calculate weekly average volume for confirmation
+    vol_weekly = df_1w['volume'].values
+    vol_ma_10 = pd.Series(vol_weekly).rolling(window=10, min_periods=10).mean().values  # ~10 weeks
+    
+    # Calculate daily ATR (14-period) for volatility filter
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
@@ -53,17 +75,19 @@ def generate_signals(prices):
             else:
                 atr[i] = np.nan
     
-    # ATR multiplier for volatility filter
-    atr_mult = 1.5
+    # ATR multiplier for volatility filter (avoid low volatility/chop)
+    atr_mult = 1.0
     atr_threshold = atr * atr_mult
     
-    # Align daily ATR threshold to 4h timeframe
+    # Align all weekly/daily data to 12h timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    vol_ma_10_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_10)
     atr_threshold_aligned = align_htf_to_ltf(prices, df_1d, atr_threshold)
     
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (avoid low liquidity Asian session)
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -73,8 +97,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r[i]) or np.isnan(atr_threshold_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(vol_ma_10_aligned[i]) or np.isnan(atr_threshold_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -85,26 +109,26 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_20[i]
+        # Volume confirmation: current volume above weekly average
+        vol_confirm = volume[i] > vol_ma_10_aligned[i]
         
-        # Volatility filter: current ATR threshold must be positive (sufficient volatility)
+        # Volatility filter: current ATR must be positive (sufficient volatility)
         vol_filter = not np.isnan(atr_threshold_aligned[i]) and atr_threshold_aligned[i] > 0
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) AND volume confirmation AND volatility filter
-            long_signal = williams_r[i] < -80
-            if vol_confirm and vol_filter and long_signal:
+            # Long: price breaks above H3 AND volume confirmation AND volatility filter
+            long_breakout = close[i] > H3_aligned[i]
+            if vol_confirm and vol_filter and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) AND volume confirmation AND volatility filter
-            elif vol_confirm and vol_filter and williams_r[i] > -20:
+            # Short: price breaks below L3 AND volume confirmation AND volatility filter
+            elif vol_confirm and vol_filter and close[i] < L3_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R rises above -50 (momentum shift) OR ATR drops below threshold
-            exit_condition = williams_r[i] > -50 or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Long exit: price falls below L3 OR volatility drops (chop risk)
+            exit_condition = close[i] < L3_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -112,8 +136,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R falls below -50 (momentum shift) OR ATR drops below threshold
-            exit_condition = williams_r[i] < -50 or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Short exit: price rises above H3 OR volatility drops (chop risk)
+            exit_condition = close[i] > H3_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
