@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_WVWAP_MeanReversion_Bands
-Hypothesis: 12-hour price reverts to volume-weighted moving average (VWAP) with Bollinger Bands as dynamic thresholds.
-In ranging markets (common in 2025+), price tends to revert to VWAP. Bands adapt to volatility, reducing whipsaws.
-Works in both bull/bear: mean reversion is stronger in ranging/low-volatility regimes, which occur in all market phases.
-Uses 1-day trend filter to avoid counter-trend trades during strong moves. Target: 15-25 trades/year.
+4h_Camarilla_R1S1_Breakout_1dTrend_Volume
+Hypothesis: 4-hour breakouts above Camarilla R1 or below S1 with 1-day EMA34 trend filter and volume confirmation.
+Combines intraday support/resistance (Camarilla) with daily trend filter to reduce whipsaw and improve performance in both bull and bear markets.
+Target: 20-50 trades/year with strict entry conditions to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,91 +20,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12-hour VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(volume)
-    vwap_12h_raw = cum_pv / cum_vol
-    
-    # Get actual 12h data for proper alignment
-    df_12h = get_htf_data(prices, '12h')
-    # Resample VWAP to 12h by taking last value of each 12h bar
-    # We'll compute VWAP on 12h data directly for cleaner alignment
-    typical_price_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3.0
-    pv_12h = typical_price_12h * df_12h['volume'].values
-    cum_pv_12h = np.cumsum(pv_12h)
-    cum_vol_12h = np.cumsum(df_12h['volume'].values)
-    vwap_12h = cum_pv_12h / cum_vol_12h
-    
-    # Align 12h VWAP to 12h timeframe (no additional delay needed as VWAP is cumulative)
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
-    
-    # Calculate 12h rolling standard deviation for Bollinger Bands
-    # Use typical price for volatility calculation
-    tp_12h = typical_price_12h
-    tp_mean = np.full_like(tp_12h, np.nan)
-    tp_std = np.full_like(tp_12h, np.nan)
-    
-    # Calculate rolling mean and std with min_periods=20
-    for i in range(len(tp_12h)):
-        if i >= 19:  # 20-period window
-            window = tp_12h[i-19:i+1]
-            tp_mean[i] = np.mean(window)
-            tp_std[i] = np.std(window)
-    
-    # Bollinger Bands: ±2 std dev
-    upper_bb = tp_mean + 2 * tp_std
-    lower_band = tp_mean - 2 * tp_std
-    
-    # Align bands to 12h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_12h, upper_bb)
-    lower_band_aligned = align_htf_to_ltf(prices, df_12h, lower_band)
-    
-    # 1-day trend filter: EMA50
+    # Calculate 1-day EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[0:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = close_1d[i] * alpha + ema50_1d[i-1] * (1 - alpha)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Entry conditions
+    # Calculate EMA34 with proper smoothing
+    ema34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[0:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = close_1d[i] * alpha + ema34_1d[i-1] * (1 - alpha)
+    
+    # Align 1-day EMA34 to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate true daily Camarilla levels from previous day
+    # We need actual daily OHLC - use 1d data from htF
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
+    
+    # Map each 4h bar to its corresponding previous day
+    # Create mapping from 4h index to 1d index
+    day_index = np.zeros(n, dtype=int)
+    day_index[:] = -1
+    
+    for i in range(n):
+        # Find the 1d bar that contains this 4h bar's open_time
+        # Since we don't have the actual datetime, we'll use index mapping
+        # 6 four-hour bars per day
+        day_index[i] = i // 6
+    
+    for i in range(n):
+        day_idx = day_index[i]
+        if day_idx >= 1 and day_idx < len(daily_close):  # Ensure we have previous day
+            prev_high = daily_high[day_idx - 1]
+            prev_low = daily_low[day_idx - 1]
+            prev_close = daily_close[day_idx - 1]
+            range_val = prev_high - prev_low
+            if range_val > 0:  # Avoid division by zero
+                camarilla_r1[i] = prev_close + range_val * 1.1 / 12
+                camarilla_s1[i] = prev_close - range_val * 1.1 / 12
+    
+    # Volume spike: current volume > 1.5 x 20-period average (more reasonable threshold)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 1.5)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 and Bollinger Bands
+    start_idx = max(34, 20, 1)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_12h_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_band_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price touches or goes below lower band, but 1d trend is up (avoid strong downtrends)
-            if close[i] <= lower_band_aligned[i] and close[i] > ema50_1d_aligned[i]:
+            # Long: break above Camarilla R1 with volume spike and 1-day uptrend
+            if (close[i] > camarilla_r1[i] and vol_spike[i] and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or goes above upper band, but 1d trend is down (avoid strong uptrends)
-            elif close[i] >= upper_bb_aligned[i] and close[i] < ema50_1d_aligned[i]:
+            # Short: break below Camarilla S1 with volume spike and 1-day downtrend
+            elif (close[i] < camarilla_s1[i] and vol_spike[i] and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to VWAP or breaks above upper band (momentum)
-            if close[i] >= vwap_12h_aligned[i] or close[i] >= upper_bb_aligned[i]:
+            # Long exit: close below Camarilla S1 or 1-day trend turns down
+            if (close[i] < camarilla_s1[i] or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to VWAP or breaks below lower band (momentum)
-            if close[i] <= vwap_12h_aligned[i] or close[i] <= lower_band_aligned[i]:
+            # Short exit: close above Camarilla R1 or 1-day trend turns up
+            if (close[i] > camarilla_r1[i] or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WVWAP_MeanReversion_Bands"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
