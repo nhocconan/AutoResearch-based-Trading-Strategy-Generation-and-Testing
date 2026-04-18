@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d ADX filter and volume confirmation.
-# Williams Alligator identifies trending vs ranging markets via smoothed SMAs.
-# ADX from 1d confirms trend strength to avoid false signals in chop.
-# Volume confirmation adds conviction to signals.
-# Designed for low trade frequency (15-30/year) to minimize fee drag in 6h timeframe.
-# Works in bull markets (trend up) and bear markets (trend down) by filtering with ADX.
-name = "6h_WilliamsAlligator_1dADX_Volume"
-timeframe = "6h"
+# Hypothesis: 12h Camarilla H3/L3 breakout with weekly volatility filter and volume confirmation.
+# Camarilla levels provide mean-reversion boundaries; breakouts beyond H3/L3 indicate strong momentum.
+# Weekly ATR filter ensures we trade only when volatility is sufficient, avoiding choppy markets.
+# Volume confirmation adds conviction to breakouts. Designed for low trade frequency (<30/year) to minimize fee drag.
+# Works in bull markets (breakouts above H3) and bear markets (breakouts below L3).
+name = "12h_Camarilla_H3L3_WeeklyATR_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,51 +22,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX filter (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for Camarilla levels and ATR filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) - all SMAs with future shift
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate Camarilla levels (H3, L3) from previous weekly bar
+    # H3 = close + 1.1*(high - low)/2, L3 = close - 1.1*(high - low)/2
+    typical_range = df_1w['high'] - df_1w['low']
+    H3 = df_1w['close'] + 1.1 * typical_range / 2
+    L3 = df_1w['close'] - 1.1 * typical_range / 2
     
-    # Calculate ADX (14-period) on daily timeframe
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
+    # Align weekly Camarilla levels to 12h timeframe (wait for weekly bar to close)
+    H3_aligned = align_htf_to_ltf(prices, df_1w, H3.values)
+    L3_aligned = align_htf_to_ltf(prices, df_1w, L3.values)
     
-    # True Range and Directional Movement
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    # Calculate weekly ATR (14-period) for volatility filter
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
+    
+    # True Range calculation
+    tr1 = high_w[1:] - low_w[1:]
+    tr2 = np.abs(high_w[1:] - close_w[:-1])
+    tr3 = np.abs(low_w[1:] - close_w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    plus_dm = np.concatenate([[np.nan], np.maximum(high_d[1:] - high_d[:-1], 0)])
-    minus_dm = np.concatenate([[np.nan], np.maximum(low_d[:-1] - low_d[1:], 0)])
+    # ATR using Wilder's smoothing (EMA with alpha=1/14)
+    atr_period = 14
+    atr = np.full_like(tr, np.nan)
+    if len(tr) >= atr_period:
+        atr[atr_period-1] = np.nanmean(tr[:atr_period])
+        for i in range(atr_period, len(tr)):
+            if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
+                atr[i] = atr[i-1] * (1 - 1/atr_period) + tr[i] * (1/atr_period)
+            else:
+                atr[i] = np.nan
     
-    # Only update DM when TR > 0
-    plus_dm = np.where(tr[1:] > 0, plus_dm[1:], 0)
-    minus_dm = np.where(tr[1:] > 0, minus_dm[1:], 0)
-    tr = np.where(tr > 0, tr, 0)  # Avoid division by zero
+    # ATR multiplier for volatility filter
+    atr_mult = 2.0
+    atr_threshold = atr * atr_mult
     
-    # Smooth with Wilder's smoothing (alpha = 1/14)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[:period])
-            for i in range(period, len(data)):
-                if not np.isnan(result[i-1]):
-                    result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
-        return result
+    # Align weekly ATR threshold to 12h timeframe
+    atr_threshold_aligned = align_htf_to_ltf(prices, df_1w, atr_threshold)
     
-    atr_14 = wilders_smooth(tr, 14)
-    plus_di_14 = 100 * wilders_smooth(plus_dm, 14) / atr_14
-    minus_di_14 = 100 * wilders_smooth(minus_dm, 14) / atr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = wilders_smooth(dx, 14)
-    
-    # Align daily ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 20-period average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -79,8 +77,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(atr_threshold_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -91,33 +89,26 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above 20-period average
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        if np.isnan(vol_ma_20[i]):
-            signals[i] = 0.0
-            continue
+        # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma_20[i]
         
-        # Alligator conditions: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        alligator_up = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        alligator_down = lips[i] < teeth[i] and teeth[i] < jaw[i]
-        
-        # ADX filter: trend strength > 25
-        adx_strong = adx_aligned[i] > 25
+        # Volatility filter: current ATR threshold must be positive (sufficient volatility)
+        vol_filter = not np.isnan(atr_threshold_aligned[i]) and atr_threshold_aligned[i] > 0
         
         if position == 0:
-            # Long: Alligator uptrend + strong ADX + volume confirmation
-            if alligator_up and adx_strong and vol_confirm:
+            # Long: price breaks above H3 AND volume confirmation AND volatility filter
+            long_breakout = close[i] > H3_aligned[i]
+            if vol_confirm and vol_filter and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator downtrend + strong ADX + volume confirmation
-            elif alligator_down and adx_strong and vol_confirm:
+            # Short: price breaks below L3 AND volume confirmation AND volatility filter
+            elif vol_confirm and vol_filter and close[i] < L3_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Alligator turns down OR ADX weakens
-            exit_condition = not alligator_up or adx_aligned[i] <= 25
+            # Long exit: price falls below L3 OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] < L3_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -125,8 +116,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Alligator turns up OR ADX weakens
-            exit_condition = not alligator_down or adx_aligned[i] <= 25
+            # Short exit: price rises above H3 OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] > H3_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
