@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Camarilla_R1_S1_Breakout_Volume_Filter_v1
-Strategy: Camarilla R1/S1 breakout on 1h with 4h trend filter and 1d volume confirmation.
-- 4h EMA34 trend: price > EMA34 = uptrend, price < EMA34 = downtrend
-- 1d volume: current volume > 1.5x 20-period volume average
-- 1h Camarilla: long on break above R1, short on break below S1
-- Session filter: 08:00-20:00 UTC
-- Position size: 0.20 (discrete to minimize fee churn)
-Target: 15-30 trades/year (60-120 total over 4 years)
+12h_Camarilla_Pivot_Bias_V1
+Strategy: 12h Camarilla pivot level bias with 1D trend filter and volume confirmation.
+Long: Price closes above H3 in uptrend with volume confirmation.
+Short: Price closes below L3 in downtrend with volume confirmation.
+Designed for 12h timeframe: ~15-25 trades/year per symbol (60-100 total over 4 years).
+Uses proven Camarilla pivot framework with trend filter to avoid whipsaws.
 """
 
 import numpy as np
@@ -24,94 +22,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (EMA34)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # 4h EMA34 for trend
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Get 1d data for volume confirmation
+    # Get daily data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
+    
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d 20-period volume average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Daily pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_hl = high_1d - low_1d
     
-    # Pre-calculate 1h Camarilla levels from previous bar
-    # Typical Price = (H + L + C) / 3
-    typical_price = (high + low + close) / 3
-    range_hl = high - low
+    # Camarilla levels (H3, L3)
+    h3 = pivot + range_hl * 1.1 / 2
+    l3 = pivot - range_hl * 1.1 / 2
     
-    # Camarilla levels
-    R1 = close + (1.1/12) * range_hl
-    S1 = close - (1.1/12) * range_hl
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Shift to get previous bar's levels (no look-ahead)
-    R1_prev = np.roll(R1, 1)
-    S1_prev = np.roll(S1, 1)
-    R1_prev[0] = np.nan
-    S1_prev[0] = np.nan
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-calculate session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align all daily data to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # need EMA34 and volume MA
+    start_idx = 50  # need enough for EMA200
     
     for i in range(start_idx, n):
-        # Skip if outside session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is not available
-        if (np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(R1_prev[i]) or np.isnan(S1_prev[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend condition from 4h EMA34
-        uptrend = close[i] > ema_34_4h_aligned[i]
-        downtrend = close[i] < ema_34_4h_aligned[i]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
-        # Volume confirmation from 1d
-        vol_confirm = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + break above R1
-            if uptrend and vol_confirm and high[i] > R1_prev[i]:
-                signals[i] = 0.20
+            # Long: uptrend + volume + close above H3
+            if uptrend and vol_confirm and close[i] > h3_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + break below S1
-            elif downtrend and vol_confirm and low[i] < S1_prev[i]:
-                signals[i] = -0.20
+            # Short: downtrend + volume + close below L3
+            elif downtrend and vol_confirm and close[i] < l3_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change or break below S1 (reversal)
-            if not uptrend or low[i] < S1_prev[i]:
-                signals[i] = -0.20  # reverse to short
+            # Long exit: trend change or close below L3 (reversal signal)
+            if not uptrend or close[i] < l3_aligned[i]:
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change or break above R1 (reversal)
-            if not downtrend or high[i] > R1_prev[i]:
-                signals[i] = 0.20  # reverse to long
+            # Short exit: trend change or close above H3 (reversal signal)
+            if not downtrend or close[i] > h3_aligned[i]:
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_1d_Camarilla_R1_S1_Breakout_Volume_Filter_v1"
-timeframe = "1h"
+name = "12h_Camarilla_Pivot_Bias_V1"
+timeframe = "12h"
 leverage = 1.0
