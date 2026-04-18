@@ -1,88 +1,43 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Confirmation and 1d ADX Filter
-Hypothesis: Donchian channel breakouts on 12h timeframe capture medium-term momentum moves.
-Volume confirms institutional participation. 1d ADX filter ensures we only trade in trending markets,
-avoiding whipsaws in ranging conditions. Works in both bull and bear markets by following breakout direction.
-Target: 12-37 trades per year to minimize fee drag.
+4h Camarilla Pivot R1/S1 Breakout with Volume Confirmation
+Hypothesis: Camarilla pivot levels act as strong support/resistance. Price breaking through R1/S1 with volume
+indicates institutional breakout. Works in both bull (breakouts up) and bear (breakdowns down) by following
+price action. Uses volume confirmation to avoid false breakouts and limits trades to reduce fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index"""
-    if len(high) < period + 1:
-        return np.full_like(high, np.nan)
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    atr = np.zeros_like(high)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    plus_di = np.zeros_like(high)
-    minus_di = np.zeros_like(high)
-    
-    plus_dm_smooth = np.zeros_like(high)
-    minus_dm_smooth = np.zeros_like(high)
-    
-    plus_dm_smooth[0] = plus_dm[0]
-    minus_dm_smooth[0] = minus_dm[0]
-    
-    for i in range(1, len(high)):
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-    
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = np.zeros_like(high)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    
-    adx = np.zeros_like(high)
-    adx[0] = dx[0]
-    for i in range(1, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    return adx
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
+def calculate_cci(high, low, close, period=20):
+    """Calculate Commodity Channel Index"""
     if len(high) < period:
         return np.full_like(high, np.nan)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = np.zeros_like(high)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    return atr
+    tp = (high + low + close) / 3
+    ma = np.zeros_like(tp)
+    for i in range(len(tp)):
+        if i < period:
+            ma[i] = np.mean(tp[0:i+1])
+        else:
+            ma[i] = np.mean(tp[i-period+1:i+1])
+    md = np.zeros_like(tp)
+    for i in range(len(tp)):
+        if i < period:
+            md[i] = np.mean(np.abs(tp[0:i+1] - ma[i]))
+        else:
+            md[i] = np.mean(np.abs(tp[i-period+1:i+1] - ma[i]))
+    cci = np.zeros_like(tp)
+    for i in range(len(tp)):
+        if md[i] != 0:
+            cci[i] = (tp[i] - ma[i]) / (0.015 * md[i])
+        else:
+            cci[i] = 0
+    return cci
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -90,74 +45,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX filter
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ADX on daily timeframe
+    # Calculate Camarilla levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Donchian channel (20-period)
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    
-    for i in range(len(high)):
-        if i < 19:
-            highest_high[i] = np.max(high[0:i+1]) if i >= 0 else high[i]
-            lowest_low[i] = np.min(low[0:i+1]) if i >= 0 else low[i]
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = np.zeros_like(close_1d)
+    camarilla_s1 = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i == 0:
+            camarilla_r1[i] = close_1d[i]  # placeholder
+            camarilla_s1[i] = close_1d[i]
         else:
-            highest_high[i] = np.max(high[i-19:i+1])
-            lowest_low[i] = np.min(low[i-19:i+1])
+            rang = high_1d[i-1] - low_1d[i-1]
+            camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
+            camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
+    # Align to 4h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i < 19:
+        if i < 20:
             vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
         else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 1.5)
+            vol_ma[i] = np.mean(volume[i-20+1:i+1])
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup for indicators
+    start_idx = 25  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when ADX > 25 (trending market)
-        trending = adx_1d_aligned[i] > 25
-        
         if position == 0:
-            # Long breakout: price breaks above 20-period high with volume in trending market
-            if (close[i] > highest_high[i] and vol_spike[i] and trending):
+            # Long: price breaks above R1 with volume spike
+            if close[i] > camarilla_r1_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below 20-period low with volume in trending market
-            elif (close[i] < lowest_low[i] and vol_spike[i] and trending):
+            # Short: price breaks below S1 with volume spike
+            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below 20-period low or volatility ends
-            if close[i] < lowest_low[i] or not vol_spike[i]:
+            # Exit long: price returns below S1 (mean reversion) or volume dies
+            if close[i] < camarilla_s1_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above 20-period high or volatility ends
-            if close[i] > highest_high[i] or not vol_spike[i]:
+            # Exit short: price returns above R1 or volume dies
+            if close[i] > camarilla_r1_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -165,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_ADXFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
