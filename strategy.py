@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Choppiness Index regime filter + 1w EMA200 trend filter + Volume confirmation
-# Choppiness Index identifies trending vs ranging markets (CHOP > 61.8 = range, CHOP < 38.2 = trend).
-# In trending markets (CHOP < 38.2): trade in direction of weekly EMA200.
-# In ranging markets (CHOP > 61.8): mean-revert at daily Bollinger Bands (20,2).
-# Volume confirmation filters low-quality signals.
-# Works in bull markets (trend following) and bear markets (mean reversion in ranges).
-# Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
-name = "1d_Choppiness_EMA200_Bollinger_Volume"
-timeframe = "1d"
+# Hypothesis: 12h Williams Alligator + Volume Confirmation + 1d EMA34 Trend Filter
+# Williams Alligator uses 3 SMAs (Jaw=13, Teeth=8, Lips=5) to detect trends.
+# In trending markets, the SMAs are ordered (Lips > Teeth > Jaw for up, reverse for down).
+# Works in both bull and bear markets: long when aligned up, short when aligned down.
+# Volume confirmation filters false signals. 1d EMA34 ensures higher timeframe trend alignment.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drift.
+name = "12h_WilliamsAlligator_Volume_1dEMA34"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,96 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data (same as primary for indicators) and 1w for EMA200
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    close_1d = df_1d['close'].values
     
-    # Calculate Choppiness Index (14-period) on 1d data
-    # CHOP = 100 * log10(sum(ATR(1)) / (max(high) - min(low))) / log10(n)
-    tr1 = np.maximum(high - low, 
-                     np.maximum(np.abs(high - np.roll(close, 1)), 
-                                np.absolute(np.roll(close, 1) - low)))
-    tr1[0] = high[0] - low[0]  # First TR
-    atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA34 on 1d data
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Williams Alligator components on 12h data
+    # Jaw: 13-period SMMA (smoothed moving average)
+    # Teeth: 8-period SMMA
+    # Lips: 5-period SMMA
+    # SMMA is similar to EMA but with different smoothing
+    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
     
-    chop = 100 * np.log10(atr1 * 14 / (max_high - min_low)) / np.log10(14)
-    
-    # Calculate EMA200 on 1w data for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # Calculate Bollinger Bands (20,2) on 1d data for mean reversion
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + (2 * std_20)
-    bb_lower = sma_20 - (2 * std_20)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    # Volume spike: current volume > 1.5 * 24-period average (2 days on 12h chart)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for EMA200 calculation
+    start_idx = 34  # Wait for EMA34 calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(chop[i]) or np.isnan(ema_200_1w_aligned[i]) or
-            np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        chop_val = chop[i]
-        ema_val = ema_200_1w_aligned[i]
-        bb_upper_val = bb_upper[i]
-        bb_lower_val = bb_lower[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema_val = ema_34_1d_aligned[i]
         
         if position == 0:
-            # Trending market (CHOP < 38.2): follow weekly EMA200 trend
-            if chop_val < 38.2:
-                if close_val > ema_val and volume_confirm[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close_val < ema_val and volume_confirm[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # Ranging market (CHOP > 61.8): mean revert at Bollinger Bands
-            elif chop_val > 61.8:
-                if close_val <= bb_lower[i] and volume_confirm[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close_val >= bb_upper[i] and volume_confirm[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Lips > Teeth > Jaw (bullish alignment) AND price above EMA34 AND volume spike
+            if lips_val > teeth_val > jaw_val and close_val > ema_val and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: Lips < Teeth < Jaw (bearish alignment) AND price below EMA34 AND volume spike
+            elif lips_val < teeth_val < jaw_val and close_val < ema_val and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: 
-            # - Trending: close below weekly EMA200
-            # - Ranging: touch upper Bollinger Band
-            # - Opposite regime extreme
-            if ((chop_val < 38.2 and close_val < ema_val) or
-                (chop_val > 61.8 and close_val >= bb_upper_val) or
-                (chop_val >= 38.2 and chop_val <= 61.8)):  # Transition zone
+            # Long exit: Alligator alignment breaks (Lips <= Teeth) or price below EMA34
+            if lips_val <= teeth_val or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit:
-            # - Trending: close above weekly EMA200
-            # - Ranging: touch lower Bollinger Band
-            # - Opposite regime extreme
-            if ((chop_val < 38.2 and close_val > ema_val) or
-                (chop_val > 61.8 and close_val <= bb_lower_val) or
-                (chop_val >= 38.2 and chop_val <= 61.8)):  # Transition zone
+            # Short exit: Alligator alignment breaks (Lips >= Teeth) or price above EMA34
+            if lips_val >= teeth_val or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
