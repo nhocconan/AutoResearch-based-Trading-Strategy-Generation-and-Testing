@@ -1,17 +1,48 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h momentum with 4h ADX trend filter and volume spike.
-- Long: 1h RSI > 55, 4h ADX > 25, volume > 2x 20-period average
-- Short: 1h RSI < 45, 4h ADX > 25, volume > 2x 20-period average
-- Exit: RSI crosses 50 (mean reversion) or ADX < 20
-- Uses 4h ADX for trend strength, avoiding choppy markets.
-- Volume spike filters for institutional participation.
-Designed for 15-37 trades/year (60-150 total) to minimize fee drag.
+Hypothesis: 6h Hull Moving Average (HMA) crossover with 1-week RSI filter and volume confirmation.
+- Long: HMA(20) crosses above HMA(50) AND weekly RSI(14) > 50 AND volume > 1.5x average
+- Short: HMA(20) crosses below HMA(50) AND weekly RSI(14) < 50 AND volume > 1.5x average
+- Exit: opposite HMA crossover
+- Uses weekly RSI to filter for trend alignment on higher timeframe, reducing whipsaws in both bull and bear markets.
+Designed for 12-37 trades/year (50-150 total) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average."""
+    if len(close) < period:
+        return np.full(len(close), np.nan)
+    
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA of half period
+    wma_half = np.full(len(close), np.nan)
+    for i in range(half_period - 1, len(close)):
+        weights = np.arange(1, half_period + 1)
+        wma_half[i] = np.dot(close[i - half_period + 1:i + 1], weights) / weights.sum()
+    
+    # WMA of full period
+    wma_full = np.full(len(close), np.nan)
+    for i in range(period - 1, len(close)):
+        weights = np.arange(1, period + 1)
+        wma_full[i] = np.dot(close[i - period + 1:i + 1], weights) / weights.sum()
+    
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    hma_raw = 2 * wma_half - wma_full
+    
+    # Final WMA of raw HMA with sqrt period
+    hma = np.full(len(close), np.nan)
+    for i in range(sqrt_period - 1, len(hma_raw)):
+        if not np.isnan(hma_raw[i - sqrt_period + 1:i + 1]).any():
+            weights = np.arange(1, sqrt_period + 1)
+            hma[i] = np.dot(hma_raw[i - sqrt_period + 1:i + 1], weights) / weights.sum()
+    
+    return hma
 
 def calculate_rsi(close, period):
     """Calculate Relative Strength Index."""
@@ -25,97 +56,49 @@ def calculate_rsi(close, period):
     avg_gain = np.full(len(close), np.nan)
     avg_loss = np.full(len(close), np.nan)
     
-    if len(close) >= period + 1:
+    # Initial average
+    if len(gain) >= period:
         avg_gain[period] = np.mean(gain[:period])
         avg_loss[period] = np.mean(loss[:period])
-        
-        for i in range(period + 1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Wilder's smoothing
+    for i in range(period + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    
+    rs = np.full(len(close), np.nan)
+    for i in range(period, len(close)):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+    
+    rsi = np.full(len(close), np.nan)
+    for i in range(period, len(close)):
+        if rs[i] is not np.nan:
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+    
     return rsi
-
-def calculate_adx(high, low, close, period):
-    """Calculate Average Directional Index."""
-    if len(high) < period * 2:
-        return np.full(len(high), np.nan)
-    
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Calculate Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR and DM
-    atr = np.full(len(tr), np.nan)
-    if len(tr) >= period:
-        atr[period-1] = np.nanmean(tr[1:period])
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-    
-    dm_plus_smooth = np.full(len(dm_plus), np.nan)
-    dm_minus_smooth = np.full(len(dm_minus), np.nan)
-    if len(dm_plus) >= period:
-        dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period])
-        dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period])
-        for i in range(period, len(dm_plus)):
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
-    
-    # Calculate Directional Indicators
-    plus_di = np.full(len(dm_plus), np.nan)
-    minus_di = np.full(len(dm_minus), np.nan)
-    for i in range(period, len(atr)):
-        if atr[i] != 0:
-            plus_di[i] = 100 * dm_plus_smooth[i] / atr[i]
-            minus_di[i] = 100 * dm_minus_smooth[i] / atr[i]
-    
-    # Calculate DX and ADX
-    dx = np.full(len(plus_di), np.nan)
-    for i in range(period, len(plus_di)):
-        if (plus_di[i] + minus_di[i]) != 0:
-            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-    
-    adx = np.full(len(dx), np.nan)
-    if len(dx) >= 2 * period - 1:
-        adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
-        for i in range(2*period-1, len(dx)):
-            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-    
-    return adx
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for ADX
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get 1w data for RSI filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h ADX (14-period)
-    adx_14_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
-    adx_14_4h_1h = align_htf_to_ltf(prices, df_4h, adx_14_4h)
+    # Calculate weekly RSI(14)
+    rsi_14_1w = calculate_rsi(close_1w, 14)
     
-    # Calculate 1h RSI (14-period)
-    rsi_14 = calculate_rsi(close, 14)
+    # Align weekly RSI to 6h timeframe
+    rsi_14_1w_6h = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
+    
+    # Calculate HMA(20) and HMA(50) on 6h
+    hma_20 = calculate_hma(close, 20)
+    hma_50 = calculate_hma(close, 50)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -125,46 +108,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # need RSI, ADX, and volume MA
+    start_idx = max(50, 20)  # need HMA(50) and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_14[i]) or np.isnan(adx_14_4h_1h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(hma_20[i]) or np.isnan(hma_50[i]) or 
+            np.isnan(rsi_14_1w_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2x 20-period average
-        vol_spike = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
+        # HMA crossover signals
+        hma_cross_up = hma_20[i] > hma_50[i] and hma_20[i-1] <= hma_50[i-1]
+        hma_cross_down = hma_20[i] < hma_50[i] and hma_20[i-1] >= hma_50[i-1]
         
         if position == 0:
-            # Long: RSI > 55, ADX > 25, volume spike
-            if rsi_14[i] > 55 and adx_14_4h_1h[i] > 25 and vol_spike:
-                signals[i] = 0.20
+            # Long: HMA bullish crossover, weekly RSI > 50, volume confirmation
+            if hma_cross_up and rsi_14_1w_6h[i] > 50 and vol_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45, ADX > 25, volume spike
-            elif rsi_14[i] < 45 and adx_14_4h_1h[i] > 25 and vol_spike:
-                signals[i] = -0.20
+            # Short: HMA bearish crossover, weekly RSI < 50, volume confirmation
+            elif hma_cross_down and rsi_14_1w_6h[i] < 50 and vol_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI < 50 or ADX < 20
-            if rsi_14[i] < 50 or adx_14_4h_1h[i] < 20:
+            # Long exit: HMA bearish crossover
+            if hma_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI > 50 or ADX < 20
-            if rsi_14[i] > 50 or adx_14_4h_1h[i] < 20:
+            # Short exit: HMA bullish crossover
+            if hma_cross_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI14_ADX14_VolumeSpike"
-timeframe = "1h"
+name = "6h_HMA20_50_RSI14_1w_Volume"
+timeframe = "6h"
 leverage = 1.0
