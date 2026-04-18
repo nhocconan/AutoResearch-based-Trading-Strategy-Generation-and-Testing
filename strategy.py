@@ -1,13 +1,10 @@
-#!/usr/bin/env python3
-"""
-12h_3ATR_Breakout_Trend_Volume
-12h strategy using 3x ATR breakout from ATR-based channels with trend and volume filters.
-Long: Close breaks above upper band (mean + 3*ATR) + trend filter + volume confirmation
-Short: Close breaks below lower band (mean - 3*ATR) + trend filter + volume confirmation
-Exit: Opposite breakout or trend reversal
-Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
-ATR channels provide volatility-adaptive breakout levels that work in both bull and bear markets
-"""
+# 4h_Donchian_Breakout_Volume_Trend_Regime_v1
+# 4h strategy combining Donchian breakout with volume confirmation, trend filter, and Chop regime filter.
+# Long: Price breaks above Donchian(20) high + volume > 1.5x 20-period avg + EMA20 > EMA50 + Chop > 61.8 (range)
+# Short: Price breaks below Donchian(20) low + volume > 1.5x 20-period avg + EMA20 < EMA50 + Chop > 61.8 (range)
+# Exit: Opposite breakout or trend reversal or Chop < 38.2 (trend)
+# Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
+# Works in bull markets (breakout continuation) and bear markets (avoids false breakouts via Chop filter)
 
 import numpy as np
 import pandas as pd
@@ -23,86 +20,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR-based channels on primary timeframe
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
+    # EMA for trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate mean price (close) for channel center
-    mean_price = close
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Upper and lower bands (mean ± 3*ATR)
-    upper_band = mean_price + 3.0 * atr
-    lower_band = mean_price - 3.0 * atr
-    
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Daily volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all daily data to 12h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Choppy market indicator (Chop) - 14-period
+    # Chop = 100 * log10(sum(ATR(1) over n) / (max(high-n) - min(low-n))) / log10(n)
+    tr1 = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr1[0] = high[0] - low[0]  # first TR
+    atr = pd.Series(tr1).rolling(window=1, min_periods=1).sum().values  # ATR(1) is just TR
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range_val = max_high - min_low
+    # Avoid division by zero
+    range_val = np.where(range_val == 0, 1e-10, range_val)
+    chop = 100 * (np.log10(sum_atr / range_val) / np.log10(14))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200
+    start_idx = 50  # need enough for EMA50 and Chop
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        uptrend = ema_20[i] > ema_50[i]
+        downtrend = ema_20[i] < ema_50[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # Chop regime filter (only trade in ranging markets)
+        chop_filter = chop[i] > 61.8  # range when Chop > 61.8
         
         # Breakout conditions
-        breakout_up = close[i] > upper_band[i]
-        breakdown_down = close[i] < lower_band[i]
+        breakout_up = close[i] > donchian_high[i]
+        breakdown_down = close[i] < donchian_low[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above upper band
-            if uptrend and vol_confirm and breakout_up:
+            # Long: uptrend + volume + breakout above Donchian high + Chop filter
+            if uptrend and vol_confirm and breakout_up and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below lower band
-            elif downtrend and vol_confirm and breakdown_down:
+            # Short: downtrend + volume + breakdown below Donchian low + Chop filter
+            elif downtrend and vol_confirm and breakdown_down and chop_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below lower band
-            if not uptrend or (vol_confirm and breakdown_down):
+            # Long exit: trend reversal, volume breakdown, Chop trend signal, or opposite breakout
+            if (not uptrend) or (not vol_confirm) or (chop[i] < 38.2) or breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above upper band
-            if not downtrend or (vol_confirm and breakout_up):
+            # Short exit: trend reversal, volume breakdown, Chop trend signal, or opposite breakout
+            if (not downtrend) or (not vol_confirm) or (chop[i] < 38.2) or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -110,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_3ATR_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_Trend_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
