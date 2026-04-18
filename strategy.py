@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot Reversal with Volume Spike and Trend Filter
-Hypothesis: Price often reverses from key intraday support/resistance levels (Camarilla levels)
-calculated from the previous day's range. Entries are taken at S3/R3 levels with volume
-confirmation and trend alignment (using 1-day EMA) to avoid counter-trend trades.
-Designed for 20-50 trades/year on 4h timeframe.
+1d Weekly Range Breakout with Volume Spike and Momentum Filter
+Hypothesis: The previous week's high and low act as key support/resistance levels.
+Breakouts beyond these levels with volume confirmation capture momentum moves.
+Works in both bull and bear markets by requiring volume confirmation to avoid false breakouts
+and using a momentum filter to align with short-term price action.
+Designed for 7-25 trades/year on 1d timeframe.
 """
 
 import numpy as np
@@ -21,41 +22,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation (once before loop)
-    df_d = get_htf_data(prices, '1d')
+    # Get weekly data for previous week's high/low (once before loop)
+    df_w = get_htf_data(prices, '1w')
     
-    # Previous day's high, low, close
-    prev_high = df_d['high'].shift(1).values
-    prev_low = df_d['low'].shift(1).values
-    prev_close = df_d['close'].shift(1).values
+    # Previous week's high and low (shifted by 1 to avoid look-ahead)
+    prev_high = df_w['high'].shift(1).values
+    prev_low = df_w['low'].shift(1).values
     
-    # Calculate Camarilla levels: S3, S2, S1, R1, R2, R3
-    # Range = previous day's high - low
-    range_val = prev_high - prev_low
+    # Align to 1d timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_w, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_w, prev_low)
     
-    # Camarilla formulas
-    s3 = prev_close - (range_val * 1.1 / 6)
-    s2 = prev_close - (range_val * 1.1 / 4)
-    s1 = prev_close - (range_val * 1.1 / 2)
-    r1 = prev_close + (range_val * 1.1 / 2)
-    r2 = prev_close + (range_val * 1.1 / 4)
-    r3 = prev_close + (range_val * 1.1 / 6)
-    
-    # Align Camarilla levels to 4h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_d, s3)
-    s2_aligned = align_htf_to_ltf(prices, df_d, s2)
-    s1_aligned = align_htf_to_ltf(prices, df_d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_d, r3)
-    
-    # Volume spike: 2x 20-period average on 4h
+    # Volume spike: 2x 20-period average on 1d
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Trend filter: 1-day EMA (34) aligned to 4h
-    ema_34_d = pd.Series(df_d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_d, ema_34_d)
+    # Momentum filter: 4-period RSI > 50 for long, < 50 for short
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=4, min_periods=4).mean()
+    avg_loss = loss.rolling(window=4, min_periods=4).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -63,43 +53,45 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(s3_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(ema_34_aligned[i])):
+        if (np.isnan(prev_high_aligned[i]) or 
+            np.isnan(prev_low_aligned[i]) or
+            np.isnan(vol_ma[i]) or
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema = ema_34_aligned[i]
+        ph = prev_high_aligned[i]
+        pl = prev_low_aligned[i]
         
         if position == 0:
-            # Long: price at or below S3 with volume spike and uptrend (price > EMA)
-            if price <= s3_aligned[i] and volume_spike[i] and price > ema:
+            # Long: break above previous week's high with volume spike and bullish momentum
+            if price > ph and volume_spike[i] and rsi_values[i] > 50:
                 signals[i] = 0.25
                 position = 1
-            # Short: price at or above R3 with volume spike and downtrend (price < EMA)
-            elif price >= r3_aligned[i] and volume_spike[i] and price < ema:
+            # Short: break below previous week's low with volume spike and bearish momentum
+            elif price < pl and volume_spike[i] and rsi_values[i] < 50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: price reaches S1 or trend turns bearish
-            if price >= s1_aligned[i] or price < ema:
+            # Exit: price returns to previous week's low or momentum turns bearish
+            if price <= pl or rsi_values[i] < 50:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: price reaches R1 or trend turns bullish
-            if price <= r1_aligned[i] or price > ema:
+            # Exit: price returns to previous week's high or momentum turns bullish
+            if price >= ph or rsi_values[i] > 50:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_Pivot_Reversal_Volume_Trend"
-timeframe = "4h"
+name = "1d_WeeklyRange_Breakout_Volume_Momentum"
+timeframe = "1d"
 leverage = 1.0
