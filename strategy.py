@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_RangeBreakout_WeeklyTrend_Volume
-Hypothesis: Uses 1d weekly trend (via 5-day SMA) to filter 6h breakouts from 20-bar Donchian channels, with volume confirmation to avoid false signals. Designed for 6h timeframe to capture medium-term trends while minimizing false breakouts in ranging markets.
+12h_Donchian_20_Volume_Trend_1d
+Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d trend filter (EMA50).
+Works in bull/bear: breakouts capture momentum, volume filter reduces false signals, 1d EMA50 ensures alignment with higher timeframe trend.
+Targets 15-30 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -18,79 +20,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly trend and Donchian context
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d 5-day SMA for weekly trend filter
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    sma_5_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 5:
-        sma_5_1d[4] = np.mean(close_1d[:5])
-        for i in range(5, len(close_1d)):
-            sma_5_1d[i] = close_1d[i] * 0.2 + sma_5_1d[i-1] * 0.8  # EMA-like smoothing for simplicity
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        k = 2 / (50 + 1)
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = close_1d[i] * k + ema_50_1d[i-1] * (1 - k)
     
-    # Align 1d 5-day SMA to 6h timeframe
-    sma_5_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_5_1d)
-    
-    # Calculate 6h Donchian channels (20-period)
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    for i in range(n):
-        if i < 20:
-            highest_high[i] = np.max(high[:i+1])
-            lowest_low[i] = np.min(low[:i+1])
-        else:
-            highest_high[i] = np.max(high[i-19:i+1])
-            lowest_low[i] = np.min(low[i-19:i+1])
+    # Align 1d EMA50 to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.mean(volume[:i+1]) if i >= 0 else volume[i]
-        else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = 20  # Warmup for Donchian
+    start_idx = max(20, 50)  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(sma_5_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # Long: price breaks above 20-bar high, above 1d 5-day SMA, with volume spike
-            if close[i] > highest_high[i] and close[i] > sma_5_1d_aligned[i] and vol_spike[i]:
+            # Long: price breaks above Donchian high with volume spike and above 1d EMA50
+            if close[i] > donchian_high[i] and vol_spike[i] and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: price breaks below 20-bar low, below 1d 5-day SMA, with volume spike
-            elif close[i] < lowest_low[i] and close[i] < sma_5_1d_aligned[i] and vol_spike[i]:
+            # Short: price breaks below Donchian low with volume spike and below 1d EMA50
+            elif close[i] < donchian_low[i] and vol_spike[i] and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
-        
         elif position == 1:
-            # Exit: reverse signal or loss of momentum
-            if close[i] < lowest_low[i] or close[i] < sma_5_1d_aligned[i] or not vol_spike[i]:
+            # Long exit: price breaks below Donchian low or trend changes
+            if close[i] < donchian_low[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Exit: reverse signal or loss of momentum
-            if close[i] > highest_high[i] or close[i] > sma_5_1d_aligned[i] or not vol_spike[i]:
+            # Short exit: price breaks above Donchian high or trend changes
+            if close[i] > donchian_high[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RangeBreakout_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian_20_Volume_Trend_1d"
+timeframe = "12h"
 leverage = 1.0
