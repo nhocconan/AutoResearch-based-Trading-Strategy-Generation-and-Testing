@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h 12h EMA + Volume Confirmation + ADX Filter
-Hypothesis: In trending markets (ADX > 20), price above/below the 12h EMA34 indicates trend direction.
-Volume confirmation (volume > 1.5x 20-period average) filters false breakouts.
-This combination works in both bull and bear markets by capturing sustained trends
-while avoiding choppy periods. Target: 20-40 trades/year to minimize fee drag.
+1h 4h-1d Trend Alignment with Volume and Session Filter
+Hypothesis: In trending markets, when 4h and 1d EMAs align (both bullish or bearish),
+price pulls back to the 4h EMA during the active session (08-20 UTC) offers high-probability
+entries with volume confirmation. This captures trend continuation moves while avoiding
+counter-trend noise. Target: 15-35 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,85 +21,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h EMA34 once before loop
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Get 4h and 1d EMA21 once before loop
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # ADX for trend strength (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
-    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
-    
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 100  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(adx[i]) or 
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_21_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_12h = ema_34_12h_aligned[i]
-        adx_val = adx[i]
-        vol_conf = vol_ratio[i] > 1.5
+        ema_4h = ema_21_4h_aligned[i]
+        ema_1d = ema_21_1d_aligned[i]
+        vol_conf = vol_ratio[i] > 1.3
+        in_session = (8 <= hours[i] <= 20)
         
         if position == 0:
-            # Strong trend (ADX > 20) and volume confirmation
-            # Price above 12h EMA = long
-            if adx_val > 20 and price > ema_12h and vol_conf:
-                signals[i] = 0.25
+            # Long setup: both EMAs bullish, price near 4h EMA, volume, session
+            if ema_4h > ema_1d and price > ema_4h * 0.998 and price < ema_4h * 1.002 and vol_conf and in_session:
+                signals[i] = 0.20
                 position = 1
-            # Price below 12h EMA = short
-            elif adx_val > 20 and price < ema_12h and vol_conf:
-                signals[i] = -0.25
+            # Short setup: both EMAs bearish, price near 4h EMA, volume, session
+            elif ema_4h < ema_1d and price < ema_4h * 1.002 and price > ema_4h * 0.998 and vol_conf and in_session:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit if trend weakens or price crosses below EMA
-            if adx_val < 15 or price < ema_12h:
+            # Exit if trend alignment breaks or price moves significantly away from 4h EMA
+            if ema_4h < ema_1d or price < ema_4h * 0.985 or price > ema_4h * 1.015:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit if trend weakens or price crosses above EMA
-            if adx_val < 15 or price > ema_12h:
+            # Exit if trend alignment breaks or price moves significantly away from 4h EMA
+            if ema_4h > ema_1d or price > ema_4h * 1.015 or price < ema_4h * 0.985:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_12hEMA34_Volume_ADX"
-timeframe = "4h"
+name = "1h_4h1d_EMA21_Align_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
