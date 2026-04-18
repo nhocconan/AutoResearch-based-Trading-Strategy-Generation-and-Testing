@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with 4h volume confirmation and 4h ATR volatility filter.
-# Uses daily Donchian channels (20) for breakout direction, 4h volume spike for confirmation,
-# and 4h ATR to avoid low volatility periods. Designed for 20-40 trades/year to minimize fee drag
-# and work in both bull and bear markets by trading breakouts with volatility filtering.
+# Hypothesis: 4h Williams %R with 1-day trend filter and volume confirmation.
+# Uses Williams %R(14) for overbought/oversold signals on 4h timeframe,
+# daily EMA20 for trend direction, and volume spike for confirmation.
+# Designed for mean reversion in ranging markets and trend exhaustion in trending markets.
+# Target: 20-50 trades per year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     open_price = prices['open'].values
@@ -19,33 +20,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20) on daily data
-    upper_20 = np.full(len(high_1d), np.nan)
-    lower_20 = np.full(len(low_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        upper_20[i] = np.max(high_1d[i-20:i])
-        lower_20[i] = np.min(low_1d[i-20:i])
+    # Calculate EMA(20) on daily data
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align daily Donchian to 4h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    # Align daily EMA20 to 4h timeframe
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate 4h ATR for volatility filter
-    tr_4h_1 = high - low
-    tr_4h_2 = np.abs(high - np.roll(close, 1))
-    tr_4h_3 = np.abs(low - np.roll(close, 1))
-    tr_4h_1[0] = high[0] - low[0]
-    tr_4h_2[0] = np.abs(high[0] - close[0])
-    tr_4h_3[0] = np.abs(low[0] - close[0])
-    tr_4h = np.maximum(tr_4h_1, np.maximum(tr_4h_2, tr_4h_3))
-    atr_4h = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate Williams %R(14) on 4h data
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(14, n):
+        highest_high[i] = np.max(high[i-14:i+1])
+        lowest_low[i] = np.min(low[i-14:i+1])
+    for i in range(14):
+        highest_high[i] = np.max(high[:i+1])
+        lowest_low[i] = np.min(low[:i+1])
     
-    # Calculate 4h volume moving average (20-period)
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
+    
+    # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -53,48 +51,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # need daily Donchian, volume MA
+    start_idx = max(20, 20)  # need daily EMA20, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(atr_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0 * 20-period average (spike)
-        vol_spike = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.8 * 20-period average
+        vol_confirmed = volume[i] > 1.8 * vol_ma[i]
         
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_4h[i] > 0.5 * np.nanmedian(atr_4h[max(0, i-100):i+1])
+        # Trend filter: price above daily EMA20 (uptrend) or below (downtrend)
+        trend_up = close[i] > ema_20_1d_aligned[i]
+        trend_down = close[i] < ema_20_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above daily upper Donchian with volume spike and vol filter
-            if (close[i] > upper_20_aligned[i] and 
-                vol_spike and 
-                vol_filter):
+            # Long entry: Williams %R oversold (< -80) with volume and in uptrend
+            if (williams_r[i] < -80 and 
+                vol_confirmed and 
+                trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below daily lower Donchian with volume spike and vol filter
-            elif (close[i] < lower_20_aligned[i] and 
-                  vol_spike and 
-                  vol_filter):
+            # Short entry: Williams %R overbought (> -20) with volume and in downtrend
+            elif (williams_r[i] > -20 and 
+                  vol_confirmed and 
+                  trend_down):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses below daily lower Donchian or volatility drops
-            if close[i] < lower_20_aligned[i]:
+            # Long exit: Williams %R returns to neutral (> -50) or overbought
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above daily upper Donchian or volatility drops
-            if close[i] > upper_20_aligned[i]:
+            # Short exit: Williams %R returns to neutral (< -50) or oversold
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyDonchian20_VolumeSpike_VolatilityFilter"
+name = "4h_WilliamsR14_DailyEMA20_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
