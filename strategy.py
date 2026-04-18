@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_Breakout_Retest
-- Uses 4h/1d price structure (higher highs/lows) for directional bias
-- Enters on 1h retest of broken 4h/1d swing levels with volume confirmation
-- Filters by 1d ADX > 20 to avoid chop
-- Strict entry: max 2 signals per day to control frequency
-- Target: 15-30 trades/year per symbol
+4h Williams %R Mean Reversion with 1d ADX Trend Filter and Volume Spike
+- Uses Williams %R(14) on 4h for mean reversion signals: long when < -80, short when > -20
+- Filters by 1-day ADX > 25 to ensure trending market (avoids chop)
+- Requires volume > 1.5x 20-period average for confirmation
+- Exits when Williams %R crosses back through -50 (mean reversion complete)
+- Designed for 20-50 trades/year to minimize fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_swing_high(low, lookback):
-    """Find swing highs: higher than N bars before and after."""
-    n = len(low)
-    swing_high = np.full(n, np.nan)
-    for i in range(lookback, n - lookback):
-        if low[i] == np.min(low[i-lookback:i+lookback+1]):
-            swing_high[i] = low[i]
-    return swing_high
-
-def calculate_swing_low(high, lookback):
-    """Find swing lows: lower than N bars before and after."""
-    n = len(high)
-    swing_low = np.full(n, np.nan)
-    for i in range(lookback, n - lookback):
-        if high[i] == np.max(high[i-lookback:i+lookback+1]):
-            swing_low[i] = high[i]
-    return swing_low
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R with proper handling."""
+    highest_high = np.full(len(high), np.nan)
+    lowest_low = np.full(len(low), np.nan)
+    
+    for i in range(period-1, len(high)):
+        highest_high[i] = np.max(high[i-period+1:i+1])
+        lowest_low[i] = np.min(low[i-period+1:i+1])
+    
+    williams_r = np.full(len(close), np.nan)
+    for i in range(period-1, len(close)):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
+        else:
+            williams_r[i] = -50  # neutral when no range
+    
+    return williams_r
 
 def calculate_adx(high, low, close, period):
-    """Calculate Average Directional Index."""
+    """Calculate Average Directional Index with Wilder's smoothing."""
     if len(high) < period * 2:
         return np.full(len(high), np.nan)
     
@@ -87,9 +87,17 @@ def calculate_adx(high, low, close, period):
     
     return adx
 
+def calculate_sma(arr, period):
+    """Calculate Simple Moving Average with NaN for insufficient data."""
+    sma = np.full(len(arr), np.nan)
+    if len(arr) >= period:
+        for i in range(period-1, len(arr)):
+            sma[i] = np.mean(arr[i-period+1:i+1])
+    return sma
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -97,107 +105,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for structure
+    # Get 4h data for Williams %R and volume
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 4h swing points (structure)
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    swing_high_4h = calculate_swing_high(low_4h, 3)  # 3-bar lookback
-    swing_low_4h = calculate_swing_low(high_4h, 3)
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate 1d swing points (stronger structure)
+    # Get 1d data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    swing_high_1d = calculate_swing_high(low_1d, 2)
-    swing_low_1d = calculate_swing_low(high_1d, 2)
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX filter
-    adx_14_1d = calculate_adx(high_1d, low_1d, df_1d['close'].values, 14)
+    # Calculate Williams %R(14) on 4h
+    williams_r_4h = calculate_williams_r(high_4h, low_4h, close_4h, 14)
     
-    # Align 4h/1d structures to 1h
-    swing_high_4h_1h = align_htf_to_ltf(prices, df_4h, swing_high_4h)
-    swing_low_4h_1h = align_htf_to_ltf(prices, df_4h, swing_low_4h)
-    swing_high_1d_1h = align_htf_to_ltf(prices, df_1d, swing_high_1d)
-    swing_low_1d_1h = align_htf_to_ltf(prices, df_1d, swing_low_1d)
-    adx_14_1d_1h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Calculate 1-day ADX(14)
+    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Volume filter: 1h volume > 1.5x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > 1.5 * vol_ma
+    # Calculate 4h volume moving average (20-period)
+    vol_ma_4h = calculate_sma(volume_4h, 20)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align 1d ADX to 4h timeframe
+    adx_14_1d_4h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    
+    # Align 4h Williams %R and volume MA to 4h (no alignment needed)
+    williams_r_4h_aligned = williams_r_4h
+    vol_ma_4h_aligned = vol_ma_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Track daily signals to limit frequency
-    dates = pd.DatetimeIndex(prices['open_time']).date
-    daily_signal_count = {}
-    
-    start_idx = 50  # warmup
+    start_idx = 40  # need sufficient data for Williams %R, ADX, and volume MA
     
     for i in range(start_idx, n):
-        # Skip if any data unavailable
-        if (np.isnan(swing_high_4h_1h[i]) or np.isnan(swing_low_4h_1h[i]) or
-            np.isnan(swing_high_1d_1h[i]) or np.isnan(swing_low_1d_1h[i]) or
-            np.isnan(adx_14_1d_1h[i])):
+        # Skip if any required data is not available
+        if (np.isnan(williams_r_4h_aligned[i]) or np.isnan(adx_14_1d_4h[i]) or 
+            np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Check session and volume
-        if not (session_filter[i] and vol_filter[i]):
-            signals[i] = 0.0
-            continue
+        # Get aligned 4h volume for current 4h bar
+        vol_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
         
-        # Check daily signal limit (max 2 per day)
-        current_date = dates[i]
-        daily_count = daily_signal_count.get(current_date, 0)
-        if daily_count >= 2:
-            signals[i] = 0.0
-            continue
-        
-        # Determine structure bias from 4h/1d swings
-        # Bullish: price above recent swing lows
-        # Bearish: price below recent swing highs
-        structure_bullish = close[i] > swing_low_4h_1h[i] and close[i] > swing_low_1d_1h[i]
-        structure_bearish = close[i] < swing_high_4h_1h[i] and close[i] < swing_high_1d_1h[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        vol_spike = vol_4h_aligned[i] > 1.5 * vol_ma_4h_aligned[i]
         
         if position == 0:
-            # Long: bullish structure + ADX > 20
-            if structure_bullish and adx_14_1d_1h[i] > 20:
-                signals[i] = 0.20
+            # Long: Williams %R < -80 (oversold), volume spike, ADX > 25
+            if williams_r_4h_aligned[i] < -80 and vol_spike and adx_14_1d_4h[i] > 25:
+                signals[i] = 0.25
                 position = 1
-                daily_signal_count[current_date] = daily_count + 1
-            # Short: bearish structure + ADX > 20
-            elif structure_bearish and adx_14_1d_1h[i] > 20:
-                signals[i] = -0.20
+            # Short: Williams %R > -20 (overbought), volume spike, ADX > 25
+            elif williams_r_4h_aligned[i] > -20 and vol_spike and adx_14_1d_4h[i] > 25:
+                signals[i] = -0.25
                 position = -1
-                daily_signal_count[current_date] = daily_count + 1
         
         elif position == 1:
-            # Long exit: structure turns bearish or ADX weak
-            if not structure_bullish or adx_14_1d_1h[i] < 15:
+            # Long exit: Williams %R crosses back above -50 (mean reversion)
+            if williams_r_4h_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: structure turns bullish or ADX weak
-            if not structure_bearish or adx_14_1d_1h[i] < 15:
+            # Short exit: Williams %R crosses back below -50 (mean reversion)
+            if williams_r_4h_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h1d_Breakout_Retest"
-timeframe = "1h"
+name = "4h_WilliamsR_ADX14_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
