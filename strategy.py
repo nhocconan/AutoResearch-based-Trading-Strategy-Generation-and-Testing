@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_WVWAP_Cross_Volume_Surge
-Hypothesis: 1d volume-weighted average price (VWAP) cross with volume surge acts as institutional order flow signal. Works in both bull/bear markets as VWAP captures fair value and volume surge confirms participation. Uses 1w trend filter to avoid counter-trend trades. Target: 15-25 trades/year.
+6h_ADX_BollingerBand_Reversion_1dTrend
+Hypothesis: Mean reversion at Bollinger Bands (±2 std) in strong trends (ADX>25) with 1-day EMA50 trend filter. 
+Works in bull/bear by only trading mean-reversion pullbacks in established trends, avoiding chop.
+Target: 60-120 trades over 4 years (15-30/year). Uses discrete position sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
@@ -16,67 +18,96 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1d VWAP (typical price * volume cumulative / volume cumulative)
+    # Calculate 6h indicators
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_ma = np.full(n, np.nan)
+    bb_std = np.full(n, np.nan)
+    for i in range(bb_period, n):
+        bb_ma[i] = np.mean(close[i-bb_period:i])
+        bb_std[i] = np.std(close[i-bb_period:i])
+    bb_upper = bb_ma + 2 * bb_std
+    bb_lower = bb_ma - 2 * bb_std
+    
+    # ADX (14) - need +DI, -DI, TR
+    adx_period = 14
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.insert(tr, 0, high[0] - low[0])
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    
+    tr_ma = np.full(n, np.nan)
+    plus_di_ma = np.full(n, np.nan)
+    minus_di_ma = np.full(n, np.nan)
+    for i in range(adx_period, n):
+        if i == adx_period:
+            tr_ma[i] = np.sum(tr[0:adx_period+1])
+            plus_di_ma[i] = np.sum(plus_dm[0:adx_period+1])
+            minus_di_ma[i] = np.sum(minus_dm[0:adx_period+1])
+        else:
+            tr_ma[i] = tr_ma[i-1] - (tr_ma[i-1] / adx_period) + tr[i]
+            plus_di_ma[i] = plus_di_ma[i-1] - (plus_di_ma[i-1] / adx_period) + plus_dm[i]
+            minus_di_ma[i] = minus_di_ma[i-1] - (minus_di_ma[i-1] / adx_period) + minus_dm[i]
+    
+    plus_di = np.where(tr_ma != 0, 100 * plus_di_ma / tr_ma, 0)
+    minus_di = np.where(tr_ma != 0, 100 * minus_di_ma / tr_ma, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = np.full(n, np.nan)
+    for i in range(adx_period, n):
+        if i == adx_period:
+            adx[i] = np.mean(dx[0:adx_period+1])
+        else:
+            adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
+    
+    # Calculate 1-day EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    pv_1d = typical_price_1d * df_1d['volume'].values
-    vol_1d = df_1d['volume'].values
-    
-    # Cumulative VWAP calculation
-    cum_pv = np.cumsum(pv_1d)
-    cum_vol = np.cumsum(vol_1d)
-    vwap_1d = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
-    
-    # 1w EMA50 trend filter (avoid counter-trend in chop)
-    df_1w = get_htf_data(prices, '1w')
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align to 1d timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume surge: current 1d volume > 2.5x 20-day average
-    vol_ma_20 = np.full(len(close), np.nan)
-    for i in range(20, len(close)):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    volume_surge = volume > (vol_ma_20 * 2.5)
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    for i in range(50, len(close_1d)):
+        if i == 50:
+            ema50_1d[i] = np.mean(close_1d[0:51])
+        else:
+            k = 2 / (50 + 1)
+            ema50_1d[i] = close_1d[i] * k + ema50_1d[i-1] * (1 - k)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure indicators ready
+    start_idx = max(bb_period, adx_period, 50)
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(adx[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price crosses above VWAP with volume surge and 1w uptrend
-            if (close[i] > vwap_1d_aligned[i] and volume_surge[i] and 
-                close[i] > ema50_1w_aligned[i]):
+            # Long: pullback to lower BB in uptrend (ADX>25, price>EMA50_1d)
+            if (close[i] <= bb_lower[i] and adx[i] > 25 and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below VWAP with volume surge and 1w downtrend
-            elif (close[i] < vwap_1d_aligned[i] and volume_surge[i] and 
-                  close[i] < ema50_1w_aligned[i]):
+            # Short: pullback to upper BB in downtrend (ADX>25, price<EMA50_1d)
+            elif (close[i] >= bb_upper[i] and adx[i] > 25 and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below VWAP or 1w trend turns down
-            if (close[i] < vwap_1d_aligned[i] or close[i] < ema50_1w_aligned[i]):
+            # Long exit: return to mean (middle BB) or trend weakness
+            if (close[i] >= bb_ma[i] or adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above VWAP or 1w trend turns up
-            if (close[i] > vwap_1d_aligned[i] or close[i] > ema50_1w_aligned[i]):
+            # Short exit: return to mean (middle BB) or trend weakness
+            if (close[i] <= bb_ma[i] or adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WVWAP_Cross_Volume_Surge"
-timeframe = "1d"
+name = "6h_ADX_BollingerBand_Reversion_1dTrend"
+timeframe = "6h"
 leverage = 1.0
