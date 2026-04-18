@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_Refined
-Hypothesis: Refined version focusing on higher-quality breakouts by requiring volume confirmation and stricter position management to reduce overtrading. Uses tighter exit conditions and adds a minimum hold period to reduce trade frequency.
+4h_Camarilla_R1S1_Breakout_With_Momentum_Filter
+Hypothesis: Combines Camarilla pivot breakouts with momentum confirmation to reduce false signals. Uses a strict momentum filter (close > SMA10 for longs, close < SMA10 for shorts) to ensure breakouts align with short-term momentum, reducing whipsaws and overtrading. Targets 20-30 trades per year per symbol.
 """
 
 import numpy as np
@@ -44,6 +44,10 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
+    # Momentum filter: SMA10
+    close_s = pd.Series(close)
+    sma10 = close_s.rolling(window=10, min_periods=10).mean().values
+    
     # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
@@ -61,48 +65,42 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i]) or np.isnan(sma10[i])):
             signals[i] = 0.0
             continue
         
         bars_since_entry += 1
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike
-            if close[i] > camarilla_r1_aligned[i] and vol_spike[i]:
+            # Long: price breaks above R1 with volume spike AND momentum confirmation
+            if close[i] > camarilla_r1_aligned[i] and vol_spike[i] and close[i] > sma10[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: price breaks below S1 with volume spike
-            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i]:
+            # Short: price breaks below S1 with volume spike AND momentum confirmation
+            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i] and close[i] < sma10[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         
         elif position == 1:
-            # Exit conditions: minimum 3 bars hold, then exit on mean reversion or volume fade
-            if bars_since_entry >= 3:
-                if close[i] < camarilla_s1_aligned[i] or not vol_spike[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: price returns below S1 or momentum fades
+            if close[i] < camarilla_s1_aligned[i] or close[i] < sma10[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.25  # Hold during minimum period
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions: minimum 3 bars hold, then exit on mean reversion or volume fade
-            if bars_since_entry >= 3:
-                if close[i] > camarilla_r1_aligned[i] or not vol_spike[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: price returns above R1 or momentum fades
+            if close[i] > camarilla_r1_aligned[i] or close[i] > sma10[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = -0.25  # Hold during minimum period
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Refined"
+name = "4h_Camarilla_R1S1_Breakout_With_Momentum_Filter"
 timeframe = "4h"
 leverage = 1.0
