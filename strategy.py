@@ -3,48 +3,46 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily price channel breakout with 1-day trend filter and volume confirmation.
-# Uses daily Donchian channels (20-period) to identify breakouts, daily SMA200 for trend filter,
-# and volume spike for confirmation. Designed for low trade frequency (<40/year) to minimize
-# fee drag while capturing strong momentum moves in both bull and bear markets.
+# Hypothesis: Daily breakout of weekly Bollinger Bands with volume confirmation.
+# Uses weekly Bollinger Bands (20, 2.0) to define volatility regime and trend.
+# Enters on daily close beyond upper/lower band with volume > 1.5x 20-day average.
+# Exits on return to middle band (20-day SMA).
+# Designed for low frequency (target 10-25 trades/year) to avoid fee drag.
+# Works in bull markets (breakouts continue) and bear markets (mean reversion to middle band).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Donchian channels (20-period) on daily data
-    upper_20d = np.full(len(high_1d), np.nan)
-    lower_20d = np.full(len(low_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        upper_20d[i] = np.max(high_1d[i-20:i])
-        lower_20d[i] = np.min(low_1d[i-20:i])
+    # Calculate weekly Bollinger Bands (20, 2.0)
+    sma_20 = np.full(len(close_1w), np.nan)
+    for i in range(20, len(close_1w)):
+        sma_20[i] = np.mean(close_1w[i-20:i])
     
-    # Align daily Donchian channels to 12h timeframe
-    upper_20d_aligned = align_htf_to_ltf(prices, df_1d, upper_20d)
-    lower_20d_aligned = align_htf_to_ltf(prices, df_1d, lower_20d)
+    std_20 = np.full(len(close_1w), np.nan)
+    for i in range(20, len(close_1w)):
+        std_20[i] = np.std(close_1w[i-20:i])
     
-    # Calculate SMA(200) on daily close for trend filter
-    sma_200_1d = np.full(len(close_1d), np.nan)
-    for i in range(200, len(close_1d)):
-        sma_200_1d[i] = np.mean(close_1d[i-200:i])
+    upper_band = sma_20 + 2.0 * std_20
+    lower_band = sma_20 - 2.0 * std_20
+    middle_band = sma_20  # 20-day SMA
     
-    # Align daily SMA200 to 12h timeframe
-    sma_200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
+    # Align weekly bands to daily timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    middle_aligned = align_htf_to_ltf(prices, df_1w, middle_band)
     
-    # Calculate volume moving average (20-period) on 12h data
+    # Calculate 20-day volume moving average for confirmation
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -52,49 +50,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # need daily SMA200, volume MA
+    start_idx = max(20, 20)  # need weekly BBands and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_20d_aligned[i]) or np.isnan(lower_20d_aligned[i]) or 
-            np.isnan(sma_200_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(middle_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        vol_confirmed = volume[i] > 2.0 * vol_ma[i]
-        
-        # Trend filter: price above daily SMA200 (uptrend) or below (downtrend)
-        trend_up = close[i] > sma_200_1d_aligned[i]
-        trend_down = close[i] < sma_200_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5 * 20-day average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above 20-day high, with volume and trend filter
-            if (close[i] > upper_20d_aligned[i] and 
-                vol_confirmed and 
-                trend_up):
+            # Long entry: close above upper band with volume confirmation
+            if close[i] > upper_aligned[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below 20-day low, with volume and trend filter
-            elif (close[i] < lower_20d_aligned[i] and 
-                  vol_confirmed and 
-                  trend_down):
+            # Short entry: close below lower band with volume confirmation
+            elif close[i] < lower_aligned[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses below 20-day low or opposite signal
-            if close[i] < lower_20d_aligned[i]:
+            # Long exit: return to middle band
+            if close[i] <= middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 20-day high or opposite signal
-            if close[i] > upper_20d_aligned[i]:
+            # Short exit: return to middle band
+            if close[i] >= middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyDonchian20_SMA200_Volume2x"
-timeframe = "12h"
+name = "1d_WeeklyBBands20_2.0_VolumeConfirmation"
+timeframe = "1d"
 leverage = 1.0
