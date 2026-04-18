@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot R1/S1 Breakout + Volume Spike + ADX Trend Filter
-Uses daily Camarilla pivot levels (R1, S1) from 1d timeframe for entry signals.
-Long when price breaks above R1 with volume confirmation, short when breaks below S1.
-ADX filter ensures we only trade in trending markets (ADX > 25).
-Designed for low trade frequency with strong trend-following edge in both bull and bear markets.
+6h ADX + Williams Alligator + Volume Spike
+Trend-following strategy using Williams Alligator (3 SMAs) and ADX for trend confirmation.
+Long when price > Alligator teeth and ADX > 25, short when price < Alligator teeth and ADX > 25.
+Uses volume spike (2x 6-period average) for entry confirmation.
+Designed for 6h timeframe with daily trend filter to avoid false signals in choppy markets.
 """
 
 import numpy as np
@@ -21,24 +21,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) >= period:
+            result[period-1] = np.mean(arr[:period])
+            for i in range(period, len(arr)):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate Camarilla pivot levels for each day
-    # R1 = Close + 1.1*(High - Low)/12
-    # S1 = Close - 1.1*(High - Low)/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    jaws = smma(close, 13)   # Jaw (blue)
+    teeth = smma(close, 8)   # Teeth (red)
+    lips = smma(close, 5)    # Lips (green)
     
-    r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 12
-    s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align daily levels to 4h timeframe (wait for daily bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # ADX calculation for trend strength (on 4h data)
+    # ADX calculation for trend strength
     def calculate_adx(high, low, close, period=14):
         """Calculate ADX (Average Directional Index)"""
         # True Range
@@ -46,7 +43,7 @@ def generate_signals(prices):
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First period
+        tr[0] = tr1[0]
         
         # Directional Movement
         up_move = high - np.roll(high, 1)
@@ -59,10 +56,8 @@ def generate_signals(prices):
         
         # Smoothed values
         def smm(arr, period):
-            """Smoothed Moving Average for ADX"""
             result = np.full_like(arr, np.nan, dtype=float)
             if len(arr) >= period:
-                # First value is sum of first 'period' elements
                 result[period-1] = np.nansum(arr[:period])
                 for i in range(period, len(arr)):
                     if not np.isnan(result[i-1]):
@@ -84,9 +79,17 @@ def generate_signals(prices):
     
     adx = calculate_adx(high, low, close, 14)
     
-    # Volume spike detection (2x 4-period average)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection (2x 6-period average)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # Get daily trend filter (1 = uptrend, -1 = downtrend, 0 = neutral)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Daily EMA 34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    daily_trend = np.where(close_1d > ema_34_1d, 1, -1)  # 1 = uptrend, -1 = downtrend
+    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -94,44 +97,46 @@ def generate_signals(prices):
     start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma[i]) or np.isnan(daily_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         strong_trend = adx[i] > 25
+        price_above_teeth = price > teeth[i]
+        price_below_teeth = price < teeth[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and strong trend
-            if (price > r1_aligned[i] and 
-                volume_spike[i] and strong_trend):
+            # Long: price above teeth, strong trend, volume spike, daily uptrend
+            if (price_above_teeth and strong_trend and volume_spike[i] and 
+                daily_trend_aligned[i] == 1):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and strong trend
-            elif (price < s1_aligned[i] and 
-                  volume_spike[i] and strong_trend):
+            # Short: price below teeth, strong trend, volume spike, daily downtrend
+            elif (price_below_teeth and strong_trend and volume_spike[i] and 
+                  daily_trend_aligned[i] == -1):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: price crosses below S1 (reversion to mean)
-            if price < s1_aligned[i]:
+            # Exit: price crosses below teeth or trend weakens
+            if price < teeth[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: price crosses above R1 (reversion to mean)
-            if price > r1_aligned[i]:
+            # Exit: price crosses above teeth or trend weakens
+            if price > teeth[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_VolumeSpike_ADXFilter"
-timeframe = "4h"
+name = "6h_ADX_Alligator_VolumeSpike_DailyTrend"
+timeframe = "6h"
 leverage = 1.0
