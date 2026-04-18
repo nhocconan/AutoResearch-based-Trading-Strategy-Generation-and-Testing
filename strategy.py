@@ -1,107 +1,101 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-4h_RSI2_Regime_Breakout
-RSI(2) mean reversion with trend filter and volatility regime:
-- Long when RSI(2) < 10 and price > EMA(200) and ATR(14) < SMA(ATR(14), 50)
-- Short when RSI(2) > 90 and price < EMA(200) and ATR(14) < SMA(ATR(14), 50)
-- Exit when RSI(2) crosses 50 (mean reversion complete)
-- Uses 12h EMA(50) for higher timeframe trend confirmation
-- Designed for 20-40 trades/year per symbol
-Works in both bull (buying dips in uptrend) and bear (selling rallies in downtrend) markets
+1d_WeeklyPivot_Breakout_Volume
+Weekly pivot breakout strategy with volume confirmation for 1d timeframe:
+- Long when price breaks above weekly R1 with volume > 1.5x average volume
+- Short when price breaks below weekly S1 with volume > 1.5x average volume
+- Exit when price returns to weekly pivot point (PP)
+- Uses weekly pivot points calculated from prior week's high, low, close
+- Designed for 15-25 trades/year per symbol
+Works in both bull (captures breakouts) and bear (captures breakdowns) markets
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
+
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot points: PP, R1, S1, R2, S2."""
+    pp = (high + low + close) / 3
+    r1 = 2 * pp - low
+    s1 = 2 * pp - high
+    r2 = pp + (high - low)
+    s2 = pp - (high - low)
+    return pp, r1, s1, r2, s2
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) == 0:
+        return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate EMA(50) on 12h for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate weekly pivot points
+    pp_weekly, r1_weekly, s1_weekly, r2_weekly, s2_weekly = calculate_weekly_pivot(
+        high_weekly, low_weekly, close_weekly
+    )
     
-    # Calculate RSI(2)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align weekly pivots to daily timeframe
+    pp_aligned = align_ltf_to_htf(prices, df_weekly, pp_weekly)
+    r1_aligned = align_ltf_to_htf(prices, df_weekly, r1_weekly)
+    s1_aligned = align_ltf_to_htf(prices, df_weekly, s1_weekly)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate EMA(200) for trend filter
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Calculate ATR(14) for volatility regime
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate SMA of ATR(50) for volatility regime filter
-    atr_sma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    # Calculate average volume (20-day)
+    volume = prices['volume'].values
+    vol_avg = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_avg[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need sufficient data for EMA(200)
+    start_idx = 20  # need volume average
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_200[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_sma[i])):
+        # Skip if pivot data not available
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: low volatility (ATR < SMA of ATR)
-        low_volatility = atr[i] < atr_sma[i]
-        
-        # Trend filter: price vs EMA(200) and 12h EMA(50)
-        uptrend = close[i] > ema_200[i] and ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]
-        downtrend = close[i] < ema_200[i] and ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1]
+        # Volume condition: current volume > 1.5x average volume
+        volume_condition = volume[i] > 1.5 * vol_avg[i]
         
         if position == 0:
-            # Long: RSI(2) oversold + uptrend + low volatility
-            if rsi[i] < 10 and uptrend and low_volatility:
+            # Long: break above R1 with volume confirmation
+            if prices['close'][i] > r1_aligned[i] and volume_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) overbought + downtrend + low volatility
-            elif rsi[i] > 90 and downtrend and low_volatility:
+            # Short: break below S1 with volume confirmation
+            elif prices['close'][i] < s1_aligned[i] and volume_condition:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI(2) crosses above 50 (mean reversion complete)
-            if rsi[i] > 50 and rsi[i-1] <= 50:
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long exit: return to pivot point
+            if prices['close'][i] <= pp_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI(2) crosses below 50 (mean reversion complete)
-            if rsi[i] < 50 and rsi[i-1] >= 50:
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short exit: return to pivot point
+            if prices['close'][i] >= pp_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_RSI2_Regime_Breakout"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
