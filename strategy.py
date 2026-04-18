@@ -1,152 +1,142 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud + TK Cross + Volume Confirmation
-Hypothesis: Ichimoku cloud provides dynamic support/resistance and trend direction. TK cross signals momentum shifts. Volume confirms institutional participation. Works in both bull/bear markets by adapting to cloud thickness and price/cloud relationship. Low trade frequency due to strict cloud/TK cross requirements.
+4h Williams Alligator + Volume Spike + ADX Trend Filter
+Hypothesis: Williams Alligator (3 SMAs: Jaw, Teeth, Lips) identifies trend direction and strength. 
+When aligned (Lips > Teeth > Jaw for uptrend, Lips < Teeth < Jaw for downtrend) combined with 
+volume spike (institutional interest) and ADX > 25 (trending market), it captures strong trends.
+Uses Williams Alligator to avoid whipsaws in ranging markets. Low trade frequency due to strict multi-condition entry.
 """
 
 import numpy as np
 import pandas as pd
-from typing import Tuple
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Calculate Ichimoku components:
-    - tenkan_sen: (9-period high + 9-period low)/2
-    - kijun_sen: (26-period high + 26-period low)/2
-    - senkou_span_a: (tenkan_sen + kijun_sen)/2 shifted 26 periods ahead
-    - senkou_span_b: (52-period high + 52-period low)/2 shifted 26 periods ahead
-    - chikou_span: close shifted 26 periods behind
-    """
-    def _rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                res[i] = np.max(arr[i - window + 1:i + 1])
-        return res
-    
-    def _rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                res[i] = np.min(arr[i - window + 1:i + 1])
-        return res
-    
-    # Tenkan-sen (Conversion Line): 9-period high-low midpoint
-    tenkan_sen = (_rolling_max(high, 9) + _rolling_min(low, 9)) / 2
-    
-    # Kijun-sen (Base Line): 26-period high-low midpoint
-    kijun_sen = (_rolling_max(high, 26) + _rolling_min(low, 26)) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods forward
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): 52-period high-low midpoint shifted 26 periods forward
-    senkou_span_b = (_rolling_max(high, 52) + _rolling_min(low, 52)) / 2
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods backward
-    chikou_span = np.full_like(close, np.nan)
-    for i in range(26, len(close)):
-        chikou_span[i] = close[i - 26]
-    
-    return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span
+def sma(arr, period):
+    """Simple Moving Average"""
+    result = np.full_like(arr, np.nan, dtype=float)
+    if len(arr) < period:
+        return result
+    for i in range(period-1, len(arr)):
+        result[i] = np.mean(arr[i-period+1:i+1])
+    return result
+
+def calculate_alligator(close, jaw_period=13, teeth_period=8, lips_period=5):
+    """Williams Alligator: Jaw(13), Teeth(8), Lips(5) SMAs"""
+    jaw = sma(close, jaw_period)
+    teeth = sma(close, teeth_period)
+    lips = sma(close, lips_period)
+    return jaw, teeth, lips
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku calculation (HTF)
+    # Get 1d data for Alligator trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Ichimoku on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Alligator on 1d
     close_1d = df_1d['close'].values
+    jaw, teeth, lips = calculate_alligator(close_1d, jaw_period=13, teeth_period=8, lips_period=5)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    tenkan_sen_1d, kijun_sen_1d, senkou_span_a_1d, senkou_span_b_1d, chikou_span_1d = calculate_ichimoku(
-        high_1d, low_1d, close_1d
-    )
+    # Calculate ADX on 4h data
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d)
-    chikou_span_aligned = align_htf_to_ltf(prices, df_1d, chikou_span_1d)
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma = np.zeros_like(volume)
+    # Smoothed values using Wilder smoothing
+    def wilders_smooth(data, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values use Wilder smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / np.where(atr != 0, atr, 1)
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / np.where(atr != 0, atr, 1)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma = np.full_like(volume, np.nan, dtype=float)
     for i in range(len(volume)):
         if i < 20:
             vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Warmup for Ichimoku (need 52 + 26 periods)
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if any Ichimoku component is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(chikou_span_aligned[i])):
+        # Check for NaN values
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        tenkan = tenkan_sen_aligned[i]
-        kijun = kijun_sen_aligned[i]
-        senkou_a = senkou_span_a_aligned[i]
-        senkou_b = senkou_span_b_aligned[i]
-        chikou = chikou_span_aligned[i]
-        current_close = close[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        adx_val = adx[i]
         vol_ok = vol_spike[i]
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_a, senkou_b)
-        cloud_bottom = min(senkou_a, senkou_b)
-        
-        # TK Cross conditions
-        tk_cross_up = tenkan > kijun and tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]
-        tk_cross_down = tenkan < kijun and tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        alligator_long = lips_val > teeth_val and teeth_val > jaw_val
+        alligator_short = lips_val < teeth_val and teeth_val < jaw_val
         
         if position == 0:
-            # Enter long: price above cloud + TK cross up + chikou above price (26 periods ago) + volume spike
-            if (current_close > cloud_top and 
-                tk_cross_up and 
-                chikou > close[i-26] if i >= 26 else False and 
-                vol_ok):
+            # Enter long: Alligator aligned up + ADX > 25 + volume spike
+            if alligator_long and adx_val > 25 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below cloud + TK cross down + chikou below price (26 periods ago) + volume spike
-            elif (current_close < cloud_bottom and 
-                  tk_cross_down and 
-                  chikou < close[i-26] if i >= 26 else False and 
-                  vol_ok):
+            # Enter short: Alligator aligned down + ADX > 25 + volume spike
+            elif alligator_short and adx_val > 25 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below cloud or TK cross down
-            if current_close < cloud_bottom or tk_cross_down:
+            # Exit long: Alligator alignment breaks or ADX weakens
+            if not alligator_long or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above cloud or TK cross up
-            if current_close > cloud_top or tk_cross_up:
+            # Exit short: Alligator alignment breaks or ADX weakens
+            if not alligator_short or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -154,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_TKCross_Volume"
-timeframe = "6h"
+name = "4h_Williams_Alligator_VolumeSpike_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
