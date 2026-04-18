@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyTrend_Filter
-Daily trend following with weekly trend filter and volume confirmation.
-- Primary signal: Price above/below daily EMA50 (trend)
-- Weekly filter: Only trade in direction of weekly EMA34 (avoid counter-trend)
-- Entry trigger: Pullback to daily EMA20 with volume > 1.3x 20-day average
-- Position size: 0.25 (25% of capital)
-- Exit: Trend reversal (price crosses daily EMA50 opposite direction)
-- Designed for 10-25 trades/year per symbol
-Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
+4h_Gap_Fade_Retest
+Fade gaps with mean reversion on 4h chart.
+- Gap defined: open > previous close + 0.5% (gap up) or open < previous close - 0.5% (gap down)
+- Fade condition: price retraces 50% of gap toward previous close
+- Volume confirmation: current volume > 1.5x 20-bar average
+- Trend filter: price above/below 50 EMA to avoid counter-trend fades
+- Exit: price reaches previous close or opposite signal
+- Designed for 20-40 trades/year per symbol
+Works in bull (fade gap ups in uptrend) and bear (fade gap downs in downtrend) markets
 """
 
 import numpy as np
@@ -23,25 +23,27 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_ = prices['open'].values
     volume = prices['volume'].values
     
-    # Get daily and weekly data
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Calculate daily EMA50 for trend
+    # Calculate 50 EMA on 1d for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily EMA20 for entry timing
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Previous close for gap calculation
+    prev_close = np.roll(close, 1)
+    prev_close[0] = np.nan
+    
+    # Gap size and direction
+    gap_up = (open_ - prev_close) > (prev_close * 0.005)  # gap up > 0.5%
+    gap_down = (open_ - prev_close) < (-prev_close * 0.005)  # gap down < -0.5%
+    
+    # Gap midpoint (50% retracement level)
+    gap_mid = prev_close + (open_ - prev_close) * 0.5
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,55 +51,57 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need 50 for EMA50 + buffer
+    start_idx = 50  # need 50 for EMA + buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(gap_mid[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        bull_weekly = close[i] > ema_34_1w_aligned[i]  # Price above weekly EMA34
-        bear_weekly = close[i] < ema_34_1w_aligned[i]  # Price below weekly EMA34
+        # Trend filter from 1d EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Daily trend
-        bull_daily = close[i] > ema_50_1d_aligned[i]
-        bear_daily = close[i] < ema_50_1d_aligned[i]
+        # Fade condition: price retraced to gap midpoint
+        if gap_up[i]:
+            faded_to_mid = low[i] <= gap_mid[i]  # gap up faded if low touches midpoint
+        elif gap_down[i]:
+            faded_to_mid = high[i] >= gap_mid[i]  # gap down faded if high touches midpoint
+        else:
+            faded_to_mid = False
         
-        # Entry conditions: pullback to EMA20 with volume
-        near_ema20 = abs(close[i] - ema_20_1d_aligned[i]) / ema_20_1d_aligned[i] < 0.01  # within 1%
-        volume_ok = volume[i] > 1.3 * vol_ma[i]
+        volume_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: weekly uptrend + daily uptrend + pullback to EMA20 + volume
-            if bull_weekly and bull_daily and near_ema20 and volume_ok:
+            # Long fade: gap down faded + above EMA + volume
+            if gap_down[i] and faded_to_mid and price_above_ema and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + daily downtrend + pullback to EMA20 + volume
-            elif bear_weekly and bear_daily and near_ema20 and volume_ok:
+            # Short fade: gap up faded + below EMA + volume
+            elif gap_up[i] and faded_to_mid and price_below_ema and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: weekly trend turns bearish OR price breaks below daily EMA50
-            if not bull_weekly or bear_daily:
-                signals[i] = 0.0  # exit to flat
-                position = 0
+            # Long exit: price reaches previous close or gap fills completely
+            if high[i] >= prev_close[i] or gap_up[i]:  # gap filled or new gap up
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly trend turns bullish OR price breaks above daily EMA50
-            if not bear_weekly or bull_daily:
-                signals[i] = 0.0  # exit to flat
-                position = 0
+            # Short exit: price reaches previous close or gap fills completely
+            if low[i] <= prev_close[i] or gap_down[i]:  # gap filled or new gap down
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "4h_Gap_Fade_Retest"
+timeframe = "4h"
 leverage = 1.0
