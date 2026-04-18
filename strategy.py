@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_R1S1_Breakout_Volume
-Hypothesis: Use weekly Camarilla pivot levels (R1, S1) from the previous week for breakout signals on daily timeframe. Go long when price breaks above weekly R1 with volume confirmation, short when price breaks below weekly S1 with volume confirmation. Uses weekly ADX > 25 to filter for trending markets only. Designed to work in both bull (breakouts) and bear (breakdowns) markets with low trade frequency to minimize fee drag.
+6h_4h200_EMA_1d_Trend_Filter_v1
+Hypothesis: On 6h timeframe, use 4h EMA200 for primary trend direction and 1d EMA200 for higher timeframe trend confirmation. 
+Enter long when price > 4h EMA200 and price > 1d EMA200, short when price < 4h EMA200 and price < 1d EMA200.
+Requires volume > 1.3x 20-period average for confirmation to avoid chop. 
+Exit when price crosses back below/above the 4h EMA200. 
+This dual-timeframe EMA filter should reduce whipsaws in ranging markets while capturing trends in both bull and bear regimes.
+Target: 20-40 trades/year by requiring alignment of two timeframes and volume filter.
 """
 
 import numpy as np
@@ -18,87 +23,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 4h data for EMA200
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate Camarilla pivot levels for weekly timeframe
-    # Camarilla formulas: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    r1_1w = np.full_like(close_1w, np.nan)
-    s1_1w = np.full_like(close_1w, np.nan)
+    # 4h EMA(200)
+    ema_len = 200
+    ema_4h = np.full_like(close_4h, np.nan)
     
-    for i in range(len(close_1w)):
-        if not (np.isnan(high_1w[i]) or np.isnan(low_1w[i]) or np.isnan(close_1w[i])):
-            r1_1w[i] = close_1w[i] + (high_1w[i] - low_1w[i]) * 1.1 / 12
-            s1_1w[i] = close_1w[i] - (high_1w[i] - low_1w[i]) * 1.1 / 12
+    if len(close_4h) >= ema_len:
+        # Calculate EMA using Wilder's smoothing (alpha = 1/N)
+        alpha = 1.0 / ema_len
+        ema_4h[0] = close_4h[0]
+        for i in range(1, len(close_4h)):
+            ema_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema_4h[i-1]
     
-    # Calculate weekly ADX for trend filtering
-    # ADX calculation requires +DI and -DI
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # align with original arrays
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        plus_dm = np.concatenate([[np.nan], plus_dm])
-        minus_dm = np.concatenate([[np.nan], minus_dm])
-        
-        # Smoothed values
-        atr = np.full_like(tr, np.nan)
-        plus_di = np.full_like(tr, np.nan)
-        minus_di = np.full_like(tr, np.nan)
-        
-        if len(tr) >= period:
-            # Initial values
-            atr[period] = np.nanmean(tr[1:period+1])
-            plus_dm_sum = np.nansum(plus_dm[1:period+1])
-            minus_dm_sum = np.nansum(minus_dm[1:period+1])
-            
-            plus_di[period] = 100 * plus_dm_sum / (atr[period] * period) if atr[period] > 0 else 0
-            minus_di[period] = 100 * minus_dm_sum / (atr[period] * period) if atr[period] > 0 else 0
-            
-            # Wilder smoothing
-            for i in range(period+1, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                plus_dm_val = plus_dm[i] if not np.isnan(plus_dm[i]) else 0
-                minus_dm_val = minus_dm[i] if not np.isnan(minus_dm[i]) else 0
-                plus_di[i] = 100 * (plus_di[i-1] * (period-1) + plus_dm_val) / (atr[i] * period) if atr[i] > 0 else 0
-                minus_di[i] = 100 * (minus_di[i-1] * (period-1) + minus_dm_val) / (atr[i] * period) if atr[i] > 0 else 0
-        
-        # DX and ADX
-        dx = np.full_like(tr, np.nan)
-        adx = np.full_like(tr, np.nan)
-        
-        for i in range(period, len(tr)):
-            if plus_di[i] + minus_di[i] > 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        if len(tr) >= 2*period:
-            adx[2*period-1] = np.nanmean(dx[period:2*period])
-            for i in range(2*period, len(tr)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Align 4h EMA200 to 6h timeframe
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    # Get 1d data for EMA200
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Align weekly data to daily timeframe
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # 1d EMA(200)
+    ema_1d = np.full_like(close_1d, np.nan)
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    if len(close_1d) >= ema_len:
+        alpha = 1.0 / ema_len
+        ema_1d[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
+            ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
+    
+    # Align 1d EMA200 to 6h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
     
@@ -109,42 +68,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(vol_period, 28) + 1  # ensure ADX and volume data available
+    start_idx = max(ema_len, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in trending markets (ADX > 25)
-        trending = adx_1w_aligned[i] > 25
-        
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        if position == 0 and trending:
-            # Long: price breaks above weekly R1 + volume
-            if close[i] > r1_1w_aligned[i] and vol_confirm:
+        if position == 0:
+            # Long: price above both 4h EMA200 and 1d EMA200 + volume confirmation
+            if close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i] and volume[i] > 1.3 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 + volume
-            elif close[i] < s1_1w_aligned[i] and vol_confirm:
+            # Short: price below both 4h EMA200 and 1d EMA200 + volume confirmation
+            elif close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i] and volume[i] > 1.3 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below weekly S1
-            if close[i] < s1_1w_aligned[i]:
+            # Long exit: price crosses below 4h EMA200 (trend change on lower timeframe)
+            if close[i] < ema_4h_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above weekly R1
-            if close[i] > r1_1w_aligned[i]:
+            # Short exit: price crosses above 4h EMA200 (trend change on lower timeframe)
+            if close[i] > ema_4h_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -152,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_Pivot_R1S1_Breakout_Volume"
-timeframe = "1d"
+name = "6h_4h200_EMA_1d_Trend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
