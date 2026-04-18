@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_Volume_Strategy_v1
-Hypothesis: Use daily Camarilla pivot levels (S1/S3 for long, R1/R3 for short) with volume confirmation and ADX trend filter. 
-Go long when price crosses above S1 with volume > 1.5x average and ADX > 25, short when price crosses below R1 with same conditions. 
-Exit on opposite pivot touch (S3/R3) or when ADX < 20 (range market). 
-Designed for 12h timeframe to capture multi-day swings while minimizing trades (target 15-25/year). 
-Works in bull markets via breakouts above R1, in bear via breakdowns below S1, and in ranging markets via mean reversion at S1/R1.
+4h_HTF_Pivot_Trend_Breakout_V1
+Hypothesis: Use 12h pivot points (R1/S1) for entry levels, 1d EMA34 for trend direction, and volume spike for confirmation. Long when price crosses above R1 in an uptrend with volume > 1.5x average, short when price crosses below S1 in a downtrend with volume > 1.5x average. Exit when price touches the opposite pivot level (S1 for long, R1 for short). Designed for 4h timeframe to capture meaningful moves while limiting trades to 20-50/year. Works in bull markets via trend-following longs and in bear via trend-following shorts.
 """
 
 import numpy as np
@@ -22,92 +18,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and ADX
+    # Get 12h data for pivot points (using daily high/low/close)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    pivot_12h = np.full_like(close_12h, np.nan)
+    r1_12h = np.full_like(close_12h, np.nan)
+    s1_12h = np.full_like(close_12h, np.nan)
+    
+    for i in range(len(close_12h)):
+        pivot_12h[i] = (high_12h[i] + low_12h[i] + close_12h[i]) / 3.0
+        r1_12h[i] = 2 * pivot_12h[i] - low_12h[i]
+        s1_12h[i] = 2 * pivot_12h[i] - high_12h[i]
+    
+    # Align pivot levels to 4h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (based on previous day)
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # S1 = C - (Range * 1.1 / 6)
-    # S2 = C - (Range * 1.1 / 4)
-    # S3 = C - (Range * 1.1 / 2)
-    # R1 = C + (Range * 1.1 / 6)
-    # R2 = C + (Range * 1.1 / 4)
-    # R3 = C + (Range * 1.1 / 2)
+    # 1d EMA34
+    ema34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[:34])  # Simple average for first value
+        alpha = 2.0 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
     
-    pivot_1d = np.full_like(high_1d, np.nan)
-    range_1d = np.full_like(high_1d, np.nan)
-    s1_1d = np.full_like(high_1d, np.nan)
-    s3_1d = np.full_like(high_1d, np.nan)
-    r1_1d = np.full_like(high_1d, np.nan)
-    r3_1d = np.full_like(high_1d, np.nan)
+    # Align EMA34 to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    for i in range(1, len(high_1d)):
-        pivot_1d[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
-        range_1d[i] = high_1d[i-1] - low_1d[i-1]
-        s1_1d[i] = close_1d[i-1] - (range_1d[i] * 1.1 / 6)
-        s3_1d[i] = close_1d[i-1] - (range_1d[i] * 1.1 / 2)
-        r1_1d[i] = close_1d[i-1] + (range_1d[i] * 1.1 / 6)
-        r3_1d[i] = close_1d[i-1] + (range_1d[i] * 1.1 / 2)
-    
-    # Calculate ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # Directional Movement
-        plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                           np.maximum(high[1:] - high[:-1], 0), 0)
-        plus_dm = np.concatenate([[np.nan], plus_dm])
-        minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                            np.maximum(low[:-1] - low[1:], 0), 0)
-        minus_dm = np.concatenate([[np.nan], minus_dm])
-        
-        # Smoothed values
-        atr = np.full_like(tr, np.nan)
-        plus_di = np.full_like(tr, np.nan)
-        minus_di = np.full_like(tr, np.nan)
-        
-        if len(tr) >= period + 1:
-            # Initial averages
-            atr[period] = np.nanmean(tr[1:period+1])
-            plus_dm_sum = np.nansum(plus_dm[1:period+1])
-            minus_dm_sum = np.nansum(minus_dm[1:period+1])
-            
-            # Smoothing
-            for i in range(period + 1, len(tr)):
-                atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-                plus_dm_sum = plus_dm_sum * (period - 1) / period + plus_dm[i]
-                minus_dm_sum = minus_dm_sum * (period - 1) / period + minus_dm[i]
-                
-                plus_di[i] = 100 * plus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
-                minus_di[i] = 100 * minus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
-        
-        # ADX calculation
-        dx = np.full_like(tr, np.nan)
-        adx = np.full_like(tr, np.nan)
-        
-        for i in range(period + 1, len(tr)):
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        if len(tr) >= 2 * period + 1:
-            adx[2*period] = np.nanmean(dx[period+1:2*period+1])
-            for i in range(2*period + 1, len(tr)):
-                adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-        
-        return adx
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    
-    # Volume average (20-period)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
     
@@ -115,50 +62,48 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
-    # Align all 1d indicators to 12h timeframe
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30) + 1  # vol_period + adx stabilization
+    start_idx = max(34, vol_period) + 1  # EMA34 and volume MA need warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(s1_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
+        
+        # Determine trend from 1d EMA34: up if close > EMA, down if close < EMA
+        # Use previous bar's close to avoid look-ahead
+        prev_close = close[i-1] if i > 0 else close[0]
+        trend_up = prev_close > ema34_1d_aligned[i]
+        trend_down = prev_close < ema34_1d_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        if position == 0:
-            # Long: price crosses above S1 with volume and ADX > 25 (trending)
-            if close[i] > s1_1d_aligned[i] and close[i-1] <= s1_1d_aligned[i-1] and vol_confirm and adx_1d_aligned[i] > 25:
+        if position == 0 and vol_confirm:
+            # Long: price crosses above R1 in uptrend
+            if trend_up and close[i] > r1_12h_aligned[i] and close[i-1] <= r1_12h_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below R1 with volume and ADX > 25 (trending)
-            elif close[i] < r1_1d_aligned[i] and close[i-1] >= r1_1d_aligned[i-1] and vol_confirm and adx_1d_aligned[i] > 25:
+            # Short: price crosses below S1 in downtrend
+            elif trend_down and close[i] < s1_12h_aligned[i] and close[i-1] >= s1_12h_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches S3 (strong support) or ADX < 20 (ranging)
-            if close[i] <= s3_1d_aligned[i] or adx_1d_aligned[i] < 20:
+            # Long exit: price touches S1 (opposite pivot level)
+            if close[i] <= s1_12h_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price touches R3 (strong resistance) or ADX < 20 (ranging)
-            if close[i] >= r3_1d_aligned[i] or adx_1d_aligned[i] < 20:
+            # Short exit: price touches R1 (opposite pivot level)
+            if close[i] >= r1_12h_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -166,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_Volume_Strategy_v1"
-timeframe = "12h"
+name = "4h_HTF_Pivot_Trend_Breakout_V1"
+timeframe = "4h"
 leverage = 1.0
