@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_WilliamsAlligator_ElderRay_TrendFilter
-Hypothesis: Combine Williams Alligator (trend direction) with Elder Ray (bull/bear power) for high-probability trend entries. 
-Go long when Alligator jaws < teeth < lips (bullish alignment) AND Bull Power > 0 (price above EMA13). 
-Go short when jaws > teeth > lips (bearish alignment) AND Bear Power < 0 (price below EMA13). 
-Use 1d ADX > 25 for trend strength filter and volume > 1.5x 20-period average for confirmation. 
-Exit on opposing Alligator signal or ADX < 20 (trend weakening). 
-Designed for low turnover (<30 trades/year) with strong trend capture in both bull and bear markets.
+1d_KAMA_Direction_WeeklyTrend_1wRSI_Pullback
+Hypothesis: Trade KAMA direction on daily timeframe with weekly RSI pullback confirmation. KAMA adapts to market efficiency, reducing whipsaw in sideways markets and capturing trends. Enter long when KAMA turns up and weekly RSI < 40 (pullback in uptrend), short when KAMA turns down and weekly RSI > 60 (pullback in downtrend). Uses volume > 1.5x 24-period average for confirmation. Designed for 1d timeframe to target 7-25 trades/year (30-100 total over 4 years). Uses weekly RSI for pullback to avoid chasing extended moves and align with higher timeframe trend.
 """
 
 import numpy as np
@@ -23,96 +18,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for RSI
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly RSI(14)
+    rsi_period = 14
+    close_1w = df_1w['close'].values
+    rsi_1w = np.full_like(close_1w, np.nan)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    
-    atr = np.full_like(tr, np.nan)
-    plus_di = np.full_like(tr, np.nan)
-    minus_di = np.full_like(tr, np.nan)
-    dx = np.full_like(tr, np.nan)
-    adx_1d = np.full_like(tr, np.nan)
-    
-    if len(tr) >= period + 1:
-        # Initial ATR
-        atr[period] = np.nanmean(tr[1:period+1])
-        plus_di[period] = 100 * np.nanmean(plus_dm[1:period+1]) / atr[period]
-        minus_di[period] = 100 * np.nanmean(minus_dm[1:period+1]) / atr[period]
+    if len(close_1w) >= rsi_period + 1:
+        delta = np.diff(close_1w)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close_1w, np.nan)
+        avg_loss = np.full_like(close_1w, np.nan)
+        
+        # First average
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
         
         # Wilder smoothing
-        for i in range(period + 1, len(tr)):
-            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-            plus_di[i] = (plus_di[i-1] * (period - 1) + plus_dm[i]) / period * 100 / atr[i]
-            minus_di[i] = (minus_di[i-1] * (period - 1) + minus_dm[i]) / period * 100 / atr[i]
+        for i in range(rsi_period + 1, len(close_1w)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
         
-        # DX and ADX
-        di_sum = plus_di + minus_di
-        dx = np.where(di_sum != 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0)
-        
-        # ADX smoothing
-        adx_1d[2*period] = np.nanmean(dx[period+1:2*period+1])
-        for i in range(2*period + 1, len(dx)):
-            adx_1d[i] = (adx_1d[i-1] * (period - 1) + dx[i]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_1w = 100 - (100 / (1 + rs))
     
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align weekly RSI to daily timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Williams Alligator on 4h
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # KAMA on daily timeframe (using close prices directly)
+    # KAMA parameters
+    fast_sc = 2 / (2 + 1)  # 2-period EMA
+    slow_sc = 2 / (30 + 1) # 30-period EMA
     
-    # Smoothed Moving Average (SMMA) - similar to Wilder's smoothing
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            # First value is simple average
-            result[period-1] = np.mean(arr[:period])
-            # Subsequent values: SMMA = (PREV_SMMA*(N-1) + CURRENT_PRICE) / N
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period - 1) + arr[i]) / period
-        return result
+    kama = np.full_like(close, np.nan)
     
-    jaws = smma(close_4h, 13)  # Blue line
-    teeth = smma(close_4h, 8)  # Red line
-    lips = smma(close_4h, 5)   # Green line
+    if len(close) >= 2:
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            # Efficiency ratio
+            if i >= 1:
+                change = abs(close[i] - close[i-1])
+                volatility = 0
+                for j in range(1, i+1):
+                    volatility += abs(close[j] - close[j-1])
+                er = change / volatility if volatility != 0 else 0
+                sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+                kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+            else:
+                kama[i] = close[i]
     
-    # Align Alligator lines to 4h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_4h, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_4h, lips)
-    
-    # Elder Ray: Bull Power and Bear Power
-    ema13 = smma(close_4h, 13)  # EMA13 equivalent
-    ema13_aligned = align_htf_to_ltf(prices, df_4h, ema13)
-    bull_power = high - ema13_aligned
-    bear_power = low - ema13_aligned
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.5x 24-period average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
+    vol_period = 24
+    
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
@@ -120,52 +82,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, vol_period, 2*14)  # Ensure all indicators are ready
+    start_idx = max(30, vol_period)  # KAMA needs ~30 periods, vol MA needs 24
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+        if (np.isnan(kama[i]) or np.isnan(rsi_1w_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment signals
-        bullish_alignment = jaws_aligned[i] < teeth_aligned[i] < lips_aligned[i]
-        bearish_alignment = jaws_aligned[i] > teeth_aligned[i] > lips_aligned[i]
-        
-        # Elder Ray signals
-        bull_power_positive = bull_power[i] > 0
-        bear_power_negative = bear_power[i] < 0
-        
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend strength filter
-        strong_trend = adx_1d_aligned[i] > 25
-        weak_trend = adx_1d_aligned[i] < 20
-        
         if position == 0:
-            # Long: Bullish Alligator + Bull Power > 0 + Strong trend + Volume
-            if bullish_alignment and bull_power_positive and strong_trend and vol_confirm:
+            # Long: KAMA turning up + RSI pullback (<40) + volume
+            if i > 0 and not np.isnan(kama[i-1]) and kama[i] > kama[i-1] and rsi_1w_aligned[i] < 40 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish Alligator + Bear Power < 0 + Strong trend + Volume
-            elif bearish_alignment and bear_power_negative and strong_trend and vol_confirm:
+            # Short: KAMA turning down + RSI pullback (>60) + volume
+            elif i > 0 and not np.isnan(kama[i-1]) and kama[i] < kama[i-1] and rsi_1w_aligned[i] > 60 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bearish Alligator OR Weak trend
-            if bearish_alignment or weak_trend:
+            # Long exit: KAMA turns down or RSI > 60 (overbought)
+            if (i > 0 and not np.isnan(kama[i-1]) and kama[i] < kama[i-1]) or rsi_1w_aligned[i] > 60:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bullish Alligator OR Weak trend
-            if bullish_alignment or weak_trend:
+            # Short exit: KAMA turns up or RSI < 40 (oversold)
+            if (i > 0 and not np.isnan(kama[i-1]) and kama[i] > kama[i-1]) or rsi_1w_aligned[i] < 40:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -173,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_ElderRay_TrendFilter"
-timeframe = "4h"
+name = "1d_KAMA_Direction_WeeklyTrend_1wRSI_Pullback"
+timeframe = "1d"
 leverage = 1.0
