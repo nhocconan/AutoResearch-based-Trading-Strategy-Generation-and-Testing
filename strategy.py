@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly VWAP Reversion with Volume Spike and 1w Trend Filter
-# In ranging markets, price tends to revert to the weekly VWAP. Strong volume spikes
-# indicate institutional interest and higher probability of mean reversion.
-# Weekly EMA34 filter ensures we only take reversions aligned with the longer-term trend,
-# avoiding counter-trend trades in strong trends. Designed for low trade frequency.
-# Works in both bull and bear markets by fading extremes with institutional volume.
-
-name = "1d_WeeklyVWAP_Reversion_VolumeSpike_TrendFilter"
-timeframe = "1d"
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA13 and weekly EMA50 regime filter.
+# Bull Power = High - EMA13, Bear Power = Low - EMA13 (daily timeframe).
+# Weekly EMA50 defines trend: above = bull regime (long bias), below = bear regime (short bias).
+# Entry: Bull Power > 0 in bull regime for long, Bear Power < 0 in bear regime for short.
+# Exit: Opposite power signal or power crosses zero.
+# Designed for low trade frequency (~20-40/year) to minimize fee drag in 6h timeframe.
+# Works in bull markets (buy strength in uptrend) and bear markets (sell weakness in downtrend).
+name = "6h_ElderRay_1dEMA13_WeeklyEMA50_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,74 +22,71 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for VWAP and EMA (ONCE before loop)
+    # Get daily data for Elder Ray calculation (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for EMA50 regime filter (ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly VWAP (volume-weighted average price)
-    # VWAP = sum(price * volume) / sum(volume) for the week
-    typical_price = (high + low + close) / 3
-    pv = typical_price * volume
-    cum_pv = np.nancumsum(pv)
-    cum_vol = np.nancumsum(volume)
-    vwap = np.where(cum_vol > 0, cum_pv / cum_vol, np.nan)
+    # Calculate daily EMA13 for Elder Ray
+    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate Bull Power (High - EMA13) and Bear Power (Low - EMA13)
+    bull_power = df_1d['high'].values - ema_13_1d
+    bear_power = df_1d['low'].values - ema_13_1d
     
-    # Volume spike detector: current volume > 2.0 * 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 2.0)
+    # Align to 6s timeframe (wait for daily bar to close)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Align weekly VWAP to daily timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
-    
-    # Session filter: 08-20 UTC (trade during active hours)
-    hour_index = pd.DatetimeIndex(prices['open_time']).hour
+    # Calculate weekly EMA50 for regime filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Wait for EMA and VWAP warmup
+    start_idx = 13  # Wait for EMA13 calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vwap_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        hour = hour_index[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            signals[i] = 0.0
-            continue
+        # Regime: weekly EMA50 slope (bull if rising, bear if falling)
+        if i >= 1:
+            ema_50_prev = ema_50_1w_aligned[i-1]
+            ema_50_curr = ema_50_1w_aligned[i]
+            bull_regime = ema_50_curr > ema_50_prev  # Rising EMA50 = bull regime
+            bear_regime = ema_50_curr < ema_50_prev  # Falling EMA50 = bear regime
+        else:
+            bull_regime = False
+            bear_regime = False
         
         if position == 0:
-            # Long: price below VWAP (oversold) + volume spike + weekly uptrend
-            if vol_spike[i] and close[i] < vwap_aligned[i] and close[i] > ema_34_1w_aligned[i]:
+            # Long: Bull Power > 0 in bull regime
+            if bull_regime and bull_power_aligned[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price above VWAP (overbought) + volume spike + weekly downtrend
-            elif vol_spike[i] and close[i] > vwap_aligned[i] and close[i] < ema_34_1w_aligned[i]:
+            # Short: Bear Power < 0 in bear regime
+            elif bear_regime and bear_power_aligned[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to VWAP (mean reversion complete) or trend breaks
-            if close[i] >= vwap_aligned[i] or close[i] < ema_34_1w_aligned[i]:
+            # Long exit: Bear Power >= 0 (loss of bearish pressure) or Bull Power <= 0
+            if bear_power_aligned[i] >= 0 or bull_power_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to VWAP or trend breaks
-            if close[i] <= vwap_aligned[i] or close[i] > ema_34_1w_aligned[i]:
+            # Short exit: Bull Power <= 0 (loss of bullish pressure) or Bear Power >= 0
+            if bull_power_aligned[i] <= 0 or bear_power_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
