@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_RSI_Pullback_4hTrend
-Hypothesis: In 4h trend context (EMA50), enter on RSI(14) pullbacks (long when RSI<40, short when RSI>60) at 1h timeframe.
-Volume confirmation (>1.5x 20-bar avg) filters false signals. Session filter (08-20 UTC) reduces noise.
-Designed for low trade frequency (target: 15-37/year) with defined risk via trend-following exits.
-Works in bull/bear by following 4h trend while using mean-reversion entries.
+4h_4F_Trend_Filter_Breakout
+Hypothesis: Combines 4-hour Donchian breakout with 1-day EMA34 trend filter, volume confirmation, and ADX strength filter. 
+Designed for low trade frequency (target: 20-50/year) with strong performance in both bull and bear markets by requiring 
+multiple confluence factors before entry, reducing false signals and whipsaws.
 """
 
 import numpy as np
@@ -21,87 +20,131 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema50_4h = np.full(len(close_4h), np.nan)
-    for i in range(50, len(close_4h)):
-        if i == 50:
-            ema50_4h[i] = np.mean(close_4h[0:51])
-        else:
-            k = 2 / (50 + 1)
-            ema50_4h[i] = close_4h[i] * k + ema50_4h[i-1] * (1 - k)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate 1-day EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # RSI(14) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[0:15])
-            avg_loss[i] = np.mean(loss[0:15])
+    # 1-day EMA34
+    ema34_1d = np.full(len(close_1d), np.nan)
+    for i in range(34, len(close_1d)):
+        if i == 34:
+            ema34_1d[i] = np.mean(close_1d[0:35])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+            k = 2 / (34 + 1)
+            ema34_1d[i] = close_1d[i] * k + ema34_1d[i-1] * (1 - k)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: >1.5x 20-bar average
+    # 1-day ADX for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Calculate +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed values
+    tr_period = 14
+    atr_1d = np.full(len(close_1d), np.nan)
+    plus_dm_smooth = np.full(len(close_1d), np.nan)
+    minus_dm_smooth = np.full(len(close_1d), np.nan)
+    
+    for i in range(tr_period, len(close_1d)):
+        if i == tr_period:
+            atr_1d[i] = np.nanmean(tr[1:i+1])
+            plus_dm_smooth[i] = np.nanmean(plus_dm[1:i+1])
+            minus_dm_smooth[i] = np.nanmean(minus_dm[1:i+1])
+        else:
+            atr_1d[i] = atr_1d[i-1] - (atr_1d[i-1] / tr_period) + tr[i]
+            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / tr_period) + plus_dm[i]
+            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / tr_period) + minus_dm[i]
+    
+    # Calculate +DI and -DI
+    plus_di_1d = np.full(len(close_1d), np.nan)
+    minus_di_1d = np.full(len(close_1d), np.nan)
+    dx_1d = np.full(len(close_1d), np.nan)
+    
+    for i in range(tr_period, len(close_1d)):
+        if atr_1d[i] > 0:
+            plus_di_1d[i] = 100 * (plus_dm_smooth[i] / atr_1d[i])
+            minus_di_1d[i] = 100 * (minus_dm_smooth[i] / atr_1d[i])
+            if (plus_di_1d[i] + minus_di_1d[i]) > 0:
+                dx_1d[i] = 100 * np.abs(plus_di_1d[i] - minus_di_1d[i]) / (plus_di_1d[i] + minus_di_1d[i])
+    
+    # Calculate ADX
+    adx_1d = np.full(len(close_1d), np.nan)
+    for i in range(2*tr_period, len(close_1d)):
+        valid_dx = dx_1d[tr_period:i+1]
+        if len(valid_dx) >= tr_period:
+            adx_1d[i] = np.nanmean(valid_dx[-tr_period:])
+    
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # 4-hour Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # Volume spike: current volume > 2.0 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14, 20)  # Ensure indicators ready
+    start_idx = max(34, 20, 2*14)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: RSI < 40 (oversold) in 4h uptrend with volume
-            if (rsi[i] < 40 and close[i] > ema50_4h_aligned[i] and vol_confirm[i]):
-                signals[i] = 0.20
+            # Long: break above Donchian high with volume spike, uptrend, and strong ADX
+            if (close[i] > donchian_high[i] and vol_spike[i] and 
+                close[i] > ema34_1d_aligned[i] and adx_1d_aligned[i] > 25):
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 60 (overbought) in 4h downtrend with volume
-            elif (rsi[i] > 60 and close[i] < ema50_4h_aligned[i] and vol_confirm[i]):
-                signals[i] = -0.20
+            # Short: break below Donchian low with volume spike, downtrend, and strong ADX
+            elif (close[i] < donchian_low[i] and vol_spike[i] and 
+                  close[i] < ema34_1d_aligned[i] and adx_1d_aligned[i] > 25):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI > 60 (overbought) or 4h trend turns down
-            if (rsi[i] > 60 or close[i] < ema50_4h_aligned[i]):
+            # Long exit: close below Donchian low or trend turns down
+            if (close[i] < donchian_low[i] or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI < 40 (oversold) or 4h trend turns up
-            if (rsi[i] < 40 or close[i] > ema50_4h_aligned[i]):
+            # Short exit: close above Donchian high or trend turns up
+            if (close[i] > donchian_high[i] or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI_Pullback_4hTrend"
-timeframe = "1h"
+name = "4h_4F_Trend_Filter_Breakout"
+timeframe = "4h"
 leverage = 1.0
