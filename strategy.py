@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_With_Volume_And_Trend_Filter
-Hypothesis: Price breaks above/below S1/R1 levels with volume confirmation and trend filter.
-Uses 1d Camarilla pivot levels, volume > 2x 20-period average, and EMA20 trend filter.
-Designed to work in both bull and bear markets by requiring trend alignment.
-Target: 20-30 trades/year to minimize fee drag while capturing institutional breakout moves.
+12h_Donchian20_Breakout_Volume_Trend_1dTrend
+Hypothesis: Price breaks 20-period Donchian channel on 12h with volume confirmation and 1d trend filter.
+Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by aligning with higher timeframe trend.
+Target: 15-25 trades/year to minimize fee drift while capturing sustained moves.
 """
 
 import numpy as np
@@ -21,77 +20,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot levels (calculated from previous day's OHLC)
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels: R1, S1 based on previous day
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_range = (high_1d - low_1d) * 1.1 / 12
-    r1 = close_1d + camarilla_range
-    s1 = close_1d - camarilla_range
+    # 12h Donchian channel (20 periods)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align to 4h timeframe (use previous day's levels for current day)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # EMA20 for trend filter on 4h
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume spike: >2x 20-period average
+    # Volume spike: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 1)  # Warmup for indicators
+    start_idx = max(20, 1)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_20[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        ema20 = ema_20[i]
+        upper = high_max[i]
+        lower = low_min[i]
+        trend = ema_50_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above S1 with volume spike in uptrend
-            if (price > s1_level and          # breaks above S1
-                vol_spike and                 # volume confirmation
-                price > ema20):               # uptrend filter
+            # Long: break above upper channel with volume in uptrend
+            if (price > upper and
+                vol_spike and
+                price > trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R1 with volume spike in downtrend
-            elif (price < r1_level and        # breaks below R1
-                  vol_spike and               # volume confirmation
-                  price < ema20):             # downtrend filter
+            # Short: break below lower channel with volume in downtrend
+            elif (price < lower and
+                  vol_spike and
+                  price < trend):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses back below S1 or trend reverses
-            if price < s1_level or price < ema20:
+            # Exit: price re-enters channel or trend reverses
+            if price < upper or price < trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses back above R1 or trend reverses
-            if price > r1_level or price > ema20:
+            # Exit: price re-enters channel or trend reverses
+            if price > lower or price > trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_With_Volume_And_Trend_Filter"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_Volume_Trend_1dTrend"
+timeframe = "12h"
 leverage = 1.0
