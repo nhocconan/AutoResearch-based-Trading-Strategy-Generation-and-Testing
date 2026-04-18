@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:  # Need enough data for weekly calculations
+    if n < 50:  # Need enough data for weekly calculations
         return np.zeros(n)
     
     close = prices['close'].values
@@ -44,7 +44,7 @@ def generate_signals(prices):
     weekly_r3 = weekly_high + 2 * (weekly_p - weekly_low)
     weekly_s3 = weekly_low - 2 * (weekly_high - weekly_p)
     
-    # Align weekly pivot levels to 6h timeframe
+    # Align weekly pivot levels to 1d timeframe
     wp_aligned = align_htf_to_ltf(prices, df_1d, weekly_p)
     wr1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
     ws1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
@@ -62,13 +62,13 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align ATR to 6h
+    # Align ATR to 1d
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate 1d volume spike (volume > 1.8x 20-period average for stricter filter)
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_spike_1d = volume_1d > (1.8 * vol_ma_1d)
-    volume_spike_6h = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -86,13 +86,13 @@ def generate_signals(prices):
         # Volatility filter: only trade when ATR is above its 30-period average
         if i >= 30:
             atr_ma_1d = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
-            atr_ma_6h = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
-            vol_filter = atr_1d_aligned[i] > atr_ma_6h[i] if not np.isnan(atr_ma_6h[i]) else False
+            atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+            vol_filter = atr_1d_aligned[i] > atr_ma_1d_aligned[i] if not np.isnan(atr_ma_1d_aligned[i]) else False
         else:
             vol_filter = False
         
         # Only trade with volume spike and volatility filter
-        trade_allowed = volume_spike_6h[i] and vol_filter
+        trade_allowed = volume_spike_1d_aligned[i] and vol_filter
         
         if position == 0:
             # Long: price touches or goes below S3 (strong support) with volume spike
@@ -124,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R3_S3_StrictVolume"
-timeframe = "6h"
+name = "1d_WeeklyPivot_R3_S3_StrictVolume"
+timeframe = "1d"
 leverage = 1.0
