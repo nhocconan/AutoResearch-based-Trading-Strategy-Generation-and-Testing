@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Volume_TrendFilter_v1"
-timeframe = "4h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,17 +17,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter
+    # Load daily data for ATR and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate ATR(14) on daily
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Daily EMA34 for trend filter
-    daily_close = df_1d['close'].values
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Camarilla pivot levels (R1, S1) from previous daily bar
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    R1 = pivot + (range_hl * 1.1 / 12)
+    S1 = pivot - (range_hl * 1.1 / 12)
+    
+    # Align ATR, R1, S1 to 12h (wait for daily close)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,39 +57,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        ema34_val = ema34_1d_aligned[i]
+        atr_val = atr_14_aligned[i]
+        R1_val = R1_aligned[i]
+        S1_val = S1_aligned[i]
         vol_filter = volume_filter[i]
         sess_filter = session_filter[i]
         
         if position == 0:
-            # Long: break above upper band with volume, session, and uptrend
-            if close_val > upper and vol_filter and sess_filter and close_val > ema34_val:
+            # Long: break above R1 with volume and session
+            if close_val > R1_val and vol_filter and sess_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume, session, and downtrend
-            elif close_val < lower and vol_filter and sess_filter and close_val < ema34_val:
+            # Short: break below S1 with volume and session
+            elif close_val < S1_val and vol_filter and sess_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below lower band
-            if close_val < lower:
+            # Long exit: price falls back below S1 OR ATR-based stop
+            if close_val < S1_val or close_val < (prices['high'].rolling(3).max().iloc[i] - 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above upper band
-            if close_val > upper:
+            # Short exit: price rises back above R1 OR ATR-based stop
+            if close_val > R1_val or close_val > (prices['low'].rolling(3).min().iloc[i] + 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
