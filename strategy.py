@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_Volume_Filter
-1d strategy using Kaufman Adaptive Moving Average (KAMA) for trend detection,
-combined with volume confirmation and RSI filter to reduce whipsaws.
-- Long: KAMA trending up + volume > 1.5x 20-day avg + RSI > 50
-- Short: KAMA trending down + volume > 1.5x 20-day avg + RSI < 50
-- Exit: Opposite KAMA direction signal
-Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
-KAMA adapts to market noise, reducing false signals in ranging markets
+4h_4H_CAMARILLA_R1S1_BREAKOUT_VOLUME
+4h strategy using daily Camarilla pivot points (S1/R1) with volume confirmation and daily trend filter.
+- Long: Close breaks above daily R1 + volume > 1.5x daily avg + daily EMA50 > EMA200
+- Short: Close breaks below daily S1 + volume > 1.5x daily avg + daily EMA50 < EMA200
+- Exit: Opposite breakout or trend reversal
+Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -16,131 +15,89 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA and volume average
+    # Get daily data for Camarilla pivots and filters
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # Parameters: ER period=10, Fast EMA=2, Slow EMA=30
-    er_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Calculate Camarilla pivot points for daily timeframe
+    # Pivot = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # This is wrong, need to fix
-    
-    # Correct ER calculation
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    # Volatility is sum of absolute changes over er_period
-    volatility = np.zeros_like(close_1d)
-    for i in range(er_period, len(close_1d)):
-        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-er_period:i+1])))
-    
-    # Avoid division by zero
-    er = np.zeros_like(close_1d)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
-    
-    # Calculate smoothing constant
-    fast_sc = 2 / (fast_ema + 1)
-    slow_sc = 2 / (slow_ema + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # RSI calculation (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # First average gain/loss
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    
-    # Subsequent averages
-    for i in range(15, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.zeros_like(close_1d)
-    rsi = np.zeros_like(close_1d)
-    mask = avg_loss != 0
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    rsi[avg_loss == 0] = 100  # No loss = RSI 100
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Daily volume average (20-period)
-    vol_ma_20 = np.zeros_like(volume_1d)
-    for i in range(len(volume_1d)):
-        if i < 20:
-            vol_ma_20[i] = np.nan
-        else:
-            vol_ma_20[i] = np.mean(volume_1d[i-20:i])
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all daily data to 1d timeframe (identity since same timeframe)
-    kama_aligned = kama  # Same timeframe, no alignment needed
-    rsi_aligned = rsi    # Same timeframe, no alignment needed
-    vol_ma_aligned = vol_ma_20  # Same timeframe, no alignment needed
+    # Align all daily data to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need enough for KAMA and RSI
+    start_idx = 50  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
             np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA trend direction (comparing current to previous)
-        kama_up = kama_aligned[i] > kama_aligned[i-1]
-        kama_down = kama_aligned[i] < kama_aligned[i-1]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # RSI filter
-        rsi_filter_long = rsi_aligned[i] > 50
-        rsi_filter_short = rsi_aligned[i] < 50
+        # Breakout conditions
+        breakout_up = close[i] > r1_aligned[i]
+        breakdown_down = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: KAMA up + volume + RSI > 50
-            if kama_up and vol_confirm and rsi_filter_long:
+            # Long: uptrend + volume + breakout above daily R1
+            if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down + volume + RSI < 50
-            elif kama_down and vol_confirm and rsi_filter_short:
+            # Short: downtrend + volume + breakdown below daily S1
+            elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA turns down
-            if kama_down:
+            # Long exit: trend change, volume confirmation, or breakdown below daily S1
+            if not uptrend or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA turns up
-            if kama_up:
+            # Short exit: trend change, volume confirmation, or breakout above daily R1
+            if not downtrend or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -148,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_With_Volume_Filter"
-timeframe = "1d"
+name = "4h_4H_CAMARILLA_R1S1_BREAKOUT_VOLUME"
+timeframe = "4h"
 leverage = 1.0
