@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily pivot-based breakout with volume confirmation and ATR volatility filter.
-# Uses daily pivot levels (R1/S1) as dynamic support/resistance on 4h chart.
-# Requires volume spike (>2x 24-period average) and minimum ATR volatility to avoid false breakouts in low volatility.
-# Exit when price returns to daily pivot (mean reversion to equilibrium).
-# Designed for fewer trades (<150/year) with clear entry/exit rules to minimize fee drag.
-# Works in both bull and bear markets by trading breakouts in direction of momentum with volatility filter.
-name = "4h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v3"
+# Hypothesis: 4h Donchian breakout with daily volatility filter and volume confirmation.
+# Uses 4h Donchian(20) breakout in direction of 1d EMA(50) trend.
+# Requires 1d ATR > 10-period median (avoid low volatility) and volume spike (>1.5x 24-period average).
+# Exit when price touches opposite Donchian band or reverses against 1d EMA.
+# Designed for 20-40 trades/year with clear rules to minimize fee drag.
+# Works in bull/bear by following higher timeframe trend with volatility filter.
+name = "4h_Donchian20_Volume_TrendFilter_V2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,36 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for pivot and ATR
+    # Daily data for trend and volatility filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Previous daily OHLC
-    prev_close_d = df_1d['close'].shift(1).values
-    prev_high_d = df_1d['high'].shift(1).values
-    prev_low_d = df_1d['low'].shift(1).values
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close']
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Pivot levels: R1, S1
-    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
-    range_d = prev_high_d - prev_low_d
-    R1_d = pivot_d + range_d
-    S1_d = pivot_d - range_d
-    
-    # ATR(14) for stop filter
-    tr1 = prev_high_d - prev_low_d
-    tr2 = np.abs(prev_high_d - prev_close_d)
-    tr3 = np.abs(prev_low_d - prev_close_d)
+    # 1d ATR(14) for volatility filter
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - close_1d.shift(1))
+    tr3 = np.abs(low_1d - close_1d.shift(1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_median_1d = pd.Series(atr_14_1d).rolling(window=10, min_periods=10).median().values
     
     # Align to 4h
-    R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
-    S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
-    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
-    atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_median_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_median_1d)
     
-    # Volume filter: current volume > 2.0 * 24-period average (24 * 4h = 4 days)
+    # 4h Donchian(20) channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: current volume > 1.5 * 24-period average (24 * 4h = 4 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma_24)
+    volume_filter = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,40 +63,44 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
-            np.isnan(pivot_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(atr_median_1d_aligned[i]) or np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R1_val = R1_d_aligned[i]
-        S1_val = S1_d_aligned[i]
-        pivot_val = pivot_d_aligned[i]
-        atr_val = atr_d_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
+        atr_vol = atr_14_1d_aligned[i]
+        atr_med = atr_median_1d_aligned[i]
+        upper_band = donchian_high[i]
+        lower_band = donchian_low[i]
         vol_filter = volume_filter[i]
         
+        # Volatility filter: avoid low volatility environments
+        vol_filter_ok = atr_vol > atr_med
+        
         if position == 0:
-            # Long: break above R1 with volume and ATR filter (avoid low-vol breakouts)
-            if close_val > R1_val and vol_filter and atr_val > 0:
+            # Long: break above upper band with uptrend, volume, and volatility
+            if close_val > upper_band and close_val > ema_trend and vol_filter and vol_filter_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume and ATR filter
-            elif close_val < S1_val and vol_filter and atr_val > 0:
+            # Short: break below lower band with downtrend, volume, and volatility
+            elif close_val < lower_band and close_val < ema_trend and vol_filter and vol_filter_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below pivot
-            if close_val < pivot_val:
+            # Long exit: price touches lower band or reverses against trend
+            if close_val < lower_band or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above pivot
-            if close_val > pivot_val:
+            # Short exit: price touches upper band or reverses against trend
+            if close_val > upper_band or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
