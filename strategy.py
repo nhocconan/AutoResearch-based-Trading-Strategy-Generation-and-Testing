@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Williams_Alligator_Trend_v1
-Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength. 
-Long when Lips > Teeth > Jaw (bullish alignment) with volume confirmation.
-Short when Lips < Teeth < Jaw (bearish alignment) with volume confirmation.
-Exit when alignment breaks or volume weakens. Uses 1d ADX filter to avoid weak trends.
-Target: 20-40 trades/year by requiring strong alignment and volume confirmation.
-Works in trending markets via trend following and avoids whipsaws in ranging markets.
+12h_Pivot_R1S1_Breakout_Volume_Filtered
+Hypothesis: In ranging markets (ADX<25), price respects daily Camarilla pivot levels R1/S1.
+Breakouts with volume (>1.5x 20-period mean) trigger entries in the direction of the break.
+Uses weekly EMA(34) filter to avoid counter-trend trades in strong weekly trends.
+Designed for low trade frequency (<25/year) to minimize fee drag on 12h timeframe.
+Works in both bull and bear markets by adapting to regime (range vs trend).
 """
 
 import numpy as np
@@ -23,37 +22,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX filter
+    # Get daily data for Camarilla pivots and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator (SMMA-based)
-    def smoothed_moving_average(data, period):
-        """Williams Alligator uses SMMA (Smoothed Moving Average)"""
-        if len(data) < period:
-            return np.full_like(data, np.nan)
-        
-        sma = np.full_like(data, np.nan)
-        smma = np.full_like(data, np.nan)
-        
-        # Calculate initial SMA
-        sma[period-1] = np.mean(data[:period])
-        smma[period-1] = sma[period-1]
-        
-        # Calculate SMMA using Wilder's smoothing
-        for i in range(period, len(data)):
-            smma[i] = (smma[i-1] * (period-1) + data[i]) / period
-        
-        return smma
+    # Calculate Camarilla levels (based on previous day)
+    R1 = np.full_like(high_1d, np.nan)
+    S1 = np.full_like(low_1d, np.nan)
     
-    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3)
-    jaw = smoothed_moving_average(close, 13)
-    teeth = smoothed_moving_average(close, 8)
-    lips = smoothed_moving_average(close, 5)
+    for i in range(1, len(close_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_ = prev_high - prev_low
+        
+        if range_ > 0:
+            R1[i] = prev_close + 1.1 * range_ / 12
+            S1[i] = prev_close - 1.1 * range_ / 12
     
-    # Calculate 14-period ADX for trend strength filter
+    # Calculate 14-period ADX for regime filtering
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high[1:] - low[1:]
@@ -111,13 +100,23 @@ def generate_signals(prices):
     
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align Alligator lines and ADX to 4h timeframe
-    jaw_4h = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_4h = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_4h = align_htf_to_ltf(prices, df_1d, lips)
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Weekly EMA(34) for trend filter
+    if len(close_1w) >= 34:
+        ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False).mean().values
+    else:
+        ema_1w = np.full_like(close_1w, np.nan)
+    
+    # Align all 1d data to 12h timeframe
+    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
     
@@ -128,47 +127,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(13, 8, 5, 14) + 1  # Ensure we have enough data
+    start_idx = max(20, 14, 34) + 1  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw_4h[i]) or np.isnan(teeth_4h[i]) or 
-            np.isnan(lips_4h[i]) or np.isnan(adx_4h[i]) or 
+        if (np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or 
+            np.isnan(adx_12h[i]) or np.isnan(ema_1w_12h[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend strength filter: ADX > 25
-        strong_trend = adx_4h[i] > 25
-        
-        # Alligator alignment signals
-        bullish_alignment = lips_4h[i] > teeth_4h[i] and teeth_4h[i] > jaw_4h[i]
-        bearish_alignment = lips_4h[i] < teeth_4h[i] and teeth_4h[i] < jaw_4h[i]
+        # Regime filters: daily ADX < 25 (range) AND price above weekly EMA (bullish bias)
+        range_regime = adx_12h[i] < 25
+        bullish_bias = close[i] > ema_1w_12h[i]
         
         if position == 0:
-            # Long: bullish alignment with volume and strong trend
-            if bullish_alignment and vol_confirm and strong_trend:
+            # Long: price breaks above R1 with volume in range regime
+            if close[i] > R1_12h[i] and vol_confirm and range_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment with volume and strong trend
-            elif bearish_alignment and vol_confirm and strong_trend:
+            # Short: price breaks below S1 with volume in range regime
+            elif close[i] < S1_12h[i] and vol_confirm and range_regime:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: alignment breaks or trend weakens
-            if not bullish_alignment or not strong_trend:
+            # Long exit: price breaks below S1 OR ADX rises above 30 (trend emerging)
+            if close[i] < S1_12h[i] or adx_12h[i] > 30:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: alignment breaks or trend weakens
-            if not bearish_alignment or not strong_trend:
+            # Short exit: price breaks above R1 OR ADX rises above 30 (trend emerging)
+            if close[i] > R1_12h[i] or adx_12h[i] > 30:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -176,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Williams_Alligator_Trend_v1"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_Breakout_Volume_Filtered"
+timeframe = "12h"
 leverage = 1.0
