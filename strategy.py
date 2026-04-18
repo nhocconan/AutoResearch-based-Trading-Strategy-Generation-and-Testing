@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Volume Confirmation and Weekly Trend Filter
-Hypothesis: Price breaking above/below Donchian Channel (20-day) with volume confirmation 
-(volume > 1.5x 20-day average) and weekly trend alignment (price above/below weekly EMA34) 
-indicates strong momentum. Weekly EMA34 filter reduces false breakouts in counter-trend moves.
-Target: 10-25 trades/year to minimize fee drain on daily timeframe.
+6h Bollinger Band Squeeze Breakout with Volume Confirmation and Daily Trend Filter
+Hypothesis: Bollinger Band squeeze (low volatility) followed by breakout with volume 
+confirmation and alignment with daily trend (price above/below daily EMA50) captures 
+explosive moves in both bull and bear markets. Works in ranging markets (squeeze) 
+and trending markets (breakout). Target: 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -21,62 +21,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma20 + bb_std * std20
+    lower_bb = sma20 - bb_std * std20
+    bb_width = (upper_bb - lower_bb) / sma20  # Normalized width
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    # Bollinger Band Squeeze: width below 20-period average width
+    avg_width = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < 0.5 * avg_width  # Squeeze when width is less than 50% of average
+    
+    # Volume confirmation: volume > 2x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ratio = volume / vol_ema
+    vol_confirm = volume > 2 * vol_ema
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
-    
-    # Weekly EMA34 for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema34 = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_ema34_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema34)
+    # Daily trend filter: EMA50 from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Warmup for indicators (max of 20,20,34)
+    start_idx = 50  # Warmup for indicators (max of 20,20,20,50)
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(weekly_ema34_aligned[i])):
+        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(avg_width[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        weekly_trend = weekly_ema34_aligned[i]
-        vol_conf = vol_ratio[i] > 1.5
+        upper = upper_bb[i]
+        lower = lower_bb[i]
+        is_squeeze = squeeze[i]
+        vol_ok = vol_confirm[i]
+        daily_ema = ema50_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper + volume + weekly uptrend
-            if price > upper and vol_conf and price > weekly_trend:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below Donchian lower + volume + weekly downtrend
-            elif price < lower and vol_conf and price < weekly_trend:
-                signals[i] = -0.25
-                position = -1
+            # Look for breakout after squeeze with volume confirmation
+            if is_squeeze and vol_ok:
+                # Bullish breakout: price above upper BB and above daily EMA50
+                if price > upper and price > daily_ema:
+                    signals[i] = 0.25
+                    position = 1
+                # Bearish breakout: price below lower BB and below daily EMA50
+                elif price < lower and price < daily_ema:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit if price returns to weekly EMA34 or breaks below Donchian lower
-            if price < weekly_trend or price < lower:
+            # Exit if price returns to middle Bollinger Band or squeeze breaks down
+            if price < sma20[i] or (not is_squeeze and price < upper):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price returns to weekly EMA34 or breaks above Donchian upper
-            if price > weekly_trend or price > upper:
+            # Exit if price returns to middle Bollinger Band or squeeze breaks down
+            if price > sma20[i] or (not is_squeeze and price > lower):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_Breakout_Volume_WeeklyEMA34"
-timeframe = "1d"
+name = "6h_Bollinger_Squeeze_Breakout_Volume_DailyTrend"
+timeframe = "6h"
 leverage = 1.0
