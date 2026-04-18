@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_WeeklyTrend_VolumeSpike_v1
-Hypothesis: 4h Donchian(20) breakouts aligned with weekly trend (price > weekly EMA20) and volume spikes capture strong momentum with low false breakouts. Weekly EMA filter ensures we only trade in the direction of higher timeframe trend, reducing whipsaws in sideways markets. Target: 25-35 trades/year on 4h timeframe.
+12h_Camarilla_Pivot_S1R1_Breakout_VolumeSpike_WeeklyTrend
+Hypothesis: Daily Camarilla pivot S1/R1 levels act as strong support/resistance. 
+Breakouts with volume spike and weekly EMA(34) trend filter capture momentum on 12h timeframe.
+Target: 12-37 trades/year (50-150 total over 4 years) on 12h timeframe.
 """
 
 import numpy as np
@@ -18,30 +20,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
+    # Get daily data for Camarilla pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily Camarilla pivot points
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
+    
+    # Camarilla formulas
+    range_1d = high_1d - low_1d
+    pivot = (high_1d + low_1d + close_1d) / 3
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    
+    # Shift by 1 to use previous day's levels only
+    s1_prev = s1.shift(1).values
+    r1_prev = r1.shift(1).values
+    
+    # Align to 12h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
+    
+    # Get weekly data for EMA trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly EMA(20) for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # ATR for volatility filter (14-period)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # first period
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volatility filter: only trade when ATR > 1.5x 50-period average (avoid chop)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr > (1.5 * atr_ma)
+    # Volatility filter: only trade when ATR > 20-period average (avoid chop)
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    volatility_filter = atr > atr_ma
     
-    # Volume spike: 2x 20-period average
+    # Volume spike: 2x 20-period average on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -51,9 +69,9 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or
+        if (np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(atr[i]) or
             np.isnan(atr_ma[i])):
@@ -61,40 +79,40 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
-        weekly_trend = ema_20_1w_aligned[i]
+        s1_val = s1_aligned[i]
+        r1_val = r1_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
         vol_filter = volatility_filter[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: break above upper channel with volume spike, price above weekly EMA, and sufficient volatility
-            if price > upper_channel and vol_spike and price > weekly_trend and vol_filter:
+            # Long: break above R1 with volume spike, price above weekly EMA, and sufficient volatility
+            if price > r1_val and vol_spike and price > ema_trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower channel with volume spike, price below weekly EMA, and sufficient volatility
-            elif price < lower_channel and vol_spike and price < weekly_trend and vol_filter:
+            # Short: break below S1 with volume spike, price below weekly EMA, and sufficient volatility
+            elif price < s1_val and vol_spike and price < ema_trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: price returns to lower channel or breaks below weekly EMA
-            if price < lower_channel or price < weekly_trend:
+            # Exit: price returns to S1 or breaks below weekly EMA
+            if price <= s1_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: price returns to upper channel or breaks above weekly EMA
-            if price > upper_channel or price > weekly_trend:
+            # Exit: price returns to R1 or breaks above weekly EMA
+            if price >= r1_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_WeeklyTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_S1R1_Breakout_VolumeSpike_WeeklyTrend"
+timeframe = "12h"
 leverage = 1.0
