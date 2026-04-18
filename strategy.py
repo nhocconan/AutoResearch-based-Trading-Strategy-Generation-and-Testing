@@ -1,14 +1,11 @@
-# SPDX-FileCopyrightText: 2025 Agent42
-# SPDX-License-Identifier: MIT
 #!/usr/bin/env python3
 """
-12h Pivot Range Breakout with Volume and Weekly Trend Filter
-Hypothesis: Price breaks of daily pivot ranges (R1/S1) on 12h timeframe with volume
-confirmation and weekly trend filter capture institutional breakout moves in both
-bull and bear markets. The weekly EMA34 ensures we trade with dominant higher timeframe
-momentum, reducing counter-trend trades. Pivot ranges provide clear support/resistance
-levels that work across regimes. Volume confirmation filters false breakouts.
-Target: 15-25 trades/year to minimize fee drag while capturing strong momentum.
+4h ATR Breakout with Volume and Daily Trend Filter
+Hypothesis: Price breakouts beyond ATR-based channels with volume confirmation
+and alignment to daily trend capture strong momentum moves while avoiding
+counter-trend trades. This strategy targets 20-30 trades/year to minimize
+fee drag in both bull and bear markets by using volatility-based entry
+and trend filtering.
 """
 
 import numpy as np
@@ -25,32 +22,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot points (once before loop)
+    # Get daily data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 1w data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate pivot points from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    # Calculate ATR for volatility-based channels
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align pivot levels to 12h timeframe (they update daily)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 1w EMA34 for trend filter
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate upper and lower channels (ATR multiples from close)
+    upper_channel = close + (1.5 * atr)
+    lower_channel = close - (1.5 * atr)
     
     # Volume filter: current volume > 1.8x 20-period volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,42 +50,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_ok = vol_filter[i]
-        trend = ema34_1w_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        trend = ema50_1d_aligned[i]
         
         if position == 0:
-            # Long: break above R1 with volume, in uptrend
-            if price > r1_val and vol_ok and price > trend:
+            # Long: price breaks above upper channel with volume, in uptrend
+            if price > upper_channel[i] and vol_ok and price > trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume, in downtrend
-            elif price < s1_val and vol_ok and price < trend:
+            # Short: price breaks below lower channel with volume, in downtrend
+            elif price < lower_channel[i] and vol_ok and price < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if price returns to pivot or trend weakens
-            if price < pivot_aligned[i] or price < trend:
+            # Exit if price returns to middle or trend weakens
+            if price < close[i] or price < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price returns to pivot or trend weakens
-            if price > pivot_aligned[i] or price > trend:
+            # Exit if price returns to middle or trend weakens
+            if price > close[i] or price > trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_Range_Breakout_Volume_WeeklyTrend"
-timeframe = "12h"
+name = "4h_ATR_Breakout_Volume_DailyTrend"
+timeframe = "4h"
 leverage = 1.0
