@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1d_MACD_Signal_Crossover_Volume
-Hypothesis: Use MACD signal line crossover on 1d timeframe for primary trend direction, combined with 6h price action confirmation and volume filter. MACD provides clear trend signals with reduced whipsaws, while volume confirmation ensures institutional participation. Works in bull markets by taking longs on MACD bullish crossovers above zero, and in bear markets by taking shorts on bearish crossovers below zero. Targets 15-25 trades/year by requiring alignment of MACD crossover, price confirmation in direction of trend, and volume > 1.3x 20-period average.
+4h_12h_Camarilla_Pullback_Reversal_V1
+Hypothesis: Price often pulls back to Camarilla H3/L3 levels before continuing the 12h trend. 
+Long when: 12h EMA34 up, price pulls back to H3 and bounces, volume confirms.
+Short when: 12h EMA34 down, price pulls back to L3 and rejects, volume confirms.
+Uses tight entries (pullback to H3/L3) to limit trades to ~25-35/year. Works in bull by buying dips in uptrend, 
+in bear by selling rallies in downtrend. Volume filter avoids false breakouts.
 """
 
 import numpy as np
@@ -18,88 +22,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for MACD (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for EMA trend filter and Camarilla calculation (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate MACD on 1d close
-    # EMA12
-    ema12 = np.full_like(close_1d, np.nan)
-    k = 2 / (12 + 1)
-    ema12[11] = np.mean(close_1d[:12])
-    for i in range(12, len(close_1d)):
-        ema12[i] = close_1d[i] * k + ema12[i-1] * (1 - k)
+    # Calculate 12h EMA34 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # EMA26
-    ema26 = np.full_like(close_1d, np.nan)
-    k = 2 / (26 + 1)
-    ema26[25] = np.mean(close_1d[:26])
-    for i in range(26, len(close_1d)):
-        ema26[i] = close_1d[i] * k + ema26[i-1] * (1 - k)
+    # Calculate 12h Camarilla H3 and L3
+    range_12h = high_12h - low_12h
+    h3_12h = close_12h + range_12h * 1.1 / 6
+    l3_12h = close_12h - range_12h * 1.1 / 6
     
-    # MACD line
-    macd_line = ema12 - ema26
+    # Align H3/L3 to 4h timeframe
+    h3_12h_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
+    l3_12h_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
     
-    # Signal line (EMA9 of MACD)
-    signal_line = np.full_like(macd_line, np.nan)
-    k = 2 / (9 + 1)
-    # Find first valid MACD value
-    first_valid = np.where(~np.isnan(macd_line))[0]
-    if len(first_valid) > 0:
-        start_idx = first_valid[0]
-        signal_line[start_idx] = macd_line[start_idx]
-        for i in range(start_idx + 1, len(macd_line)):
-            signal_line[i] = macd_line[i] * k + signal_line[i-1] * (1 - k)
-    
-    # MACD histogram (for crossover detection)
-    macd_hist = macd_line - signal_line
-    
-    # Align MACD components to 6h timeframe
-    macd_line_aligned = align_htf_to_ltf(prices, df_1d, macd_line)
-    signal_line_aligned = align_htf_to_ltf(prices, df_1d, signal_line)
-    macd_hist_aligned = align_htf_to_ltf(prices, df_1d, macd_hist)
-    
-    # Volume confirmation: current volume > 1.3 x 20-period average
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(26, 20)  # need MACD warmup and volume MA
+    start_idx = 34  # need EMA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(macd_line_aligned[i]) or np.isnan(signal_line_aligned[i]) or 
-            np.isnan(macd_hist_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(h3_12h_aligned[i]) or 
+            np.isnan(l3_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: MACD bullish crossover (hist crosses above zero) with volume confirmation
-            if (macd_hist_aligned[i] > 0 and macd_hist_aligned[i-1] <= 0 and vol_confirm[i]):
+            # Long: price pulls back to H3 and bounces in 12h uptrend
+            if (ema_12h_aligned[i] > ema_12h_aligned[i-1] and  # EMA rising
+                low[i] <= h3_12h_aligned[i] * 1.002 and  # touched H3 (0.2% buffer)
+                close[i] > h3_12h_aligned[i] * 1.001 and  # closed above H3
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: MACD bearish crossover (hist crosses below zero) with volume confirmation
-            elif (macd_hist_aligned[i] < 0 and macd_hist_aligned[i-1] >= 0 and vol_confirm[i]):
+            # Short: price pulls back to L3 and rejects in 12h downtrend
+            elif (ema_12h_aligned[i] < ema_12h_aligned[i-1] and  # EMA falling
+                  high[i] >= l3_12h_aligned[i] * 0.998 and  # touched L3
+                  close[i] < l3_12h_aligned[i] * 0.999 and  # closed below L3
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: MACD bearish crossover or loss of momentum
-            if macd_hist_aligned[i] < 0 and macd_hist_aligned[i-1] >= 0:
+            # Long exit: EMA turns down or price breaks below L3 (failed hold)
+            if (ema_12h_aligned[i] < ema_12h_aligned[i-1] or 
+                close[i] < l3_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: MACD bullish crossover or loss of momentum
-            if macd_hist_aligned[i] > 0 and macd_hist_aligned[i-1] <= 0:
+            # Short exit: EMA turns up or price breaks above H3 (failed hold)
+            if (ema_12h_aligned[i] > ema_12h_aligned[i-1] or 
+                close[i] > h3_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_MACD_Signal_Crossover_Volume"
-timeframe = "6h"
+name = "4h_12h_Camarilla_Pullback_Reversal_V1"
+timeframe = "4h"
 leverage = 1.0
