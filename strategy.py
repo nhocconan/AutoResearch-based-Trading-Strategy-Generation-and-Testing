@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v4"
-timeframe = "4h"
+name = "1h_4h1d_TrendFilter_1hEntry_V1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,41 +12,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for pivot and ATR
+    # HTF: 4h trend filter
+    df_4h = get_htf_data(prices, '4h')
+    # EMA34 on 4h close
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    
+    # HTF: 1d trend filter
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Previous daily OHLC
-    prev_close_d = df_1d['close'].shift(1).values
-    prev_high_d = df_1d['high'].shift(1).values
-    prev_low_d = df_1d['low'].shift(1).values
+    # 1h indicators for entry timing
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Pivot levels: R1, S1
-    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
-    range_d = prev_high_d - prev_low_d
-    R1_d = pivot_d + range_d
-    S1_d = pivot_d - range_d
-    
-    # ATR(14) for stop filter
-    tr1 = prev_high_d - prev_low_d
-    tr2 = np.abs(prev_high_d - prev_close_d)
-    tr3 = np.abs(prev_low_d - prev_close_d)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align to 4h
-    R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
-    S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
-    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
-    atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
-    
-    # Volume filter: current volume > 2.0 * 24-period average (24 * 4h = 4 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma_24)
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,43 +52,45 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
-            np.isnan(pivot_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R1_val = R1_d_aligned[i]
-        S1_val = S1_d_aligned[i]
-        pivot_val = pivot_d_aligned[i]
-        atr_val = atr_d_aligned[i]
+        ema34_4h_val = ema34_4h_aligned[i]
+        ema50_1d_val = ema50_1d_aligned[i]
+        rsi_val = rsi[i]
         vol_filter = volume_filter[i]
         
+        # Trend direction: both 4h and 1d EMA aligned
+        long_trend = close_val > ema34_4h_val and close_val > ema50_1d_val
+        short_trend = close_val < ema34_4h_val and close_val < ema50_1d_val
+        
         if position == 0:
-            # Long: break above R1 with volume and ATR filter (avoid low-vol breakouts)
-            if close_val > R1_val and vol_filter and atr_val > 0:
-                signals[i] = 0.25
+            # Long entry: uptrend + RSI pullback + volume
+            if long_trend and rsi_val < 40 and vol_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S1 with volume and ATR filter
-            elif close_val < S1_val and vol_filter and atr_val > 0:
-                signals[i] = -0.25
+            # Short entry: downtrend + RSI bounce + volume
+            elif short_trend and rsi_val > 60 and vol_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below pivot
-            if close_val < pivot_val:
+            # Long exit: trend breaks or RSI overbought
+            if not long_trend or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price rises back above pivot
-            if close_val > pivot_val:
+            # Short exit: trend breaks or RSI oversold
+            if not short_trend or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
