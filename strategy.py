@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_VWAP_Trend_With_1d_Camarilla_R1S1
-Hypothesis: Price above/below VWAP indicates trend direction, while 1d Camarilla R1/S1 levels provide precise entry/exit zones. VWAP filters noise, Camarilla levels capture institutional interest, and the combination works in both bull (buy VWAP bounces at S1) and bear (sell VWAP rejections at R1). Low-frequency 12h timeframe reduces trade frequency and fee drag.
+4h_Camarilla_R1S1_Breakout_Volume
+Hypothesis: Camarilla pivot levels act as strong support/resistance. Price breaking through R1/S1 with volume indicates institutional breakout. Works in both bull (breakouts up) and bear (breakdowns down) by following price action. Uses volume confirmation to avoid false breakouts and limits trades to reduce fee drag.
 """
 
 import numpy as np
@@ -10,19 +10,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
     
     # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
@@ -34,53 +28,63 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     camarilla_r1 = np.zeros_like(close_1d)
     camarilla_s1 = np.zeros_like(close_1d)
     for i in range(len(close_1d)):
         if i == 0:
-            camarilla_r1[i] = close_1d[i]
+            camarilla_r1[i] = close_1d[i]  # placeholder
             camarilla_s1[i] = close_1d[i]
         else:
             rang = high_1d[i-1] - low_1d[i-1]
             camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
             camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
     
-    # Align to 12h timeframe (use previous day's levels)
+    # Align to 4h timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
+        else:
+            vol_ma[i] = np.mean(volume[i-20+1:i+1])
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup
+    start_idx = 25  # Warmup
     
     for i in range(start_idx, n):
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vwap[i])):
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above VWAP and tests S1 support
-            if close[i] > vwap[i] and close[i] <= camarilla_s1_aligned[i] * 1.005:  # within 0.5% of S1
+            # Long: price breaks above R1 with volume spike
+            if close[i] > camarilla_r1_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below VWAP and tests R1 resistance
-            elif close[i] < vwap[i] and close[i] >= camarilla_r1_aligned[i] * 0.995:  # within 0.5% of R1
+            # Short: price breaks below S1 with volume spike
+            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below VWAP (trend change) or reaches R1
-            if close[i] < vwap[i] or close[i] >= camarilla_r1_aligned[i] * 0.995:
+            # Exit long: price returns below S1 (mean reversion) or volume dies
+            if close[i] < camarilla_s1_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above VWAP (trend change) or reaches S1
-            if close[i] > vwap[i] or close[i] <= camarilla_s1_aligned[i] * 1.005:
+            # Exit short: price returns above R1 or volume dies
+            if close[i] > camarilla_r1_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VWAP_Trend_With_1d_Camarilla_R1S1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
