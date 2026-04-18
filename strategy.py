@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_DMI_Crossover_Trend_Strength
-Hypothesis: On 6h timeframe, use +DI/-DI crossover from DMI(14) as entry signal, 
-filtered by ADX>25 for trend strength and 1d EMA50 for higher timeframe trend alignment.
-Works in both bull and bear markets by capturing strong trending moves when ADX confirms strength.
-Designed for low trade frequency (target 20-50 trades/year) to avoid fee drag.
+12h_Camarilla_R1S1_Breakout_Volume_Spike_ADXFilter
+Hypothesis: Breakout above/below daily Camarilla R1/S1 with volume spike and ADX>25 confirms strong momentum.
+Exit when price crosses back below/above S1/R1 or ADX weakens (<20). Designed for low trade frequency 
+to avoid fee drag while capturing strong trending moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,88 +12,92 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate True Range and Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
+    # Daily high, low, close for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate Camarilla levels for each day
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - low[:-1])
-    tr3 = np.abs(low[1:] - high[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Align daily Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # ADX(14) trend strength filter
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - low[:-1]), np.absolute(low[1:] - high[:-1]))
     
     plus_dm = np.concatenate([[0], plus_dm])
     minus_dm = np.concatenate([[0], minus_dm])
     tr = np.concatenate([[0], tr])
     
-    # ATR and DI calculation
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
     minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    
-    # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Get 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = max(30, 20, 14*2)  # Need warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
-            np.isnan(adx[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        di_cross_up = plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1]
-        di_cross_down = minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1]
-        strong_trend = adx[i] > 25
-        uptrend_1d = close[i] > ema_50_1d_aligned[i]
-        downtrend_1d = close[i] < ema_50_1d_aligned[i]
+        price = close[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        vol_spike = volume_spike[i]
+        adx_val = adx[i]
         
         if position == 0:
-            # Long: DI bullish crossover + strong trend + 1d uptrend
-            if di_cross_up and strong_trend and uptrend_1d:
+            # Long: price > Camarilla R1 with volume spike and strong trend (ADX>25)
+            if price > r1 and vol_spike and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: DI bearish crossover + strong trend + 1d downtrend
-            elif di_cross_down and strong_trend and downtrend_1d:
+            # Short: price < Camarilla S1 with volume spike and strong trend (ADX>25)
+            elif price < s1 and vol_spike and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: DI bearish crossover OR weak trend
-            if di_cross_down or adx[i] < 20:
+            # Exit: price < Camarilla S1 OR ADX weakens (<20)
+            if price < s1 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: DI bullish crossover OR weak trend
-            if di_cross_up or adx[i] < 20:
+            # Exit: price > Camarilla R1 OR ADX weakens (<20)
+            if price > r1 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_DMI_Crossover_Trend_Strength"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_Volume_Spike_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
