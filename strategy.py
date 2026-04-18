@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Pivot_S1R1_TrendFollow_Volume
-# 12h strategy using daily Camarilla pivot points (S1/R1) with volume confirmation and daily trend filter.
-# Long: Close breaks above daily R1 + volume > 1.5x daily avg + daily EMA50 > EMA200
-# Short: Close breaks below daily S1 + volume > 1.5x daily avg + daily EMA50 < EMA200
-# Exit: Opposite breakout or trend reversal
-# Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
-# Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+"""
+4h_ThreeStooges_LongOnly_V1
+Long-only strategy for BTC/ETH using daily VWAP trend, hourly VWAP deviation, and volume confirmation.
+- Long when: price > daily VWAP (trend), price < 0.5 std below hourly VWAP (dip), and volume > 1.5x 20-period average
+- Exit when: price crosses above hourly VWAP (mean reversion complete) or trend breaks
+- Designed for ~25-35 trades/year per symbol (100-140 total over 4 years)
+- Works in bull markets (buy dips in uptrend) and bear markets (buy dips in less steep downtrends)
+"""
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,88 +22,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and filters
+    # Get daily data for VWAP trend
     df_1d = get_htf_data(prices, '1d')
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d = vwap_1d.values
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Get 1h data for VWAP and bands
+    df_1h = get_htf_data(prices, '1h')
+    typical_price_1h = (df_1h['high'] + df_1h['low'] + df_1h['close']) / 3.0
+    vwap_1h = (typical_price_1h * df_1h['volume']).cumsum() / df_1h['volume'].cumsum()
+    vwap_1h = vwap_1h.values
     
-    # Calculate Camarilla pivot points for daily timeframe
-    # Pivot = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = C + (H - L) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    # S1 = C - (H - L) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate rolling std of deviation from VWAP (1h)
+    deviation = typical_price_1h - vwap_1h
+    # Use expanding std for first 20 periods, then rolling
+    deviation_std = pd.Series(deviation).expanding().std().values
+    deviation_std_20 = pd.Series(deviation).rolling(window=20, min_periods=20).std().values
+    # Combine: use expanding until we have 20 samples, then rolling
+    vwap_std = np.where(np.arange(len(deviation)) < 20, deviation_std, deviation_std_20)
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Align all data to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    vwap_1h_aligned = align_htf_to_ltf(prices, df_1h, vwap_1h)
+    vwap_std_aligned = align_htf_to_ltf(prices, df_1h, vwap_std)
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all daily data to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Volume average (20-period) on 1h
+    vol_ma_20_1h = pd.Series(df_1h['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1h, vol_ma_20_1h)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
-    start_idx = 50  # need enough for EMA200
+    start_idx = 20  # need enough for VWAP std and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_1h_aligned[i]) or 
+            np.isnan(vwap_std_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Trend condition: price > daily VWAP
+        uptrend = close[i] > vwap_1d_aligned[i]
+        
+        # Dip condition: price < 0.5 std below 1h VWAP
+        dip_condition = close[i] < (vwap_1h_aligned[i] - 0.5 * vwap_std_aligned[i])
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakdown_down = close[i] < s1_aligned[i]
+        # Exit condition: price crosses above 1h VWAP (mean reversion)
+        exit_condition = close[i] > vwap_1h_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above daily R1
-            if uptrend and vol_confirm and breakout_up:
+            # Long: uptrend + dip + volume
+            if uptrend and dip_condition and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below daily S1
-            elif downtrend and vol_confirm and breakdown_down:
-                signals[i] = -0.25
-                position = -1
-        
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below daily S1
-            if not uptrend or (vol_confirm and breakdown_down):
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Exit: mean reversion complete or trend break
+            if exit_condition or not uptrend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above daily R1
-            if not downtrend or (vol_confirm and breakout_up):
-                signals[i] = 0.25  # reverse to long
-                position = 1
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "12h_Pivot_S1R1_TrendFollow_Volume"
-timeframe = "12h"
+name = "4h_ThreeStooges_LongOnly_V1"
+timeframe = "4h"
 leverage = 1.0
