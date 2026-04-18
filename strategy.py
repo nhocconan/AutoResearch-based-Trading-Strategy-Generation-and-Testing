@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_With_Volume_Filter
-Hypothesis: Use daily Camarilla pivot levels (R1/S1) to identify breakout points on 12h timeframe. 
-Go long when price breaks above S1 with volume confirmation, short when breaks below R1. 
-Uses daily structure for institutional levels and 12h volume for confirmation. 
-Designed to capture momentum moves in both bull and bear markets with filtered entries.
-Target: 15-30 trades/year with position size 0.25.
+4h_12h_Trend_Following_With_Volume_Filter
+Hypothesis: Use 12h EMA trend to determine direction and 4h Donchian breakout with volume confirmation for entries. Works in both bull and bear markets by following higher timeframe trend and filtering false breakouts. Targets 15-25 trades/year with position size 0.25.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,21 +18,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla pivots (R1/S1)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla R1 and S1 levels for each day
-    # R1 = Close + 1.1 * (High - Low)
-    # S1 = Close - 1.1 * (High - Low)
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d)
+    # Calculate 12h EMA34 for trend
+    close_12h_series = pd.Series(close_12h)
+    ema_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels to 12h timeframe (wait for daily bar close)
-    r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Calculate 4h Donchian channels (20-period)
+    high_max = np.full(n, np.nan)
+    low_min = np.full(n, np.nan)
+    for i in range(20, n):
+        high_max[i] = np.max(high[i-20:i])
+        low_min[i] = np.min(low[i-20:i])
     
     # Calculate volume average (20-period) for confirmation
     vol_ma = np.full(n, np.nan)
@@ -46,41 +44,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA
+    start_idx = 20  # need Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
+        
+        # Determine trend from 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
         # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above S1 with volume confirmation
-            if close[i] > s1_12h[i] and vol_confirmed:
+            # Long entry: price breaks above Donchian high + uptrend + volume
+            if close[i] > high_max[i] and uptrend and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below R1 with volume confirmation
-            elif close[i] < r1_12h[i] and vol_confirmed:
+            # Short entry: price breaks below Donchian low + downtrend + volume
+            elif close[i] < low_min[i] and downtrend and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses back below S1
-            if close[i] < s1_12h[i]:
+            # Long exit: price breaks below Donchian low
+            if close[i] < low_min[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above R1
-            if close[i] > r1_12h[i]:
+            # Short exit: price breaks above Donchian high
+            if close[i] > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_With_Volume_Filter"
-timeframe = "12h"
+name = "4h_12h_Trend_Following_With_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
