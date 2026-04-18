@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_R2S2_Breakout_VolumeTrend
-Hypothesis: Weekly pivot R2/S2 levels act as strong weekly support/resistance. 
-Breakouts with volume confirmation and weekly EMA(34) trend filter capture momentum in both bull and bear markets. 
-Uses daily timeframe for execution with weekly context to reduce noise and improve trade quality.
-Target: 10-25 trades/year on daily timeframe.
+6h_SwingReversal_1dTrend_VolumeFilter
+Hypothesis: On 6h timeframe, swing reversals identified by price crossing 6-period RSI(14) extremes (RSI<30 for long, RSI>70 for short) combined with 1d EMA(50) trend filter and volume spike (2.0x 20-period average) capture mean-reversion in trending markets. Works in both bull and bear: in bull markets, buys dips in uptrend; in bear markets, sells rallies in downtrend. Target: 20-40 trades/year.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,109 +18,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation and EMA (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for EMA trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close']
     
-    # Calculate weekly pivot points using standard formula
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    close_1w = df_1w['close']
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    pivot = (high_1w + low_1w + close_1w) / 3
-    r2 = pivot + (high_1w - low_1w)  # R2 = P + (H - L)
-    s2 = pivot - (high_1w - low_1w)  # S2 = P - (H - L)
+    # Calculate 6-period RSI(14) on 6h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Shift by 1 to use previous week's levels only
-    r2_prev = r2.shift(1).values
-    s2_prev = s2.shift(1).values
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align to daily timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_prev)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_prev)
-    
-    # Get weekly data for EMA trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # ATR for volatility filter (14-period)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Volatility filter: only trade when ATR > 20-period average (avoid chop)
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    volatility_filter = atr > atr_ma
-    
-    # Volume spike: 2.5x 20-period average (balanced to avoid overtrading)
+    # Volume spike: 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    bars_since_entry = 0  # track holding period
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(atr_ma[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
         price = close[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        ema_trend = ema_34_1w_aligned[i]
-        vol_filter = volatility_filter[i]
+        rsi_val = rsi[i]
+        ema_trend = ema_50_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            bars_since_entry = 0
-            # Long: break above R2 with volume spike, price above weekly EMA, and sufficient volatility
-            if price > r2_val and vol_spike and price > ema_trend and vol_filter:
+            # Long: RSI < 30 (oversold) with volume spike and price above daily EMA (uptrend)
+            if rsi_val < 30 and vol_spike and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S2 with volume spike, price below weekly EMA, and sufficient volatility
-            elif price < s2_val and vol_spike and price < ema_trend and vol_filter:
+            # Short: RSI > 70 (overbought) with volume spike and price below daily EMA (downtrend)
+            elif rsi_val > 70 and vol_spike and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Minimum holding period: 3 days
-            if bars_since_entry < 3:
-                signals[i] = 0.25
-                bars_since_entry += 1
+            # Exit: RSI returns to neutral (50) or breaks below daily EMA
+            if rsi_val >= 50 or price < ema_trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
-                # Exit: price returns to S2 or breaks below weekly EMA
-                if price <= s2_val or price < ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
         
         elif position == -1:
-            # Minimum holding period: 3 days
-            if bars_since_entry < 3:
-                signals[i] = -0.25
-                bars_since_entry += 1
+            # Exit: RSI returns to neutral (50) or breaks above daily EMA
+            if rsi_val <= 50 or price > ema_trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
-                # Exit: price returns to R2 or breaks above weekly EMA
-                if price >= r2_val or price > ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
     
     return signals
 
-name = "1d_WeeklyPivot_R2S2_Breakout_VolumeTrend"
-timeframe = "1d"
+name = "6h_SwingReversal_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
