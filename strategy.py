@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Confirmation_v2
-Hypothesis: Donchian channel breakouts with volume confirmation and ADX trend filter capture strong momentum moves while avoiding whipsaws. Designed for ~30 trades/year to minimize fee drag and work in both bull and bear markets via symmetric long/short logic.
+4h_Camarilla_R1S1_Breakout_VolumeSpike_1dEMA34_Trend_v1
+Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and 1-day EMA34 trend filter capture strong moves while avoiding false breakouts in chop. Works in bull via upward breakouts above R1 and in bear via downward breakouts below S1. Target: ~25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,44 +18,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # ADX trend filter (14-period) on 1d timeframe
+    # Daily Camarilla levels (based on previous day)
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Camarilla levels for each day
+    R1 = np.zeros_like(close_1d)
+    S1 = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        # Use previous day's range
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        R1[i] = prev_close + (range_val * 1.1 / 12)
+        S1[i] = prev_close - (range_val * 1.1 / 12)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # 1-day EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # DI and DX
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: >1.5x 20-period average
+    # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
@@ -63,42 +54,44 @@ def generate_signals(prices):
     start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_confirm[i]) or
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_1d_aligned[i]
-        vol_conf = volume_confirm[i]
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        ema34 = ema_34_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high, strong trend (ADX > 25), volume confirmation
-            if price > donchian_high[i] and adx_val > 25 and vol_conf:
+            # Long: price breaks above R1 with volume spike and above daily EMA34
+            if price > r1 and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low, strong trend (ADX > 25), volume confirmation
-            elif price < donchian_low[i] and adx_val > 25 and vol_conf:
+            # Short: price breaks below S1 with volume spike and below daily EMA34
+            elif price < s1 and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price breaks below Donchian low or ADX weakens (< 20)
-            if price < donchian_low[i] or adx_val < 20:
+            # Exit: price closes below R1 or below daily EMA34
+            if price < r1 or price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price breaks above Donchian high or ADX weakens (< 20)
-            if price > donchian_high[i] or adx_val < 20:
+            # Exit: price closes above S1 or above daily EMA34
+            if price > s1 or price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Confirmation_v2"
+name = "4h_Camarilla_R1S1_Breakout_VolumeSpike_1dEMA34_Trend_v1"
 timeframe = "4h"
 leverage = 1.0
