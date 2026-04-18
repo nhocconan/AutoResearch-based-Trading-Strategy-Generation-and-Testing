@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: 12h Donchian(20) breakouts capture medium-term momentum.
-Adding 1d EMA trend filter ensures we trade with the higher timeframe trend.
-Volume confirmation filters out weak breakouts.
-Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year).
-Works in bull markets via upward breaks and in bear markets via downward breaks.
+4h Pivot Range Breakout with Volume Confirmation and 1d EMA Filter
+Hypothesis: Daily pivot ranges act as key support/resistance. Breaking above the daily pivot range 
+with volume confirmation and 1d EMA trend filter captures momentum breakouts. Works in bull markets 
+via upward breaks above resistance and in bear markets via downward breaks below support. 
+Low trade frequency due to requirement of breaking the full pivot range (not just single levels).
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,18 +21,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (once before loop)
+    # Get 1d data for pivot range and EMA filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate daily pivot range: (H+L+C)/3 ± (H-L)/2
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    pivot = typical_price.values
+    range_val = (df_1d['high'] - df_1d['low']).values
+    pivot_high = pivot + range_val / 2  # Resistance level
+    pivot_low = pivot - range_val / 2   # Support level
     
-    # 12h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align pivot levels to 4h timeframe
+    pivot_high_aligned = align_htf_to_ltf(prices, df_1d, pivot_high)
+    pivot_low_aligned = align_htf_to_ltf(prices, df_1d, pivot_low)
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,39 +48,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 100  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(pivot_high_aligned[i]) or np.isnan(pivot_low_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        trend = ema50_1d_aligned[i]
+        trend = ema34_1d_aligned[i]
         vol_ok = vol_confirm[i]
-        donchian_high = high_max[i]
-        donchian_low = low_min[i]
+        ph = pivot_high_aligned[i]
+        pl = pivot_low_aligned[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian high with volume + uptrend
-            if vol_ok and close[i] > donchian_high and close[i] > trend:
+            # Enter long: price breaks above daily pivot high (resistance) with volume + uptrend
+            if vol_ok and close[i] > ph and close[i] > trend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low with volume + downtrend
-            elif vol_ok and close[i] < donchian_low and close[i] < trend:
+            # Enter short: price breaks below daily pivot low (support) with volume + downtrend
+            elif vol_ok and close[i] < pl and close[i] < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below Donchian low or trend turns down
-            if close[i] < donchian_low or close[i] < trend:
+            # Exit long: price falls back below pivot low or trend turns down
+            if close[i] < pl or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above Donchian high or trend turns up
-            if close[i] > donchian_high or close[i] > trend:
+            # Exit short: price rises back above pivot high or trend turns up
+            if close[i] > ph or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Pivot_Range_Breakout_Volume_EMA"
+timeframe = "4h"
 leverage = 1.0
