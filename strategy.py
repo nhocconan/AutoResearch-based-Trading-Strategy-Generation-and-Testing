@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Liquidity_Wave_Trend
-Hypothesis: On 6-hour timeframe, identify directional momentum by combining 
-liquidity-based mean reversion (price deviation from volume-weighted average price) 
-with trend confirmation from higher timeframe (1-day EMA). 
-In bull/bear markets, price tends to revert to VWAP during pullbacks in strong trends.
-Uses VWAP deviation as entry signal with 1-day EMA as trend filter.
-Designed for low trade frequency (target: 15-35/year) with controlled risk.
+4h_Pivot_R1S1_Breakout_12hEMA34_Volume_Conservative
+Hypothesis: 4-hour breakouts above Camarilla R1 or below S1 with 12-hour EMA34 trend filter and volume confirmation. Conservative version with stricter volume and trend filters to reduce trade frequency and improve performance across BTC, ETH, and SOL in both bull and bear markets.
 """
 
 import numpy as np
@@ -15,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,87 +18,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6-hour VWAP (volume-weighted average price)
-    # VWAP = cumulative(volume * typical_price) / cumulative(volume)
-    # where typical_price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(volume * typical_price)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    # Calculate 12-hour EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate price deviation from VWAP as percentage
-    # Negative deviation = price below VWAP (potential long setup in uptrend)
-    # Positive deviation = price above VWAP (potential short setup in downtrend)
-    vwap_deviation = (close - vwap) / vwap * 100.0
+    # Calculate EMA34 with proper smoothing and min_periods
+    ema34_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 34:
+        ema34_12h[33] = np.mean(close_12h[0:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_12h)):
+            ema34_12h[i] = close_12h[i] * alpha + ema34_12h[i-1] * (1 - alpha)
     
-    # Calculate 1-day EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Align 12-hour EMA34 to 4h timeframe
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # EMA50 calculation
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[0:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = close_1d[i] * alpha + ema50_1d[i-1] * (1 - alpha)
+    # Calculate Camarilla levels from previous day using proper daily aggregation
+    # We'll use 12h data to approximate daily OHLC (2 periods = 1 day)
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
     
-    # Align 1-day EMA50 to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate daily OHLC from 12h data (each day = 2 periods of 12h)
+    # Create arrays for daily high, low, close
+    daily_high = np.full(len(close_12h), np.nan)
+    daily_low = np.full(len(close_12h), np.nan)
+    daily_close = np.full(len(close_12h), np.nan)
     
-    # Calculate 6-hour ATR for dynamic thresholds
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.nanmean(tr[1:15])  # First ATR as simple average
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
+    # For each 12h period, we need the daily context
+    # Since 12h data: index 0,1 = day 0; index 2,3 = day 1; etc.
+    for i in range(len(close_12h)):
+        day_idx = i // 2  # Each day has 2 periods of 12h data
+        start_idx = day_idx * 2
+        end_idx = start_idx + 2
+        
+        # Get the two 12h periods for this day
+        if end_idx <= len(close_12h):
+            day_high = np.max(df_12h['high'].values[start_idx:end_idx])
+            day_low = np.min(df_12h['low'].values[start_idx:end_idx])
+            day_close = df_12h['close'].values[end_idx-1]  # Close of last period
+            
+            daily_high[i] = day_high
+            daily_low[i] = day_low
+            daily_close[i] = day_close
     
-    # Dynamic entry threshold: 0.5 * ATR as percentage of price
-    # This adapts to volatility - wider bands in volatile markets
-    dynamic_threshold = 0.5 * (atr / close) * 100.0  # Convert to percentage
+    # Now calculate Camarilla levels for each 4h bar using the prior day's OHLC
+    for i in range(n):
+        # Find which 12h period corresponds to this 4h bar
+        # 4h to 12h ratio: 3 periods of 4h = 1 period of 12h
+        period_12h_idx = i // 3
+        
+        # We need the previous day's data (not current day)
+        prev_day_idx = period_12h_idx - 2  # Go back 2 periods (1 day) in 12h data
+        
+        if prev_day_idx >= 0 and not (np.isnan(daily_high[prev_day_idx]) or np.isnan(daily_low[prev_day_idx])):
+            prev_high = daily_high[prev_day_idx]
+            prev_low = daily_low[prev_day_idx]
+            prev_close = daily_close[prev_day_idx]
+            range_val = prev_high - prev_low
+            
+            camarilla_r1[i] = prev_close + range_val * 1.1 / 12
+            camarilla_s1[i] = prev_close - range_val * 1.1 / 12
+    
+    # Volume spike: current volume > 2.0 x 30-period average (stricter)
+    vol_ma = np.full(n, np.nan)
+    for i in range(30, n):
+        vol_ma[i] = np.mean(volume[i-30:i])
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)  # Ensure indicators are ready
+    start_idx = max(34, 30, 2)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_deviation[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(dynamic_threshold[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price significantly below VWAP in uptrend (price > EMA50)
-            if (vwap_deviation[i] < -dynamic_threshold[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long: break above Camarilla R1 with volume spike and 12h uptrend
+            if (close[i] > camarilla_r1[i] and vol_spike[i] and 
+                close[i] > ema34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price significantly above VWAP in downtrend (price < EMA50)
-            elif (vwap_deviation[i] > dynamic_threshold[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: break below Camarilla S1 with volume spike and 12h downtrend
+            elif (close[i] < camarilla_s1[i] and vol_spike[i] and 
+                  close[i] < ema34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to VWAP or trend breaks down
-            if (vwap_deviation[i] > -0.5 * dynamic_threshold[i] or  # Halfway back to VWAP
-                close[i] < ema50_1d_aligned[i]):
+            # Long exit: close below Camarilla S1 or 12h trend turns down
+            if (close[i] < camarilla_s1[i] or close[i] < ema34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to VWAP or trend breaks up
-            if (vwap_deviation[i] < 0.5 * dynamic_threshold[i] or  # Halfway back to VWAP
-                close[i] > ema50_1d_aligned[i]):
+            # Short exit: close above Camarilla R1 or 12h trend turns up
+            if (close[i] > camarilla_r1[i] or close[i] > ema34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Liquidity_Wave_Trend"
-timeframe = "6h"
+name = "4h_Pivot_R1S1_Breakout_12hEMA34_Volume_Conservative"
+timeframe = "4h"
 leverage = 1.0
