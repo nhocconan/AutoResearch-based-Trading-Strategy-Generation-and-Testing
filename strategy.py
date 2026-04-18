@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_1D_Camarilla_R1S1_Breakout_Volume_V1
-Strategy: Use 1D Camarilla levels (R1/S1) for directional bias, 1H for entry timing with volume confirmation.
+1h_1D_Camarilla_R1S1_Breakout_Volume_V2
+Hypothesis: Use 1D Camarilla R1/S1 for directional bias, 1H for entry with volume confirmation.
 Long when price breaks above daily R1 with volume > 1.5x average during active session (08-20 UTC).
 Short when price breaks below daily S1 with volume > 1.5x average during active session.
-Position size fixed at 0.20 to manage drawdown. Uses volatility filter (ATR) to avoid chop.
+Fixed position size 0.20. Added volatility filter (ATR) to avoid chop.
 Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 Works in bull/bear via volatility regime filter and session timing.
 """
@@ -76,7 +76,8 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
         # Volatility filter: avoid extreme volatility (stop hunting)
-        vol_filter = atr_20_aligned[i] < pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values[i] * 2
+        vol_ma_long = pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr_20_aligned[i] < vol_ma_long[i] * 2 if not np.isnan(vol_ma_long[i]) else False
         
         # Only trade during active session
         in_session = session_mask[i]
@@ -109,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1D_Camarilla_R1S1_Breakout_Volume_V1"
+name = "1h_1D_Camarilla_R1S1_Breakout_Volume_V2"
 timeframe = "1h"
 leverage = 1.0
