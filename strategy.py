@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1_S1_Breakout_Volume_Trend
-Hypothesis: Price breaks above/below Camarilla pivot support/resistance (R1/S1) with volume spike and 1d EMA trend filter.
-Captures breakouts in bull markets and breakdowns in bear markets. Uses 1d EMA34 for trend confirmation.
-Target: 20-40 trades/year to minimize fee drag while capturing strong directional moves.
+6h_ADX_Trend_Strength_with_1dEMA_Filter
+Hypothesis: Strong trends (ADX > 25) combined with 1d EMA50 direction provide reliable entries with controlled drawdowns in both bull and bear markets.
+Uses 60% of capital on signals to balance return and risk. Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -12,89 +11,104 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Camarilla pivot from previous 1d bar
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot levels: P = (H+L+C)/3, R1 = C + (H-L)*1.1/2, S1 = C - (H-L)*1.1/2
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align to 4h: previous day's levels available after 1d bar closes
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate ADX (14-period) on 6h data
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Volume spike: >1.8x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Trend filter: 1d EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Smooth TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
+    atr = np.zeros(n)
+    plus_dm_smooth = np.zeros(n)
+    minus_dm_smooth = np.zeros(n)
+    
+    atr[0] = tr[0]
+    plus_dm_smooth[0] = plus_dm[0] if len(plus_dm) > 0 else 0
+    minus_dm_smooth[0] = minus_dm[0] if len(minus_dm) > 0 else 0
+    
+    for i in range(1, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+        plus_dm_val = plus_dm[i-1] if i-1 < len(plus_dm) else 0
+        minus_dm_val = minus_dm[i-1] if i-1 < len(minus_dm) else 0
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * 13 + plus_dm_val) / 14
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * 13 + minus_dm_val) / 14
+    
+    # Calculate +DI and -DI
+    plus_di = np.where(atr != 0, (plus_dm_smooth / atr) * 100, 0)
+    minus_di = np.where(atr != 0, (minus_dm_smooth / atr) * 100, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = np.zeros(n)
+    adx[0] = dx[0] if len(dx) > 0 else 0
+    for i in range(1, n):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Trend strength: ADX > 25 indicates strong trend
+    strong_trend = adx > 25
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20)  # Warmup for EMA and indicators
+    start_idx = 50  # Warmup for EMA and ADX
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if np.isnan(ema_50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema34 = ema_34_1d_aligned[i]
-        vol_spike = volume_spike[i]
+        ema50 = ema_50_1d_aligned[i]
+        is_strong_trend = strong_trend[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and uptrend
-            if price > r1_val and vol_spike and price > ema34:
-                signals[i] = 0.25
+            # Long: strong uptrend + price above 1d EMA50
+            if is_strong_trend and price > ema50:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below S1 with volume spike and downtrend
-            elif price < s1_val and vol_spike and price < ema34:
-                signals[i] = -0.25
+            # Short: strong downtrend + price below 1d EMA50
+            elif is_strong_trend and price < ema50:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            signals[i] = 0.25
-            # Exit: price closes below pivot OR trend turns down
-            if price < pivot_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            elif price < ema34:
+            signals[i] = 0.30
+            # Exit: trend weakens OR price crosses below EMA50
+            if not is_strong_trend or price < ema50:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            signals[i] = -0.25
-            # Exit: price closes above pivot OR trend turns up
-            if price > pivot_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            elif price > ema34:
+            signals[i] = -0.30
+            # Exit: trend weakens OR price crosses above EMA50
+            if not is_strong_trend or price > ema50:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "6h_ADX_Trend_Strength_with_1dEMA_Filter"
+timeframe = "6h"
 leverage = 1.0
