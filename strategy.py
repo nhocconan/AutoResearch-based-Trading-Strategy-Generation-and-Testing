@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Bollinger Band breakout with volume confirmation and daily trend filter.
-# In bull markets, buy breakouts above upper band; in bear markets, sell breakouts below lower band.
-# Uses daily EMA34 as trend filter: only take long trades when price > daily EMA34, short when price < daily EMA34.
-# Bollinger Bands (20,2) provide dynamic support/resistance. Volume filter ensures breakouts have conviction.
-# Target: 20-50 trades per year (80-200 total over 4 years) to avoid excessive fee drag.
-name = "4h_BollingerBreakout_Volume_DailyTrendFilter"
-timeframe = "4h"
+# Hypothesis: 6h RSI(2) pullback with 1d trend filter. Works in bull (pullbacks in uptrend) and bear (short rallies in downtrend).
+# Uses extremely short RSI for mean reversion entries, filtered by daily trend to avoid counter-trend trades.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+name = "6h_RSI2_Pullback_1dTrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,27 +15,26 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for EMA trend filter
+    # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Bollinger Bands (20, 2) on 4h data
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + (2 * std_20)
-    lower_band = sma_20 - (2 * std_20)
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Calculate 6h RSI(2)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,38 +43,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        ema_trend = ema_34_aligned[i]
-        vol_filter = volume_filter[i]
+        ema_50_val = ema_50_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: break above upper band with volume confirmation and bullish daily trend
-            if close_val > upper and vol_filter and (close_val > ema_trend):
+            # Long: RSI(2) < 10 (oversold) in uptrend (price > daily EMA50)
+            if rsi_val < 10 and close_val > ema_50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume confirmation and bearish daily trend
-            elif close_val < lower and vol_filter and (close_val < ema_trend):
+            # Short: RSI(2) > 90 (overbought) in downtrend (price < daily EMA50)
+            elif rsi_val > 90 and close_val < ema_50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below middle band (SMA20)
-            if close_val < sma_20[i]:
+            # Long exit: RSI(2) > 50 (mean reversion complete) or trend breaks
+            if rsi_val > 50 or close_val < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above middle band (SMA20)
-            if close_val > sma_20[i]:
+            # Short exit: RSI(2) < 50 (mean reversion complete) or trend breaks
+            if rsi_val < 50 or close_val > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
