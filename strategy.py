@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Keltner Channel Breakout with Volume Confirmation and ADX Filter
-Hypothesis: Price breaking above/below Keltner Channel (EMA20 + 2*ATR) with volume confirmation 
-(volume > 1.5x average) and trend strength (ADX > 20) indicates strong momentum. 
-Keltner Channels adapt better than Bollinger Bands in trending markets, reducing false breakouts.
-Target: 20-40 trades/year to minimize fee drain.
+6h Williams Alligator + Elder Ray + ADX Filter
+Hypothesis: The Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength,
+while Elder Ray (Bull/Bear Power) measures bull/bear strength relative to EMA13.
+Combined with ADX > 25 for trend confirmation, this captures strong trends while avoiding whipsaws.
+Works in both bull (Alligator aligned up, Bull Power > 0) and bear (Alligator aligned down, Bear Power < 0).
+Target: 15-25 trades/year to minimize fee drain.
 """
 
 import numpy as np
@@ -13,28 +14,25 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # EMA20 for Keltner Channel middle
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Williams Alligator: SMAs with specific periods
+    # Jaw: SMA(13), 8 periods ahead
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: SMA(8), 5 periods ahead
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: SMA(5), 3 periods ahead
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # True Range and ATR(20)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channels
-    upper_kc = ema20 + 2 * atr
-    lower_kc = ema20 - 2 * atr
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     # ADX for trend strength (14-period)
     tr1 = high - low
@@ -60,49 +58,42 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ratio = volume / vol_ema
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators (max of 20,20,14)
+    start_idx = 30  # Warmup for indicators (max of shifts + periods)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema20[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        upper = upper_kc[i]
-        lower = lower_kc[i]
-        adx_val = adx[i]
-        vol_conf = vol_ratio[i] > 1.5
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:
-            # Strong trend (ADX > 20) and volume confirmation
-            # Price breaks above upper KC = long
-            if adx_val > 20 and price > upper and vol_conf:
+            # Long: Alligator aligned up, Bull Power positive, ADX > 25
+            if alligator_long and bull_power[i] > 0 and adx[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Price breaks below lower KC = short
-            elif adx_val > 20 and price < lower and vol_conf:
+            # Short: Alligator aligned down, Bear Power negative, ADX > 25
+            elif alligator_short and bear_power[i] < 0 and adx[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if trend weakens or price returns to EMA20
-            if adx_val < 15 or price < ema20[i]:
+            # Exit if Alligator alignment breaks or Bull Power turns negative
+            if not alligator_long or bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if trend weakens or price returns to EMA20
-            if adx_val < 15 or price > ema20[i]:
+            # Exit if Alligator alignment breaks or Bear Power turns positive
+            if not alligator_short or bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Keltner_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "6h_Alligator_ElderRay_ADX"
+timeframe = "6h"
 leverage = 1.0
