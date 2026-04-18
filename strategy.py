@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_R1S1_Breakout_Volume
-Hypothesis: Use 1D Camarilla R1/S1 breakouts on 12h timeframe with volume confirmation and volatility filter to reduce trade frequency.
-Long when price breaks above daily R1 with volume > 1.8x average during active session.
-Short when price breaks below daily S1 with volume > 1.8x average during active session.
+4h_1D_Camarilla_R1S1_Breakout_Volume_V3
+Hypothesis: Use 1D Camarilla R1/S1 for directional bias with 4H entry, but with stricter volume confirmation and session filtering to reduce trade frequency.
+Long when price breaks above daily R1 with volume > 2.0x average (much stricter) during active session (08-20 UTC).
+Short when price breaks below daily S1 with volume > 2.0x average during active session.
 Fixed position size 0.25. Added volatility filter (ATR) to avoid chop.
-Target: 25-35 trades/year per symbol (100-140 total over 4 years) to minimize fee flood.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 Works in bull/bear via volatility regime filter and session timing.
 """
 
@@ -50,7 +50,7 @@ def generate_signals(prices):
     tr[0] = high_1d[0] - low_1d[0]  # first day
     atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Align all daily data to 12h timeframe
+    # Align all daily data to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
@@ -71,9 +71,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period average
+        # Volume confirmation: current volume > 2.0x 20-period average (much stricter)
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > 1.8 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        vol_confirm = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
         # Volatility filter: avoid extreme volatility (stop hunting)
         vol_ma_long = pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1D_Camarilla_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1S1_Breakout_Volume_V3"
+timeframe = "4h"
 leverage = 1.0
