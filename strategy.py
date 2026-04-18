@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_R1S1_Breakout_With_Volume_and_WeeklyTrend
-Hypothesis: Buy when price breaks above weekly R1 with volume spike and above weekly EMA34; short when breaks below S1 with volume spike and below weekly EMA34. Weekly pivots capture longer-term structure, reducing whipsaw. Volume confirms institutional participation, and weekly EMA34 ensures alignment with major trend. Designed for very low trade frequency (<20/year) to minimize fee drift while capturing high-probability breakouts in both bull and bear regimes.
+12h_KAMA_Trend_With_Volume_and_ChopFilter
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on 12h timeframe to detect trend direction, confirmed by volume spike (>1.8x 20-period average) and choppy market filter (Choppiness Index < 61.8 for trending regime). Enter long when price crosses above KAMA with volume confirmation in trending market, short when price crosses below KAMA with volume confirmation. Exit when price crosses back across KAMA. Designed for low-frequency trading (12-37 trades/year) to minimize fee decay while capturing sustained trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,80 +13,125 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly OHLC for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    pweek_high = df_1w['high'].values
-    pweek_low = df_1w['low'].values
-    pweek_close = df_1w['close'].values
+    # KAMA (Kaufman Adaptive Moving Average) calculation
+    def calculate_kama(price, period=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(price, n=period))
+        volatility = np.sum(np.abs(np.diff(price)), axis=1)
+        er = np.where(volatility != 0, change / volatility, 0)
+        
+        # Smoothing Constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # KAMA
+        kama = np.full_like(price, np.nan, dtype=float)
+        kama[period] = price[period]  # Initialize
+        
+        for i in range(period+1, len(price)):
+            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
+        
+        return kama
     
-    # Weekly Camarilla levels
-    rang = pweek_high - pweek_low
-    r1 = pweek_close + rang * 1.1 / 12
-    s1 = pweek_close - rang * 1.1 / 12
+    # Choppiness Index
+    def calculate_chop(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First TR is just high-low
+        
+        # Sum of True Range over period
+        atr_sum = np.nansum(tr, axis=1)  # Will be replaced with proper rolling sum
+        
+        # Proper rolling sum for ATR
+        tr_series = pd.Series(tr)
+        atr_sum = tr_series.rolling(window=period, min_periods=period).sum().values
+        
+        # Highest high and lowest low over period
+        max_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        min_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        
+        # Chop calculation
+        range_max_min = max_high - min_low
+        chop = np.where(range_max_min != 0, 
+                        100 * np.log10(atr_sum / range_max_min) / np.log10(period), 
+                        50)
+        return chop
     
-    # Align to daily timeframe (wait for weekly close)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Calculate KAMA on 12h timeframe
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    kama_12h = calculate_kama(close_12h, period=10, fast=2, slow=30)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
     
-    # Volume spike: >2.0x 20-period average
+    # Calculate Choppiness Index on 1d timeframe for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, period=14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Volume spike: >1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Weekly EMA34 trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need volume MA and indicators
+    start_idx = 30  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(weekly_ema_aligned[i])):
+        if (np.isnan(kama_12h_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        kama = kama_12h_aligned[i]
+        chop = chop_1d_aligned[i]
         vol_spike = volume_spike[i]
-        weekly_ema_val = weekly_ema_aligned[i]
+        
+        # Only trade in trending markets (Chop < 61.8)
+        is_trending = chop < 61.8
         
         if position == 0:
-            # Long: price > R1 with volume spike and above weekly EMA34
-            if price > r1_val and vol_spike and price > weekly_ema_val:
-                signals[i] = 0.25
-                position = 1
-            # Short: price < S1 with volume spike and below weekly EMA34
-            elif price < s1_val and vol_spike and price < weekly_ema_val:
-                signals[i] = -0.25
-                position = -1
+            # Long: price crosses above KAMA with volume spike in trending market
+            if price > kama and is_trending and vol_spike:
+                # Need to confirm crossover - price was below KAMA previously
+                if i > start_idx and close[i-1] <= kama_12h_aligned[i-1]:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: price crosses below KAMA with volume spike in trending market
+            elif price < kama and is_trending and vol_spike:
+                # Need to confirm crossover - price was above KAMA previously
+                if i > start_idx and close[i-1] >= kama_12h_aligned[i-1]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < S1 or below weekly EMA34
-            if price < s1_val or price < weekly_ema_val:
+            # Exit: price crosses back below KAMA
+            if price < kama and close[i-1] >= kama_12h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > R1 or above weekly EMA34
-            if price > r1_val or price > weekly_ema_val:
+            # Exit: price crosses back above KAMA
+            if price > kama and close[i-1] <= kama_12h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Weekly_Pivot_R1S1_Breakout_With_Volume_and_WeeklyTrend"
-timeframe = "1d"
+name = "12h_KAMA_Trend_With_Volume_and_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
