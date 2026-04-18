@@ -1,6 +1,11 @@
-# 4h_VolumeBreakout_ATRFilter_V1
-# Hypothesis: Breakouts with volume surge and ATR-based volatility filter work in both bull and bear markets by capturing momentum bursts. Uses 4h timeframe with 1d trend filter to reduce noise and false signals. Target: 20-30 trades/year for low friction.
 #!/usr/bin/env python3
+"""
+1d_WMABreakout_WeeklyTrend_Filter
+Hypothesis: On daily timeframe, buy when price breaks above Wilder Moving Average (WMA) with weekly uptrend filter,
+sell when price breaks below WMA with weekly downtrend filter. WMA adapts faster than SMA but slower than EMA,
+providing good trend-following in both bull and bear markets. Weekly trend filter prevents counter-trend trades.
+Target: 15-25 trades/year on 1d timeframe with disciplined entry conditions.
+"""
 
 import numpy as np
 import pandas as pd
@@ -16,77 +21,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 20-period highest high and lowest low (Donchian)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
-    
-    # 14-period ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
+    # Wilder Moving Average (WMA) - 34 period
+    # WMA is similar to Wilder's smoothing used in RSI/ATR
+    wma = np.full(n, np.nan)
+    alpha = 1 / 34  # Wilder's smoothing constant
+    for i in range(34, n):
+        if i == 34:
+            wma[i] = np.mean(close[0:35])  # Initialize with simple average
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            wma[i] = alpha * close[i] + (1 - alpha) * wma[i-1]
     
-    # Volume spike: current > 2.5x 20-period average
+    # Weekly trend filter: Weekly WMA 34
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    wma_1w = np.full(len(close_1w), np.nan)
+    alpha_1w = 1 / 34
+    for i in range(34, len(close_1w)):
+        if i == 34:
+            wma_1w[i] = np.mean(close_1w[0:35])
+        else:
+            wma_1w[i] = alpha_1w * close_1w[i] + (1 - alpha_1w) * wma_1w[i-1]
+    wma_1w_aligned = align_htf_to_ltf(prices, df_1w, wma_1w)
+    
+    # Volume confirmation: current volume > 1.5 x 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.5)
-    
-    # 1d EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    k = 2 / (50 + 1)
-    for i in range(50, len(close_1d)):
-        if i == 50:
-            ema50_1d[i] = np.mean(close_1d[0:51])
-        else:
-            ema50_1d[i] = close_1d[i] * k + ema50_1d[i-1] * (1 - k)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(wma[i]) or np.isnan(wma_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above 20-period high with volume spike and 1d uptrend
-            if (close[i] > highest_high[i] and vol_spike[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long: price crosses above WMA with weekly uptrend and volume confirmation
+            if (close[i] > wma[i] and close[i-1] <= wma[i-1] and  # upward cross
+                close[i] > wma_1w_aligned[i] and                  # weekly uptrend
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-period low with volume spike and 1d downtrend
-            elif (close[i] < lowest_low[i] and vol_spike[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: price crosses below WMA with weekly downtrend and volume confirmation
+            elif (close[i] < wma[i] and close[i-1] >= wma[i-1] and  # downward cross
+                  close[i] < wma_1w_aligned[i] and                  # weekly downtrend
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below 20-period low or 1d trend turns down
-            if (close[i] < lowest_low[i] or close[i] < ema50_1d_aligned[i]):
+            # Long exit: price crosses below WMA or weekly trend turns down
+            if (close[i] < wma[i] and close[i-1] >= wma[i-1]) or \
+               (close[i] < wma_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above 20-period high or 1d trend turns up
-            if (close[i] > highest_high[i] or close[i] > ema50_1d_aligned[i]):
+            # Short exit: price crosses above WMA or weekly trend turns up
+            if (close[i] > wma[i] and close[i-1] <= wma[i-1]) or \
+               (close[i] > wma_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolumeBreakout_ATRFilter_V1"
-timeframe = "4h"
+name = "1d_WMABreakout_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
