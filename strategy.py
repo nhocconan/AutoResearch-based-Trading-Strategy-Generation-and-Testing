@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_WaveTrend_Oscillator_Reversal
-Hypothesis: WaveTrend oscillator identifies overbought/oversold conditions on daily timeframe.
-Uses WTL1/WTL2 crossovers for entries with weekly trend filter (EMA34) and volume confirmation.
-Designed for low-frequency signals (target: 10-25 trades/year) to minimize fee drag in both bull and bear markets.
+12h_Donchian_Breakout_20plus_Volume_Trend_1dEMA34
+Hypothesis: On 12h timeframe, break above/below 20-period Donchian channels with volume spike (>1.5x 20-period average) 
+and 1d EMA34 trend filter captures sustained directional moves in both bull/bear markets. 
+Daily EMA34 filter ensures alignment with higher timeframe trend, reducing whipsaw. 
+Target: 15-30 trades/year to minimize fee drag while capturing strong trends with proper risk control.
 """
 
 import numpy as np
@@ -20,102 +21,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter: EMA34
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
-    # WaveTrend parameters
-    n1 = 10
-    n2 = 21
+    # Volume spike: >1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Calculate typical price
-    tp = (high + low + close) / 3
-    
-    # EMA of typical price
-    ema_tp = pd.Series(tp).ewm(span=n1, adjust=False, min_periods=n1).mean().values
-    
-    # Absolute deviation
-    dev = np.abs(tp - ema_tp)
-    
-    # EMA of deviation
-    ema_dev = pd.Series(dev).ewm(span=n1, adjust=False, min_periods=n1).mean().values
-    
-    # Avoid division by zero
-    epsilon = 1e-10
-    ci = (tp - ema_tp) / (0.015 * ema_dev + epsilon)
-    
-    # TCI smoothed
-    tci = pd.Series(ci).ewm(span=n2, adjust=False, min_periods=n2).mean().values
-    wt1 = tci
-    
-    # Signal line (SMA of WT1)
-    wt2 = pd.Series(wt1).rolling(window=4, min_periods=4).mean().values
-    
-    # Volume confirmation: >1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma)
+    # 1d EMA34 for trend filter (updated once per day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        ema_1d = np.full(len(df_1d), np.nan)
+    else:
+        close_1d = pd.Series(df_1d['close'].values)
+        ema_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 34)  # Warmup for indicators
+    start_idx = max(34, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(wt1[i]) or 
-            np.isnan(wt2[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(volume_confirmed[i])):
+        if (np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or
+            np.isnan(ema_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        wt1_val = wt1[i]
-        wt2_val = wt2[i]
-        weekly_trend = ema_34_1w_aligned[i]
-        vol_conf = volume_confirmed[i]
         price = close[i]
+        upper = upper_channel[i]
+        lower = lower_channel[i]
+        ema1d = ema_1d_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: WT1 crosses above WT2 from oversold (< -60) with weekly uptrend and volume
-            if (wt1_val > wt2_val and 
-                wt1[i-1] <= wt2[i-1] and 
-                wt1_val < -60 and 
-                price > weekly_trend and 
-                vol_conf):
+            # Long: price breaks above upper channel with volume spike and uptrend (above 1d EMA34)
+            if price > upper and vol_spike and price > ema1d:
                 signals[i] = 0.25
                 position = 1
-            # Short: WT1 crosses below WT2 from overbought (> 60) with weekly downtrend and volume
-            elif (wt1_val < wt2_val and 
-                  wt1[i-1] >= wt2[i-1] and 
-                  wt1_val > 60 and 
-                  price < weekly_trend and 
-                  vol_conf):
+            # Short: price breaks below lower channel with volume spike and downtrend (below 1d EMA34)
+            elif price < lower and vol_spike and price < ema1d:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: WT1 crosses below WT2 OR weekly trend turns down
-            if wt1_val < wt2_val and wt1[i-1] >= wt2[i-1]:
+            # Exit: price closes below 1d EMA34 OR touches opposite channel
+            if price < ema1d:
                 signals[i] = 0.0
                 position = 0
-            elif price < weekly_trend:
+            elif price < lower:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: WT1 crosses above WT2 OR weekly trend turns up
-            if wt1_val > wt2_val and wt1[i-1] <= wt2[i-1]:
+            # Exit: price closes above 1d EMA34 OR touches opposite channel
+            if price > ema1d:
                 signals[i] = 0.0
                 position = 0
-            elif price > weekly_trend:
+            elif price > upper:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WaveTrend_Oscillator_Reversal"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_20plus_Volume_Trend_1dEMA34"
+timeframe = "12h"
 leverage = 1.0
