@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla Pivot + Volume Spike + Weekly ADX Trend Filter
-# Camarilla pivot levels provide high-probability reversal zones (H3/L3).
-# Volume spike confirms breakout/breakdown conviction.
-# Weekly ADX ensures we only trade in strong trends, avoiding whipsaws.
-# Designed for low trade frequency (10-25/year) to minimize fee drag in 1d timeframe.
-# Works in bull markets (long at L3 breakout with volume + rising ADX) and bear markets 
-# (short at H3 breakdown with volume + rising ADX).
-name = "1d_Camarilla_H3L3_Volume_Spike_WeeklyADX"
-timeframe = "1d"
+# Hypothesis: 6h Donchian(20) breakout with daily ADX filter and volume confirmation.
+# Donchian breakouts capture momentum in trending markets. Daily ADX ensures we only
+# trade when the daily trend is strong (ADX > 25), avoiding whipsaws in ranging markets.
+# Volume confirmation adds conviction to breakouts. Designed for low trade frequency
+# (15-35/year) to minimize fee drag in 6h timeframe. Works in bull markets (breakout
+# above upper band with rising ADX) and bear markets (breakdown below lower band with
+# rising ADX).
+name = "6h_Donchian20_DailyADX_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,55 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation (ONCE before loop)
+    # Get daily data for Donchian and ADX (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    # Get weekly data for ADX filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels using previous day's OHLC
-    # Pivot point (PP) = (High + Low + Close) / 3
-    pp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Range = High - Low
-    rng = df_1d['high'] - df_1d['low']
+    # Calculate Donchian channels (20-period high/low) using previous day's data
+    high_20 = df_1d['high'].rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = df_1d['low'].rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Resistance levels
-    r1 = pp + (rng * 1.0833)  # H3 equivalent
-    r2 = pp + (rng * 1.1666)  # H4
-    r3 = pp + (rng * 1.2500)  # H5
-    r4 = pp + (rng * 1.3333)  # H6
-    
-    # Support levels
-    s1 = pp - (rng * 1.0833)  # L3 equivalent
-    s2 = pp - (rng * 1.1666)  # L4
-    s3 = pp - (rng * 1.2500)  # L5
-    s4 = pp - (rng * 1.3333)  # L6
-    
-    # Focus on H3 (r1) and L3 (s1) as primary reversal zones
-    h3 = r1.values
-    l3 = s1.values
-    
-    # Shift by 1 to use previous day's levels (no look-ahead)
-    h3 = np.roll(h3, 1)
-    l3 = np.roll(l3, 1)
-    h3[0] = np.nan
-    l3[0] = np.nan
-    
-    # Calculate weekly ADX for trend strength
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    # Calculate ADX components
+    high_d = df_1d['high'].values
+    low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
     
     # True Range
-    tr1 = high_w[1:] - low_w[1:]
-    tr2 = np.abs(high_w[1:] - close_w[:-1])
-    tr3 = np.abs(low_w[1:] - close_w[:-1])
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    dm_plus = np.where((high_w[1:] - high_w[:-1]) > (low_w[:-1] - low_w[1:]), 
-                       np.maximum(high_w[1:] - high_w[:-1], 0), 0)
-    dm_minus = np.where((low_w[:-1] - low_w[1:]) > (high_w[1:] - high_w[:-1]), 
-                        np.maximum(low_w[:-1] - low_w[1:], 0), 0)
+    dm_plus = np.where((high_d[1:] - high_d[:-1]) > (low_d[:-1] - low_d[1:]), 
+                       np.maximum(high_d[1:] - high_d[:-1], 0), 0)
+    dm_minus = np.where((low_d[:-1] - low_d[1:]) > (high_d[1:] - high_d[:-1]), 
+                        np.maximum(low_d[:-1] - low_d[1:], 0), 0)
     dm_plus = np.concatenate([[np.nan], dm_plus])
     dm_minus = np.concatenate([[np.nan], dm_minus])
     
@@ -80,9 +54,7 @@ def generate_signals(prices):
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) >= period:
-            # First value is simple average
             result[period-1] = np.nansum(data[:period]) / period
-            # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
             for i in range(period, len(data)):
                 if not np.isnan(result[i-1]) and not np.isnan(data[i]):
                     result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
@@ -101,66 +73,62 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, atr_period)  # ADX is smoothed DX
+    adx = wilders_smoothing(dx, atr_period)
     
-    # Align weekly ADX to daily timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align indicators to 6h timeframe
+    upper_band = align_htf_to_ltf(prices, df_1d, high_20)
+    lower_band = align_htf_to_ltf(prices, df_1d, low_20)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 20-period average volume for spike detection
+    # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volume spike: current volume > 1.5 * 20-period average
-    vol_spike = volume > (vol_ma_20 * 1.5)
+    # Session filter: 08-20 UTC
+    hour_index = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike confirmation
-        if not vol_spike[i]:
-            # No volume spike, maintain current position or flat
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+        hour = hour_index[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            signals[i] = 0.0
             continue
         
-        # Strong trend filter: ADX > 25
-        strong_trend = adx_aligned[i] > 25
+        # Volume confirmation: current volume above average
+        vol_confirm = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # Long: Close breaks above H3 with volume spike and strong trend
-            if close[i] > h3[i] and strong_trend:
+            # Long: breakout above upper band AND strong trend (ADX > 25) AND volume
+            if vol_confirm and close[i] > upper_band[i] and adx_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below L3 with volume spike and strong trend
-            elif close[i] < l3[i] and strong_trend:
+            # Short: breakdown below lower band AND strong trend (ADX > 25) AND volume
+            elif vol_confirm and close[i] < lower_band[i] and adx_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: Close breaks below L3 (reversal signal)
-            if close[i] < l3[i]:
+            # Long exit: price falls below lower band (reversal signal)
+            if close[i] < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close breaks above H3 (reversal signal)
-            if close[i] > h3[i]:
+            # Short exit: price rises above upper band (reversal signal)
+            if close[i] > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
