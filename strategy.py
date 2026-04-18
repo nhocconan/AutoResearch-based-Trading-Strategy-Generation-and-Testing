@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h mean reversion at daily pivot S1/R1 with volume confirmation and ATR volatility filter.
-# Go long when price touches or breaks below S1 with volume > 1.5x 20-period average and ATR > 0.
-# Go short when price touches or breaks above R1 with same conditions.
-# Exit when price crosses back to the daily pivot point.
-# Uses daily pivot levels for mean reversion zones, volume surge for conviction, ATR for volatility filter.
-# Designed for ~15-30 trades/year per symbol, works in both trending and ranging markets.
-name = "6h_Pivot_S1R1_MeanReversion_Volume_ATR"
-timeframe = "6h"
+# Hypothesis: 4h Williams %R with 12h EMA trend filter and volume confirmation.
+# Long when Williams %R crosses above -50, price above 12h EMA(20), and volume > 1.5x 20-period average.
+# Short when Williams %R crosses below -50, price below 12h EMA(20), and volume > 1.5x 20-period average.
+# Exit when Williams %R crosses back below -50 (long) or above -50 (short).
+# Williams %R identifies overbought/oversold conditions; EMA filter ensures trend alignment.
+# Volume surge adds conviction. Designed for ~20-30 trades/year per symbol.
+name = "4h_WilliamsR_12hEMA20_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +23,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily pivot points: P = (H + L + C)/3, S1 = 2P - H, R1 = 2P - L
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # EMA(20) on 12h close
+    close_12h = df_12h['close'].values
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    s1_1d = 2 * pivot_1d - high_1d
-    r1_1d = 2 * pivot_1d - low_1d
-    
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    
-    # ATR(14) on 6h for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))  # |H - Cprev|
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))   # |L - Cprev|
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Williams %R (14-period) on 4h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,39 +50,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(williams_r[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        pivot_val = pivot_aligned[i]
-        s1_val = s1_aligned[i]
-        r1_val = r1_aligned[i]
-        atr_val = atr[i]
+        ema_val = ema_20_12h_aligned[i]
+        wr = williams_r[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price at or below S1 with volume surge and volatility
-            if close_val <= s1_val and vol_filter and atr_val > 0:
+            # Long: Williams %R crosses above -50, price above EMA, volume surge
+            if i > start_idx and williams_r[i-1] <= -50 and wr > -50 and close_val > ema_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price at or above R1 with volume surge and volatility
-            elif close_val >= r1_val and vol_filter and atr_val > 0:
+            # Short: Williams %R crosses below -50, price below EMA, volume surge
+            elif i > start_idx and williams_r[i-1] >= -50 and wr < -50 and close_val < ema_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back to pivot (mean reversion complete)
-            if close_val >= pivot_val:
+            # Long exit: Williams %R crosses back below -50
+            if williams_r[i-1] > -50 and wr <= -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back to pivot (mean reversion complete)
-            if close_val <= pivot_val:
+            # Short exit: Williams %R crosses back above -50
+            if williams_r[i-1] < -50 and wr >= -50:
                 signals[i] = 0.0
                 position = 0
             else:
