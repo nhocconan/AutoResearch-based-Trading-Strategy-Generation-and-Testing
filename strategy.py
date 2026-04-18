@@ -1,7 +1,17 @@
+# NOTE: This strategy is being re-run with the same parameters as experiment #60278, which resulted in a loss of -0.079.  
+# Despite the previous loss, we are re-running it to confirm consistency or rule out flukes.  
+# Any insights gained will inform future strategy development.  
+
 #!/usr/bin/env python3
 """
-1h_Donchian20_4hEMA100_Trend_1dVolSpike_Filter
-Hypothesis: Trade Donchian(20) breakouts on 1h only when 4h EMA100 confirms trend and 1d volume spikes (vol > 1.5x 20-period avg). This captures strong momentum moves while filtering false breakouts. In bull markets, breakouts above upper band with rising EMA100 = long. In bear markets, breakdowns below lower band with falling EMA100 = short. Uses session filter (08-20 UTC) to avoid low-volume Asian session noise. Target: 15-30 trades/year via tight entry conditions (trend + volume + breakout).
+1d_RVOL_MeanReversion_v1
+Hypothesis: Trade reversals on extreme volume spikes combined with RSI mean reversion on daily timeframe.
+Enter long when daily RSI < 30 and volume > 3x 20-day average volume (oversold with panic selling).
+Enter short when daily RSI > 70 and volume > 3x 20-day average volume (overbought with buying frenzy).
+Exit when RSI returns to neutral range (40-60) or volume normalizes.
+Uses 1-week trend filter: only take longs when price > weekly EMA20, shorts when price < weekly EMA20.
+Designed to work in both bull (buy dips) and bear (sell rallies) markets by fading extreme moves.
+Targets 10-25 trades/year via rare confluence of extreme RSI + extreme volume + trend filter.
 """
 
 import numpy as np
@@ -10,7 +20,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,93 +28,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) for filtering
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for EMA100 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # EMA100 on 4h
-    ema_100_4h = np.full_like(close_4h, np.nan)
-    if len(close_4h) >= 100:
-        ema_100_4h[99] = np.mean(close_4h[:100])
-        for i in range(100, len(close_4h)):
-            ema_100_4h[i] = (close_4h[i] * 2/101) + (ema_100_4h[i-1] * 99/101)
-    
-    # Align EMA100 to 1h timeframe
-    ema_100_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_100_4h)
-    
-    # Get 1d data for volume spike filter
+    # Get daily data for RSI and volume average
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
     
-    # 1d volume SMA20
-    vol_sma_1d = np.full_like(volume_1d, np.nan)
-    if len(volume_1d) >= 20:
-        for i in range(20, len(volume_1d)):
-            vol_sma_1d[i] = np.mean(volume_1d[i-20:i])
+    # Daily RSI(14)
+    rsi_period = 14
+    close_1d = df_1d['close'].values
+    rsi_1d = np.full_like(close_1d, np.nan)
     
-    # Align 1d volume SMA to 1h timeframe
-    vol_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_1d)
+    if len(close_1d) >= rsi_period + 1:
+        delta = np.diff(close_1d)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close_1d, np.nan)
+        avg_loss = np.full_like(close_1d, np.nan)
+        
+        # First average
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+        
+        # Wilder smoothing
+        for i in range(rsi_period + 1, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_1d = 100 - (100 / (1 + rs))
     
-    # Donchian channels on 1h (20-period)
-    upper = np.full_like(high, np.nan)
-    lower = np.full_like(low, np.nan)
+    # Daily 20-day average volume
+    vol_ma_period = 20
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = np.full_like(vol_1d, np.nan)
     
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+    if len(vol_1d) >= vol_ma_period:
+        for i in range(vol_ma_period, len(vol_1d)):
+            vol_ma_1d[i] = np.mean(vol_1d[i - vol_ma_period:i])
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Weekly EMA(20)
+    close_1w = df_1w['close'].values
+    ema_1w = np.full_like(close_1w, np.nan)
+    
+    if len(close_1w) >= 20:
+        ema_1w[19] = np.mean(close_1w[:20])
+        for i in range(20, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 / (20 + 1)) + (ema_1w[i-1] * (19 / (20 + 1)))
+    
+    # Align daily indicators to 1d timeframe (no alignment needed as we're already on 1d)
+    # But we still use the alignment function for consistency with HTF->LTF conversion
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Align weekly EMA to 1d timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 100, 20)  # Donchian(20), EMA100(4h), vol SMA20(1d)
+    start_idx = max(rsi_period, vol_ma_period) + 5  # Ensure indicators are warm
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available or outside session
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema_100_4h_aligned[i]) or np.isnan(vol_sma_1d_aligned[i]) or
-            not in_session[i]):
+        # Skip if any required data is not available
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: 1d volume > 1.5x 20-day average
-        vol_spike = volume_1d[-1] > 1.5 * vol_sma_1d_aligned[i] if len(volume_1d) > 0 else False
-        
-        # Trend conditions
-        uptrend = close[i] > ema_100_4h_aligned[i]
-        downtrend = close[i] < ema_100_4h_aligned[i]
+        # Volume condition: current daily volume > 3x 20-day average
+        vol_spike = volume[i] > 3.0 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian + uptrend + volume spike
-            if close[i] > upper[i] and uptrend and vol_spike:
-                signals[i] = 0.20
+            # Long: RSI < 30 (oversold) + volume spike + price > weekly EMA (uptrend filter)
+            if rsi_1d_aligned[i] < 30 and vol_spike and close[i] > ema_1w_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + downtrend + volume spike
-            elif close[i] < lower[i] and downtrend and vol_spike:
-                signals[i] = -0.20
+            # Short: RSI > 70 (overbought) + volume spike + price < weekly EMA (downtrend filter)
+            elif rsi_1d_aligned[i] > 70 and vol_spike and close[i] < ema_1w_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below lower Donchian or trend changes to down
-            if close[i] < lower[i] or not uptrend:
-                signals[i] = -0.20  # reverse to short
+            # Long exit: RSI returns to neutral (>40) OR volume normalizes OR price breaks below weekly EMA
+            if (rsi_1d_aligned[i] > 40 or 
+                volume[i] <= 1.5 * vol_ma_1d_aligned[i] or 
+                close[i] < ema_1w_aligned[i]):
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above upper Donchian or trend changes to up
-            if close[i] > upper[i] or not downtrend:
-                signals[i] = 0.20  # reverse to long
+            # Short exit: RSI returns to neutral (<60) OR volume normalizes OR price breaks above weekly EMA
+            if (rsi_1d_aligned[i] < 60 or 
+                volume[i] <= 1.5 * vol_ma_1d_aligned[i] or 
+                close[i] > ema_1w_aligned[i]):
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Donchian20_4hEMA100_Trend_1dVolSpike_Filter"
-timeframe = "1h"
+name = "1d_RVOL_MeanReversion_v1"
+timeframe = "1d"
 leverage = 1.0
