@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_R4_S4_Breakout_VolumeFilter"
+name = "6h_WeeklyPivot_R4_S4_Breakout_VolumeFilter_v2"
 timeframe = "6h"
 leverage = 1.0
 
@@ -27,12 +27,14 @@ def generate_signals(prices):
     
     pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3
     range_w = prev_high_w - prev_low_w
-    R4_w = pivot_w + (range_w * 1.1 / 2) * 2  # R4 = pivot + 1.1*range
-    S4_w = pivot_w - (range_w * 1.1 / 2) * 2  # S4 = pivot - 1.1*range
+    # Correct R4/S4 calculation: R4 = pivot + 1.1 * range, S4 = pivot - 1.1 * range
+    R4_w = pivot_w + (range_w * 1.1)
+    S4_w = pivot_w - (range_w * 1.1)
     
     # Align weekly R4/S4 to 6h (wait for weekly close)
     R4_w_aligned = align_htf_to_ltf(prices, df_1w, R4_w)
     S4_w_aligned = align_htf_to_ltf(prices, df_1w, S4_w)
+    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
     
     # Volume filter: current volume > 1.8 * 24-period average (4 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -46,13 +48,14 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(R4_w_aligned[i]) or np.isnan(S4_w_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+            np.isnan(pivot_w_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         R4_val = R4_w_aligned[i]
         S4_val = S4_w_aligned[i]
+        pivot_val = pivot_w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
@@ -67,7 +70,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Long exit: price falls back below pivot
-            if close_val < pivot_w[i]:
+            if close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -75,7 +78,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price rises back above pivot
-            if close_val > pivot_w[i]:
+            if close_val > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
