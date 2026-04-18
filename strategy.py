@@ -37,9 +37,9 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d volume spike (volume > 1.5x 20-period average)
+    # Calculate 1d volume spike (volume > 2.0x 20-period average)
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (1.5 * vol_ma_1d)
+    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
     volume_spike_12h = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
     signals = np.zeros(n)
@@ -55,8 +55,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above its 30-period average (avoid low volatility chop)
-        atr_ma_1d = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
+        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
+        atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
         atr_ma_12h = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
         vol_filter = atr_1d[i] > atr_ma_1d[i] if not np.isnan(atr_ma_1d[i]) else False
         
