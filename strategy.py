@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_MACD_Convergence_With_1D_Volume_Filter
-Hypothesis: On 4h timeframe, use MACD convergence (MACD line approaching signal line) combined with volume expansion to identify trend continuation. Enter long when MACD line crosses above signal line and volume > 1.5x average, short when MACD line crosses below signal line and volume > 1.5x average. Use 1D EMA(50) filter to avoid counter-trend trades in bear markets. Targets 20-30 trades/year by requiring MACD cross + volume filter + EMA filter, with position size 0.25.
+1d_1w_Kelly_Fractional_Kelly_Strategy
+Hypothesis: Use weekly price action to determine market regime (bull/bear/range) and apply fractional Kelly criterion for position sizing on daily timeframe. In bull regime (price > weekly SMA50), go long with Kelly size based on daily RSI mean reversion. In bear regime (price < weekly SMA50), go short with Kelly size. In range (price near weekly SMA50), stay flat. This adapts position size to edge strength, reducing exposure in uncertain markets and maximizing growth in trending ones. Targets 10-20 trades/year with proper risk control.
 """
 
 import numpy as np
@@ -10,116 +10,121 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate MACD components
-    fast = 12
-    slow = 26
-    signal_period = 9
+    # Get weekly data for regime determination
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
+        return np.zeros(n)
     
-    # EMA calculations
-    ema_fast = np.full(n, np.nan)
-    ema_slow = np.full(n, np.nan)
+    weekly_close = df_weekly['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     
-    # Calculate EMA using Wilder's smoothing (alpha = 2/(period+1))
-    alpha_fast = 2.0 / (fast + 1)
-    alpha_slow = 2.0 / (slow + 1)
+    # Calculate weekly SMA50 for regime
+    weekly_sma50 = np.full_like(weekly_close, np.nan)
+    for i in range(50, len(weekly_close)):
+        weekly_sma50[i] = np.mean(weekly_close[i-50:i])
     
-    # Initialize EMAs
-    ema_fast[fast-1] = np.mean(close[0:fast])
-    ema_slow[slow-1] = np.mean(close[0:slow])
+    # Align weekly SMA50 to daily
+    weekly_sma50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_sma50)
     
-    for i in range(fast, n):
-        ema_fast[i] = alpha_fast * close[i] + (1 - alpha_fast) * ema_fast[i-1]
+    # Calculate daily RSI(14) for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    for i in range(slow, n):
-        ema_slow[i] = alpha_slow * close[i] + (1 - alpha_slow) * ema_slow[i-1]
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
     
-    macd_line = ema_fast - ema_slow
+    for i in range(14, len(close)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:14])
+            avg_loss[i] = np.mean(loss[0:14])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Signal line EMA of MACD
-    signal_line = np.full(n, np.nan)
-    alpha_signal = 2.0 / (signal_period + 1)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Find first valid MACD value for signal line initialization
-    first_valid = np.where(~np.isnan(macd_line))[0]
-    if len(first_valid) > 0:
-        idx = first_valid[0]
-        signal_line[idx] = macd_line[idx]
-        for i in range(idx + 1, n):
-            signal_line[i] = alpha_signal * macd_line[i] + (1 - alpha_signal) * signal_line[i-1]
+    # Calculate Kelly fraction components
+    # Win probability based on RSI extremes (oversold/overbought)
+    # In bull regime: long when RSI < 30 (oversold)
+    # In bear regime: short when RSI > 70 (overbought)
+    # Win rate assumed 60% for extreme RSI readings
+    win_prob = 0.60
+    # Average win/loss ratio based on ATR
+    # Calculate daily ATR(14)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # MACD histogram
-    macd_hist = macd_line - signal_line
+    atr = np.full_like(close, np.nan)
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr[i] = np.mean(tr[0:14])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Volume moving average
-    vol_ma = np.full(n, np.nan)
-    vol_period = 20
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    # Use ATR as proxy for average win/loss
+    # In mean reversion, target 1x ATR profit, 0.5x ATR loss
+    avg_win = atr
+    avg_loss = 0.5 * atr
+    win_loss_ratio = np.where(avg_loss != 0, avg_win / avg_loss, 2.0)
     
-    # Get 1D data for EMA filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate EMA(50) on 1D
-    ema50_1d = np.full(len(close_1d), np.nan)
-    alpha_1d = 2.0 / (50 + 1)
-    ema50_1d[49] = np.mean(close_1d[0:50])
-    for i in range(50, len(close_1d)):
-        ema50_1d[i] = alpha_1d * close_1d[i] + (1 - alpha_1d) * ema50_1d[i-1]
-    
-    # Align 1D EMA to 4h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Kelly fraction: f = (bp - q) / b where b = win/loss ratio, p = win prob, q = loss prob
+    kelly_fraction = (win_loss_ratio * win_prob - (1 - win_prob)) / win_loss_ratio
+    kelly_fraction = np.clip(kelly_fraction, 0, 0.5)  # Cap at 50%, use half-Kelly for safety
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, slow, vol_period)  # need all indicators
+    start_idx = max(50, 14)  # need weekly SMA50 and daily RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(weekly_sma50_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        if position == 0:
-            # Long entry: MACD line crosses above signal line AND volume expansion AND price above 1D EMA50
-            if (macd_line[i-1] <= signal_line[i-1] and macd_line[i] > signal_line[i] and 
-                volume[i] > 1.5 * vol_ma[i] and close[i] > ema50_1d_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short entry: MACD line crosses below signal line AND volume expansion AND price below 1D EMA50
-            elif (macd_line[i-1] >= signal_line[i-1] and macd_line[i] < signal_line[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and close[i] < ema50_1d_aligned[i]):
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
+        price = close[i]
+        weekly_sma = weekly_sma50_aligned[i]
         
-        elif position == 1:
-            # Long exit: MACD line crosses below signal line
-            if macd_line[i] < signal_line[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+        # Determine regime: bull if price > weekly SMA50, bear if price < weekly SMA50
+        # Add hysteresis to prevent whipsaw: 1% buffer
+        bull_threshold = weekly_sma * 1.01
+        bear_threshold = weekly_sma * 0.99
         
-        elif position == -1:
-            # Short exit: MACD line crosses above signal line
-            if macd_line[i] > signal_line[i]:
-                signals[i] = 0.0
-                position = 0
+        if price > bull_threshold:
+            # Bull regime: look for long opportunities on RSI oversold
+            if rsi[i] < 30:
+                kelly = kelly_fraction[i]
+                signals[i] = min(kelly, 0.30)  # Cap position size at 30%
             else:
-                signals[i] = -0.25
+                signals[i] = 0.0
+        elif price < bear_threshold:
+            # Bear regime: look for short opportunities on RSI overbought
+            if rsi[i] > 70:
+                kelly = kelly_fraction[i]
+                signals[i] = -min(kelly, 0.30)  # Cap position size at 30%
+            else:
+                signals[i] = 0.0
+        else:
+            # Range regime: stay flat
+            signals[i] = 0.0
     
     return signals
 
-name = "4h_MACD_Convergence_With_1D_Volume_Filter"
-timeframe = "4h"
+name = "1d_1w_Kelly_Fractional_Kelly_Strategy"
+timeframe = "1d"
 leverage = 1.0
