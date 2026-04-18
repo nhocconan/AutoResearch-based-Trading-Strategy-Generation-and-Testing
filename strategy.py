@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Breakout_1dTrendFilter_V1
-Hypothesis: Trade breakouts from weekly pivot levels (R1/S1) in the direction of the 1d trend (EMA50) with volume confirmation.
-Weekly pivots provide strong support/resistance; breakouts indicate momentum. Filtering by 1d EMA50 ensures trades align with the higher-timeframe trend, improving win rate in both bull and bear markets. Volume > 1.5x 20-period average confirms breakout strength. Targets 20-40 trades/year by requiring confluence of weekly pivot breakout, 1d trend, and volume.
+12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
+Hypothesis: Trade breakouts of Camarilla R1/S1 levels derived from daily pivot points with volume confirmation and ATR-based trend filter. In both bull and bear markets, price tends to respect these institutional levels. Enter long when price breaks above R1 with volume > 1.5x average and ATR(14) rising (indicating momentum). Enter short when price breaks below S1 with volume confirmation and rising ATR. Uses tight conditions to limit trades to 12-37/year. ATR filter ensures we only trade in momentum regimes, reducing whipsaw in sideways markets.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_hlf
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,40 +18,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot points (using previous week's OHLC)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    
-    # Align weekly pivot levels to 6h
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    
-    # Get daily data for trend filter (EMA50)
+    # Get daily data for Camarilla levels and ATR
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA50 on daily
-    ema_50 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50[i] = (close_1d[i] * 2 / (50 + 1)) + ema_50[i-1] * (1 - 2 / (50 + 1))
+    # Camarilla levels: R1, S1
+    R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Align EMA50 to 6h
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Calculate ATR(14) on daily
+    atr_period = 14
+    tr = np.maximum(high_1d - low_1d, np.maximum(abs(high_1d - np.roll(close_1d, 1)), abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]  # first TR
+    atr = np.full_like(tr, np.nan)
+    if len(tr) >= atr_period:
+        atr[atr_period-1] = np.mean(tr[:atr_period])
+        for i in range(atr_period, len(tr)):
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Align Camarilla levels and ATR to 12h timeframe
+    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # Volume confirmation: volume > 1.5x 24-period average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
+    vol_period = 24
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
@@ -60,39 +55,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, vol_period)  # EMA50 needs 50, vol MA needs 20
+    start_idx = max(vol_period, atr_period)  # ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or 
+            np.isnan(atr_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
+        # ATR rising condition: current ATR > previous ATR
+        atr_rising = i > 0 and not np.isnan(atr_12h[i-1]) and atr_12h[i] > atr_12h[i-1]
+        
         if position == 0:
-            # Long: price breaks above R1, above 1d EMA50, with volume
-            if close[i] > r1_aligned[i] and close[i] > ema_50_aligned[i] and vol_confirm:
+            # Long: price breaks above R1 + volume + ATR rising
+            if close[i] > R1_12h[i] and vol_confirm and atr_rising:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below 1d EMA50, with volume
-            elif close[i] < s1_aligned[i] and close[i] < ema_50_aligned[i] and vol_confirm:
+            # Short: price breaks below S1 + volume + ATR rising
+            elif close[i] < S1_12h[i] and vol_confirm and atr_rising:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below S1 or below 1d EMA50
-            if close[i] < s1_aligned[i] or close[i] < ema_50_aligned[i]:
+            # Long exit: price breaks below S1 or ATR stops rising
+            if close[i] < S1_12h[i] or (i > 0 and not np.isnan(atr_12h[i-1]) and atr_12h[i] <= atr_12h[i-1]):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 or above 1d EMA50
-            if close[i] > r1_aligned[i] or close[i] > ema_50_aligned[i]:
+            # Short exit: price breaks above R1 or ATR stops rising
+            if close[i] > R1_12h[i] or (i > 0 and not np.isnan(atr_12h[i-1]) and atr_12h[i] <= atr_12h[i-1]):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -100,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Breakout_1dTrendFilter_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "12h"
 leverage = 1.0
