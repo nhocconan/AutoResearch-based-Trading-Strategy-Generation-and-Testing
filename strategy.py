@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-"""
-12h_Ichimoku_Kijun_Breakout_With_Volume
-Hypothesis: Ichimoku Kijun-sen (base line) breakouts on 12h with volume confirmation.
-Long when price crosses above Kijun with volume spike; short when crosses below with volume spike.
-Ichimoku works in both bull/bear markets by capturing momentum shifts. Volume filter reduces false breakouts.
-Designed for low trade frequency (12-37/year) on 12h timeframe to avoid fee drag.
-"""
+# 1d_RSI_Extreme_With_WeeklyTrend
+# Hypothesis: Daily RSI extremes (overbought >70, oversold <30) with weekly trend filter (price > weekly EMA50 for long, < for short).
+# Works in bull markets by buying oversold dips in uptrend, in bear markets by selling overbought rallies in downtrend.
+# Low trade frequency due to strict RSI thresholds and trend alignment.
+# Includes volatility filter (ATR) to avoid chop and ensure momentum behind moves.
 
 import numpy as np
 import pandas as pd
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,77 +18,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku components (26-period)
-    # Tenkan-sen (conversion line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Kijun-sen (base line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # Weekly EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Senkou Span A (leading span A): (Tenkan + Kijun)/2 shifted 26 periods
-    # Not needed for breakout logic
+    # Daily RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Senkou Span B (leading span B): (52-period high + 52-period low)/2 shifted 52 periods
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
-    
-    # Chikou Span (lagging span): close shifted -22 periods
-    # Not needed for breakout logic
-    
-    # Volume spike: >1.8x 20-period average (moderate threshold)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Daily ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(26, 20)  # Warmup for Ichimoku and volume
+    start_idx = max(50, 14)  # Wait for weekly EMA and RSI warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan[i]) or 
-            np.isnan(kijun[i]) or
-            np.isnan(senkou_b[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kijun_val = kijun[i]
-        tenkan_val = tenkan[i]
-        senkou_b_val = senkou_b[i]
-        vol_spike = volume_spike[i]
+        ema50w = ema_50_1w_aligned[i]
+        rsi_val = rsi[i]
+        atr_val = atr[i]
+        
+        # Volatility filter: require ATR > 0.5% of price to avoid choppy markets
+        vol_filter = atr_val > (0.005 * price)
         
         if position == 0:
-            # Long: price crosses above Kijun with volume spike and bullish cloud (price > Senkou B)
-            if price > kijun_val and tenkan_val > kijun_val and price > senkou_b_val and vol_spike:
+            # Long: RSI oversold (<30) in weekly uptrend (price > weekly EMA50) with volatility
+            if rsi_val < 30 and price > ema50w and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below Kijun with volume spike and bearish cloud (price < Senkou B)
-            elif price < kijun_val and tenkan_val < kijun_val and price < senkou_b_val and vol_spike:
+            # Short: RSI overbought (>70) in weekly downtrend (price < weekly EMA50) with volatility
+            elif rsi_val > 70 and price < ema50w and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses back below Kijun OR tenkan-kijun cross turns bearish
-            if price < kijun_val or tenkan_val < kijun_val:
+            # Exit: RSI returns to neutral (>50) or trend turns down
+            if rsi_val > 50 or price < ema50w:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses back above Kijun OR tenkan-kijun cross turns bullish
-            if price > kijun_val or tenkan_val > kijun_val:
+            # Exit: RSI returns to neutral (<50) or trend turns up
+            if rsi_val < 50 or price > ema50w:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Ichimoku_Kijun_Breakout_With_Volume"
-timeframe = "12h"
+name = "1d_RSI_Extreme_With_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
