@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -30,62 +30,57 @@ def generate_signals(prices):
     R1 = pivot + (range_hl * 1.1 / 12)
     S1 = pivot - (range_hl * 1.1 / 12)
     
-    # Align R1/S1 to 12h (wait for daily close)
+    # Align R1/S1 to 4h (wait for daily close)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Load daily data for EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Session filter: 08-20 UTC (only trade during active hours)
+    # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 30  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         R1_val = R1_aligned[i]
         S1_val = S1_aligned[i]
-        ema_1d_val = ema_34_1d_aligned[i]
         vol_filter = volume_filter[i]
         sess_filter = session_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume, session, and price above daily EMA34 (bullish bias)
-            if close_val > R1_val and vol_filter and sess_filter and (close_val > ema_1d_val):
+            # Long: break above R1 with volume and session
+            if close_val > R1_val and vol_filter and sess_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume, session, and price below daily EMA34 (bearish bias)
-            elif close_val < S1_val and vol_filter and sess_filter and (close_val < ema_1d_val):
+            # Short: break below S1 with volume and session
+            elif close_val < S1_val and vol_filter and sess_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below S1 or price crosses below daily EMA34
-            if close_val < S1_val or (close_val < ema_1d_val):
+            # Long exit: price falls back below S1
+            if close_val < S1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above R1 or price crosses above daily EMA34
-            if close_val > R1_val or (close_val > ema_1d_val):
+            # Short exit: price rises back above R1
+            if close_val > R1_val:
                 signals[i] = 0.0
                 position = 0
             else:
