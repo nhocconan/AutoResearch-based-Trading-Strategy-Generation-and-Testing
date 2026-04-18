@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_With_Volume_And_Trend_Filter
+4h_Pivot_R1S1_Breakout_Volume_Trend_Filter
 Hypothesis: Price breaks above/below S1/R1 levels with volume confirmation and trend filter.
-Uses daily Camarilla pivot levels (from previous day), volume > 2x 20-period average, and EMA20 trend filter.
+Uses 1d Camarilla pivot levels, volume > 2x 20-period average, and EMA20 trend filter.
 Designed to work in both bull and bear markets by requiring trend alignment.
-Target: 12-37 trades/year to minimize fee drift on 12h timeframe.
+Target: 20-30 trades/year to minimize fee drag while capturing institutional breakout moves.
 """
 
 import numpy as np
@@ -34,11 +34,11 @@ def generate_signals(prices):
     r1 = close_1d + camarilla_range
     s1 = close_1d - camarilla_range
     
-    # Align to 12h timeframe (use previous day's levels for current day)
+    # Align to 4h timeframe (use previous day's levels for current day)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # EMA20 for trend filter on 12h
+    # EMA20 for trend filter on 4h
     ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Volume spike: >2x 20-period average
@@ -92,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_With_Volume_And_Trend_Filter"
-timeframe = "12h"
+name = "4h_Pivot_R1S1_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
