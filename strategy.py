@@ -1,30 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume_Confirmation_v2
-Hypothesis: Use daily Camarilla pivot levels R1/S1 as support/resistance on 12h timeframe. Enter long when price breaks above R1 with volume confirmation, short when price breaks below S1 with volume confirmation. Exit at opposite pivot level (S1 for long, R1 for short) or on reversal. Uses tight entry conditions to limit trades to 12-37/year, reducing fee drag. Designed to work in both bull and bear markets by trading breakouts from key daily levels.
+4h_Camarilla_Pivot_R1S1_With_Volume_And_Trend_Filter_v1
+Hypothesis: Use daily Camarilla pivot levels (R1, S1) for mean-reversion entries on 4h, confirmed by volume spikes and aligned with 1-week EMA trend to work in both bull and bear markets. Camarilla levels provide high-probability reversal zones. Volume confirms institutional interest. Weekly EMA filter ensures trades align with higher timeframe trend, avoiding counter-trend whipsaws. Designed for low trade frequency (<30/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period."""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close
-    c = close
-    h = high
-    l = low
-    r1 = c + (range_val * 1.1 / 12)
-    s1 = c - (range_val * 1.1 / 12)
-    r2 = c + (range_val * 1.1 / 6)
-    s2 = c - (range_val * 1.1 / 6)
-    return r1, s1, r2, s2
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,80 +18,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Calculate 1-day Camarilla pivot levels (R1, S1)
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla levels
-    r1_1d = np.zeros(len(close_1d))
-    s1_1d = np.zeros(len(close_1d))
-    r2_1d = np.zeros(len(close_1d))
-    s2_1d = np.zeros(len(close_1d))
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    for i in range(len(close_1d)):
-        r1, s1, r2, s2 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        r1_1d[i] = r1
-        s1_1d[i] = s1
-        r2_1d[i] = r2
-        s2_1d[i] = s2
+    # Align to 4h timeframe (wait for daily close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Align daily pivots to 12h timeframe (wait for daily close)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # 1-week EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
     
-    # Volume confirmation: >2.0x 24-period average (24*12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation: >2.0x 20-period average (high threshold to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 24  # Need volume MA history
+    start_idx = 50  # Need history for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or 
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        ema_1w_val = ema_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: break above R1 with volume
-            if price > r1 and vol_spike:
+            # Long: Price touches S1 with volume spike and above weekly EMA
+            if price <= s1 and vol_spike and price > ema_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume
-            elif price < s1 and vol_spike:
+            # Short: Price touches R1 with volume spike and below weekly EMA
+            elif price >= r1 and vol_spike and price < ema_1w_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price reaches S1 (opposite level) or reverses below R1
-            if price <= s1 or price < r1:
+            # Exit: Price reaches midpoint (C) or touches R1
+            midpoint = (r1 + s1) / 2
+            if price >= midpoint or price >= r1:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price reaches R1 (opposite level) or reverses above S1
-            if price >= r1 or price > s1:
+            # Exit: Price reaches midpoint (C) or touches S1
+            midpoint = (r1 + s1) / 2
+            if price <= midpoint or price <= s1:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_Volume_Confirmation_v2"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R1S1_With_Volume_And_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
