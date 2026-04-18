@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) and price > 1d EMA(50) and volume > 1.5x 20-period average.
-# Short when Williams %R > -20 (overbought) and price < 1d EMA(50) and volume > 1.5x 20-period average.
-# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts).
-# Williams %R identifies reversal points in ranging markets, while 1d EMA filters for trend direction.
-# Volume surge confirms conviction. Designed for ~20-40 trades/year per symbol.
-name = "6h_WilliamsR_1dEMA50_VolumeFilter"
-timeframe = "6h"
+# Hypothesis: Daily trend following with weekly trend filter and volume confirmation.
+# Long when price > daily EMA(34), weekly EMA(34) confirms uptrend, and volume > 1.5x daily 20-period average.
+# Short when price < daily EMA(34), weekly EMA(34) confirms downtrend, and volume > 1.5x daily 20-period average.
+# Exit when price crosses back below/above daily EMA(34).
+# Designed for ~10-30 trades/year per symbol with low turnover.
+name = "1d_EMA34_WeeklyTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +22,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Weekly EMA(34) for trend direction
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # EMA(50) on 1d close
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily EMA(34) for entry trigger
+    ema_34_daily = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.5 * daily 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
@@ -49,37 +44,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(ema_34_daily[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        wr_val = williams_r[i]
-        ema_val = ema_50_1d_aligned[i]
+        daily_ema_val = ema_34_daily[i]
+        weekly_ema_val = ema_34_1w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: oversold, above 1d EMA, with volume surge
-            if wr_val < -80 and close_val > ema_val and vol_filter:
+            # Long: price above daily EMA, weekly EMA confirms uptrend, volume surge
+            if close_val > daily_ema_val and weekly_ema_val > daily_ema_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought, below 1d EMA, with volume surge
-            elif wr_val > -20 and close_val < ema_val and vol_filter:
+            # Short: price below daily EMA, weekly EMA confirms downtrend, volume surge
+            elif close_val < daily_ema_val and weekly_ema_val < daily_ema_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R crosses back above -50
-            if wr_val > -50:
+            # Long exit: price crosses back below daily EMA
+            if close_val < daily_ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses back below -50
-            if wr_val < -50:
+            # Short exit: price crosses back above daily EMA
+            if close_val > daily_ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
