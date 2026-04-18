@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-4h 12h EMA Trend + Volume Spike + RSI Filter
-Hypothesis: Trend alignment on 12h (EMA34) filters false breakouts, volume spikes confirm institutional interest,
-and RSI avoids overextended entries. This combination reduces whipsaw in both bull and bear markets.
+1h Intraday Trend + Volume + 4h Trend Filter
+Hypothesis: 1h momentum with volume confirmation, filtered by 4h trend, captures intraday moves
+while avoiding counter-trend trades. Volume filters out low-quality moves, 4h trend ensures
+we trade with the higher timeframe momentum. Designed for low trade frequency (15-30/year).
+Works in bull via trend continuation, in bear via counter-trend bounces within 4h trend context.
 """
 
 import numpy as np
@@ -11,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,72 +21,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12h EMA34 for trend filter
-    ema34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # 4h EMA50 for trend filter
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Volume spike detection: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 1.8x 20-period average (avoid too many triggers)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.8)
     
-    # RSI(14) to avoid overextended entries
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 1h price momentum: close > open (bullish candle)
+    bullish_candle = close > prices['open'].values
+    bearish_candle = close < prices['open'].values
+    
+    # Price position relative to 4h EMA: only trade in direction of 4h trend
+    price_above_4h_ema = close > ema50_4h_aligned
+    price_below_4h_ema = close < ema50_4h_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 60  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(rsi[i]):
+        if np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        trend = ema34_12h_aligned[i]
         vol_ok = vol_spike[i]
-        rsi_val = rsi[i]
-        price_above_trend = close[i] > trend
-        price_below_trend = close[i] < trend
+        bullish = bullish_candle[i]
+        bearish = bearish_candle[i]
+        above_ema = price_above_4h_ema[i]
+        below_ema = price_below_4h_ema[i]
         
         if position == 0:
-            # Enter long: volume spike + above trend + RSI not overbought
-            if vol_ok and price_above_trend and rsi_val < 70:
-                signals[i] = 0.25
+            # Enter long: volume spike + bullish candle + price above 4h EMA (uptrend)
+            if vol_ok and bullish and above_ema:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: volume spike + below trend + RSI not oversold
-            elif vol_ok and price_below_trend and rsi_val > 30:
-                signals[i] = -0.25
+            # Enter short: volume spike + bearish candle + price below 4h EMA (downtrend)
+            elif vol_ok and bearish and below_ema:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal or RSI overbought
-            if not price_above_trend or rsi_val >= 70:
+            # Exit long: momentum loss or price crosses below 4h EMA
+            if not bullish or below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: trend reversal or RSI oversold
-            if not price_below_trend or rsi_val <= 30:
+            # Exit short: momentum loss or price crosses above 4h EMA
+            if not bearish or above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_12hEMA_VolumeSpike_RSI"
-timeframe = "4h"
+name = "1h_Intraday_Trend_Volume_4hFilter"
+timeframe = "1h"
 leverage = 1.0
