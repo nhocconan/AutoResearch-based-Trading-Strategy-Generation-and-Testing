@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Overbought_Oversold_With_Trend_Filter
-Hypothesis: Uses RSI(14) for mean reversion entries with EMA(50) trend filter on 4h.
-Enters long when RSI < 30 and price > EMA50 (bullish mean reversion in uptrend).
-Enters short when RSI > 70 and price < EMA50 (bearish mean reversion in downtrend).
-Requires volume > 1.5x 20-period average for confirmation.
-Designed for fewer trades (~20-30/year) with high win rate in both bull and bear markets.
+1d_Weekly_Donchian_Trend_Filter
+Hypothesis: Uses weekly Donchian channel breakouts on daily timeframe with volume confirmation and ADX trend filter.
+Enters long when price breaks above weekly upper band with ADX>25, short when breaks below weekly lower band with ADX>25.
+Designed for low trade frequency (~10-20/year) to capture major trends while avoiding whipsaws in ranging markets.
+Works in both bull (breakouts) and bear (breakdowns) markets by following the weekly trend.
 """
 
 import numpy as np
@@ -22,36 +21,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI(14) calculation
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) == 0:
+        return np.zeros(n)
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    for i in range(rsi_period, n):
-        if i == rsi_period:
-            avg_gain[i] = np.mean(gain[i-rsi_period+1:i+1])
-            avg_loss[i] = np.mean(loss[i-rsi_period+1:i+1])
+    # Calculate weekly Donchian channels (20-period)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    
+    donchian_high = np.full(len(weekly_high), np.nan)
+    donchian_low = np.full(len(weekly_low), np.nan)
+    
+    for i in range(20, len(weekly_high)):
+        donchian_high[i] = np.max(weekly_high[i-20:i])
+        donchian_low[i] = np.min(weekly_low[i-20:i])
+    
+    # Align to daily timeframe (waits for weekly bar to close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    
+    # ADX filter on weekly timeframe (trend strength)
+    # Calculate True Range components
+    tr1 = weekly_high[1:] - weekly_low[1:]
+    tr2 = np.abs(weekly_high[1:] - weekly_close[:-1]) if len(weekly_high) > 1 else np.array([])
+    tr3 = np.abs(weekly_low[1:] - weekly_close[:-1]) if len(weekly_high) > 1 else np.array([])
+    
+    weekly_close = df_weekly['close'].values
+    if len(weekly_high) > 1:
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    else:
+        tr = np.array([np.nan])
+    
+    # Calculate ATR (14-period)
+    atr_period = 14
+    atr = np.full(len(tr), np.nan)
+    for i in range(atr_period, len(tr)):
+        if i == atr_period:
+            atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
         else:
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate +DM and -DM
+    up_move = np.diff(weekly_high)
+    down_move = -np.diff(weekly_low)
     
-    # EMA(50) trend filter
-    ema_period = 50
-    ema = np.full(n, np.nan)
-    k = 2 / (ema_period + 1)
-    for i in range(ema_period, n):
-        if i == ema_period:
-            ema[i] = np.mean(close[i-ema_period+1:i+1])
-        else:
-            ema[i] = close[i] * k + ema[i-1] * (1 - k)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(arr[:period])
+        # Subsequent values: smoothed = prev * (1-1/period) + current * (1/period)
+        alpha = 1.0 / period
+        for i in range(period, len(arr)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] * (1 - alpha) + arr[i] * alpha
+        return result
+    
+    plus_di = 100 * wilder_smooth(plus_dm, atr_period) / atr
+    minus_di = 100 * wilder_smooth(minus_dm, atr_period) / atr
+    
+    # Calculate DX and ADX
+    dx = np.full(len(plus_di), np.nan)
+    mask = (plus_di + minus_di) > 0
+    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / (plus_di[mask] + minus_di[mask])
+    
+    adx = wilder_smooth(dx, atr_period)
+    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
+    
+    # Volume confirmation: daily volume > 1.5x 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -63,32 +106,32 @@ def generate_signals(prices):
     start_idx = 50  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or np.isnan(ema[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI oversold in uptrend with volume spike
-            if rsi[i] < 30 and close[i] > ema[i] and vol_spike[i]:
+            # Long: break above weekly upper band with strong trend and volume spike
+            if close[i] > donchian_high_aligned[i] and adx_aligned[i] > 25 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought in downtrend with volume spike
-            elif rsi[i] > 70 and close[i] < ema[i] and vol_spike[i]:
+            # Short: break below weekly lower band with strong trend and volume spike
+            elif close[i] < donchian_low_aligned[i] and adx_aligned[i] > 25 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: RSI returns to neutral or trend changes
-            if rsi[i] > 50 or close[i] < ema[i]:
+            # Exit: price closes below weekly lower band or trend weakens
+            if close[i] < donchian_low_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RSI returns to neutral or trend changes
-            if rsi[i] < 50 or close[i] > ema[i]:
+            # Exit: price closes above weekly upper band or trend weakens
+            if close[i] > donchian_high_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Overbought_Oversold_With_Trend_Filter"
-timeframe = "4h"
+name = "1d_Weekly_Donchian_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
