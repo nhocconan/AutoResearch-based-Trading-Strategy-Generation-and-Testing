@@ -1,12 +1,13 @@
+#%%
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_VWAP_Reversal
-6h strategy using weekly VWAP and monthly pivot points with reversal logic.
-- Long: Price pulls back to weekly VWAP during monthly uptrend + RSI < 40
-- Short: Price rallies to weekly VWAP during monthly downtrend + RSI > 60
-- Exit: Opposite signal or RSI crosses 50
+12h_Pivot_S1R1_Breakout_Volume
+12h strategy using daily Camarilla pivot points (S1/R1) with volume confirmation and daily trend filter.
+- Long: Close breaks above daily R1 + volume > 1.5x daily avg + daily EMA50 > EMA200
+- Short: Close breaks below daily S1 + volume > 1.5x daily avg + daily EMA50 < EMA200
+- Exit: Opposite breakout or trend reversal
 Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
-Works in bull markets (buy pullbacks to VWAP) and bear markets (sell rallies to VWAP)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -23,100 +24,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get monthly data for pivot points and trend
-    df_1m = get_htf_data(prices, '1M')
+    # Get daily data for Camarilla pivots and filters
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate monthly pivot points (using previous month's data)
-    high_1m = df_1m['high'].values
-    low_1m = df_1m['low'].values
-    close_1m = df_1m['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Monthly pivot = (H + L + C) / 3
-    pivot_1m = (high_1m + low_1m + close_1m) / 3.0
-    # R1 = 2*P - L
-    r1_1m = 2 * pivot_1m - low_1m
-    # S1 = 2*P - H
-    s1_1m = 2 * pivot_1m - high_1m
+    # Calculate Camarilla pivot points for daily timeframe
+    # Pivot = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Monthly trend: EMA50 vs EMA200
-    ema_50_1m = pd.Series(close_1m).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1m = pd.Series(close_1m).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Get weekly data for VWAP calculation
-    df_1w = get_htf_data(prices, '1w')
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
-    
-    # Typical price for VWAP
-    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
-    # VWAP = sum(price * volume) / sum(volume)
-    pv_1w = typical_price_1w * volume_1w
-    cum_pv_1w = np.nancumsum(pv_1w)
-    cum_vol_1w = np.nancumsum(volume_1w)
-    vwap_1w = np.divide(cum_pv_1w, cum_vol_1w, out=np.full_like(cum_pv_1w, np.nan), where=cum_vol_1w!=0)
-    
-    # RSI(14) on 6h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.maximum(delta, 0)
-    loss = np.maximum(-delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0.0), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align all data to 6h timeframe
-    pivot_1m_aligned = align_htf_to_ltf(prices, df_1m, pivot_1m)
-    r1_1m_aligned = align_htf_to_ltf(prices, df_1m, r1_1m)
-    s1_1m_aligned = align_htf_to_ltf(prices, df_1m, s1_1m)
-    ema_50_1m_aligned = align_htf_to_ltf(prices, df_1m, ema_50_1m)
-    ema_200_1m_aligned = align_htf_to_ltf(prices, df_1m, ema_200_1m)
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    # Align all daily data to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need enough for EMA200
+    start_idx = 50  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1m_aligned[i]) or np.isnan(r1_1m_aligned[i]) or 
-            np.isnan(s1_1m_aligned[i]) or np.isnan(ema_50_1m_aligned[i]) or
-            np.isnan(ema_200_1m_aligned[i]) or np.isnan(vwap_1w_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Monthly trend conditions
-        uptrend = ema_50_1m_aligned[i] > ema_200_1m_aligned[i]
-        downtrend = ema_50_1m_aligned[i] < ema_200_1m_aligned[i]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
-        # Distance to weekly VWAP (normalized by price)
-        dist_to_vwap = (close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        
+        # Breakout conditions
+        breakout_up = close[i] > r1_aligned[i]
+        breakdown_down = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: monthly uptrend + pullback to VWAP + RSI oversold
-            if uptrend and dist_to_vwap > -0.02 and dist_to_vwap < 0.02 and rsi[i] < 40:
+            # Long: uptrend + volume + breakout above daily R1
+            if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: monthly downtrend + rally to VWAP + RSI overbought
-            elif downtrend and dist_to_vwap > -0.02 and dist_to_vwap < 0.02 and rsi[i] > 60:
+            # Short: downtrend + volume + breakdown below daily S1
+            elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change or RSI > 50
-            if not uptrend or rsi[i] > 50:
+            # Long exit: trend change, volume confirmation, or breakdown below daily S1
+            if not uptrend or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change or RSI < 50
-            if not downtrend or rsi[i] < 50:
+            # Short exit: trend change, volume confirmation, or breakout above daily R1
+            if not downtrend or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -124,6 +106,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_VWAP_Reversal"
-timeframe = "6h"
+name = "12h_Pivot_S1R1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
+#%%
