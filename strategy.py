@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_CCI_MeanReversion_WithVolume
-Hypothesis: On 1h timeframe, use daily CCI to detect oversold/overbought conditions (CCI < -100 for long, CCI > +100 for short)
-and 4h EMA for trend filter (only long when price > EMA, short when price < EMA).
-Require volume spike (>1.5x 20-period average) to confirm entry.
-Trade only during active session (08-20 UTC).
-Target: 15-35 trades/year per symbol, using mean reversion in ranging markets and trend alignment in trending markets.
+12h_VWAP_RangeReversion_BollingerBands
+Hypothesis: 12-hour VWAP mean reversion with Bollinger Bands and volume confirmation.
+Trades mean reversion from Bollinger Band extremes toward VWAP, using 1-day trend filter
+to avoid counter-trend trades. Designed for low frequency (15-35 trades/year) with
+strong performance in ranging markets by combining intraday mean reversion with
+daily trend alignment.
 """
 
 import numpy as np
@@ -22,88 +22,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for CCI
+    # Get 12h data for VWAP calculation
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate 12h VWAP
+    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3
+    vwap_num = np.cumsum(typical_price_12h * df_12h['volume'].values)
+    vwap_den = np.cumsum(df_12h['volume'].values)
+    vwap_12h = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    
+    # Calculate 1-day EMA50 trend filter
     close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[0:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = close_1d[i] * alpha + ema50_1d[i-1] * (1 - alpha)
     
-    # Calculate CCI(20) on daily
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    sma_tp = np.full(len(typical_price), np.nan)
-    mad = np.full(len(typical_price), np.nan)
-    cci = np.full(len(typical_price), np.nan)
+    # Calculate Bollinger Bands (20, 2) on 12h typical price
+    tp_12h = typical_price_12h
+    sma_20 = np.full(len(tp_12h), np.nan)
+    std_20 = np.full(len(tp_12h), np.nan)
     
-    if len(typical_price) >= 20:
-        for i in range(19, len(typical_price)):
-            sma_tp[i] = np.mean(typical_price[i-19:i+1])
-            mad[i] = np.mean(np.abs(typical_price[i-19:i+1] - sma_tp[i]))
-            if mad[i] != 0:
-                cci[i] = (typical_price[i] - sma_tp[i]) / (0.015 * mad[i])
+    for i in range(19, len(tp_12h)):
+        sma_20[i] = np.mean(tp_12h[i-19:i+1])
+        std_20[i] = np.std(tp_12h[i-19:i+1])
     
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 20:
-        ema_4h[19] = np.mean(close_4h[0:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, len(close_4h)):
-            ema_4h[i] = close_4h[i] * alpha + ema_4h[i-1] * (1 - alpha)
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Align daily CCI and 4h EMA to 1h
-    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Align all indicators to 12h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_12h, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_12h, lower_bb)
     
-    # Volume spike: current volume > 1.5 x 20-period average
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session = (hours >= 8) & (hours <= 20)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(cci_aligned[i]) or np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(vol_ma[i]) or not session[i]):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: daily CCI < -100 (oversold), price above 4h EMA (uptrend filter), volume spike
-            if (cci_aligned[i] < -100 and close[i] > ema_4h_aligned[i] and vol_spike[i]):
-                signals[i] = 0.20
+            # Long: price touches lower BB with volume confirmation and above 1d EMA50
+            if (close[i] <= lower_bb_aligned[i] and vol_confirm[i] and 
+                close[i] > ema50_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: daily CCI > +100 (overbought), price below 4h EMA (downtrend filter), volume spike
-            elif (cci_aligned[i] > 100 and close[i] < ema_4h_aligned[i] and vol_spike[i]):
-                signals[i] = -0.20
+            # Short: price touches upper BB with volume confirmation and below 1d EMA50
+            elif (close[i] >= upper_bb_aligned[i] and vol_confirm[i] and 
+                  close[i] < ema50_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: CCI returns to neutral (> -50) or trend turns down
-            if (cci_aligned[i] > -50 or close[i] < ema_4h_aligned[i]):
+            # Long exit: price reaches VWAP or breaks below lower BB
+            if (close[i] >= vwap_aligned[i] or close[i] < lower_bb_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: CCI returns to neutral (< +50) or trend turns up
-            if (cci_aligned[i] < 50 or close[i] > ema_4h_aligned[i]):
+            # Short exit: price reaches VWAP or breaks above upper BB
+            if (close[i] <= vwap_aligned[i] or close[i] > upper_bb_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h1d_CCI_MeanReversion_WithVolume"
-timeframe = "1h"
+name = "12h_VWAP_RangeReversion_BollingerBands"
+timeframe = "12h"
 leverage = 1.0
