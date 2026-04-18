@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_12hEMA34_VolumeSpike_ATRStop
-Hypothesis: TRIX (triple exponential moving average) crossing above/below zero signals momentum shifts, filtered by 12h EMA34 trend direction and confirmed by volume spikes. ATR-based stop loss manages risk. Designed for low-to-moderate trade frequency (20-40/year) to avoid fee drag while capturing trends in both bull and bear markets.
+12h_Camarilla_Pivot_R1S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: On 12h timeframe, breakouts above R1 or below S1 (from 1d Camarilla pivot levels) with 1d trend filter and volume spike capture strong moves while avoiding whipsaws. The 1d EMA34 provides longer-term trend context, reducing false signals in choppy markets. Volume surge confirms breakout conviction. Designed for low trade frequency (12-37/year) to minimize fee drag on 12h timeframe.
 """
 
 import numpy as np
@@ -18,80 +18,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX (15-period standard) on close
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1 period ago
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3 - np.roll(ema3, 1)
-    trix[0] = 0  # first value has no previous
+    # Get 1d data for Camarilla pivot levels and trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
     
-    # Get 12h data for EMA34 trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close']
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate Camarilla levels for each day
+    # R1 = Close + 1.1*(High-Low)/12
+    # S1 = Close - 1.1*(High-Low)/12
+    camarilla_range = (high_1d - low_1d)
+    r1_level = close_1d + (1.1 * camarilla_range) / 12
+    s1_level = close_1d - (1.1 * camarilla_range) / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
+    
+    # Get 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # ATR for stop loss (20-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR is just high-low
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trix[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(atr[i])):
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        trix_now = trix[i]
-        ema_trend = ema_34_12h_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
-        atr_now = atr[i]
         
         if position == 0:
-            # Long: TRIX crosses above zero with 12h uptrend and volume spike
-            if trix_now > 0 and trix[i-1] <= 0 and price > ema_trend and vol_spike:
+            # Long: break above R1 with 1d uptrend and volume spike
+            if price > r1 and price > ema_trend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: TRIX crosses below zero with 12h downtrend and volume spike
-            elif trix_now < 0 and trix[i-1] >= 0 and price < ema_trend and vol_spike:
+            # Short: break below S1 with 1d downtrend and volume spike
+            elif price < s1 and price < ema_trend and vol_spike:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: TRIX crosses below zero OR price hits ATR stop
-            if trix_now < 0 or price < entry_price - 2.0 * atr_now:
+            # Exit: price returns to S1 or breaks below 1d EMA
+            if price < s1 or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: TRIX crosses above zero OR price hits ATR stop
-            if trix_now > 0 or price > entry_price + 2.0 * atr_now:
+            # Exit: price returns to R1 or breaks above 1d EMA
+            if price > r1 or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_TRIX_12hEMA34_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
