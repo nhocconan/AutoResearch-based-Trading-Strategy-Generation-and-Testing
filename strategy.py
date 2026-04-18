@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R2S2_Breakout_Volume_TrendFilter
-Hypothesis: Weekly pivot R2/S2 levels act as strong support/resistance on 6h timeframe. Breakouts with volume confirmation and trend filter (price above/below weekly EMA20) capture directional moves. Works in both bull/bear markets by using weekly context and volatility filter to avoid chop.
+12h_Camarilla_Pivot_S1R1_Breakout_VolumeSpike_1dTrend_v1
+Hypothesis: Daily Camarilla S1/R1 levels act as strong support/resistance on 12h timeframe.
+Breakouts with volume spike and daily EMA(34) trend filter capture momentum while minimizing trades.
+Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -18,31 +20,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation and EMA (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla pivot calculation and EMA (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points using standard formula
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    close_1w = df_1w['close']
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot = (high_1w + low_1w + close_1w) / 3
-    r2 = pivot + (high_1w - low_1w)  # R2 = pivot + (high - low)
-    s2 = pivot - (high_1w - low_1w)  # S2 = pivot - (high - low)
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3
+    # Camarilla levels
+    range_1d = high_1d - low_1d
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Shift by 1 to use previous week's levels only
-    r2_prev = r2.shift(1).values
-    s2_prev = s2.shift(1).values
+    # Shift by 1 to use previous day's levels only
+    r1_prev = np.roll(r1, 1)
+    s1_prev = np.roll(s1, 1)
+    r1_prev[0] = np.nan
+    s1_prev[0] = np.nan
     
-    # Align to 6h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_prev)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_prev)
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
     
-    # Get weekly data for EMA trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Get daily data for EMA trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR for volatility filter (14-period)
+    # ATR for volatility filter (14-period on 12h)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -54,9 +61,9 @@ def generate_signals(prices):
     atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     volatility_filter = atr > atr_ma
     
-    # Volume spike: 2.0x 20-period average on 6h
+    # Volume spike: 2.5x 20-period average on 12h (tighter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (2.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -65,9 +72,9 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(atr[i]) or
             np.isnan(atr_ma[i])):
@@ -76,51 +83,51 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        ema_trend = ema_20_1w_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_filter = volatility_filter[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
             bars_since_entry = 0
-            # Long: break above R2 with volume spike, price above weekly EMA, and sufficient volatility
-            if price > r2_val and vol_spike and price > ema_trend and vol_filter:
+            # Long: break above R1 with volume spike, price above daily EMA, and sufficient volatility
+            if price > r1_val and vol_spike and price > ema_trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S2 with volume spike, price below weekly EMA, and sufficient volatility
-            elif price < s2_val and vol_spike and price < ema_trend and vol_filter:
+            # Short: break below S1 with volume spike, price below daily EMA, and sufficient volatility
+            elif price < s1_val and vol_spike and price < ema_trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Minimum holding period: 3 bars (18 hours for 6h)
-            if bars_since_entry < 3:
+            # Minimum holding period: 2 bars (24 hours for 12h)
+            if bars_since_entry < 2:
                 signals[i] = 0.25
                 bars_since_entry += 1
             else:
                 signals[i] = 0.25
-                # Exit: price returns to S2 or breaks below weekly EMA
-                if price <= s2_val or price < ema_trend:
+                # Exit: price returns to S1 or breaks below daily EMA
+                if price <= s1_val or price < ema_trend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
         
         elif position == -1:
-            # Minimum holding period: 3 bars (18 hours for 6h)
-            if bars_since_entry < 3:
+            # Minimum holding period: 2 bars (24 hours for 12h)
+            if bars_since_entry < 2:
                 signals[i] = -0.25
                 bars_since_entry += 1
             else:
                 signals[i] = -0.25
-                # Exit: price returns to R2 or breaks above weekly EMA
-                if price >= r2_val or price > ema_trend:
+                # Exit: price returns to R1 or breaks above daily EMA
+                if price >= r1_val or price > ema_trend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
     
     return signals
 
-name = "6h_WeeklyPivot_R2S2_Breakout_Volume_TrendFilter"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_S1R1_Breakout_VolumeSpike_1dTrend_v1"
+timeframe = "12h"
 leverage = 1.0
