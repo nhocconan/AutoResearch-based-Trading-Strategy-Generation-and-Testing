@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Daily_Weekly_Pivot_Breakout_With_Trend_Filter
-Hypothesis: Weekly pivot levels (R1, S1) act as strong support/resistance. Breakout above R1 with bullish weekly EMA trend = long; breakdown below S1 with bearish weekly EMA trend = short. Daily volume confirmation filters false breakouts. Designed for low frequency (10-25 trades/year) to minimize fee drag and work in both bull and bear markets via trend filter.
+4h_ADX_Trend_Strength_With_Volume_Confirmation
+Hypothesis: Strong ADX trend (ADX>25) combined with volume spikes (1.5x 20-period average) 
+provides high-probability entries in the direction of the 4h EMA(50) trend. 
+Volume confirms institutional participation, reducing false breakouts. 
+Designed for 4h timeframe to capture multi-day trends with low frequency 
+(20-40 trades/year) to minimize fee drag and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,76 +22,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily typical price for pivot calculation
-    daily_tp = (high + low + close) / 3
+    # ADX calculation (14-period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.maximum(np.abs(high[1:] - close[:-1]), 
+                               np.abs(low[1:] - close[:-1])))
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
     
-    # Weekly OHLC from higher timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * np.arange(1, n+1) + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * np.arange(1, n+1) + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Weekly pivot levels: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_p = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * weekly_p - weekly_low
-    weekly_s1 = 2 * weekly_p - weekly_high
+    # EMA(50) trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly levels to daily timeframe (wait for weekly bar close)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # Weekly EMA trend filter (34-period)
-    weekly_ema = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
-    
-    # Daily volume filter: >1.5x 20-day average
+    # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 50  # Warmup for EMA and ADX
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(weekly_ema_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(adx[i]) or np.isnan(ema_50[i]) or 
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = weekly_r1_aligned[i]
-        s1 = weekly_s1_aligned[i]
-        ema_trend = weekly_ema_aligned[i]
+        adx_val = adx[i]
+        ema_val = ema_50[i]
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above weekly R1 with volume in uptrend
-            if price > r1 and vol_ok and price > ema_trend:
+            # Long: ADX > 25 (strong trend), price above EMA50, volume confirmation
+            if adx_val > 25 and price > ema_val and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 with volume in downtrend
-            elif price < s1 and vol_ok and price < ema_trend:
+            # Short: ADX > 25 (strong trend), price below EMA50, volume confirmation
+            elif adx_val > 25 and price < ema_val and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price returns below weekly pivot point or trend reverses
-            weekly_p_aligned = (weekly_high + weekly_low + weekly_close) / 3
-            weekly_p_aligned = align_htf_to_ltf(prices, df_1w, weekly_p_aligned)
-            if price < weekly_p_aligned[i] or price < ema_trend:
+            # Exit long if trend weakens (ADX < 20) or price crosses below EMA50
+            if adx[i] < 20 or price < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns above weekly pivot point or trend reverses
-            weekly_p_aligned = (weekly_high + weekly_low + weekly_close) / 3
-            weekly_p_aligned = align_htf_to_ltf(prices, df_1w, weekly_p_aligned)
-            if price > weekly_p_aligned[i] or price > ema_trend:
+            # Exit short if trend weakens (ADX < 20) or price crosses above EMA50
+            if adx[i] < 20 or price > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Daily_Weekly_Pivot_Breakout_With_Trend_Filter"
-timeframe = "1d"
+name = "4h_ADX_Trend_Strength_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
