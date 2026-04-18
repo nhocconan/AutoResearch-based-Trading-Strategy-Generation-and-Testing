@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume spike confirmation.
-# Williams Alligator: Jaw (13-period smoothed median), Teeth (8-period smoothed median), Lips (5-period smoothed median).
-# In uptrend: Lips > Teeth > Jaw. In downtrend: Lips < Teeth < Jaw.
-# 1d EMA50 filter ensures we trade only in the direction of the daily trend.
-# Volume spike (>2x 20-period average) confirms conviction.
-# Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years).
-name = "12h_WilliamsAlligator_1dEMA50_VolumeSpike"
-timeframe = "12h"
+# Hypothesis: 1h RSI(14) with 4h ADX(14) trend filter and 1d volume regime filter.
+# RSI < 30 = oversold (long), RSI > 70 = overbought (short) in ranging markets (ADX < 25).
+# In trending markets (ADX >= 25), follow momentum: RSI > 50 long, RSI < 50 short.
+# 1d volume regime: only trade when 1d volume > 20-day average (avoid low-volume chop).
+# Session filter: 08-20 UTC to avoid low-liquidity Asian session.
+# Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag.
+name = "1h_RSI_ADX_VolumeRegime"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,70 +23,135 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 filter (ONCE before loop)
+    # Session filter: 08-20 UTC (pre-compute)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = gain_ma / (loss_ma + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Get 4h data for ADX(14) (trend strength)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # True Range
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[-1]), np.abs(low_4h[0] - close_4h[-1])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr_smooth + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr_smooth + 1e-10)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 4h ADX to 1h
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    
+    # Get 1d data for volume regime filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Williams Alligator: Smoothed medians (using close as proxy for median price)
-    close_s = pd.Series(close)
-    jaw = close_s.rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().values  # Smoothed median (13)
-    teeth = close_s.rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().values    # Smoothed median (8)
-    lips = close_s.rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().values     # Smoothed median (5)
-    
-    # Calculate 1d EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Calculate volume spike: current volume > 2.0 * 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_1d = df_1d['volume'].values
+    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_regime = volume_1d > volume_ma_20  # High volume regime
+    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        # Session filter
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Alligator alignment
-        lips_above_teeth = lips[i] > teeth[i]
-        teeth_above_jaw = teeth[i] > jaw[i]
-        lips_below_teeth = lips[i] < teeth[i]
-        teeth_below_jaw = teeth[i] < jaw[i]
+        # Market regime: ADX < 25 = ranging, ADX >= 25 = trending
+        ranging = adx_aligned[i] < 25
+        trending = adx_aligned[i] >= 25
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (uptrend alignment) AND uptrend AND volume spike
-            if lips_above_teeth and teeth_above_jaw and uptrend and volume_spike[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: Lips < Teeth < Jaw (downtrend alignment) AND downtrend AND volume spike
-            elif lips_below_teeth and teeth_below_jaw and downtrend and volume_spike[i]:
-                signals[i] = -0.25
-                position = -1
+            # Entry logic
+            if ranging:
+                # Mean reversion in ranging markets
+                if rsi[i] < 30 and volume_regime_aligned[i]:
+                    signals[i] = 0.20
+                    position = 1
+                elif rsi[i] > 70 and volume_regime_aligned[i]:
+                    signals[i] = -0.20
+                    position = -1
+            else:  # trending
+                # Momentum in trending markets
+                if rsi[i] > 50 and volume_regime_aligned[i]:
+                    signals[i] = 0.20
+                    position = 1
+                elif rsi[i] < 50 and volume_regime_aligned[i]:
+                    signals[i] = -0.20
+                    position = -1
         
         elif position == 1:
-            # Long exit: Alligator alignment breaks (Lips < Teeth or Teeth < Jaw) OR trend reverses
-            if not (lips_above_teeth and teeth_above_jaw) or not uptrend:
-                signals[i] = 0.0
-                position = 0
+            # Long exit conditions
+            if ranging:
+                # Exit mean reversion at RSI 50
+                if rsi[i] >= 50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
             else:
-                signals[i] = 0.25
+                # Exit trend when RSI < 40 (weakening momentum)
+                if rsi[i] < 40:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Alligator alignment breaks (Lips > Teeth or Teeth > Jaw) OR trend reverses
-            if not (lips_below_teeth and teeth_below_jaw) or not downtrend:
-                signals[i] = 0.0
-                position = 0
+            # Short exit conditions
+            if ranging:
+                # Exit mean reversion at RSI 50
+                if rsi[i] <= 50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
             else:
-                signals[i] = -0.25
+                # Exit trend when RSI > 60 (weakening momentum)
+                if rsi[i] > 60:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
     
     return signals
