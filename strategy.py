@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1w_PriceChannelBreakout_Volume_Confirm
-Hypothesis: Breakouts of 20-period high/low on 12h timeframe with volume confirmation and 1w trend filter.
-Works in bull markets via upside breakouts, in bear markets via downside breakouts.
-Target: 15-30 trades/year on 12h timeframe with disciplined entry conditions.
+4h_WeeklyPivot_Trend_Filter_v2
+Hypothesis: Weekly pivot levels (R1, S1) act as dynamic support/resistance. 
+In trending markets (ADX > 25), price tends to respect these levels. 
+In ranging markets (ADX < 20), reversals at R1/S1 offer mean-reversion opportunities.
+Combined with volume confirmation to avoid false breakouts.
+Designed for low trade frequency (<400 total 4h trades) to minimize fee drag.
 """
 
 import numpy as np
@@ -20,77 +22,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 20-period Donchian channels (highest high, lowest low)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
+    # Weekly pivot points (using prior week's OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 14-period ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
+    # Calculate pivot and support/resistance levels
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    
+    # Align to 4h timeframe (weekly levels only update at weekly close)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # ADX for trend strength (14-period)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr = np.zeros(n)
+    plus_dm_smooth = np.zeros(n)
+    minus_dm_smooth = np.zeros(n)
+    
+    for i in range(n):
+        if i < 1:
+            atr[i] = 0
+            plus_dm_smooth[i] = 0
+            minus_dm_smooth[i] = 0
+        elif i < 14:
+            atr[i] = (atr[i-1] * (i-1) + tr[i]) / i if i > 0 else tr[i]
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (i-1) + plus_dm[i]) / i if i > 0 else plus_dm[i]
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (i-1) + minus_dm[i]) / i if i > 0 else minus_dm[i]
         else:
             atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * 13 + plus_dm[i]) / 14
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * 13 + minus_dm[i]) / 14
     
-    # Volume spike: current volume > 2.0 x 20-period average
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    adx = np.zeros(n)
+    for i in range(n):
+        if i < 14:
+            adx[i] = 0
+        elif i == 14:
+            adx[i] = np.mean(dx[1:15])
+        else:
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Volume spike: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
-    
-    # 1w EMA34 trend filter (from higher timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = np.full(len(close_1w), np.nan)
-    k = 2 / (34 + 1)
-    for i in range(34, len(close_1w)):
-        if i == 34:
-            ema34_1w[i] = np.mean(close_1w[0:35])
-        else:
-            ema34_1w[i] = close_1w[i] * k + ema34_1w[i-1] * (1 - k)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure all indicators ready
+    start_idx = max(20, 14)  # Ensure indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(adx[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above 20-period high with volume spike and 1w uptrend
-            if (close[i] > highest_high[i] and vol_spike[i] and 
-                close[i] > ema34_1w_aligned[i]):
+            # Long: price near S1 with volume spike in uptrend (ADX > 25 and rising)
+            # OR price breaks above R1 with volume spike in any trend
+            near_s1 = abs(close[i] - s1_1w_aligned[i]) / close[i] < 0.005  # Within 0.5%
+            above_r1 = close[i] > r1_1w_aligned[i]
+            trending_up = adx[i] > 25 and plus_di[i] > minus_di[i]
+            
+            if (near_s1 and vol_spike[i] and trending_up) or (above_r1 and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-period low with volume spike and 1w downtrend
-            elif (close[i] < lowest_low[i] and vol_spike[i] and 
-                  close[i] < ema34_1w_aligned[i]):
+            # Short: price near R1 with volume spike in downtrend
+            # OR price breaks below S1 with volume spike in any trend
+            near_r1 = abs(close[i] - r1_1w_aligned[i]) / close[i] < 0.005  # Within 0.5%
+            below_s1 = close[i] < s1_1w_aligned[i]
+            trending_down = adx[i] > 25 and minus_di[i] > plus_di[i]
+            
+            if (near_r1 and vol_spike[i] and trending_down) or (below_s1 and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below 20-period low or 1w trend turns down
-            if (close[i] < lowest_low[i] or close[i] < ema34_1w_aligned[i]):
+            # Long exit: price crosses below pivot or trend weakens
+            if close[i] < pivot_1w_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above 20-period high or 1w trend turns up
-            if (close[i] > highest_high[i] or close[i] > ema34_1w_aligned[i]):
+            # Short exit: price crosses above pivot or trend weakens
+            if close[i] > pivot_1w_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_PriceChannelBreakout_Volume_Confirm"
-timeframe = "12h"
+name = "4h_WeeklyPivot_Trend_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
