@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_WideRange_Breakout_Volume_Trend
-Hypothesis: Uses 12h wide range (high-low) filter to identify expansion periods, then trades breakouts
-of 4h Donchian channels with volume confirmation. Works in both bull (breakouts up) and bear (breakouts down)
-by capturing volatility expansion phases. Targets 20-30 trades/year.
+1h_4h1d_Momentum_Confluence
+Hypothesis: Combines 4h RSI trend filter with 1d volume surge and 1h momentum breakout.
+Uses 4h for trend direction (avoiding counter-trend trades), 1d for institutional volume confirmation,
+and 1h for precise entry timing. Targets 15-30 trades/year by requiring confluence of three filters.
+Works in bull markets via momentum continuation and in bear markets via mean-reversion bounces
+off institutional volume zones.
 """
 
 import numpy as np
@@ -20,80 +22,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for range filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for RSI trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h range (high-low) and its 20-period average
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    range_12h = high_12h - low_12h
+    # Calculate 4h RSI(14)
+    def rsi(arr, period=14):
+        delta = np.diff(arr)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(arr)
+        avg_loss = np.zeros_like(arr)
+        if len(arr) > period:
+            avg_gain[period] = np.mean(gain[:period])
+            avg_loss[period] = np.mean(loss[:period])
+            for i in range(period+1, len(arr)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        return 100 - (100 / (1 + rs))
     
-    range_ma = np.full(len(range_12h), np.nan)
-    for i in range(20, len(range_12h)):
-        range_ma[i] = np.mean(range_12h[i-20:i])
+    rsi_4h = rsi(close_4h, 14)
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # Wide range condition: current range > 1.5 x 20-period average
-    wide_range = range_12h > (range_ma * 1.5)
+    # Get 1d data for volume surge filter
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    # Get 4h data for Donchian channels (20-period)
-    high_4h = high
-    low_4h = low
+    # Calculate 1d volume surge (current volume > 2x 20-day average)
+    vol_avg_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_avg_1d[i] = np.mean(volume_1d[i-20:i])
+    volume_surge_1d = volume_1d > (vol_avg_1d * 2.0)
+    volume_surge_aligned = align_htf_to_ltf(prices, df_1d, volume_surge_1d)
     
-    upper_channel = np.full(n, np.nan)
-    lower_channel = np.full(n, np.nan)
+    # 1h momentum: price > 10-period EMA
+    ema10 = np.full(n, np.nan)
+    if n >= 10:
+        ema10[9] = np.mean(close[0:10])
+        alpha = 2 / (10 + 1)
+        for i in range(10, n):
+            ema10[i] = close[i] * alpha + ema10[i-1] * (1 - alpha)
     
-    for i in range(20, n):
-        upper_channel[i] = np.max(high_4h[i-20:i])
-        lower_channel[i] = np.min(low_4h[i-20:i])
-    
-    # Volume spike: current volume > 2.0 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
-    
-    # Align 12h wide range to 4h timeframe
-    wide_range_aligned = align_htf_to_ltf(prices, df_12h, wide_range)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(30, 20, 10)  # RSI needs 14+ for stability, volume needs 20
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(wide_range_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(volume_surge_aligned[i]) or 
+            np.isnan(ema10[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above 4h upper channel with volume spike and wide range
-            if (close[i] > upper_channel[i] and vol_spike[i] and wide_range_aligned[i]):
-                signals[i] = 0.25
+            # Long: 4h RSI > 50 (uptrend) + 1d volume surge + 1h price > EMA10
+            if (rsi_4h_aligned[i] > 50 and volume_surge_aligned[i] and 
+                close[i] > ema10[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: break below 4h lower channel with volume spike and wide range
-            elif (close[i] < lower_channel[i] and vol_spike[i] and wide_range_aligned[i]):
-                signals[i] = -0.25
+            # Short: 4h RSI < 50 (downtrend) + 1d volume surge + 1h price < EMA10
+            elif (rsi_4h_aligned[i] < 50 and volume_surge_aligned[i] and 
+                  close[i] < ema10[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: close below 4h lower channel
-            if close[i] < lower_channel[i]:
+            # Long exit: 4h RSI < 40 or loss of 1h momentum
+            if (rsi_4h_aligned[i] < 40 or close[i] < ema10[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: close above 4h upper channel
-            if close[i] > upper_channel[i]:
+            # Short exit: 4h RSI > 60 or loss of 1h momentum
+            if (rsi_4h_aligned[i] > 60 or close[i] > ema10[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_WideRange_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1h_4h1d_Momentum_Confluence"
+timeframe = "1h"
 leverage = 1.0
