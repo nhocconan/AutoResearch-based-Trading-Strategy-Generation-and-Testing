@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume
-Hypothesis: Uses 1d R1/S1 levels as a price channel. Trades breakouts of R1/S1 in the 
-direction of the 1d trend (above/below 1d pivot) with volume confirmation. 
-Designed for both bull and bear markets by filtering with 1d trend. Target: 12-37 trades/year on 12h.
+12h_1W_WK1_WK2_WK3_WK4_Rotation
+Hypothesis: Uses weekly pivot levels (WK1-WK4) on 1w timeframe. Trades breakouts of these levels
+in the direction of the weekly trend (above/below weekly pivot) with volume confirmation.
+Designed for both bull and bear markets by filtering with weekly trend. Target: 12-37 trades/year on 12h.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,25 +20,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for multi-timeframe analysis
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for multi-timeframe analysis
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    rng_1d = high_1d - low_1d
-    r1_1d = close_1d + rng_1d * 1.1 / 12
-    s1_1d = close_1d - rng_1d * 1.1 / 12
-    
-    # Calculate 1d pivot for trend bias
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    # Weekly pivot and support/resistance levels
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    wk1 = pivot_1w * 2 - low_1w          # R1
+    wk2 = pivot_1w + (high_1w - low_1w)  # R2
+    wk3 = high_1w + 2 * (pivot_1w - low_1w)  # R3
+    wk4 = 3 * pivot_1w - 2 * low_1w      # R4 (or S4 equivalent)
+    sk1 = pivot_1w * 2 - high_1w         # S1
+    sk2 = pivot_1w - (high_1w - low_1w)  # S2
+    sk3 = low_1w - 2 * (high_1w - pivot_1w)  # S3
+    sk4 = 3 * pivot_1w - 2 * high_1w     # S4
     
     # Align all levels to 12h timeframe (wait for bar close)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    wk1_aligned = align_htf_to_ltf(prices, df_1w, wk1)
+    wk2_aligned = align_htf_to_ltf(prices, df_1w, wk2)
+    wk3_aligned = align_htf_to_ltf(prices, df_1w, wk3)
+    wk4_aligned = align_htf_to_ltf(prices, df_1w, wk4)
+    sk1_aligned = align_htf_to_ltf(prices, df_1w, sk1)
+    sk2_aligned = align_htf_to_ltf(prices, df_1w, sk2)
+    sk3_aligned = align_htf_to_ltf(prices, df_1w, sk3)
+    sk4_aligned = align_htf_to_ltf(prices, df_1w, sk4)
     
     # Volume confirmation: current volume > 2.0 x 24-period average (more selective)
     vol_ma = np.full(n, np.nan)
@@ -53,38 +63,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(wk1_aligned[i]) or np.isnan(wk2_aligned[i]) or
+            np.isnan(wk3_aligned[i]) or np.isnan(wk4_aligned[i]) or np.isnan(sk1_aligned[i]) or
+            np.isnan(sk2_aligned[i]) or np.isnan(sk3_aligned[i]) or np.isnan(sk4_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above both 1d R1 and above 1d pivot, with volume
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > pivot_1d_aligned[i] and vol_confirm[i]):
+            # Long entry: price breaks above both WK2 and above weekly pivot, with volume
+            if (close[i] > wk2_aligned[i] and 
+                close[i] > pivot_1w_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below both 1d S1 and below 1d pivot, with volume
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < pivot_1d_aligned[i] and vol_confirm[i]):
+            # Short entry: price breaks below both SK2 and below weekly pivot, with volume
+            elif (close[i] < sk2_aligned[i] and 
+                  close[i] < pivot_1w_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns to 1d pivot or breaks below 1d S1
-            if (not np.isnan(pivot_1d_aligned[i]) and close[i] < pivot_1d_aligned[i]) or \
-               (not np.isnan(s1_1d_aligned[i]) and close[i] < s1_1d_aligned[i]):
+            # Long exit: price returns to weekly pivot or breaks below SK2
+            if (not np.isnan(pivot_1w_aligned[i]) and close[i] < pivot_1w_aligned[i]) or \
+               (not np.isnan(sk2_aligned[i]) and close[i] < sk2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to 1d pivot or breaks above 1d R1
-            if (not np.isnan(pivot_1d_aligned[i]) and close[i] > pivot_1d_aligned[i]) or \
-               (not np.isnan(r1_1d_aligned[i]) and close[i] > r1_1d_aligned[i]):
+            # Short exit: price returns to weekly pivot or breaks above WK2
+            if (not np.isnan(pivot_1w_aligned[i]) and close[i] > pivot_1w_aligned[i]) or \
+               (not np.isnan(wk2_aligned[i]) and close[i] > wk2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume"
+name = "12h_1W_WK1_WK2_WK3_WK4_Rotation"
 timeframe = "12h"
 leverage = 1.0
