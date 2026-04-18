@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1S1_Breakout_12hEMA34_Volume_Conservative
-Hypothesis: 4-hour breakouts above Camarilla R1 or below S1 with 12-hour EMA34 trend filter and volume confirmation. Conservative version with stricter volume and trend filters to reduce trade frequency and improve performance across BTC, ETH, and SOL in both bull and bear markets.
+1h_Camarilla_4hTrend_Volume
+Hypothesis: 1-hour breakouts above/below daily Camarilla R1/S1 with 4-hour EMA34 trend filter and volume confirmation.
+Uses 4h EMA34 for directional bias (works in both bull/bear markets), daily Camarilla for precise S/R levels,
+and volume spike for breakout confirmation. Targets 15-37 trades/year by using 4h trend filter to reduce noise.
 """
 
 import numpy as np
@@ -18,114 +20,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12-hour EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate 4-hour EMA34 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate EMA34 with proper smoothing and min_periods
-    ema34_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 34:
-        ema34_12h[33] = np.mean(close_12h[0:34])
+    # Calculate EMA34 with proper smoothing
+    ema34_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 34:
+        ema34_4h[33] = np.mean(close_4h[0:34])
         alpha = 2 / (34 + 1)
-        for i in range(34, len(close_12h)):
-            ema34_12h[i] = close_12h[i] * alpha + ema34_12h[i-1] * (1 - alpha)
+        for i in range(34, len(close_4h)):
+            ema34_4h[i] = close_4h[i] * alpha + ema34_4h[i-1] * (1 - alpha)
     
-    # Align 12-hour EMA34 to 4h timeframe
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Align 4-hour EMA34 to 1h timeframe
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # Calculate Camarilla levels from previous day using proper daily aggregation
-    # We'll use 12h data to approximate daily OHLC (2 periods = 1 day)
+    # Calculate daily Camarilla levels from previous day
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     camarilla_r1 = np.full(n, np.nan)
     camarilla_s1 = np.full(n, np.nan)
     
-    # Calculate daily OHLC from 12h data (each day = 2 periods of 12h)
-    # Create arrays for daily high, low, close
-    daily_high = np.full(len(close_12h), np.nan)
-    daily_low = np.full(len(close_12h), np.nan)
-    daily_close = np.full(len(close_12h), np.nan)
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # For each 12h period, we need the daily context
-    # Since 12h data: index 0,1 = day 0; index 2,3 = day 1; etc.
-    for i in range(len(close_12h)):
-        day_idx = i // 2  # Each day has 2 periods of 12h data
-        start_idx = day_idx * 2
-        end_idx = start_idx + 2
-        
-        # Get the two 12h periods for this day
-        if end_idx <= len(close_12h):
-            day_high = np.max(df_12h['high'].values[start_idx:end_idx])
-            day_low = np.min(df_12h['low'].values[start_idx:end_idx])
-            day_close = df_12h['close'].values[end_idx-1]  # Close of last period
-            
-            daily_high[i] = day_high
-            daily_low[i] = day_low
-            daily_close[i] = day_close
+    # Map daily levels to 1h bars
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Now calculate Camarilla levels for each 4h bar using the prior day's OHLC
-    for i in range(n):
-        # Find which 12h period corresponds to this 4h bar
-        # 4h to 12h ratio: 3 periods of 4h = 1 period of 12h
-        period_12h_idx = i // 3
-        
-        # We need the previous day's data (not current day)
-        prev_day_idx = period_12h_idx - 2  # Go back 2 periods (1 day) in 12h data
-        
-        if prev_day_idx >= 0 and not (np.isnan(daily_high[prev_day_idx]) or np.isnan(daily_low[prev_day_idx])):
-            prev_high = daily_high[prev_day_idx]
-            prev_low = daily_low[prev_day_idx]
-            prev_close = daily_close[prev_day_idx]
-            range_val = prev_high - prev_low
-            
-            camarilla_r1[i] = prev_close + range_val * 1.1 / 12
-            camarilla_s1[i] = prev_close - range_val * 1.1 / 12
+    # Calculate daily Camarilla levels
+    camarilla_r1_daily = np.full(len(df_1d), np.nan)
+    camarilla_s1_daily = np.full(len(df_1d), np.nan)
     
-    # Volume spike: current volume > 2.0 x 30-period average (stricter)
+    for i in range(1, len(df_1d)):
+        range_val = daily_high[i-1] - daily_low[i-1]
+        camarilla_r1_daily[i] = daily_close[i-1] + range_val * 1.1 / 12
+        camarilla_s1_daily[i] = daily_close[i-1] - range_val * 1.1 / 12
+    
+    # Align daily Camarilla levels to 1h timeframe
+    camarilla_r1 = align_htf_to_ltf(prices, df_1d, camarilla_r1_daily)
+    camarilla_s1 = align_htf_to_ltf(prices, df_1d, camarilla_s1_daily)
+    
+    # Volume spike: current volume > 2.0 x 20-period average
     vol_ma = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma[i] = np.mean(volume[i-30:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     vol_spike = volume > (vol_ma * 2.0)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 30, 2)  # Ensure all indicators ready
+    start_idx = max(34, 20, 1)  # Ensure indicators ready
     
     for i in range(start_idx, n):
         if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
-            np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_ma[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above Camarilla R1 with volume spike and 12h uptrend
+            # Long: break above daily Camarilla R1 with volume spike and 4h uptrend
             if (close[i] > camarilla_r1[i] and vol_spike[i] and 
-                close[i] > ema34_12h_aligned[i]):
-                signals[i] = 0.25
+                close[i] > ema34_4h_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: break below Camarilla S1 with volume spike and 12h downtrend
+            # Short: break below daily Camarilla S1 with volume spike and 4h downtrend
             elif (close[i] < camarilla_s1[i] and vol_spike[i] and 
-                  close[i] < ema34_12h_aligned[i]):
-                signals[i] = -0.25
+                  close[i] < ema34_4h_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: close below Camarilla S1 or 12h trend turns down
-            if (close[i] < camarilla_s1[i] or close[i] < ema34_12h_aligned[i]):
+            # Long exit: close below daily Camarilla S1 or 4h trend turns down
+            if (close[i] < camarilla_s1[i] or close[i] < ema34_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: close above Camarilla R1 or 12h trend turns up
-            if (close[i] > camarilla_r1[i] or close[i] > ema34_12h_aligned[i]):
+            # Short exit: close above daily Camarilla R1 or 4h trend turns up
+            if (close[i] > camarilla_r1[i] or close[i] > ema34_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Pivot_R1S1_Breakout_12hEMA34_Volume_Conservative"
-timeframe = "4h"
+name = "1h_Camarilla_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
