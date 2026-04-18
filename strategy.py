@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_Volume_Regime_v1
-Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) on 4h to capture adaptive trend direction, combined with volume confirmation and a 12h chop regime filter to avoid whipsaws. Designed to work in both bull and bear markets by adapting to market conditions - KAMA reduces lag in trends and avoids false signals in ranges, while volume confirms breakouts and chop filter ensures we only trade in favorable regimes. Target: 20-50 trades/year per symbol.
+1h_Camarilla_R1S1_Breakout_4hTrendFilter_v1
+Hypothesis: 1-hour breakouts above R1 or below S1 of daily Camarilla pivots with 4-hour EMA34 trend filter.
+Trades only during 08-20 UTC to avoid low-volume sessions. Uses 4h trend direction to avoid counter-trend trades.
+Target: 60-150 total trades over 4 years (15-37/year) with controlled risk via position size 0.20.
+Designed to work in both bull and bear markets by following higher timeframe trend.
 """
 
 import numpy as np
@@ -18,98 +21,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA on 4h close
-    def kama(close, period=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, n=period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.full_like(close, np.nan)
-        kama[period] = close[period]
-        for i in range(period+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate 1-day Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    kama_values = kama(close, period=10, fast=2, slow=30)
+    # Pivot point and Camarilla levels (R1, S1)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1_1d = pivot_1d + range_1d * 1.1 / 12
+    s1_1d = pivot_1d - range_1d * 1.1 / 12
     
-    # 12h chop regime filter (Choppiness Index)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Align 1-day levels to 1h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # 4-hour EMA34 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema34_4h = np.full(len(close_4h), np.nan)
+    for i in range(34, len(close_4h)):
+        if i == 34:
+            ema34_4h[i] = np.mean(close_4h[0:35])
+        else:
+            k = 2 / (34 + 1)
+            ema34_4h[i] = close_4h[i] * k + ema34_4h[i-1] * (1 - k)
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # ATR(14) sum
-    atr_sum = np.full(len(close_12h), np.nan)
-    for i in range(14, len(close_12h)):
-        atr_sum[i] = np.sum(tr[i-13:i+1])
-    
-    # Sum of high-low ranges
-    hl_sum = np.full(len(close_12h), np.nan)
-    for i in range(14, len(close_12h)):
-        hl_sum[i] = np.sum(high_12h[i-13:i+1] - low_12h[i-13:i+1])
-    
-    # Choppiness Index
-    chop = np.full(len(close_12h), np.nan)
-    for i in range(14, len(close_12h)):
-        if hl_sum[i] != 0:
-            chop[i] = 100 * np.log10(atr_sum[i] / hl_sum[i]) / np.log10(14)
-    
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    
-    # Volume spike: current volume > 1.5 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure KAMA and volume MA ready
+    start_idx = max(34, 34)  # EMA34 needs 34 bars
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_values[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma[i])):
-            signals[i] = 0.0
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema34_4h_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price > KAMA with volume spike and chop < 61.8 (trending)
-            if (close[i] > kama_values[i] and vol_spike[i] and 
-                chop_aligned[i] < 61.8):
-                signals[i] = 0.25
+            # Long: break above R1 with 4h uptrend
+            if close[i] > r1_1d_aligned[i] and close[i] > ema34_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price < KAMA with volume spike and chop < 61.8 (trending)
-            elif (close[i] < kama_values[i] and vol_spike[i] and 
-                  chop_aligned[i] < 61.8):
-                signals[i] = -0.25
+            # Short: break below S1 with 4h downtrend
+            elif close[i] < s1_1d_aligned[i] and close[i] < ema34_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price < KAMA or chop > 61.8 (range)
-            if (close[i] < kama_values[i] or chop_aligned[i] > 61.8):
+            # Long exit: close below pivot or 4h trend turns down
+            if close[i] < pivot_1d_aligned[i] or close[i] < ema34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price > KAMA or chop > 61.8 (range)
-            if (close[i] > kama_values[i] or chop_aligned[i] > 61.8):
+            # Short exit: close above pivot or 4h trend turns up
+            if close[i] > pivot_1d_aligned[i] or close[i] > ema34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_KAMA_Trend_Volume_Regime_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrendFilter_v1"
+timeframe = "1h"
 leverage = 1.0
