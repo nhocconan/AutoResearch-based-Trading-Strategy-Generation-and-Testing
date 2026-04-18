@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Choppiness_Keltner_Reversion
-Hypothesis: In sideways markets (Choppiness > 61.8), price tends to revert to the Keltner middle (EMA20). 
-Long when price touches lower band with bullish engulfing candle, short when touches upper band with bearish engulfing.
-Works in both bull/bear markets because range-bound periods occur in all regimes. Uses 1d ADX to avoid strong trends.
+12h_KAMA_Direction_1wTrendFilter_Volume_Confirmation
+Hypothesis: Uses KAMA (Kaufman Adaptive Moving Average) on 12h to capture trend direction, filtered by 1-week trend (price > 50-period EMA) and volume confirmation (volume > 1.5x 20-period average). Designed for low-frequency, high-conviction trades in both bull and bear markets. Targets 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -20,197 +18,108 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period EMA for Keltner middle
-    ema_20 = np.zeros(n)
-    ema_20[:] = np.nan
-    if n >= 20:
-        k = 2 / (20 + 1)
-        ema_20[19] = np.mean(close[:20])
-        for i in range(20, n):
-            ema_20[i] = close[i] * k + ema_20[i-1] * (1 - k)
+    # Get 12h data for KAMA calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Calculate ATR(10) for Keltner width
-    atr = np.zeros(n)
-    atr[:] = np.nan
-    if n >= 2:
-        tr = np.zeros(n)
-        tr[0] = high[0] - low[0]
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        # Wilder's smoothing for ATR
-        atr[9] = np.mean(tr[:10])
-        for i in range(10, n):
-            atr[i] = (atr[i-1] * 9 + tr[i]) / 10
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.zeros_like(close_1w)
+    ema_50_1w[:] = np.nan
+    if len(close_1w) >= 50:
+        k = 2 / (50 + 1)
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = close_1w[i] * k + ema_50_1w[i-1] * (1 - k)
     
-    # Keltner bands (multiplier = 1.5)
-    keltner_upper = ema_20 + 1.5 * atr
-    keltner_lower = ema_20 - 1.5 * atr
+    # Align 1w EMA50 to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Choppiness Index (14-period) - range detection
-    def calculate_choppiness(high_arr, low_arr, close_arr, period=14):
-        chop = np.full(len(close_arr), np.nan)
-        if len(close_arr) < period * 2:
-            return chop
-        atr_sum = np.zeros(len(close_arr))
-        tr = np.zeros(len(close_arr))
-        tr[0] = high_arr[0] - low_arr[0]
-        for i in range(1, len(tr)):
-            tr[i] = max(high_arr[i] - low_arr[i], abs(high_arr[i] - close_arr[i-1]), abs(low_arr[i] - close_arr[i-1]))
-        # Wilder's smoothing for TR sum
-        atr_sum[period-1] = np.sum(tr[:period])
-        for i in range(period, len(tr)):
-            atr_sum[i] = atr_sum[i-1] - (atr_sum[i-1] / period) + tr[i]
-        # Highest high and lowest low over period
-        hh = np.zeros(len(close_arr))
-        ll = np.zeros(len(close_arr))
-        for i in range(len(close_arr)):
-            if i < period:
-                hh[i] = np.max(high_arr[:i+1])
-                ll[i] = np.min(low_arr[:i+1])
-            else:
-                hh[i] = np.max(high_arr[i-period+1:i+1])
-                ll[i] = np.min(low_arr[i-period+1:i+1])
-        # Choppiness formula
-        for i in range(period-1, len(close_arr)):
-            if atr_sum[i] > 0 and hh[i] > ll[i]:
-                chop[i] = 100 * np.log10(atr_sum[i] / (hh[i] - ll[i])) / np.log10(period)
-        return chop
+    # Calculate KAMA on 12h
+    close_12h = df_12h['close'].values
+    kama = np.zeros_like(close_12h)
+    kama[:] = np.nan
     
-    chop = calculate_choppiness(high, low, close, 14)
+    if len(close_12h) >= 20:
+        # Efficiency ratio
+        change = np.abs(np.diff(close_12h, 10))  # 10-period change
+        volatility = np.sum(np.abs(np.diff(close_12h)), axis=1)  # 10-period volatility
+        er = np.zeros_like(close_12h)
+        er[:10] = np.nan
+        er[10:] = change[10:] / volatility[10:]
+        # Avoid division by zero
+        er = np.where(volatility[10:] == 0, 0, er)
+        
+        # Smoothing constants
+        sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+        
+        # Initialize KAMA
+        kama[19] = np.mean(close_12h[:20])
+        for i in range(20, len(close_12h)):
+            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
     
-    # Bullish engulfing: current green candle engulfs previous red candle
-    bull_engulf = np.zeros(n, dtype=bool)
-    bear_engulf = np.zeros(n, dtype=bool)
-    for i in range(1, n):
-        if close[i] > open_[i] and close[i-1] < open_[i-1]:  # current up, previous down
-            if close[i] >= open_[i-1] and open_[i] <= close[i-1]:
-                bull_engulf[i] = True
-        if close[i] < open_[i] and close[i-1] > open_[i-1]:  # current down, previous up
-            if close[i] <= open_[i-1] and open_[i] >= close[i-1]:
-                bear_engulf[i] = True
+    # Align KAMA to 12h timeframe (already aligned, but keep for consistency)
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
     
-    # Need open prices
-    open_ = prices['open'].values
-    
-    # Recalculate engulfing with correct open
-    bull_engulf = np.zeros(n, dtype=bool)
-    bear_engulf = np.zeros(n, dtype=bool)
-    for i in range(1, n):
-        if close[i] > open_[i] and close[i-1] < open_[i-1]:  # current up, previous down
-            if close[i] >= open_[i-1] and open_[i] <= close[i-1]:
-                bull_engulf[i] = True
-        if close[i] < open_[i] and close[i-1] > open_[i-1]:  # current down, previous up
-            if close[i] <= open_[i-1] and open_[i] >= close[i-1]:
-                bear_engulf[i] = True
-    
-    # 1d ADX for trend strength filter (avoid strong trends)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate ADX components
-    def calculate_adx(high_arr, low_arr, close_arr, period=14):
-        adx = np.full(len(close_arr), np.nan)
-        if len(close_arr) < period * 2:
-            return adx
-        # True Range
-        tr = np.zeros(len(close_arr))
-        tr[0] = high_arr[0] - low_arr[0]
-        for i in range(1, len(tr)):
-            tr[i] = max(high_arr[i] - low_arr[i], abs(high_arr[i] - close_arr[i-1]), abs(low_arr[i] - close_arr[i-1]))
-        # Directional Movement
-        plus_dm = np.zeros(len(close_arr))
-        minus_dm = np.zeros(len(close_arr))
-        for i in range(1, len(high_arr)):
-            up_move = high_arr[i] - high_arr[i-1]
-            down_move = low_arr[i-1] - low_arr[i]
-            if up_move > down_move and up_move > 0:
-                plus_dm[i] = up_move
-            else:
-                plus_dm[i] = 0
-            if down_move > up_move and down_move > 0:
-                minus_dm[i] = down_move
-            else:
-                minus_dm[i] = 0
-        # Smoothed TR, PlusDM, MinusDM (Wilder's smoothing)
-        atr_adx = np.zeros(len(close_arr))
-        plus_dm_smooth = np.zeros(len(close_arr))
-        minus_dm_smooth = np.zeros(len(close_arr))
-        atr_adx[period-1] = np.sum(tr[:period])
-        plus_dm_smooth[period-1] = np.sum(plus_dm[:period])
-        minus_dm_smooth[period-1] = np.sum(minus_dm[:period])
-        for i in range(period, len(tr)):
-            atr_adx[i] = (atr_adx[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        # Directional Indicators
-        plus_di = np.zeros(len(close_arr))
-        minus_di = np.zeros(len(close_arr))
-        dx = np.zeros(len(close_arr))
-        for i in range(period-1, len(close_arr)):
-            if atr_adx[i] > 0:
-                plus_di[i] = 100 * plus_dm_smooth[i] / atr_adx[i]
-                minus_di[i] = 100 * minus_dm_smooth[i] / atr_adx[i]
-                if plus_di[i] + minus_di[i] > 0:
-                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        # ADX = smoothed DX
-        adx[2*period-2] = np.mean(dx[period-1:2*period-1]) if 2*period-1 <= len(dx) else np.nan
-        for i in range(2*period-1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        return adx
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
+        else:
+            vol_ma[i] = np.mean(volume[i-20+1:i+1])
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = max(40, 20)  # Ensure indicators are ready
+    start_idx = 30  # Warmup for KAMA and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(chop[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Range market: Choppiness > 61.8, weak trend: ADX < 25
-        if chop[i] > 61.8 and adx_1d_aligned[i] < 25:
-            # Long: price at lower Keltner band with bullish engulfing
-            if low[i] <= keltner_lower[i] and bull_engulf[i]:
-                if position <= 0:
-                    signals[i] = 0.25
-                    position = 1
-                else:
-                    signals[i] = 0.25  # maintain
-            # Short: price at upper Keltner band with bearish engulfing
-            elif high[i] >= keltner_upper[i] and bear_engulf[i]:
-                if position >= 0:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = -0.25  # maintain
-            # Exit: price returns to middle (EMA20) or conditions change
-            elif position == 1 and (close[i] >= ema_20[i] or chop[i] < 50 or adx_1d_aligned[i] > 30):
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and (close[i] <= ema_20[i] or chop[i] < 50 or adx_1d_aligned[i] > 30):
+        bars_since_entry += 1
+        
+        if position == 0:
+            # Long: price > KAMA, price > 1w EMA50, volume spike
+            if close[i] > kama_aligned[i] and close[i] > ema_50_1w_aligned[i] and vol_spike[i]:
+                signals[i] = 0.25
+                position = 1
+                bars_since_entry = 0
+            # Short: price < KAMA, price < 1w EMA50, volume spike
+            elif close[i] < kama_aligned[i] and close[i] < ema_50_1w_aligned[i] and vol_spike[i]:
+                signals[i] = -0.25
+                position = -1
+                bars_since_entry = 0
+        
+        elif position == 1:
+            # Exit: price crosses below KAMA or trend fails
+            if close[i] < kama_aligned[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                # Hold current position
-                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
-        else:
-            # Trending or choppy but not extreme range: stay flat
-            signals[i] = 0.0
-            position = 0
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit: price crosses above KAMA or trend fails
+            if close[i] > kama_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Choppiness_Keltner_Reversion"
-timeframe = "4h"
+name = "12h_KAMA_Direction_1wTrendFilter_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
