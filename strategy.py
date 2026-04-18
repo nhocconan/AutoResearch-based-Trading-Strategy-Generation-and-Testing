@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_Cloud_Filter_v1
-Hypothesis: Ichimoku Tenkan-Kijun cross with cloud filter from daily timeframe captures trend momentum while avoiding whipsaws. Works in bull via trend-following and bear via counter-trend at cloud edges. Designed for ~20 trades/year to minimize fee drag.
+1d_Weekly_Pivot_R1S1_Breakout_Trend_Filter_v1
+Hypothesis: Weekly pivot levels (R1/S1) from the prior week act as strong support/resistance on the daily chart. 
+Breakouts above R1 or below S1 with trend confirmation (price > weekly EMA34) capture sustained moves. 
+Volume filter reduces false breakouts. Designed for ~15-25 trades/year on 1d timeframe to minimize fee drag.
+Works in bull via trend-following breaks above R1 and in bear via breakdowns below S1.
 """
 
 import numpy as np
@@ -10,104 +13,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Ichimoku on 6h (Tenkan=9, Kijun=26, Senkou B=52)
-    # Tenkan-sen: (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Get weekly data for pivot points and EMA
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
+        return np.zeros(n)
     
-    # Kijun-sen: (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Senkou Span A: (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Calculate weekly pivot points (using prior week's data)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Senkou Span B: (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
+    # Align weekly levels to daily (already delayed by weekly close)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
     
-    # Daily trend filter: price above/below daily Kumo cloud
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA34 for trend filter
+    weekly_ema34 = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema34)
     
-    # Daily Ichimoku components
-    high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (high_9_1d + low_9_1d) / 2
-    
-    high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (high_26_1d + low_26_1d) / 2
-    
-    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
-    
-    high_52_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_52_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = (high_52_1d + low_52_1d) / 2
-    
-    # Align daily Ichimoku to 6h timeframe
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
-    cloud_bottom = np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    # Volume confirmation: volume > 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 52  # enough for Senkou B
+    start_idx = 40  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema34_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
-        
+            
         price = close[i]
-        tenkan_val = tenkan[i]
-        kijun_val = kijun[i]
-        cloud_top_val = cloud_top[i]
-        cloud_bottom_val = cloud_bottom[i]
         
         if position == 0:
-            # Long: TK cross up AND price above cloud
-            if tenkan_val > kijun_val and price > cloud_top_val:
+            # Long: break above R1 with price above weekly EMA34 and volume confirmation
+            if price > r1_aligned[i] and price > ema34_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TK cross down AND price below cloud
-            elif tenkan_val < kijun_val and price < cloud_bottom_val:
+            # Short: break below S1 with price below weekly EMA34 and volume confirmation
+            elif price < s1_aligned[i] and price < ema34_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: TK cross down OR price below cloud
-            if tenkan_val < kijun_val or price < cloud_bottom_val:
+            # Exit: price breaks below pivot (support) or volume fails
+            if price < pivot_aligned[i] or not volume_confirm[i]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: TK cross up OR price above cloud
-            if tenkan_val > kijun_val or price > cloud_top_val:
+            # Exit: price breaks above pivot (resistance) or volume fails
+            if price > pivot_aligned[i] or not volume_confirm[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_Cloud_Filter_v1"
-timeframe = "6h"
+name = "1d_Weekly_Pivot_R1S1_Breakout_Trend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
