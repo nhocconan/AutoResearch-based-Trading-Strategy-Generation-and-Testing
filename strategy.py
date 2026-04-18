@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume confirmation.
-# Donchian breakout captures breakouts in trending markets.
-# 1d ATR filter ensures we trade only when volatility is expanding (ATR > 1d ATR mean).
-# Volume confirmation (>1.5x 20-period average) validates breakout strength.
-# Works in bull markets (breakouts above upper band) and bear markets (breakouts below lower band).
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-name = "4h_Donchian20_1dATRFilter_Volume"
-timeframe = "4h"
+# Hypothesis: 12h Williams Alligator with 1d EMA34 filter and volume spike confirmation.
+# Williams Alligator uses SMAs of median price (HL/2) to identify trends.
+# Jaw (13-period), Teeth (8-period), Lips (5-period) - all shifted forward.
+# When Lips > Teeth > Jaw = uptrend; Lips < Teeth < Jaw = downtrend.
+# 1d EMA34 filter ensures alignment with daily trend.
+# Volume spike (>2x 20-period average) confirms conviction.
+# Designed to work in both bull and bear markets by following the trend.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +25,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR filter (ONCE before loop)
+    # Get 1d data for EMA34 filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Alligator components
+    median_price = (high + low) / 2.0
+    median_series = pd.Series(median_price)
     
-    # Calculate 14-period ATR for 1d
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
+    # Jaw (13-period SMA, shifted 8 bars)
+    jaw = median_series.rolling(window=13, min_periods=13).mean().shift(8).values
+    
+    # Teeth (8-period SMA, shifted 5 bars)
+    teeth = median_series.rolling(window=8, min_periods=8).mean().shift(5).values
+    
+    # Lips (5-period SMA, shifted 3 bars)
+    lips = median_series.rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Calculate 1d EMA34 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - close_1d.shift(1))
-    tr3 = np.abs(low_1d - close_1d.shift(1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_mean_1d = pd.Series(atr_14_1d).rolling(window=30, min_periods=30).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_mean_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_mean_1d)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_conf = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,36 +57,42 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_mean_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: 1d ATR > 1d ATR mean (expanding volatility)
-        vol_filter = atr_14_1d_aligned[i] > atr_mean_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
+        
+        # Alligator signals
+        lips_above_teeth = lips[i] > teeth[i]
+        teeth_above_jaw = teeth[i] > jaw[i]
+        lips_below_teeth = lips[i] < teeth[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band + volume + volatility
-            if close[i] > high_20[i] and volume_conf[i] and vol_filter:
+            # Long: Lips > Teeth > Jaw AND uptrend AND volume spike
+            if lips_above_teeth and teeth_above_jaw and uptrend and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band + volume + volatility
-            elif close[i] < low_20[i] and volume_conf[i] and vol_filter:
+            # Short: Lips < Teeth < Jaw AND downtrend AND volume spike
+            elif lips_below_teeth and teeth_below_jaw and downtrend and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below lower Donchian band
-            if close[i] < low_20[i]:
+            # Long exit: Alligator turns bearish OR trend reverses
+            if not (lips_above_teeth and teeth_above_jaw) or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above upper Donchian band
-            if close[i] > high_20[i]:
+            # Short exit: Alligator turns bullish OR trend reverses
+            if not (lips_below_teeth and teeth_below_jaw) or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
