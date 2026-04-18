@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Bollinger Band width contraction + daily RSI extremes on 12h timeframe.
-# Uses weekly BB width to identify low volatility (squeeze) regime and daily RSI for mean reversion entries.
-# Enters when price touches Bollinger Bands during squeeze with RSI extreme reversal.
-# Designed for low trade frequency to avoid fee drag, works in ranging markets.
+# Hypothesis: Daily price channel breakout with 1-day trend filter and volume confirmation.
+# Uses daily Donchian channels (20-period) to identify breakouts, daily SMA200 for trend filter,
+# and volume spike for confirmation. Designed for low trade frequency (<40/year) to minimize
+# fee drag while capturing strong momentum moves in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,128 +19,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma_20_1w = np.full(len(close_1w), np.nan)
-    for i in range(bb_period, len(close_1w)):
-        sma_20_1w[i] = np.mean(close_1w[i-bb_period:i])
-    
-    std_20_1w = np.full(len(close_1w), np.nan)
-    for i in range(bb_period, len(close_1w)):
-        std_20_1w[i] = np.std(close_1w[i-bb_period:i])
-    
-    bb_upper_1w = sma_20_1w + bb_std * std_20_1w
-    bb_lower_1w = sma_20_1w - bb_std * std_20_1w
-    bb_width_1w = (bb_upper_1w - bb_lower_1w) / sma_20_1w  # Normalized width
-    
-    # Align weekly BB data to 12h timeframe
-    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
-    bb_upper_1w_aligned = align_htf_to_ltf(prices, df_1w, bb_upper_1w)
-    bb_lower_1w_aligned = align_htf_to_ltf(prices, df_1w, bb_lower_1w)
-    bb_width_1w_aligned = align_htf_to_ltf(prices, df_1w, bb_width_1w)
-    
-    # Get daily data for RSI
+    # Get daily data for Donchian channels and trend filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily RSI(14)
-    rsi_period = 14
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Donchian channels (20-period) on daily data
+    upper_20d = np.full(len(high_1d), np.nan)
+    lower_20d = np.full(len(low_1d), np.nan)
+    for i in range(20, len(high_1d)):
+        upper_20d[i] = np.max(high_1d[i-20:i])
+        lower_20d[i] = np.min(low_1d[i-20:i])
     
-    avg_gain = np.full(len(close_1d), np.nan)
-    avg_loss = np.full(len(close_1d), np.nan)
+    # Align daily Donchian channels to 12h timeframe
+    upper_20d_aligned = align_htf_to_ltf(prices, df_1d, upper_20d)
+    lower_20d_aligned = align_htf_to_ltf(prices, df_1d, lower_20d)
     
-    # Initial average
-    if len(gain) >= rsi_period:
-        avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
-        
-        for i in range(rsi_period, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    # Calculate SMA(200) on daily close for trend filter
+    sma_200_1d = np.full(len(close_1d), np.nan)
+    for i in range(200, len(close_1d)):
+        sma_200_1d[i] = np.mean(close_1d[i-200:i])
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Align daily SMA200 to 12h timeframe
+    sma_200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
     
-    # Align daily RSI to 12h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Calculate 12h ATR for stop loss
-    tr_12h_1 = high - low
-    tr_12h_2 = np.abs(high - np.roll(close, 1))
-    tr_12h_3 = np.abs(low - np.roll(close, 1))
-    tr_12h_1[0] = high[0] - low[0]
-    tr_12h_2[0] = np.abs(high[0] - close[0])
-    tr_12h_3[0] = np.abs(low[0] - close[0])
-    tr_12h = np.maximum(tr_12h_1, np.maximum(tr_12h_2, tr_12h_3))
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate volume moving average (20-period) on 12h data
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, rsi_period, 20)  # need weekly BB, daily RSI
+    start_idx = max(200, 20)  # need daily SMA200, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bb_width_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(sma_20_1w_aligned[i]) or np.isnan(bb_upper_1w_aligned[i]) or 
-            np.isnan(bb_lower_1w_aligned[i]) or np.isnan(atr_12h[i])):
+        if (np.isnan(upper_20d_aligned[i]) or np.isnan(lower_20d_aligned[i]) or 
+            np.isnan(sma_200_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Squeeze condition: weekly BB width below 20th percentile (low volatility)
-        # Calculate percentile using historical values up to current point
-        if i >= 50:  # need sufficient history for percentile
-            width_history = bb_width_1w_aligned[:i+1]
-            width_history_valid = width_history[~np.isnan(width_history)]
-            if len(width_history_valid) >= 20:
-                width_percentile = np.percentile(width_history_valid, 20)
-                squeeze = bb_width_1w_aligned[i] <= width_percentile
-            else:
-                squeeze = False
-        else:
-            squeeze = False
+        # Volume confirmation: current volume > 2.0 * 20-period average
+        vol_confirmed = volume[i] > 2.0 * vol_ma[i]
         
-        # RSI extreme conditions
-        rsi_oversold = rsi_1d_aligned[i] < 30
-        rsi_overbought = rsi_1d_aligned[i] > 70
-        
-        # Price touching Bollinger Bands
-        touch_upper = close[i] >= bb_upper_1w_aligned[i]
-        touch_lower = close[i] <= bb_lower_1w_aligned[i]
+        # Trend filter: price above daily SMA200 (uptrend) or below (downtrend)
+        trend_up = close[i] > sma_200_1d_aligned[i]
+        trend_down = close[i] < sma_200_1d_aligned[i]
         
         if position == 0:
-            # Long entry: squeeze + RSI oversold + touch lower band
-            if squeeze and rsi_oversold and touch_lower:
+            # Long entry: price breaks above 20-day high, with volume and trend filter
+            if (close[i] > upper_20d_aligned[i] and 
+                vol_confirmed and 
+                trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: squeeze + RSI overbought + touch upper band
-            elif squeeze and rsi_overbought and touch_upper:
+            # Short entry: price breaks below 20-day low, with volume and trend filter
+            elif (close[i] < lower_20d_aligned[i] and 
+                  vol_confirmed and 
+                  trend_down):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses above middle band or RSI exits oversold
-            if close[i] >= sma_20_1w_aligned[i] or rsi_1d_aligned[i] >= 50:
+            # Long exit: price crosses below 20-day low or opposite signal
+            if close[i] < lower_20d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses below middle band or RSI exits overbought
-            if close[i] <= sma_20_1w_aligned[i] or rsi_1d_aligned[i] <= 50:
+            # Short exit: price crosses above 20-day high or opposite signal
+            if close[i] > upper_20d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -148,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_BBW_Squeeze_RSI_Extreme"
+name = "12h_DailyDonchian20_SMA200_Volume2x"
 timeframe = "12h"
 leverage = 1.0
