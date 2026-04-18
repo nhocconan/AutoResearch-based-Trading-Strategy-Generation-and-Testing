@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Direction_Volume_Trend_Filter
-Hypothesis: KAMA adapts to market noise, reducing whipsaw in ranging markets and capturing trends efficiently.
-Combined with volume confirmation and weekly EMA trend filter, it captures institutional moves in both bull and bear markets.
-Target: 12-37 trades/year (50-150 total over 4 years) to balance opportunity and fee drag.
+4h_Donchian_Breakout_Volume_Trend_Plus
+Hypothesis: Donchian(20) breakouts on 4h timeframe with volume confirmation and 12h EMA trend filter capture institutional moves.
+Works in both bull and bear by following breakout direction with trend filter. Target: 20-50 trades/year (80-200 total over 4 years).
 """
 
 import numpy as np
@@ -20,99 +19,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for weekly EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Donchian(20) channels - 20-period high/low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # KAMA parameters
-    er_length = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_length))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change.shape) > 1 else np.abs(np.diff(close)).sum()
-    # Correct calculation for volatility (sum of absolute changes over er_length period)
-    volatility = np.array([np.sum(np.abs(np.diff(close[i-er_length+1:i+1]))) if i >= er_length-1 else 0 for i in range(len(close))])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Pad the beginning
-    er = np.concatenate([np.zeros(er_length-1), er[:len(close)-er_length+1]])
-    
-    # Calculate Smoothing Constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[er_length-1] = close[er_length-1]
-    for i in range(er_length, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # 12h EMA(34) trend filter
+    ema_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
-    # Weekly EMA trend filter (using daily data)
-    ema_1d = pd.Series(df_1d['close']).ewm(span=35, adjust=False, min_periods=35).mean().values
-    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
     signals = np.zeros(n)
     position = 0
-    bars_since_entry = 0
     
-    start_idx = max(er_length, 20)  # Warmup
+    start_idx = 20  # Warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
         price = close[i]
-        kama_val = kama[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        trend = ema_12h_aligned[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_1d_12h[i]
         
         if position == 0:
-            # Long: price above KAMA with volume in uptrend
-            if price > kama_val and vol_ok and price > ema_trend:
+            # Long: break above upper band with volume in uptrend
+            if price > upper and vol_ok and price > trend:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: price below KAMA with volume in downtrend
-            elif price < kama_val and vol_ok and price < ema_trend:
+            # Short: break below lower band with volume in downtrend
+            elif price < lower and vol_ok and price < trend:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day for 12h timeframe)
-            if bars_since_entry < 2:
-                signals[i] = 0.25
+            # Long: exit when price returns to lower band or trend reverses
+            if price < lower or price < trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
-                # Exit: price crosses below KAMA or trend reverses
-                if price < kama_val or price < ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
         
         elif position == -1:
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day for 12h timeframe)
-            if bars_since_entry < 2:
-                signals[i] = -0.25
+            # Short: exit when price returns to upper band or trend reverses
+            if price > upper or price > trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
-                # Exit: price crosses above KAMA or trend reverses
-                if price > kama_val or price > ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
     
     return signals
 
-name = "12h_KAMA_Direction_Volume_Trend_Filter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_Trend_Plus"
+timeframe = "4h"
 leverage = 1.0
