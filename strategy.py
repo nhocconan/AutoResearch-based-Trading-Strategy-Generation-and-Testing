@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-12h Daily Pivot R1/S1 Breakout with Volume Spike and Daily EMA Trend
-Hypothesis: Daily pivot levels (R1, S1) from daily chart act as strong support/resistance.
-Breakouts beyond these levels with volume confirmation and daily EMA trend filter capture momentum.
-Designed for 12-37 trades/year on 12h timeframe with low trade frequency to minimize fee drag.
-Works in bull/bear markets by requiring volume spike and daily EMA trend filter.
+4h Volume-Weighted Average Price (VWAP) Deviation with 1d ATR Filter and 1w Trend
+Hypothesis: Price deviations from 4h VWAP revert to the mean when accompanied by 
+low volatility (ATR contraction) and aligned with higher timeframe trend (1w EMA).
+This mean-reversion strategy works in both bull and bear markets by taking 
+opposite positions when price deviates significantly from VWAP during low volatility
+periods, while filtering for higher timeframe trend direction to avoid counter-trend trades.
+Designed for 20-40 trades/year on 4h timeframe with strict entry conditions to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,85 +23,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation (once before loop)
+    # Calculate 4h VWAP (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
+    
+    # Calculate cumulative sums for VWAP
+    cum_vwap_num = np.nancumsum(vwap_numerator)
+    cum_vwap_den = np.nancumsum(vwap_denominator)
+    vwap = np.divide(cum_vwap_num, cum_vwap_den, out=np.full_like(cum_vwap_num, np.nan), where=cum_vwap_den!=0)
+    
+    # Calculate price deviation from VWAP as percentage
+    vwap_deviation = (close - vwap) / vwap * 100.0
+    
+    # Get 1d data for ATR filter (volatility contraction)
     df_d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot points using standard formula
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # Using previous day's data to avoid look-ahead
-    daily_high = df_d['high']
-    daily_low = df_d['low']
-    daily_close = df_d['close']
+    # Calculate 1d ATR(14) for volatility filter
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
+    close_d = df_d['close'].values
     
-    pivot = (daily_high + daily_low + daily_close) / 3
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
+    # True Range calculation
+    tr1 = high_d - low_d
+    tr2 = np.abs(high_d - np.roll(close_d, 1))
+    tr3 = np.abs(low_d - np.roll(close_d, 1))
+    tr1[0] = high_d[0] - low_d[0]  # First period TR
+    tr2[0] = np.abs(high_d[0] - close_d[0])
+    tr3[0] = np.abs(low_d[0] - close_d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Shift by 1 to use previous day's levels only
-    r1_prev = r1.shift(1).values
-    s1_prev = s1.shift(1).values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_d, r1_prev)
-    s1_aligned = align_htf_to_ltf(prices, df_d, s1_prev)
+    # Volatility contraction: current ATR < 50-period MA of ATR
+    vol_contraction = atr_14 < (0.8 * atr_ma_50)
     
-    # Get daily data for EMA trend filter (same df_d)
-    # Daily EMA34 for trend filter
-    ema_34_d = pd.Series(df_d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_d, ema_34_d)
+    # Get 1w data for trend filter
+    df_w = get_htf_data(prices, '1w')
     
-    # Volume spike: 2x 20-period average on 12h
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Weekly EMA(50) for trend filter
+    ema_50_w = pd.Series(df_w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_w_aligned = align_htf_to_ltf(prices, df_w, ema_50_w)
     
     signals = np.zeros(n)
-    position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 100
+    start_idx = 100  # Ensure sufficient data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(vwap[i]) or 
+            np.isnan(vwap_deviation[i]) or
+            np.isnan(atr_14[i]) or
+            np.isnan(atr_ma_50[i]) or
+            np.isnan(ema_50_w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_trend = ema_34_aligned[i]
+        deviation = vwap_deviation[i]
+        ema_trend = ema_50_w_aligned[i]
         
-        if position == 0:
-            # Long: break above R1 with volume spike and price above daily EMA (uptrend)
-            if price > r1_val and volume_spike[i] and price > ema_trend:
-                signals[i] = 0.25
-                position = 1
-            # Short: break below S1 with volume spike and price below daily EMA (downtrend)
-            elif price < s1_val and volume_spike[i] and price < ema_trend:
-                signals[i] = -0.25
-                position = -1
+        # Entry conditions: significant VWAP deviation + low volatility + trend alignment
+        if abs(deviation) > 2.0:  # More than 2% deviation from VWAP
+            if vol_contraction[i]:  # Low volatility environment
+                # Long when price is significantly below VWAP and above weekly EMA (uptrend)
+                if deviation < -2.0 and price > ema_trend:
+                    signals[i] = 0.25
+                # Short when price is significantly above VWAP and below weekly EMA (downtrend)
+                elif deviation > 2.0 and price < ema_trend:
+                    signals[i] = -0.25
         
-        elif position == 1:
-            # Long position
-            signals[i] = 0.25
-            # Exit: price returns to S1 or breaks below daily EMA
-            if price <= s1_val or price < ema_trend:
-                signals[i] = 0.0
-                position = 0
-        
-        elif position == -1:
-            # Short position
-            signals[i] = -0.25
-            # Exit: price returns to R1 or breaks above daily EMA
-            if price >= r1_val or price > ema_trend:
-                signals[i] = 0.0
-                position = 0
+        # Exit when price returns to VWAP (mean reversion complete) or volatility expands
+        elif abs(deviation) < 0.5:  # Back within 0.5% of VWAP
+            signals[i] = 0.0
+        # Also exit if volatility expands significantly (breakdown of mean reversion environment)
+        elif not vol_contraction[i] and abs(deviation) > 1.0:
+            signals[i] = 0.0
     
     return signals
 
-name = "12h_DailyPivot_R1S1_Breakout_Volume_EMA"
-timeframe = "12h"
+name = "4h_VWAP_Deviation_ATR_VolContraction_1wEMA"
+timeframe = "4h"
 leverage = 1.0
