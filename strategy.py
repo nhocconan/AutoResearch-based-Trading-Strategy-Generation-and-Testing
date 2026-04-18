@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_1d_Trend_Filter
-Hypothesis: KAMA adapts to market noise, providing a reliable trend filter. 
-Long when price > KAMA(10) and 1d EMA34 > prior 1d EMA34; short when price < KAMA(10) and 1d EMA34 < prior 1d EMA34. 
-Volume confirmation (>1.5x 20-period average) reduces false signals. 
-Designed for 4-hour timeframe with ~25-40 trades/year to minimize fee drag and work in both bull and bear markets via adaptive trend filter.
+1d_Weekly_Pivot_Breakout_With_Trend_Filter
+Hypothesis: Weekly (1w) CPR (Central Pivot Range) levels act as strong support/resistance.
+Breakout above weekly CPR high with volume > 1.5x 20-day average and price above weekly EMA20 = long.
+Breakdown below weekly CPR low with volume confirmation and price below weekly EMA20 = short.
+Designed for daily timeframe with ~10-25 trades/year to minimize fee drift and work in both bull and bear via trend filter.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,48 +21,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily typical price for KAMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for CPR and EMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Daily OHLC for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly OHLC
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # KAMA(10) - Adaptive Moving Average
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    er = np.zeros_like(change)
-    for i in range(len(change)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Smooth ER
-    er_smooth = pd.Series(er).ewm(alpha=2/(10+1), adjust=False).fillna(0).values
-    # Smoothing constants
-    sc = (er_smooth * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Weekly CPR (Central Pivot Range)
+    # TC = (H + L + 2C) / 4  (Top Central)
+    # BC = (H + L) / 2        (Bottom Central)
+    # PV = (H + L + C) / 3    (Pivot Point)
+    tc_1w = (high_1w + low_1w + 2 * close_1w) / 4
+    bc_1w = (high_1w + low_1w) / 2
+    pv_1w = (high_1w + low_1w + close_1w) / 3
     
-    # 1-day EMA trend filter (34-period)
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_prev = np.roll(ema_1d, 1)
-    ema_1d_prev[0] = ema_1d[0]
-    ema_1d_rising = ema_1d > ema_1d_prev
-    ema_1d_falling = ema_1d < ema_1d_prev
+    # CPR boundaries: higher of TC/PV as top, lower of BC/PV as bottom
+    cpr_top = np.maximum(tc_1w, pv_1w)
+    cpr_bottom = np.minimum(bc_1w, pv_1w)
     
-    # Align 1d indicators to 4h timeframe (wait for 1d bar close)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    ema_1d_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_rising)
-    ema_1d_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_falling)
+    # Align weekly CPR to daily timeframe (wait for weekly bar close)
+    cpr_top_aligned = align_htf_to_ltf(prices, df_1w, cpr_top)
+    cpr_bottom_aligned = align_htf_to_ltf(prices, df_1w, cpr_bottom)
     
-    # 4h volume filter: >1.5x 20-period average
+    # Weekly EMA trend filter (20-period)
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Daily volume filter: >1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
@@ -72,38 +61,38 @@ def generate_signals(prices):
     start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(ema_1d_rising_aligned[i]) or 
-            np.isnan(ema_1d_falling_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(cpr_top_aligned[i]) or np.isnan(cpr_bottom_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama_aligned[i]
-        ema_rising = ema_1d_rising_aligned[i]
-        ema_falling = ema_1d_falling_aligned[i]
+        cpr_top_val = cpr_top_aligned[i]
+        cpr_bottom_val = cpr_bottom_aligned[i]
+        ema_trend = ema_20_1w_aligned[i]
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: price above KAMA with rising 1d trend and volume
-            if price > kama_val and ema_rising and vol_ok:
+            # Long: price breaks above weekly CPR top with volume in uptrend
+            if price > cpr_top_val and vol_ok and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA with falling 1d trend and volume
-            elif price < kama_val and ema_falling and vol_ok:
+            # Short: price breaks below weekly CPR bottom with volume in downtrend
+            elif price < cpr_bottom_val and vol_ok and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price returns below KAMA or trend turns down
-            if price < kama_val or ema_falling:
+            # Exit long if price returns below weekly CPR bottom or trend reverses
+            if price < cpr_bottom_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns above KAMA or trend turns up
-            if price > kama_val or ema_rising:
+            # Exit short if price returns above weekly CPR top or trend reverses
+            if price > cpr_top_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_With_1d_Trend_Filter"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_Breakout_With_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
