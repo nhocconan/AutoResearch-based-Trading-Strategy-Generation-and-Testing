@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Channel_Breakout_1wTrend_Volume
-Hypothesis: Daily breakouts above/below Keltner Channel (ATR-based) with weekly EMA trend filter and volume confirmation.
-Keltner Channels adapt to volatility, providing dynamic support/resistance. Weekly EMA ensures trend alignment.
-Designed for low trade frequency (target: 10-25/year) with strong performance in both bull and bear markets via volatility-adjusted breakouts.
+6h_Liquidity_Wave_Trend
+Hypothesis: On 6-hour timeframe, identify directional momentum by combining 
+liquidity-based mean reversion (price deviation from volume-weighted average price) 
+with trend confirmation from higher timeframe (1-day EMA). 
+In bull/bear markets, price tends to revert to VWAP during pullbacks in strong trends.
+Uses VWAP deviation as entry signal with 1-day EMA as trend filter.
+Designed for low trade frequency (target: 15-35/year) with controlled risk.
 """
 
 import numpy as np
@@ -20,85 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly EMA20 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 6-hour VWAP (volume-weighted average price)
+    # VWAP = cumulative(volume * typical_price) / cumulative(volume)
+    # where typical_price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(volume * typical_price)
+    vwap_den = np.cumsum(volume)
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
     
-    # Calculate EMA20 with proper smoothing
-    ema20_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 20:
-        ema20_1w[19] = np.mean(close_1w[0:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, len(close_1w)):
-            ema20_1w[i] = close_1w[i] * alpha + ema20_1w[i-1] * (1 - alpha)
+    # Calculate price deviation from VWAP as percentage
+    # Negative deviation = price below VWAP (potential long setup in uptrend)
+    # Positive deviation = price above VWAP (potential short setup in downtrend)
+    vwap_deviation = (close - vwap) / vwap * 100.0
     
-    # Align weekly EMA20 to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate 1-day EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR(10) for Keltner Channel
+    # EMA50 calculation
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[0:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = close_1d[i] * alpha + ema50_1d[i-1] * (1 - alpha)
+    
+    # Align 1-day EMA50 to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate 6-hour ATR for dynamic thresholds
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = np.full(n, np.nan)
-    if n >= 10:
-        tr = np.zeros(n)
-        tr[0] = high[0] - low[0]
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # ATR with Wilder's smoothing
-        atr[9] = np.mean(tr[0:10])
-        for i in range(10, n):
-            atr[i] = (atr[i-1] * 9 + tr[i]) / 10
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.nanmean(tr[1:15])  # First ATR as simple average
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
     
-    # Calculate Keltner Channel (20 EMA ± 2 * ATR)
-    ema20 = np.full(n, np.nan)
-    if n >= 20:
-        ema20[19] = np.mean(close[0:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, n):
-            ema20[i] = close[i] * alpha + ema20[i-1] * (1 - alpha)
-    
-    kc_upper = ema20 + 2 * atr
-    kc_lower = ema20 - 2 * atr
-    
-    # Volume spike: current volume > 1.5 x 20-day average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
+    # Dynamic entry threshold: 0.5 * ATR as percentage of price
+    # This adapts to volatility - wider bands in volatile markets
+    dynamic_threshold = 0.5 * (atr / close) * 100.0  # Convert to percentage
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 10)  # Ensure indicators ready
+    start_idx = max(50, 14)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(vwap_deviation[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(dynamic_threshold[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above Keltner upper with volume spike and weekly uptrend
-            if (close[i] > kc_upper[i] and vol_spike[i] and 
-                close[i] > ema20_1w_aligned[i]):
+            # Long: price significantly below VWAP in uptrend (price > EMA50)
+            if (vwap_deviation[i] < -dynamic_threshold[i] and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Keltner lower with volume spike and weekly downtrend
-            elif (close[i] < kc_lower[i] and vol_spike[i] and 
-                  close[i] < ema20_1w_aligned[i]):
+            # Short: price significantly above VWAP in downtrend (price < EMA50)
+            elif (vwap_deviation[i] > dynamic_threshold[i] and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below Keltner lower or weekly trend turns down
-            if (close[i] < kc_lower[i] or close[i] < ema20_1w_aligned[i]):
+            # Long exit: price returns to VWAP or trend breaks down
+            if (vwap_deviation[i] > -0.5 * dynamic_threshold[i] or  # Halfway back to VWAP
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above Keltner upper or weekly trend turns up
-            if (close[i] > kc_upper[i] or close[i] > ema20_1w_aligned[i]):
+            # Short exit: price returns to VWAP or trend breaks up
+            if (vwap_deviation[i] < 0.5 * dynamic_threshold[i] or  # Halfway back to VWAP
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_Channel_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Liquidity_Wave_Trend"
+timeframe = "6h"
 leverage = 1.0
