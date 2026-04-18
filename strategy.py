@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklySupportResistance_VolumeBreakout
-1d strategy using weekly support/resistance levels with volume confirmation.
-- Long: Close breaks above weekly high + volume > 1.3x daily average volume
-- Short: Close breaks below weekly low + volume > 1.3x daily average volume
-- Exit: Opposite breakout or price returns to weekly midpoint
-Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+12h_HeikinAshi_Trend_Filter_V1
+12h strategy using Heikin Ashi candles for trend detection with volume confirmation and momentum filter.
+- Long: HA close > HA open + volume > 1.2x average + RSI(14) > 50
+- Short: HA close < HA open + volume > 1.2x average + RSI(14) < 50
+- Exit: Opposite HA candle color or RSI crossing 50
+Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
+Works in bull markets (sustained uptrends) and bear markets (sustained downtrends)
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,30 +23,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Support/Resistance levels
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate Heikin Ashi candles
+    ha_close = (high + low + close + open_price) / 4
+    ha_open = np.zeros_like(close)
+    ha_open[0] = (open_price[0] + close[0]) / 2
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
+    ha_high = np.maximum.reduce([high, ha_open, ha_close])
+    ha_low = np.minimum.reduce([low, ha_open, ha_close])
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Weekly High and Low (resistance/support)
-    weekly_high = high_1w
-    weekly_low = low_1w
-    weekly_mid = (weekly_high + weekly_low) / 2.0
-    
-    # Align weekly S/R levels to daily
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    weekly_mid_aligned = align_htf_to_ltf(prices, df_1w, weekly_mid)
-    
-    # Get daily data for volume average
+    # Get daily data for volume average and RSI
     df_1d = get_htf_data(prices, '1d')
     
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
     # Daily volume average (20-period)
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Daily RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,40 +59,42 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(weekly_mid_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(vol_ma_aligned[i]) or np.isnan(rsi_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma_aligned[i]
+        # HA candle color
+        ha_bullish = ha_close[i] > ha_open[i]
+        ha_bearish = ha_close[i] < ha_open[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > weekly_high_aligned[i]
-        breakdown_down = close[i] < weekly_low_aligned[i]
-        return_to_mid = abs(close[i] - weekly_mid_aligned[i]) < 0.1 * (weekly_high_aligned[i] - weekly_low_aligned[i])
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.2 * vol_ma_aligned[i]
+        
+        # Momentum filter
+        rsi_bullish = rsi_aligned[i] > 50
+        rsi_bearish = rsi_aligned[i] < 50
         
         if position == 0:
-            # Long: volume + breakout above weekly high
-            if vol_confirm and breakout_up:
+            # Long: bullish HA + volume + RSI > 50
+            if ha_bullish and vol_confirm and rsi_bullish:
                 signals[i] = 0.25
                 position = 1
-            # Short: volume + breakdown below weekly low
-            elif vol_confirm and breakdown_down:
+            # Short: bearish HA + volume + RSI < 50
+            elif ha_bearish and vol_confirm and rsi_bearish:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: breakdown below weekly low OR return to midpoint
-            if breakdown_down or return_to_mid:
+            # Long exit: bearish HA or RSI < 50
+            if ha_bearish or not rsi_bullish:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: breakout above weekly high OR return to midpoint
-            if breakout_up or return_to_mid:
+            # Short exit: bullish HA or RSI > 50
+            if ha_bullish or rsi_bullish:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -96,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklySupportResistance_VolumeBreakout"
-timeframe = "1d"
+name = "12h_HeikinAshi_Trend_Filter_V1"
+timeframe = "12h"
 leverage = 1.0
