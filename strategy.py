@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_1D_WeeklyPivot_Donchian20_Breakout_Volume
-Hypothesis: Combines weekly pivot point trend filter with daily Donchian breakout and volume confirmation for 6h timeframe.
-Uses weekly pivot levels (from prior week) to establish trend direction: price above weekly pivot = long bias, below = short bias.
-Enters on breakout of daily Donchian channel (20-period) in direction of weekly trend, confirmed by volume > 1.5x 20-period average.
-Exits when price returns to weekly pivot level or Donchian middle band.
-Designed to work in both bull (follow weekly uptrend breaks) and bear (short weekly downtrend breaks) markets.
-Targets 15-25 trades/year by requiring weekly trend alignment, daily breakout, and volume confirmation.
+12h_Trix_Volume_WMR_Reversal
+Hypothesis: Use TRIX (15-period) momentum reversal with Williams %R oversold/overbought conditions and volume confirmation on 12h timeframe. TRIX filters noise and identifies momentum shifts, while Williams %R identifies overextended conditions. Volume confirmation ensures institutional participation. Works in bull markets by buying oversold dips in uptrend, and in bear markets by selling overbought rallies in downtrend. Targets 15-25 trades/year by requiring TRIX crossover, Williams %R extreme, and volume > 1.5x average.
 """
 
 import numpy as np
@@ -23,45 +18,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 12h data for TRIX and Williams %R
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate weekly pivot points (using prior week's data)
-    # Pivot = (H + L + C)/3, Support1 = (2*Pivot) - H, Resistance1 = (2*Pivot) - L
-    pivot_1w = np.full_like(close_1w, np.nan)
-    support1_1w = np.full_like(close_1w, np.nan)
-    resistance1_1w = np.full_like(close_1w, np.nan)
+    # Calculate TRIX (15-period)
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1 period percent change
+    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, adjust=False).mean()
+    trix_raw = ema3.pct_change() * 100  # percentage change
     
-    for i in range(1, len(close_1w)):
-        pivot_1w[i] = (high_1w[i-1] + low_1w[i-1] + close_1w[i-1]) / 3.0
-        support1_1w[i] = (2 * pivot_1w[i]) - high_1w[i-1]
-        resistance1_1w[i] = (2 * pivot_1w[i]) - low_1w[i-1]
+    # Calculate Williams %R (14-period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
     
-    # Align weekly pivot levels to 6h timeframe (wait for week close)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    support1_1w_aligned = align_htf_to_ltf(prices, df_1w, support1_1w)
-    resistance1_1w_aligned = align_htf_to_ltf(prices, df_1w, resistance1_1w)
-    
-    # Get daily data for Donchian channel (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate daily Donchian channel (20-period)
-    high_20 = np.full_like(high_1d, np.nan)
-    low_20 = np.full_like(low_1d, np.nan)
-    
-    for i in range(len(high_1d)):
-        if i >= 19:
-            high_20[i] = np.max(high_1d[i-19:i+1])
-            low_20[i] = np.min(low_1d[i-19:i+1])
-    
-    # Align Donchian channels to 6h timeframe (wait for day close)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # Align TRIX and Williams %R to 12h timeframe (no additional delay needed as they are based on current bar)
+    trix_aligned = align_htf_to_ltf(prices, df_12h, trix_raw.values)
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r.values)
     
     # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -72,42 +51,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)  # need volume MA and at least one week of data
+    start_idx = 35  # need TRIX and Williams %R warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above daily Donchian high, with volume, and price above weekly pivot
-            if (close[i] > high_20_aligned[i] and vol_confirm[i] and 
-                close[i] > pivot_1w_aligned[i]):
+            # Long entry: TRIX crosses above zero (bullish momentum), Williams %R oversold (< -80), with volume
+            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and 
+                williams_r_aligned[i] < -80 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below daily Donchian low, with volume, and price below weekly pivot
-            elif (close[i] < low_20_aligned[i] and vol_confirm[i] and 
-                  close[i] < pivot_1w_aligned[i]):
+            # Short entry: TRIX crosses below zero (bearish momentum), Williams %R overbought (> -20), with volume
+            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and 
+                  williams_r_aligned[i] > -20 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns to weekly pivot or below Donchian low
-            if (close[i] <= pivot_1w_aligned[i] or 
-                close[i] < low_20_aligned[i]):
+            # Long exit: TRIX crosses below zero or Williams %R becomes overbought
+            if (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0) or \
+               williams_r_aligned[i] > -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to weekly pivot or above Donchian high
-            if (close[i] >= pivot_1w_aligned[i] or 
-                close[i] > high_20_aligned[i]):
+            # Short exit: TRIX crosses above zero or Williams %R becomes oversold
+            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0) or \
+               williams_r_aligned[i] < -80:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1D_WeeklyPivot_Donchian20_Breakout_Volume"
-timeframe = "6h"
+name = "12h_Trix_Volume_WMR_Reversal"
+timeframe = "12h"
 leverage = 1.0
