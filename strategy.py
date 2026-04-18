@@ -1,83 +1,74 @@
-# 1d_Pivot_R1_S1_Breakout_Volume_1wRSI_Filter_v1
-# Hypothesis: Daily Camarilla pivot levels (R1/S1) act as key support/resistance. 
-# Buy when price breaks above R1 with volume confirmation and weekly RSI < 60 (avoid overbought).
-# Sell when price breaks below S1 with volume confirmation and weekly RSI > 40 (avoid oversold).
-# Uses 1d timeframe for signal generation, 1w for regime filter. Designed for ~15-25 trades/year.
+#!/usr/bin/env python3
+"""
+Hypothesis: 6h Williams %R with 12h EMA(34) trend filter and volume confirmation.
+Williams %R identifies overbought/oversold conditions; EMA(34) defines trend direction.
+Long when %R < -80 (oversold) and price > EMA(34) (uptrend); short when %R > -20 (overbought) and price < EMA(34) (downtrend).
+Volume filter ensures momentum confirmation. Designed for 15-25 trades/year to minimize fee drag.
+Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close arrays."""
-    n = len(high)
-    pivot = (high + low + close) / 3
-    range_ = high - low
-    r1 = close + range_ * 1.1 / 12
-    s1 = close - range_ * 1.1 / 12
-    return pivot, r1, s1
-
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    if len(close) < period + 1:
+def calculate_williams_r(high, low, close, period=14):
+    """Calculate Williams %R."""
+    if len(close) < period:
         return np.full(len(close), np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    highest_high = np.full(len(close), np.nan)
+    lowest_low = np.full(len(close), np.nan)
     
-    avg_gain = np.full(len(close), np.nan)
-    avg_loss = np.full(len(close), np.nan)
+    for i in range(period-1, len(close)):
+        highest_high[i] = np.max(high[i-(period-1):i+1])
+        lowest_low[i] = np.min(low[i-(period-1):i+1])
     
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    
-    rs = np.full(len(close), np.nan)
-    rsi = np.full(len(close), np.nan)
-    
-    for i in range(period, len(close)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
+    williams_r = np.full(len(close), np.nan)
+    for i in range(period-1, len(close)):
+        if highest_high[i] - lowest_low[i] != 0:
+            williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
         else:
-            rsi[i] = 100
+            williams_r[i] = -50
     
-    return rsi
+    return williams_r
+
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
+    ema = np.full(len(close), np.nan)
+    if len(close) < period:
+        return ema
+    ema[period-1] = np.mean(close[:period])
+    for i in range(period, len(close)):
+        ema[i] = (close[i] * 2 / (period + 1)) + ema[i-1] * (1 - 2 / (period + 1))
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for Williams %R and EMA(34)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla pivots on daily
-    _, r1_1d, s1_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Calculate Williams %R(14) on 12h
+    williams_r_12h = calculate_williams_r(high_12h, low_12h, close_12h, 14)
     
-    # Get weekly data for RSI filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    rsi_14_1w = calculate_rsi(close_1w, 14)
+    # Calculate EMA(34) on 12h
+    ema_34_12h = calculate_ema(close_12h, 34)
     
-    # Align to daily timeframe (since we're using 1d timeframe)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    rsi_14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
+    # Align to 6h timeframe
+    williams_r_12h_6h = align_htf_to_ltf(prices, df_12h, williams_r_12h)
+    ema_34_12h_6h = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Volume confirmation: 20-day average
+    # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -89,35 +80,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(rsi_14_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r_12h_6h[i]) or np.isnan(ema_34_12h_6h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-day average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3 * 20-period average
+        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above R1, RSI not overbought, volume confirmation
-            if close[i] > r1_1d_aligned[i] and rsi_14_1w_aligned[i] < 60 and vol_confirmed:
+            # Long: Williams %R oversold (< -80), price above EMA(34) (uptrend), volume confirmation
+            if williams_r_12h_6h[i] < -80 and close[i] > ema_34_12h_6h[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, RSI not oversold, volume confirmation
-            elif close[i] < s1_1d_aligned[i] and rsi_14_1w_aligned[i] > 40 and vol_confirmed:
+            # Short: Williams %R overbought (> -20), price below EMA(34) (downtrend), volume confirmation
+            elif williams_r_12h_6h[i] > -20 and close[i] < ema_34_12h_6h[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below S1 or RSI becomes overbought
-            if close[i] < s1_1d_aligned[i] or rsi_14_1w_aligned[i] >= 70:
+            # Long exit: Williams %R rises above -50 (momentum fading) or price crosses below EMA(34)
+            if williams_r_12h_6h[i] > -50 or close[i] <= ema_34_12h_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above R1 or RSI becomes oversold
-            if close[i] > r1_1d_aligned[i] or rsi_14_1w_aligned[i] <= 30:
+            # Short exit: Williams %R falls below -50 (momentum fading) or price crosses above EMA(34)
+            if williams_r_12h_6h[i] < -50 or close[i] >= ema_34_12h_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pivot_R1_S1_Breakout_Volume_1wRSI_Filter_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_12hEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
