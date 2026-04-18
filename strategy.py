@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_Confirm_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,26 +17,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot levels
+    # Daily trend filter: EMA34 on daily close
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily pivot and R1/S1 from previous daily bar
-    prev_close_d = df_1d['close'].shift(1).values
-    prev_high_d = df_1d['high'].shift(1).values
-    prev_low_d = df_1d['low'].shift(1).values
+    # Donchian channels (20-period) on 4h
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
-    range_d = prev_high_d - prev_low_d
-    R1_d = pivot_d + range_d
-    S1_d = pivot_d - range_d
-    
-    # Align daily R1/S1 to 12h (wait for daily close)
-    R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
-    S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
-    
-    # Volume filter: current volume > 2.0 * 24-period average (12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma_24)
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -45,37 +38,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R1_val = R1_d_aligned[i]
-        S1_val = S1_d_aligned[i]
+        upper_channel = high_roll[i]
+        lower_channel = low_roll[i]
+        trend_filter = ema34_1d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume
-            if close_val > R1_val and vol_filter:
+            # Long: break above upper channel with volume and above daily EMA34
+            if close_val > upper_channel and vol_filter and close_val > trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume
-            elif close_val < S1_val and vol_filter:
+            # Short: break below lower channel with volume and below daily EMA34
+            elif close_val < lower_channel and vol_filter and close_val < trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below pivot
-            if close_val < pivot_d[i]:
+            # Long exit: price falls back below lower channel
+            if close_val < lower_channel:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above pivot
-            if close_val > pivot_d[i]:
+            # Short exit: price rises back above upper channel
+            if close_val > upper_channel:
                 signals[i] = 0.0
                 position = 0
             else:
