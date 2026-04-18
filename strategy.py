@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_12h_RSI_Flush_MeanReversion
-Hypothesis: Use RSI extremes on 12h timeframe (RSI < 30 or > 70) combined with 6h price rejection at Bollinger Bands (2σ) to capture mean reversion moves. This works in both bull and bear markets because extreme RSI often precedes reversals, and Bollinger Band rejection provides entry timing. Volume confirmation ensures legitimacy. Targets 15-25 trades/year by requiring alignment of 12h RSI extreme, 6h BB rejection, and volume > 1.3x 20-period average.
+4h_1d_Price_Action_Reversal_V1
+Hypothesis: Mean reversion at extreme daily levels with volume confirmation.
+Uses 1-day ATR-based upper/lower bands as dynamic support/resistance.
+Enters long when price touches lower band with volume spike in downtrend (RSI<40),
+short when price touches upper band with volume spike in uptrend (RSI>60).
+Works in both bull/bear by fading extremes only when momentum is exhausted.
+Target: 20-35 trades/year via tight entry conditions.
 """
 
 import numpy as np
@@ -10,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,93 +23,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for RSI (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1d data for ATR-based bands
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h RSI(14)
-    def rsi(close, period=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        return 100 - (100 / (1 + rs))
+    # Calculate 1-day ATR(10)
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr_1d = np.concatenate([[np.nan], tr_1d])  # align length
+    atr_1d = np.full(len(close_1d), np.nan)
+    for i in range(10, len(tr_1d)):
+        atr_1d[i] = np.mean(tr_1d[i-9:i+1])
     
-    rsi_12h = rsi(close_12h, 14)
-    rsi_overbought = rsi_12h > 70
-    rsi_oversold = rsi_12h < 30
+    # Dynamic bands: close ± 1.5 * ATR
+    upper_band_1d = close_1d + 1.5 * atr_1d
+    lower_band_1d = close_1d - 1.5 * atr_1d
     
-    # Align RSI signals to 6h timeframe
-    rsi_overbought_aligned = align_htf_to_ltf(prices, df_12h, rsi_overbought.astype(float))
-    rsi_oversold_aligned = align_htf_to_ltf(prices, df_12h, rsi_oversold.astype(float))
+    # Align bands to 4h
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band_1d)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band_1d)
     
-    # 6h Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = np.full(n, np.nan)
-    bb_std_dev = np.full(n, np.nan)
-    for i in range(bb_period, n):
-        sma[i] = np.mean(close[i-bb_period:i])
-        bb_std_dev[i] = np.std(close[i-bb_period:i])
-    upper_band = sma + bb_std * bb_std_dev
-    lower_band = sma - bb_std * bb_std_dev
+    # 4h RSI(14) for momentum filter
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: current volume > 1.3 x 20-period average
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        avg_gain[i] = np.mean(gain[i-13:i+1])
+        avg_loss[i] = np.mean(loss[i-13:i+1])
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: > 2x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.3)
+        vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(20, bb_period)  # need BB and volume MA
+    start_idx = max(20, 14)  # volume MA and RSI
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(rsi_overbought_aligned[i]) or np.isnan(rsi_oversold_aligned[i]) or 
-            np.isnan(sma[i]) or np.isnan(bb_std_dev[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: 12h RSI oversold, price rejects lower BB, with volume
-            if (rsi_oversold_aligned[i] > 0.5 and 
-                close[i] < lower_band[i] and 
-                close[i] > open_prices[i] and  # bullish rejection: close > open
-                vol_confirm[i]):
+            # Long: touch lower band, volume spike, RSI < 40 (oversold)
+            if (low[i] <= lower_band_aligned[i] and vol_spike[i] and rsi[i] < 40):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: 12h RSI overbought, price rejects upper BB, with volume
-            elif (rsi_overbought_aligned[i] > 0.5 and 
-                  close[i] > upper_band[i] and 
-                  close[i] < open_prices[i] and  # bearish rejection: close < open
-                  vol_confirm[i]):
+            # Short: touch upper band, volume spike, RSI > 60 (overbought)
+            elif (high[i] >= upper_band_aligned[i] and vol_spike[i] and rsi[i] > 60):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns to SMA (mean reversion complete) or RSI normalizes
-            if (close[i] > sma[i] or 
-                (not np.isnan(rsi_12h) and len(rsi_12h) > 0 and rsi_12h[-1] > 45)):  # simplified: use last known RSI
+            # Exit long: RSI > 50 (momentum shift) or price > upper band
+            if (rsi[i] > 50 or high[i] >= upper_band_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to SMA or RSI normalizes
-            if (close[i] < sma[i] or 
-                (not np.isnan(rsi_12h) and len(rsi_12h) > 0 and rsi_12h[-1] < 55)):
+            # Exit short: RSI < 50 or price < lower band
+            if (rsi[i] < 50 or low[i] <= lower_band_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_RSI_Flush_MeanReversion"
-timeframe = "6h"
+name = "4h_1d_Price_Action_Reversal_V1"
+timeframe = "4h"
 leverage = 1.0
