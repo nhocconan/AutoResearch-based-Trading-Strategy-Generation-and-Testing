@@ -1,13 +1,5 @@
-#!/usr/bin/env python3
-"""
-1d_1W_Camarilla_Pivot_Squeeze_Reverse_v1
-Hypothesis: In low-volatility squeeze (weekly Bollinger Band Width < 20th percentile), 
-price often reverts to the weekly mean. We use the weekly midline (average of weekly high/low) 
-as a mean-reversion target, entering when daily price touches the weekly Bollinger Bands 
-(upper/lower) with rejection (close back inside bands). Weekly trend filter (price > weekly EMA20 for long, 
-< for short) ensures we trade with the weekly bias. This captures mean reversion in ranging markets 
-while avoiding strong trends. Works in both bull and bear as it exploits mean reversion in low volatility.
-"""
+# 6h_12h_1D_Camarilla_R1S1_Breakout_Volume_Selective
+# Hypothesis: Use daily and 12h Camarilla R1/S1 for directional bias with 6h entry, requiring volume > 1.5x 20-period average and 12h ADX > 20 to avoid chop. Targets 15-35 trades/year per symbol. Works in bull/bear via volatility regime filter using 12h ADX.
 
 import numpy as np
 import pandas as pd
@@ -15,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,95 +15,126 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for mean reversion target and trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for primary directional bias
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly calculations
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 12h data for ADX filter and volatility context
+    df_12h = get_htf_data(prices, '12h')
     
-    # Weekly Bollinger Bands (20, 2)
-    close_1w_series = pd.Series(close_1w)
-    weekly_ma = close_1w_series.rolling(window=20, min_periods=20).mean().values
-    weekly_std = close_1w_series.rolling(window=20, min_periods=20).std().values
-    weekly_upper = weekly_ma + 2 * weekly_std
-    weekly_lower = weekly_ma - 2 * weekly_std
-    weekly_width = weekly_upper - weekly_lower
+    # Daily calculations for bias
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly EMA20 for trend filter
-    weekly_ema20 = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    # Weekly midline (mean of high and low) as additional target
-    weekly_midline = (high_1w + low_1w) / 2
+    # Daily Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    range_1d = prev_high - prev_low
+    r1_1d = prev_close + range_1d * 1.1 / 12
+    s1_1d = prev_close - range_1d * 1.1 / 12
     
-    # Align weekly data to daily
-    weekly_upper_aligned = align_htf_to_ltf(prices, df_1w, weekly_upper)
-    weekly_lower_aligned = align_htf_to_ltf(prices, df_1w, weekly_lower)
-    weekly_ema20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema20)
-    weekly_midline_aligned = align_htf_to_ltf(prices, df_1w, weekly_midline)
+    # 12h ADX for trend strength filter (avoid chop)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Daily Bollinger Band Width percentile (20-period) for squeeze detection
-    close_series = pd.Series(close)
-    daily_ma = close_series.rolling(window=20, min_periods=20).mean().values
-    daily_std = close_series.rolling(window=20, min_periods=20).std().values
-    daily_upper = daily_ma + 2 * daily_std
-    daily_lower = daily_ma - 2 * daily_std
-    daily_width = daily_upper - daily_lower
+    # True Range
+    tr1 = np.maximum(high_12h - low_12h, np.abs(high_12h - np.roll(close_12h, 1)))
+    tr2 = np.abs(np.roll(close_12h, 1) - low_12h)
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high_12h[0] - low_12h[0]
     
-    # Percentile of daily BB width (lookback 50 days)
-    width_percentile = np.zeros_like(daily_width)
-    for i in range(50, len(daily_width)):
-        window = daily_width[i-50:i]
-        width_percentile[i] = (np.sum(window < daily_width[i]) / 50) * 100
+    # Directional Movement
+    up_move = np.maximum(high_12h - np.roll(high_12h, 1), 0)
+    down_move = np.maximum(np.roll(low_12h, 1) - low_12h, 0)
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Squeeze condition: weekly BB width < 20th percentile (low volatility)
-    squeeze_condition = width_percentile < 20
+    # Smoothed values
+    tr_period = 14
+    tr_smooth = np.zeros_like(tr)
+    tr_smooth[tr_period] = np.nansum(tr[1:tr_period+1]) if not np.isnan(tr).all() else 0
+    for i in range(tr_period + 1, len(tr)):
+        tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / tr_period) + tr[i]
+    
+    up_smooth = np.zeros_like(up_move)
+    down_smooth = np.zeros_like(down_move)
+    up_smooth[tr_period] = np.nansum(up_move[1:tr_period+1]) if not np.isnan(up_move).all() else 0
+    down_smooth[tr_period] = np.nansum(down_move[1:tr_period+1]) if not np.isnan(down_move).all() else 0
+    for i in range(tr_period + 1, len(up_move)):
+        up_smooth[i] = up_smooth[i-1] - (up_smooth[i-1] / tr_period) + up_move[i]
+        down_smooth[i] = down_smooth[i-1] - (down_smooth[i-1] / tr_period) + down_move[i]
+    
+    # Directional Indicators
+    plus_di = 100 * up_smooth / tr_smooth
+    minus_di = 100 * down_smooth / tr_smooth
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # ADX
+    adx_period = 14
+    adx = np.zeros_like(dx)
+    adx[2*adx_period] = np.nanmean(dx[adx_period:2*adx_period+1]) if not np.isnan(dx).all() else 0
+    for i in range(2*adx_period + 1, len(dx)):
+        adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
+    
+    # Align all higher timeframe data to 6h
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for calculations
+    start_idx = 100  # need enough for ADX and averages
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_upper_aligned[i]) or np.isnan(weekly_lower_aligned[i]) or 
-            np.isnan(weekly_ema20_aligned[i]) or np.isnan(weekly_midline_aligned[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in squeeze (low volatility) conditions
-        in_squeeze = squeeze_condition[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        
+        # Trend filter: ADX > 20 to avoid chop
+        trend_filter = adx_12h_aligned[i] > 20 if not np.isnan(adx_12h_aligned[i]) else False
+        
+        # Only trade during active session
+        in_session = session_mask[i]
         
         if position == 0:
-            # Long: price touches or goes below weekly lower band AND closes back inside (rejection)
-            # AND price is above weekly EMA20 (weekly uptrend bias)
-            if (low[i] <= weekly_lower_aligned[i] and close[i] > weekly_lower_aligned[i] and
-                close[i] > weekly_ema20_aligned[i] and in_squeeze):
+            # Long: price breaks above daily R1 with volume and trend filter during session
+            if close[i] > r1_1d_aligned[i] and vol_confirm and trend_filter and in_session:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or goes above weekly upper band AND closes back inside (rejection)
-            # AND price is below weekly EMA20 (weekly downtrend bias)
-            elif (high[i] >= weekly_upper_aligned[i] and close[i] < weekly_upper_aligned[i] and
-                  close[i] < weekly_ema20_aligned[i] and in_squeeze):
+            # Short: price breaks below daily S1 with volume and trend filter during session
+            elif close[i] < s1_1d_aligned[i] and vol_confirm and trend_filter and in_session:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches weekly midline or weekly upper band or squeeze ends
-            if (close[i] >= weekly_midline_aligned[i] or 
-                close[i] >= weekly_upper_aligned[i] or 
-                not in_squeeze):
+            # Long exit: price returns below daily R1 or trend filter fails or outside session
+            if close[i] < r1_1d_aligned[i] or not trend_filter or not in_session:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches weekly midline or weekly lower band or squeeze ends
-            if (close[i] <= weekly_midline_aligned[i] or 
-                close[i] <= weekly_lower_aligned[i] or 
-                not in_squeeze):
+            # Short exit: price returns above daily S1 or trend filter fails or outside session
+            if close[i] > s1_1d_aligned[i] or not trend_filter or not in_session:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -119,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1W_Camarilla_Pivot_Squeeze_Reverse_v1"
-timeframe = "1d"
+name = "6h_12h_1D_Camarilla_R1S1_Breakout_Volume_Selective"
+timeframe = "6h"
 leverage = 1.0
