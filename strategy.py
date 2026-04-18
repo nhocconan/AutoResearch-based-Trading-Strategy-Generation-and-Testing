@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,101 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels (HTF)
+    # Get 12h data for trend and ATR
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
+    
+    # Calculate 12h EMA34 for trend
+    close_12h_series = pd.Series(close_12h)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # Calculate 12h ATR14 for volatility filter
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    atr12h_aligned = align_htf_to_ltf(prices, df_12h, atr12h)
+    
+    # Get 1d data for 4h ATR (used in stop loss)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Calculate 4h ATR14 (using 1d data for proper alignment)
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2_1d[0] = np.nan
+    tr3_1d[0] = np.nan
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    atr14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Resistance and Support levels
-    r1_1d = pivot_1d + (range_1d * 1.1 / 12)
-    s1_1d = pivot_1d - (range_1d * 1.1 / 12)
-    r2_1d = pivot_1d + (range_1d * 1.1 / 6)
-    s2_1d = pivot_1d - (range_1d * 1.1 / 6)
-    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
-    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
-    r4_1d = pivot_1d + (range_1d * 1.1 / 2)
-    s4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    # Calculate 4h Bollinger Bands (20,2) for mean reversion signals
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    # Align Camarilla levels to 6h (properly delayed for completed 1d bar)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Calculate 6h ATR (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 6h volume spike (volume > 2.0x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate 4h volume spike (volume > 1.5x 20-period average)
+    vol_ma = close_series.rolling(window=20, min_periods=20).mean().values  # Using close as proxy for volume MA calculation
+    vol_ma_actual = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_actual)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # wait for volume MA
+    start_idx = 34  # wait for EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr[i]) or
-            np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(r2_1d_aligned[i]) or
-            np.isnan(s2_1d_aligned[i]) or
-            np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or
-            np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s4_1d_aligned[i])):
+        if (np.isnan(ema34_12h_aligned[i]) or
+            np.isnan(atr12h_aligned[i]) or
+            np.isnan(atr14_1d_aligned[i]) or
+            np.isnan(bb_upper[i]) or
+            np.isnan(bb_lower[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirmed = volume_spike[i]
+        # Trend filter: only trade in direction of 12h EMA34
+        uptrend = close[i] > ema34_12h_aligned[i]
+        downtrend = close[i] < ema34_12h_aligned[i]
+        
+        # Volatility filter: only trade when volatility is elevated
+        vol_filter = atr12h_aligned[i] > 0.5 * np.nanmean(atr12h_aligned[max(0, i-50):i+1]) if i >= 50 else False
         
         if position == 0:
-            # Long: price breaks above R4 with volume (strong bullish breakout)
-            if close[i] > r4_1d_aligned[i-1] and vol_confirmed:
+            # Long: price touches lower Bollinger Band with volume spike in uptrend
+            if (low[i] <= bb_lower[i] and close[i] > bb_lower[i]) and volume_spike[i] and uptrend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4 with volume (strong bearish breakdown)
-            elif close[i] < s4_1d_aligned[i-1] and vol_confirmed:
-                signals[i] = -0.25
-                position = -1
-            # Long: mean reversion at S3 (price touches support and holds)
-            elif close[i] <= s3_1d_aligned[i] and low[i] >= s3_1d_aligned[i] * 0.999 and vol_confirmed:
-                signals[i] = 0.25
-                position = 1
-            # Short: mean reversion at R3 (price touches resistance and fails)
-            elif close[i] >= r3_1d_aligned[i] and high[i] <= r3_1d_aligned[i] * 1.001 and vol_confirmed:
+            # Short: price touches upper Bollinger Band with volume spike in downtrend
+            elif (high[i] >= bb_upper[i] and close[i] < bb_upper[i]) and volume_spike[i] and downtrend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or reverses at R3
-            if close[i] < s1_1d_aligned[i] or (close[i] >= r3_1d_aligned[i] and high[i] <= r3_1d_aligned[i] * 1.001):
+            # Long exit: price reaches middle Bollinger Band or reverses
+            if close[i] >= bb_middle[i] or (high[i] >= bb_upper[i] and close[i] <= bb_upper[i] * 0.999):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or reverses at S3
-            if close[i] > r1_1d_aligned[i] or (close[i] <= s3_1d_aligned[i] and low[i] >= s3_1d_aligned[i] * 0.999):
+            # Short exit: price reaches middle Bollinger Band or reverses
+            if close[i] <= bb_middle[i] or (low[i] <= bb_lower[i] and close[i] >= bb_lower[i] * 1.001):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_R4_S4_Breakout_MeanRev_Volume"
-timeframe = "6h"
+name = "4h_BollingerMeanReversion_EMA34Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
