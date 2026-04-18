@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Trend_v2
-Hypothesis: Breakout of 1d R1/S1 levels with volume confirmation and 12h trend bias.
-Uses tighter volume filter (3x average) and requires price to close beyond pivot for entry.
-Targets 12-37 trades per year by using strict daily pivot levels, volume confirmation, and trend filter.
-Works in both bull and bear markets by following the 12h trend.
+6h_WeeklyPivot_1d_Trend_SR_Bounce
+Hypothesis: Bounce off weekly pivot support/resistance levels in the direction of 1d EMA trend.
+Uses weekly pivot levels (calculated from prior week) as dynamic S/R, with trend filter from 1d EMA50.
+Targets 12-37 trades per year by requiring confluence of weekly S/R bounce and daily trend alignment.
+Works in bull markets by buying dips to weekly support in uptrend, and in bear markets by selling rallies to weekly resistance in downtrend.
 """
 
 import numpy as np
@@ -19,82 +19,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for pivot levels (HTF)
+    # Get weekly data for pivot levels (HTF)
+    df_week = get_htf_data(prices, '1w')
+    
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # Support 1 = (2 * Pivot) - High
+    # Resistance 1 = (2 * Pivot) - Low
+    high_week = df_week['high'].values
+    low_week = df_week['low'].values
+    close_week = df_week['close'].values
+    
+    pivot_week = (high_week + low_week + close_week) / 3
+    r1_week = (2 * pivot_week) - high_week
+    s1_week = (2 * pivot_week) - low_week
+    
+    # Align weekly levels to 6h timeframe (wait for bar close)
+    pivot_week_aligned = align_htf_to_ltf(prices, df_week, pivot_week)
+    r1_week_aligned = align_htf_to_ltf(prices, df_week, r1_week)
+    s1_week_aligned = align_htf_to_ltf(prices, df_week, s1_week)
+    
+    # Get 1d trend (EMA50) for directional bias
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    rng_1d = high_1d - low_1d
-    r1_1d = close_1d + rng_1d * 1.1 / 12
-    s1_1d = close_1d - rng_1d * 1.1 / 12
-    
-    # Calculate 1d pivot for trend bias
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    
-    # Align all levels to 12h timeframe (wait for bar close)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    
-    # Get 12h trend (EMA34) for directional bias
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Volume confirmation: current volume > 3.0 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 3.0)
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(ema_12h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_week_aligned[i]) or np.isnan(r1_week_aligned[i]) or 
+            np.isnan(s1_week_aligned[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price closes above 1d R1, above 1d pivot, with volume, and 12h uptrend
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > pivot_1d_aligned[i] and vol_confirm[i] and 
-                close[i] > ema_12h_aligned[i]):
+            # Long entry: price bounces above weekly S1 in 1d uptrend
+            if (close[i] > s1_week_aligned[i] and 
+                close[i] < pivot_week_aligned[i] and  # inside S1-Pivot range
+                close[i] > ema_1d_aligned[i]):       # above 1d EMA50 (uptrend)
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price closes below 1d S1, below 1d pivot, with volume, and 12h downtrend
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < pivot_1d_aligned[i] and vol_confirm[i] and 
-                  close[i] < ema_12h_aligned[i]):
+            # Short entry: price bounces below weekly R1 in 1d downtrend
+            elif (close[i] < r1_week_aligned[i] and 
+                  close[i] > pivot_week_aligned[i] and  # inside Pivot-R1 range
+                  close[i] < ema_1d_aligned[i]):       # below 1d EMA50 (downtrend)
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns to 1d S1 or 12h downtrend
-            if (not np.isnan(s1_1d_aligned[i]) and close[i] < s1_1d_aligned[i]) or \
-               (close[i] < ema_12h_aligned[i]):
+            # Long exit: price reaches weekly pivot or 1d trend turns down
+            if (close[i] >= pivot_week_aligned[i] or 
+                close[i] < ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to 1d R1 or 12h uptrend
-            if (not np.isnan(r1_1d_aligned[i]) and close[i] > r1_1d_aligned[i]) or \
-               (close[i] > ema_12h_aligned[i]):
+            # Short exit: price reaches weekly pivot or 1d trend turns up
+            if (close[i] <= pivot_week_aligned[i] or 
+                close[i] > ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Trend_v2"
-timeframe = "12h"
+name = "6h_WeeklyPivot_1d_Trend_SR_Bounce"
+timeframe = "6h"
 leverage = 1.0
