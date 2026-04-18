@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Williams_Alligator_Trend_Filter_with_Volume_Confirmation
-Hypothesis: 1d Williams Alligator (Jaw/Teeth/Lips) defines trend direction (Lips above Teeth/Jaw = uptrend, below = downtrend).
-Entry occurs on weekly Donchian(20) breakout in trend direction with volume spike.
-Williams Alligator uses SMAs with specific offsets (Jaw=13*8, Teeth=8*5, Lips=5*3) to avoid whipsaw.
-Volume surge confirms momentum. Designed for 10-25 trades/year to minimize fee decay while capturing strong trends.
-Works in bull (catch breakouts) and bear (catch breakdowns) via symmetric long/short logic.
+6h_WeeklyPivot_R1S1_Breakout_With_12hTrend
+Hypothesis: Weekly pivot R1/S1 levels act as strong support/resistance. Breakouts above R1 or below S1 with 12h EMA34 trend and volume confirmation capture directional moves. Weekly pivots adapt to volatility and work in both bull/bear markets. Volume ensures momentum, 12h EMA34 filters counter-trend trades. Target: 20-40 trades/year.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,103 +18,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator on 1d: Jaw(13*8), Teeth(8*5), Lips(5*3)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Jaw: Blue line, 13-period SMMA shifted 8 bars
-    jaw_raw = pd.Series(close_1d).rolling(window=13*8, min_periods=13*8).mean().values
-    jaw = np.roll(jaw_raw, 8*8)  # shift right by 8 bars
-    jaw[:8*8] = np.nan
-    
-    # Teeth: Red line, 8-period SMMA shifted 5 bars
-    teeth_raw = pd.Series(close_1d).rolling(window=8*5, min_periods=8*5).mean().values
-    teeth = np.roll(teeth_raw, 5*5)  # shift right by 5 bars
-    teeth[:5*5] = np.nan
-    
-    # Lips: Green line, 5-period SMMA shifted 3 bars
-    lips_raw = pd.Series(close_1d).rolling(window=5*3, min_periods=5*3).mean().values
-    lips = np.roll(lips_raw, 3*3)  # shift right by 3 bars
-    lips[:3*3] = np.nan
-    
-    # Align Alligator lines to 1d index
-    jaw_1d = jaw
-    teeth_1d = teeth
-    lips_1d = lips
-    
-    # Weekly Donchian(20) channels
+    # Weekly pivot points from weekly high/low/close
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Volume spike: >2.0x 20-period average
+    # Pivot point and support/resistance levels
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    
+    # Align to 6h timeframe (weekly pivot is fixed for the week)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Volume spike: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Align HTF indicators to 1d timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    # Trend filter: 12h EMA34
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(13*8 + 8*8, 8*5 + 5*5, 5*3 + 3*3, 20)  # Warmup for Alligator and Donchian
+    start_idx = max(35, 20)  # Warmup for EMA and indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or
-            np.isnan(donch_high_aligned[i]) or
-            np.isnan(donch_low_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_12h_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        dc_high = donch_high_aligned[i]
-        dc_low = donch_low_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema34 = ema_34_12h_aligned[i]
         vol_spike = volume_spike[i]
         
-        # Trend conditions: Lips above Teeth/Jaw = uptrend, below = downtrend
-        uptrend = lips_val > teeth_val and lips_val > jaw_val
-        downtrend = lips_val < teeth_val and lips_val < jaw_val
-        
         if position == 0:
-            # Long: price breaks above weekly Donchian high with volume spike and uptrend
-            if price > dc_high and vol_spike and uptrend:
+            # Long: price breaks above R1 with volume spike and uptrend
+            if price > r1_val and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian low with volume spike and downtrend
-            elif price < dc_low and vol_spike and downtrend:
+            # Short: price breaks below S1 with volume spike and downtrend
+            elif price < s1_val and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: trend changes to downtrend OR price touches weekly Donchian low
-            if not uptrend or price <= dc_low:
+            # Exit: price crosses below pivot OR trend turns down
+            if price < pivot_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: trend changes to uptrend OR price touches weekly Donchian high
-            if not downtrend or price >= dc_high:
+            # Exit: price crosses above pivot OR trend turns up
+            if price > pivot_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Williams_Alligator_Trend_Filter_with_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_WeeklyPivot_R1S1_Breakout_With_12hTrend"
+timeframe = "6h"
 leverage = 1.0
