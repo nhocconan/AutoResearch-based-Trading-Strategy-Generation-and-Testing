@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R with 1w trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) and price above 1w EMA(50) with volume > 1.5x 20-day average.
-# Short when Williams %R > -20 (overbought) and price below 1w EMA(50) with volume > 1.5x 20-day average.
-# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short).
-# Williams %R identifies mean-reversion opportunities in ranging markets.
-# 1w EMA(50) filters trades to align with higher timeframe trend.
-# Volume surge confirms conviction behind the move.
-# Designed for ~10-20 trades/year per symbol to minimize fee drag.
-name = "1d_WilliamsR_1wEMA50_Volume_Filter"
-timeframe = "1d"
+# Hypothesis: 6s Pivot R1/S1 Breakout with 12h EMA34 Trend Filter and Volume Surge
+# Long when price breaks above 1d R1 with volume > 1.5x 24-period average and price > 12h EMA(34)
+# Short when price breaks below 1d S1 with volume > 1.5x 24-period average and price < 12h EMA(34)
+# Exit when price crosses back through pivot point (R1 for longs, S1 for shorts)
+# Uses 1d Pivot for entry levels, 12h EMA for trend filter, volume surge for conviction
+# Designed for ~15-30 trades/year per symbol
+name = "6h_1dPivot_R1S1_Breakout_Volume_EMA34Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,24 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # 1d data for Pivot Points
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate Daily Pivot Points (standard formula)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # EMA(50) on 1w close
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
     
-    # Volume filter: current volume > 1.5 * 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Align 1d Pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    
+    # 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    
+    # EMA(34) on 12h close
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Volume filter: current volume > 1.5 * 24-period average (24 * 6h = 6 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,37 +63,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        wr_val = williams_r[i]
-        ema_val = ema_50_1w_aligned[i]
+        pivot_val = pivot_1d_aligned[i]
+        r1_val = r1_1d_aligned[i]
+        s1_val = s1_1d_aligned[i]
+        ema_val = ema_34_12h_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: oversold + above 1w EMA + volume surge
-            if wr_val < -80 and close_val > ema_val and vol_filter:
+            # Long: price breaks above R1 with volume surge and above 12h EMA
+            if close_val > r1_val and vol_filter and close_val > ema_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought + below 1w EMA + volume surge
-            elif wr_val > -20 and close_val < ema_val and vol_filter:
+            # Short: price breaks below S1 with volume surge and below 12h EMA
+            elif close_val < s1_val and vol_filter and close_val < ema_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R crosses back above -50
-            if wr_val > -50:
+            # Long exit: price crosses back below pivot point
+            if close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses back below -50
-            if wr_val < -50:
+            # Short exit: price crosses back above pivot point
+            if close_val > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
