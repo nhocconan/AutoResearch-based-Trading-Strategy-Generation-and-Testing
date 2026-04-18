@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Weekly Donchian Breakout with Volume and ATR Filter
-Hypothesis: Weekly Donchian channels (20-week high/low) capture major trend breakouts.
-In trending markets, price breaks above/below weekly channels with increased volume.
-We use daily timeframe for execution, with weekly Donchian as trend filter.
-Volume confirmation ensures breakout legitimacy. ATR stop manages risk.
-Works in both bull and bear markets by capturing sustained moves.
-Target: 10-20 trades/year to minimize fee drag.
+12h Donchian(20) Breakout + 1d Volume Confirmation + ADX Trend Filter
+Hypothesis: In trending markets (ADX > 25), price breaking above/below the 12h Donchian
+channel with above-average volume captures sustained moves. Works in bull/bear by
+trading breakouts in the direction of the 1d trend. Target: 15-25 trades/year to
+minimize fee drag on 12h timeframe.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,68 +21,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian channels (20-period)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Donchian channels (20-period) on 12h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    dc_upper = high_series.rolling(window=20, min_periods=20).max().values
+    dc_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate Donchian channels on weekly data
-    high_roll = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # 1d ADX for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to daily timeframe (already delayed by one weekly bar)
-    donchian_high = align_htf_to_ltf(prices, df_1w, high_roll)
-    donchian_low = align_htf_to_ltf(prices, df_1w, low_roll)
-    
-    # Daily ATR for volatility filter and stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # 1d volume average for confirmation
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 40  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr_val = atr[i]
+        vol = volume[i]
+        adx_val = adx_1d_aligned[i]
+        vol_ma = vol_ma_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 1d average
+        vol_confirm = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long breakout: price above weekly Donchian high with volume surge
-            if price > donchian_high[i] and vol_ratio[i] > 1.5:
+            # Long: price breaks above upper Donchian + ADX > 25 + volume confirmation
+            if price > dc_upper[i] and adx_val > 25 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price below weekly Donchian low with volume surge
-            elif price < donchian_low[i] and vol_ratio[i] > 1.5:
+            # Short: price breaks below lower Donchian + ADX > 25 + volume confirmation
+            elif price < dc_lower[i] and adx_val > 25 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Trail stop: exit if price drops 2*ATR from highest high since entry
-            # Simplified: exit if price < donchian_low (re-entry level)
-            if price < donchian_low[i]:
+            # Exit long if price re-enters Donchian channel or trend weakens
+            if price < dc_upper[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Trail stop: exit if price rises 2*ATR from lowest low since entry
-            # Simplified: exit if price > donchian_high (re-entry level)
-            if price > donchian_high[i]:
+            # Exit short if price re-enters Donchian channel or trend weakens
+            if price > dc_lower[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Donchian_Breakout_Volume_ATR_Filter"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
