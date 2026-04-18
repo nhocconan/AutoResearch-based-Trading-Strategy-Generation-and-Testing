@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-4h KAMA Trend with Volume Confirmation and ADX Filter
-Hypothesis: KAMA adapts to market conditions, reducing false signals in choppy markets.
-Combined with volume confirmation and ADX trend filter, it captures strong trends in both bull and bear markets while avoiding whipsaws. Target: 25-40 trades/year.
+6h Weekly Pivot Breakout with Volume Confirmation
+Hypothesis: Weekly pivot points (from weekly high/low/close) identify key support/resistance levels.
+Breakouts above weekly R1 or below weekly S1 with volume confirmation capture institutional interest.
+Works in bull/bear markets as pivots adapt to price levels. Volume filter ensures breakouts have participation.
+Targets 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -19,34 +21,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA (Adaptive Moving Average)
-    close_series = pd.Series(close)
-    direction = np.abs(close_series.diff(10).values)
-    volatility = np.abs(close_series.diff(1)).rolling(window=10, min_periods=1).sum().values
-    er = np.where(volatility > 0, direction / volatility, 0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Get weekly data (using 1w timeframe for pivot calculation)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
     
-    # ADX for trend strength (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
+    # Calculate weekly pivot points (using previous week's data)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
+    # Calculate pivot levels
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
     
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum() / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum() / atr
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align to 6h timeframe (wait for weekly bar to close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
     # Volume filter: 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,40 +51,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for KAMA, ADX, and ATR
+    start_idx = 30  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(adx[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        adx_val = adx[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: price above KAMA with rising ADX and volume
-            if price > kama_val and adx_val > 25 and vol_ok:
+            # Long: break above R1 with volume
+            if price > r1_val and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA with rising ADX and volume
-            elif price < kama_val and adx_val > 25 and vol_ok:
+            # Short: break below S1 with volume
+            elif price < s1_val and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price crosses below KAMA or ADX weakens
-            if price < kama_val or adx_val < 20:
+            # Exit long if price returns to pivot or breaks below S1
+            if price < pivot_val or price < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price crosses above KAMA or ADX weakens
-            if price > kama_val or adx_val < 20:
+            # Exit short if price returns to pivot or breaks above R1
+            if price > pivot_val or price > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_Volume_ADX_Filter"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
