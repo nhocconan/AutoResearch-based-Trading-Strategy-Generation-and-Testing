@@ -1,23 +1,19 @@
-# US Patent 10/123,456 - Confidential
-# Developed with TradeRiskAI
-# © 2024-2025 All Rights Reserved
 #!/usr/bin/env python3
 """
-6h Weekly Pivot Breakout with Volume Confirmation and Trend Filter
-Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance. 
-Breaking above R1 with volume > 1.5x average and price > 100-period EMA indicates bullish momentum.
-Breaking below S1 with volume confirmation and price < 100-period EMA indicates bearish momentum.
-Weekly pivots provide structure that works in both bull and bear markets by identifying key institutional levels.
-Target: 15-30 trades/year to minimize fee drag on 6s timeframe.
+12h Camarilla Pivot R1/S1 Breakout with Volume Confirmation and ADX Filter
+Hypothesis: Price breaking above/below Camarilla R1/S1 levels calculated from daily candles
+with volume confirmation (volume > 1.5x 20-period EMA) and trend strength (ADX > 20)
+indicates strong momentum. Camarilla levels from daily timeframe provide robust support/resistance
+levels that work in both bull and bear markets. Target: 15-30 trades/year to minimize fee drain.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,27 +21,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 100-period EMA for trend filter
-    ema100 = pd.Series(close).ewm(span=100, adjust=False, min_periods=100).mean().values
-    
-    # Get weekly data once before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) == 0:
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate Camarilla pivot levels from daily data
+    # R1 = close + (high - low) * 1.1 / 12
+    # S1 = close - (high - low) * 1.1 / 12
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
+    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
     
-    # Align weekly pivot levels to 6s timeframe (wait for weekly bar to close)
-    pivot_aligned = align_ltf_to_htf(prices, df_weekly, weekly_pivot)
-    r1_aligned = align_ltf_to_htf(prices, df_weekly, weekly_r1)
-    s1_aligned = align_ltf_to_htf(prices, df_weekly, weekly_s1)
+    # Align Camarilla levels to 12h timeframe (wait for daily candle to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # ADX for trend strength (14-period) on 12h data
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
+    
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -54,40 +71,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Warmup for EMA100
+    start_idx = 35  # Warmup for indicators (max of 14,14,20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema100[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_val = ema100[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        adx_val = adx[i]
         vol_conf = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: price breaks above weekly R1 with volume and above EMA100
-            if price > r1_aligned[i] and vol_conf and price > ema_val:
+            # Strong trend (ADX > 20) and volume confirmation
+            # Price breaks above R1 = long
+            if adx_val > 20 and price > r1_level and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 with volume and below EMA100
-            elif price < s1_aligned[i] and vol_conf and price < ema_val:
+            # Price breaks below S1 = short
+            elif adx_val > 20 and price < s1_level and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if price returns to weekly pivot or volume drops
-            if price < pivot_aligned[i] or vol_ratio[i] < 1.0:
+            # Exit if trend weakens or price returns to S1 level (mean reversion)
+            if adx_val < 15 or price < s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price returns to weekly pivot or volume drops
-            if price > pivot_aligned[i] or vol_ratio[i] < 1.0:
+            # Exit if trend weakens or price returns to R1 level (mean reversion)
+            if adx_val < 15 or price > r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Weekly_Pivot_Breakout_Volume_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
