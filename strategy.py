@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_MeanReversion_with_Target
-Hypothesis: Mean reversion from Keltner Channel extremes with RSI confirmation and profit target.
-Uses 1d Keltner Channels (EMA20 ± 2*ATR10), RSI(14) for overbought/oversold, and fixed profit target.
-Designed to work in both bull and bear markets by fading extremes during low volatility periods.
-Target: 8-25 trades/year (32-100 total over 4 years) to minimize fee drift while capturing mean reversion moves.
+12h_KAMA_Trend_With_Price_Channel_Breakout
+Hypothesis: KAMA adapts to market regime - fast in trends, slow in ranges. 
+Breakouts above/below adaptive price channels (KAMA ± ATR) with volume confirmation capture 
+trend moves while avoiding false breakouts in ranging markets. Works in both bull/bear by 
+adapting speed to volatility. Target: 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,111 +21,100 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly ATR for regime filter (low volatility = mean reversion favorable)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily trend filter: EMA50 on 1d
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range and ATR(10) for weekly
-    tr1_w = high_1w[1:] - low_1w[1:]
-    tr2_w = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3_w = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_w = np.maximum(np.maximum(tr1_w, tr2_w), tr3_w)
-    tr_w = np.concatenate([[np.nan], tr_w])
-    atr_10_1w = pd.Series(tr_w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_10_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_10_1w)
+    # KAMA (adaptive moving average) on 12h
+    # Efficiency Ratio: |price change| / sum of absolute changes
+    change = np.abs(np.diff(close, prepend=close[0]))
+    abs_change = np.abs(np.diff(close, prepend=close[0]))
     
-    # Daily Keltner Channel: EMA20 ± 2*ATR10
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # ER over 10 periods
+    price_change = np.abs(close - np.roll(close, 10))
+    change_sum = np.convolve(abs_change, np.ones(10), 'same')
+    er = np.where(change_sum != 0, price_change / change_sum, 0)
     
-    upper_keltner = ema_20 + (2.0 * atr_10)
-    lower_keltner = ema_20 - (2.0 * atr_10)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA2
+    slow_sc = 2 / (30 + 1)  # EMA30
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # RSI(14) for overbought/oversold confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # KAMA calculation
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume filter: above average to avoid dead cat bounces
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
+    # ATR for channel width
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.convolve(tr, np.ones(14), 'valid') / 14
+    atr = np.concatenate([np.full(13, np.nan), atr])  # align
+    
+    # Price channels: KAMA ± 1.5 * ATR
+    upper_channel = kama + 1.5 * atr
+    lower_channel = kama - 1.5 * atr
+    
+    # Volume confirmation: > 1.5x 20-period average
+    vol_ma = np.convolve(volume, np.ones(20), 'same') / 20
+    vol_ma[:10] = np.nan  # insufficient lookback
+    vol_ma[-10:] = np.nan  # insufficient lookahead
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
-    entry_price = 0.0
     
-    start_idx = max(20, 14)  # Warmup for indicators
+    start_idx = max(20, 30)  # warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or
-            np.isnan(rsi_values[i]) or np.isnan(volume_filter[i]) or np.isnan(atr_10_1w_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
-            if position != 0:
-                # Maintain position until exit conditions
-                signals[i] = 0.25 if position == 1 else -0.25
             continue
         
         price = close[i]
-        upper = upper_keltner[i]
-        lower = lower_keltner[i]
-        rsi_val = rsi_values[i]
-        vol_filter = volume_filter[i]
-        weekly_atr = atr_10_1w_aligned[i]
-        
-        # Skip if weekly volatility is too high (avoid mean reversion in strong trends)
-        if weekly_atr > 0 and atr_10[i] > (1.5 * weekly_atr):
-            if position != 0:
-                signals[i] = 0.25 if position == 1 else -0.25
-            else:
-                signals[i] = 0.0
-            continue
+        kama_val = kama[i]
+        upper = upper_channel[i]
+        lower = lower_channel[i]
+        ema50_1d = ema_50_1d_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price at lower Keltner band with oversold RSI and volume
-            if (price <= lower and
-                rsi_val < 30 and
-                vol_filter):
+            # Long: price breaks above upper channel with volume in uptrend (price > daily EMA50)
+            if (price > upper and 
+                vol_spike and 
+                price > ema50_1d):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price at upper Keltner band with overbought RSI and volume
-            elif (price >= upper and
-                  rsi_val > 70 and
-                  vol_filter):
+            # Short: price breaks below lower channel with volume in downtrend (price < daily EMA50)
+            elif (price < lower and 
+                  vol_spike and 
+                  price < ema50_1d):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: profit target (2.5% gain) or mean reversion failure (RSI > 50)
-            if (price >= entry_price * 1.025 or  # 2.5% profit target
-                rsi_val > 50):                   # RSI back to neutral
+            # Exit: price crosses below KAMA or trend reverses
+            if price < kama_val or price < ema50_1d:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: profit target (2.5% gain) or mean reversion failure (RSI < 50)
-            if (price <= entry_price * 0.975 or  # 2.5% profit target
-                rsi_val < 50):                   # RSI back to neutral
+            # Exit: price crosses above KAMA or trend reverses
+            if price > kama_val or price > ema50_1d:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Keltner_MeanReversion_with_Target"
-timeframe = "1d"
+name = "12h_KAMA_Trend_With_Price_Channel_Breakout"
+timeframe = "12h"
 leverage = 1.0
