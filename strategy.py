@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_Reversal_v1
-Hypothesis: Use 1d Camarilla pivot levels (R1/S1) as key reversal zones on 12h timeframe. 
-Enter long when price touches S1 and shows bullish reversal (close > open), short when price touches R1 with bearish reversal (close < open). 
-Require volume > 1.3x 20-period average for confirmation. 
-Apply 1d ADX(14) > 25 filter to ensure trending environment (avoid chop). 
-Target: 15-30 trades/year by focusing on high-probability pivot reversals in trending markets.
-Works in bull via buying S1 bounces, in bear via selling R1 rejections.
+6h_Supertrend_EMA34_VolumeFilter_V1
+Hypothesis: Use 1d Supertrend (ATR=10, mult=3) for trend direction, 6h EMA34 for entry timing, and volume > 1.5x 20-period average for confirmation. 
+Go long when 6h price crosses above EMA34 AND 1d Supertrend is uptrend, short when price crosses below EMA34 AND 1d Supertrend is downtrend. 
+Supertrend adapts to volatility, reducing whipsaws in sideways markets. Volume filter ensures momentum confirmation. 
+Target: 15-30 trades/year by combining trend-following with volatility-adjusted entry and volume confirmation. 
+Works in bull markets via trend following and in bear via short signals, with reduced false signals during consolidation.
 """
 
 import numpy as np
@@ -19,135 +18,129 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and ADX
+    # Get 1d data for Supertrend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla levels (based on previous day)
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
-    # Using previous day's values to avoid look-ahead
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    # First day will have invalid values (from roll), handled by isnan check later
+    # 1d Supertrend (ATR=10, mult=3)
+    atr_period = 10
+    multiplier = 3
     
-    rng = prev_high_1d - prev_low_1d
-    R1 = prev_close_1d + 1.1 * rng / 12.0
-    S1 = prev_close_1d - 1.1 * rng / 12.0
+    # Calculate ATR
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], 0])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 1d ADX(14) for trend strength
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        # Smooth TR and DM
-        tr_period = np.full_like(tr, np.nan)
-        dm_plus_period = np.full_like(dm_plus, np.nan)
-        dm_minus_period = np.full_like(dm_minus, np.nan)
-        if len(tr) >= period:
-            tr_period[period-1] = np.nansum(tr[:period])
-            dm_plus_period[period-1] = np.nansum(dm_plus[:period])
-            dm_minus_period[period-1] = np.nansum(dm_minus[:period])
-            for i in range(period, len(tr)):
-                tr_period[i] = tr_period[i-1] - (tr_period[i-1] / period) + tr[i]
-                dm_plus_period[i] = dm_plus_period[i-1] - (dm_plus_period[i-1] / period) + dm_plus[i]
-                dm_minus_period[i] = dm_minus_period[i-1] - (dm_minus_period[i-1] / period) + dm_minus[i]
-        # DI and DX
-        plus_di = 100 * dm_plus_period / tr_period
-        minus_di = 100 * dm_minus_period / tr_period
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        # ADX = smoothed DX
-        adx = np.full_like(dx, np.nan)
-        if len(dx) >= period:
-            adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
-            for i in range(2*period-1, len(dx)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        return adx
+    atr = np.full_like(close_1d, np.nan)
+    if len(tr) >= atr_period:
+        atr[atr_period-1] = np.mean(tr[:atr_period])
+        for i in range(atr_period, len(tr)):
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Supertrend calculation
+    hl2 = (high_1d + low_1d) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
     
-    # Align 1d indicators to 12h timeframe
-    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    supertrend = np.full_like(close_1d, np.nan)
+    uptrend = np.full_like(close_1d, True)
     
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
+    if len(close_1d) >= atr_period:
+        supertrend[atr_period-1] = hl2[atr_period-1]
+        uptrend[atr_period-1] = True
+        
+        for i in range(atr_period, len(close_1d)):
+            # Update bands
+            if close_1d[i-1] > upper_band[i-1]:
+                upper_band[i] = hl2[i] + multiplier * atr[i]
+            else:
+                upper_band[i] = min(upper_band[i-1], hl2[i] + multiplier * atr[i])
+            
+            if close_1d[i-1] < lower_band[i-1]:
+                lower_band[i] = hl2[i] - multiplier * atr[i]
+            else:
+                lower_band[i] = max(lower_band[i-1], hl2[i] - multiplier * atr[i])
+            
+            # Determine trend
+            if close_1d[i] > upper_band[i-1]:
+                uptrend[i] = True
+            elif close_1d[i] < lower_band[i-1]:
+                uptrend[i] = False
+            else:
+                uptrend[i] = uptrend[i-1]
+                if uptrend[i]:
+                    lower_band[i] = max(lower_band[i-1], hl2[i] - multiplier * atr[i])
+                else:
+                    upper_band[i] = min(upper_band[i-1], hl2[i] + multiplier * atr[i])
+            
+            supertrend[i] = lower_band[i] if uptrend[i] else upper_band[i]
+    
+    # Align Supertrend uptrend to 6h timeframe
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
+    
+    # 6h EMA34
+    ema_period = 34
+    ema = np.full_like(close, np.nan)
+    if len(close) >= ema_period:
+        ema_multiplier = 2 / (ema_period + 1)
+        ema[ema_period-1] = np.mean(close[:ema_period])
+        for i in range(ema_period, len(close)):
+            ema[i] = (close[i] - ema[i-1]) * ema_multiplier + ema[i-1]
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_period = 20
+    vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+            vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(vol_period, 1) + 1  # Need volume MA and at least 2 days for pivots
+    start_idx = max(atr_period, ema_period, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or 
-            np.isnan(adx_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(uptrend_1d_aligned[i]) or np.isnan(ema[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade in trending markets (ADX > 25)
-        strong_trend = adx_12h[i] > 25
-        
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
-        
-        # Price near pivot levels (within 0.1% tolerance)
-        tol = 0.001  # 0.1%
-        near_S1 = abs(close[i] - S1_12h[i]) / S1_12h[i] < tol
-        near_R1 = abs(close[i] - R1_12h[i]) / R1_12h[i] < tol
-        
-        # Reversal signals
-        bullish_reversal = close[i] > open_price[i]  # bullish candle
-        bearish_reversal = close[i] < open_price[i]  # bearish candle
-        
-        if position == 0 and strong_trend and vol_confirm:
-            # Long: price near S1 with bullish reversal
-            if near_S1 and bullish_reversal:
-                signals[i] = 0.25
-                position = 1
-            # Short: price near R1 with bearish reversal
-            elif near_R1 and bearish_reversal:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Long exit: price crosses R1 or shows bearish reversal at resistance
-            if close[i] > R1_12h[i] or (near_R1 and bearish_reversal):
-                signals[i] = -0.25  # reverse to short
-                position = -1
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: price crosses S1 or shows bullish reversal at support
-            if close[i] < S1_12h[i] or (near_S1 and bullish_reversal):
-                signals[i] = 0.25  # reverse to long
-                position = 1
-            else:
-                signals[i] = -0.25
+        # Long entry: price crosses above EMA34 AND 1d Supertrend uptrend AND volume confirmation
+        if (position <= 0 and 
+            close[i] > ema[i] and 
+            close[i-1] <= ema[i-1] and 
+            uptrend_1d_aligned[i] > 0.5 and 
+            volume[i] > 1.5 * vol_ma[i]):
+            signals[i] = 0.25
+            position = 1
+        # Short entry: price crosses below EMA34 AND 1d Supertrend downtrend AND volume confirmation
+        elif (position >= 0 and 
+              close[i] < ema[i] and 
+              close[i-1] >= ema[i-1] and 
+              uptrend_1d_aligned[i] < 0.5 and 
+              volume[i] > 1.5 * vol_ma[i]):
+            signals[i] = -0.25
+            position = -1
+        # Exit conditions: opposite crossover
+        elif position == 1 and close[i] < ema[i] and close[i-1] >= ema[i-1]:
+            signals[i] = -0.25  # reverse to short
+            position = -1
+        elif position == -1 and close[i] > ema[i] and close[i-1] <= ema[i-1]:
+            signals[i] = 0.25   # reverse to long
+            position = 1
+        else:
+            # Hold current position
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-name = "12h_Camarilla_Pivot_Reversal_v1"
-timeframe = "12h"
+name = "6h_Supertrend_EMA34_VolumeFilter_V1"
+timeframe = "6h"
 leverage = 1.0
