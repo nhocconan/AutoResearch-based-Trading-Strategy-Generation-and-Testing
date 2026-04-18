@@ -1,9 +1,11 @@
-# 4h Donchian Breakout with Volume and ADX Trend Filter
-# Hypothesis: Breakouts from Donchian channels with volume confirmation and trend alignment
-# capture strong momentum moves in both bull and bear markets. The ADX filter ensures
-# we only trade in trending regimes, reducing false breakouts in ranging markets.
-# This approach targets 20-30 trades/year to minimize fee drag while capturing
-# significant moves.
+#!/usr/bin/env python3
+"""
+1d Weekly Donchian Breakout with Volume Confirmation and ADX Trend Filter
+Hypothesis: Weekly Donchian channels capture major trend shifts. On daily timeframe,
+we break out of the prior week's Donchian bands with volume confirmation and ADX
+trend strength filter to avoid false breakouts. This low-frequency approach
+minimizes fee drag while capturing sustained moves in both bull and bear markets.
+"""
 
 import numpy as np
 import pandas as pd
@@ -11,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,96 +21,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Donchian channels (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Daily ADX for trend strength filter
-    # Calculate True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
-    tr3 = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
+    # Weekly Donchian(20) - using weekly high/low
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    
+    # Calculate 20-period rolling max/min on weekly data
+    donchian_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    
+    # Align to daily timeframe (will only update after weekly bar closes)
+    donchian_high_daily = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_daily = align_htf_to_ltf(prices, df_1w, donchian_low)
+    
+    # ADX(14) for trend strength on daily data
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # Calculate Directional Movement
-    up_move = df_1d['high'] - np.roll(df_1d['high'], 1)
-    down_move = np.roll(df_1d['low'], 1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Smooth TR, +DM, -DM
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Calculate DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Donchian Channel on 4h (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 1.3x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup for indicators
+    start_idx = 25  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_aligned[i]
+        upper = donchian_high_daily[i]
+        lower = donchian_low_daily[i]
+        trend_strength = adx[i]
         vol_ok = vol_filter[i]
         
-        # Only trade when ADX > 25 (trending market)
-        if adx_val > 25:
-            if position == 0:
-                # Long breakout: price breaks above Donchian high with volume
-                if price > donchian_high[i] and vol_ok:
-                    signals[i] = 0.25
-                    position = 1
-                # Short breakout: price breaks below Donchian low with volume
-                elif price < donchian_low[i] and vol_ok:
-                    signals[i] = -0.25
-                    position = -1
-            
-            elif position == 1:
-                # Exit long: price returns to Donchian midpoint or ADX weakens
-                midpoint = (donchian_high[i] + donchian_low[i]) / 2
-                if price < midpoint or adx_val < 20:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            
-            elif position == -1:
-                # Exit short: price returns to Donchian midpoint or ADX weakens
-                midpoint = (donchian_high[i] + donchian_low[i]) / 2
-                if price > midpoint or adx_val < 20:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+        # Only trade when trend is strong enough (ADX > 25)
+        if trend_strength < 25:
+            # Weak trend - stay flat or exit
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if position == 0:
+            # Long breakout: price closes above weekly Donchian high with volume
+            if price > upper and vol_ok:
+                signals[i] = 0.25
+                position = 1
+            # Short breakout: price closes below weekly Donchian low with volume
+            elif price < lower and vol_ok:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long: exit if price returns to weekly Donchian low or trend weakens
+            if price < lower or adx[i] < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short: exit if price returns to weekly Donchian high or trend weakens
+            if price > upper or adx[i] < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Breakout_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
