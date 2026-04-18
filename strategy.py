@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_WMABreakout_WeeklyTrend_Filter
-Hypothesis: On daily timeframe, buy when price breaks above Wilder Moving Average (WMA) with weekly uptrend filter,
-sell when price breaks below WMA with weekly downtrend filter. WMA adapts faster than SMA but slower than EMA,
-providing good trend-following in both bull and bear markets. Weekly trend filter prevents counter-trend trades.
-Target: 15-25 trades/year on 1d timeframe with disciplined entry conditions.
+12h_Camarilla_R1S1_Breakout_Volume
+Hypothesis: Camarilla pivot levels from 1-day provide key support/resistance in ranging markets. 
+Breakouts above R1 or below S1 with volume confirmation and 1-day trend filter work in both bull and bear markets.
+Target: 15-30 trades/year on 12h timeframe with disciplined entry conditions.
 """
 
 import numpy as np
@@ -21,72 +20,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Wilder Moving Average (WMA) - 34 period
-    # WMA is similar to Wilder's smoothing used in RSI/ATR
-    wma = np.full(n, np.nan)
-    alpha = 1 / 34  # Wilder's smoothing constant
-    for i in range(34, n):
-        if i == 34:
-            wma[i] = np.mean(close[0:35])  # Initialize with simple average
-        else:
-            wma[i] = alpha * close[i] + (1 - alpha) * wma[i-1]
+    # Calculate 1-day Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly trend filter: Weekly WMA 34
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    wma_1w = np.full(len(close_1w), np.nan)
-    alpha_1w = 1 / 34
-    for i in range(34, len(close_1w)):
-        if i == 34:
-            wma_1w[i] = np.mean(close_1w[0:35])
-        else:
-            wma_1w[i] = alpha_1w * close_1w[i] + (1 - alpha_1w) * wma_1w[i-1]
-    wma_1w_aligned = align_htf_to_ltf(prices, df_1w, wma_1w)
+    # Pivot point and Camarilla levels (R1, S1)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1_1d = pivot_1d + range_1d * 1.1 / 12
+    s1_1d = pivot_1d - range_1d * 1.1 / 12
     
-    # Volume confirmation: current volume > 1.5 x 20-day average
+    # Align 1-day levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # 1-day EMA34 trend filter
+    ema34_1d = np.full(len(close_1d), np.nan)
+    k = 2 / (34 + 1)
+    for i in range(34, len(close_1d)):
+        if i == 34:
+            ema34_1d[i] = np.mean(close_1d[0:35])
+        else:
+            ema34_1d[i] = close_1d[i] * k + ema34_1d[i-1] * (1 - k)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike: current volume > 1.5 x 12-period average
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    for i in range(12, n):
+        vol_ma[i] = np.mean(volume[i-12:i])
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure all indicators ready
+    start_idx = max(34, 12)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(wma[i]) or np.isnan(wma_1w_aligned[i]) or 
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price crosses above WMA with weekly uptrend and volume confirmation
-            if (close[i] > wma[i] and close[i-1] <= wma[i-1] and  # upward cross
-                close[i] > wma_1w_aligned[i] and                  # weekly uptrend
-                vol_confirm[i]):
+            # Long: break above R1 with volume spike and 1-day uptrend
+            if (close[i] > r1_1d_aligned[i] and vol_spike[i] and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below WMA with weekly downtrend and volume confirmation
-            elif (close[i] < wma[i] and close[i-1] >= wma[i-1] and  # downward cross
-                  close[i] < wma_1w_aligned[i] and                  # weekly downtrend
-                  vol_confirm[i]):
+            # Short: break below S1 with volume spike and 1-day downtrend
+            elif (close[i] < s1_1d_aligned[i] and vol_spike[i] and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below WMA or weekly trend turns down
-            if (close[i] < wma[i] and close[i-1] >= wma[i-1]) or \
-               (close[i] < wma_1w_aligned[i]):
+            # Long exit: close below pivot or 1-day trend turns down
+            if (close[i] < pivot_1d_aligned[i] or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above WMA or weekly trend turns up
-            if (close[i] > wma[i] and close[i-1] <= wma[i-1]) or \
-               (close[i] > wma_1w_aligned[i]):
+            # Short exit: close above pivot or 1-day trend turns up
+            if (close[i] > pivot_1d_aligned[i] or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WMABreakout_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
