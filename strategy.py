@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 12h EMA trend filter and volume confirmation.
-# Long when Williams %R crosses above -50, price above 12h EMA(20), and volume > 1.5x 20-period average.
-# Short when Williams %R crosses below -50, price below 12h EMA(20), and volume > 1.5x 20-period average.
-# Exit when Williams %R crosses back below -50 (long) or above -50 (short).
-# Williams %R identifies overbought/oversold conditions; EMA filter ensures trend alignment.
-# Volume surge adds conviction. Designed for ~20-30 trades/year per symbol.
-name = "4h_WilliamsR_12hEMA20_VolumeFilter"
-timeframe = "4h"
+# Hypothesis: 12h Camarilla pivot R1/S1 breakout with volume confirmation and 1d EMA trend filter.
+# Long when price breaks above daily Camarilla R1 with volume > 1.5x 24-period average and price > 1d EMA(34).
+# Short when price breaks below daily Camarilla S1 with volume > 1.5x 24-period average and price < 1d EMA(34).
+# Exit when price returns to Camarilla pivot point (PP).
+# Uses Camarilla levels from daily timeframe for structure, volume surge for conviction, EMA for trend filter.
+# Designed for ~15-30 trades/year per symbol.
+name = "12h_Camarilla_R1S1_Volume_EMA34_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +23,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # 1d data for Camarilla pivot levels and EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # EMA(20) on 12h close
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # Calculate Camarilla pivot levels from 1d OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams %R (14-period) on 4h data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Pivot Point (PP)
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Align Camarilla levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # EMA(34) on 1d close for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current volume > 1.5 * 24-period average (24 * 12h = 12 days, using shorter for responsiveness)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,37 +57,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(williams_r[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_val = ema_20_12h_aligned[i]
-        wr = williams_r[i]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_val = ema_34_1d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -50, price above EMA, volume surge
-            if i > start_idx and williams_r[i-1] <= -50 and wr > -50 and close_val > ema_val and vol_filter:
+            # Long: price breaks above R1 with volume surge and above EMA
+            if close_val > r1_val and vol_filter and close_val > ema_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -50, price below EMA, volume surge
-            elif i > start_idx and williams_r[i-1] >= -50 and wr < -50 and close_val < ema_val and vol_filter:
+            # Short: price breaks below S1 with volume surge and below EMA
+            elif close_val < s1_val and vol_filter and close_val < ema_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R crosses back below -50
-            if williams_r[i-1] > -50 and wr <= -50:
+            # Long exit: price returns to pivot point (PP)
+            if close_val <= pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses back above -50
-            if williams_r[i-1] < -50 and wr >= -50:
+            # Short exit: price returns to pivot point (PP)
+            if close_val >= pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
