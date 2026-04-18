@@ -1,52 +1,36 @@
 #!/usr/bin/env python3
 """
-12h_TurtleTrader_Donchian20_1dATR2
-Turtle Trading breakout system:
-- Long when price breaks above 20-period Donchian high + volume confirmation
-- Short when price breaks below 20-period Donchian low + volume confirmation  
-- Exit on opposite 10-period Donchian break (stop and reverse)
-- Uses 1d ATR for position sizing and stop loss
+12h_Camarilla_R1_S1_Breakout_Volume
+Camarilla pivot breakout strategy:
+- Long when price breaks above R1 level + volume confirmation
+- Short when price breaks below S1 level + volume confirmation
+- Exit on opposite S1/R1 break (reverse position)
+- Uses 1d Camarilla levels from prior day
 - Designed for 15-25 trades/year per symbol
-Works in both bull (captures trends) and bear (short breakdowns) markets
+Works in bull (breakouts) and bear (breakdowns) markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range."""
-    if len(high) < period:
-        return np.full(len(high), np.nan)
-    
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr = np.full(len(tr), np.nan)
-    if len(tr) >= period:
-        atr[period-1] = np.nanmean(tr[1:period])
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-    
-    return atr
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels (upper and lower bands)."""
-    upper = np.full(len(high), np.nan)
-    lower = np.full(len(high), np.nan)
-    
-    if len(high) >= period:
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for the day."""
+    range_val = high - low
+    c = close
+    r4 = c + range_val * 1.1 / 2
+    r3 = c + range_val * 1.1 / 4
+    r2 = c + range_val * 1.1 / 6
+    r1 = c + range_val * 1.1 / 12
+    s1 = c - range_val * 1.1 / 12
+    s2 = c - range_val * 1.1 / 6
+    s3 = c - range_val * 1.1 / 4
+    s4 = c - range_val * 1.1 / 2
+    return r1, s1
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -54,64 +38,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR filter
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(2)
-    atr_2_1d = calculate_atr(high_1d, low_1d, close_1d, 2)
+    # Calculate Camarilla R1 and S1 for each day
+    r1_1d = np.zeros(len(high_1d))
+    s1_1d = np.zeros(len(high_1d))
     
-    # Calculate 12-period Donchian channels (20 in original Turtle, but 12 for 12h timeframe)
-    upper_12, lower_12 = calculate_donchian_channels(high, low, 12)
-    upper_10, lower_10 = calculate_donchian_channels(high, low, 10)  # for exits
+    for i in range(len(high_1d)):
+        r1, s1 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
+        r1_1d[i] = r1
+        s1_1d[i] = s1
     
-    # Calculate volume moving average (20-period)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Calculate volume moving average (10-period)
     vol_ma = np.full(len(volume), np.nan)
-    if len(volume) >= 20:
-        for i in range(19, len(volume)):
-            vol_ma[i] = np.mean(volume[i-19:i+1])
-    
-    # Align 1d ATR to 12h timeframe
-    atr_2_1d_12h = align_htf_to_ltf(prices, df_1d, atr_2_1d)
+    if len(volume) >= 10:
+        for i in range(9, len(volume)):
+            vol_ma[i] = np.mean(volume[i-9:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need sufficient data for Donchian, ATR, and volume MA
+    start_idx = 15  # need sufficient data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_12[i]) or np.isnan(lower_12[i]) or 
-            np.isnan(atr_2_1d_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_filter = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 10-period average
+        vol_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above 12-period Donchian high + volume
-            if close[i] > upper_12[i] and vol_filter:
+            # Long: price breaks above R1 level + volume
+            if close[i] > r1_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 12-period Donchian low + volume
-            elif close[i] < lower_12[i] and vol_filter:
+            # Short: price breaks below S1 level + volume
+            elif close[i] < s1_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below 10-period Donchian low (stop and reverse)
-            if close[i] < lower_10[i]:
+            # Long exit: price breaks below S1 level (reverse to short)
+            if close[i] < s1_1d_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 10-period Donchian high (stop and reverse)
-            if close[i] > upper_10[i]:
+            # Short exit: price breaks above R1 level (reverse to long)
+            if close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -119,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_TurtleTrader_Donchian20_1dATR2"
+name = "12h_Camarilla_R1_S1_Breakout_Volume"
 timeframe = "12h"
 leverage = 1.0
