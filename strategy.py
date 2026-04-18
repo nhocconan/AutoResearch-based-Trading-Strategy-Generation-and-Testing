@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h 4h Supertrend Trend Following with 1d Volume Confirmation and Session Filter (08-20 UTC)
-# Uses 4h Supertrend for trend direction, 1h for entry timing, 1d volume filter to avoid low-volume noise.
-# Restricts trading to active UTC session (08-20) to reduce false signals.
-# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
-# Works in bull markets (follow uptrend) and bear markets (follow downtrend).
-name = "1h_Supertrend_4h_1dVolume_Session"
-timeframe = "1h"
+# Hypothesis: 6h Bollinger Band Squeeze Breakout + Volume Spike + Weekly Trend Filter
+# Bollinger Band squeeze (low volatility) precedes explosive breakouts in both bull and bear markets.
+# Breakout above upper BB or below lower BB with volume surge indicates strong directional move.
+# Weekly trend filter (price vs weekly EMA20) ensures trades align with higher timeframe momentum.
+# Works in bull markets (breakouts above upper BB in uptrend) and bear markets (breakdowns below lower BB in downtrend).
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+name = "6h_Bollinger_Squeeze_Breakout_Volume_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,104 +22,72 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = pd.to_datetime(prices['open_time'])
     
-    # Pre-calculate session filter (08-20 UTC)
-    hours = open_time.hour.values
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Bollinger Bands (20, 2) on 6h
+    close_s = pd.Series(close)
+    bb_mid = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + (2 * bb_std)
+    bb_lower = bb_mid - (2 * bb_std)
+    bb_width = bb_upper - bb_lower
     
-    # Get 4h data for Supertrend calculation
-    df_4h = get_htf_data(prices, '4h')
+    # Bollinger Band Squeeze: width below 50th percentile of last 50 periods
+    bb_width_s = pd.Series(bb_width)
+    bb_width_percentile = bb_width_s.rolling(window=50, min_periods=50).quantile(0.5).values
+    squeeze = bb_width < bb_width_percentile
     
-    # Calculate Supertrend on 4h data
-    atr_period = 10
-    multiplier = 3.0
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
+    # Weekly EMA20 for trend direction
+    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
     
-    # True Range
-    tr1 = df_4h['high'] - df_4h['low']
-    tr2 = abs(df_4h['high'] - df_4h['close'].shift(1))
-    tr3 = abs(df_4h['low'] - df_4h['close'].shift(1))
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
-    atr = tr.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Basic Upper and Lower Bands
-    hl2 = (df_4h['high'] + df_4h['low']) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Initialize Supertrend
-    supertrend = np.zeros(len(df_4h))
-    direction = np.ones(len(df_4h))  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(df_4h)):
-        if df_4h['close'].iloc[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif df_4h['close'].iloc[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # Align Supertrend and direction to 1h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_4h, direction)
-    
-    # Get 1d data for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = volume_1d > (1.5 * vol_ma_1d)
-    volume_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Volume spike: current volume > 2.5 * 20-period average volume (~5 days on 6h chart)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available or outside session
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or
-            np.isnan(volume_filter_1d_aligned[i]) or not session_filter[i]):
+        # Skip if any required data is not available
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(ema_20_weekly_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        st_val = supertrend_aligned[i]
-        direction_val = direction_aligned[i]
-        vol_filter_val = volume_filter_1d_aligned[i]
+        bb_upper_val = bb_upper[i]
+        bb_lower_val = bb_lower[i]
+        ema_weekly_val = ema_20_weekly_aligned[i]
         
         if position == 0:
-            # Long: Uptrend AND price above Supertrend AND volume filter
-            if direction_val == 1 and close_val > st_val and vol_filter_val:
-                signals[i] = 0.20
+            # Long: Bollinger squeeze breakout above upper band + volume spike + above weekly EMA
+            if squeeze[i] and close_val > bb_upper_val and volume_spike[i] and close_val > ema_weekly_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: Downtrend AND price below Supertrend AND volume filter
-            elif direction_val == -1 and close_val < st_val and vol_filter_val:
-                signals[i] = -0.20
+            # Short: Bollinger squeeze breakout below lower band + volume spike + below weekly EMA
+            elif squeeze[i] and close_val < bb_lower_val and volume_spike[i] and close_val < ema_weekly_val:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Downtrend OR price below Supertrend
-            if direction_val == -1 or close_val < st_val:
+            # Long exit: Close below middle band (mean reversion) or opposite band touch
+            if close_val < bb_mid[i] or close_val <= bb_lower_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Uptrend OR price above Supertrend
-            if direction_val == 1 or close_val > st_val:
+            # Short exit: Close above middle band (mean reversion) or opposite band touch
+            if close_val > bb_mid[i] or close_val >= bb_upper_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
