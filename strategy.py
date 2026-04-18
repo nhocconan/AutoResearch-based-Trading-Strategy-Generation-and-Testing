@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-4h VWAP Reversion with Volume Spike and 1D Trend Filter
-Hypothesis: Price reverting to VWAP after a volume spike, aligned with 1D trend (close > EMA50), captures mean reversion in strong trends. 
-Works in bull (buying dips) and bear (selling rallies). Target: 20-30 trades/year to minimize fee drag.
+4h Camarilla Pivot Breakout with Volume Confirmation and ADX Filter
+Hypothesis: Price breaking above/below Camarilla pivot levels (R1/S1) with volume confirmation 
+(volume > 1.5x average) and trend strength (ADX > 20) indicates strong momentum. 
+Camarilla pivots provide precise support/resistance levels that work well in trending markets.
+Target: 20-40 trades/year to minimize fee drain.
 """
 
 import numpy as np
@@ -19,58 +21,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    tpv = typical_price * volume
-    cum_tpv = np.cumsum(tpv)
-    cum_vol = np.cumsum(volume)
-    vwap = cum_tpv / cum_vol
-    
-    # Volume spike: current volume > 2.0 x 20-period EMA of volume
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ema)
-    
-    # 1D trend: EMA50 on daily timeframe
+    # Calculate Camarilla pivots from previous day (using daily data)
     df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Camarilla pivot levels: R1 = close + 0.382*(high-low), S1 = close - 0.382*(high-low)
+    # Using previous day's values to avoid look-ahead
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    
+    # Calculate pivot levels for previous day
+    camarilla_r1 = prev_close + 0.382 * (prev_high - prev_low)
+    camarilla_s1 = prev_close - 0.382 * (prev_high - prev_low)
+    
+    # Align to 4h timeframe (already aligned to previous day's close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # ADX for trend strength (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
+    
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: volume > 1.5x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ratio = volume / vol_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for EMA50
+    start_idx = 35  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(vwap[i]) or np.isnan(ema50_1d_aligned[i]):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vwap_val = vwap[i]
-        trend = ema50_1d_aligned[i]
-        spike = vol_spike[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        adx_val = adx[i]
+        vol_conf = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: price below VWAP, volume spike, uptrend (price > EMA50)
-            if price < vwap_val and spike and price > trend:
+            # Strong trend (ADX > 20) and volume confirmation
+            # Price breaks above R1 = long
+            if adx_val > 20 and price > r1 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short: price above VWAP, volume spike, downtrend (price < EMA50)
-            elif price > vwap_val and spike and price < trend:
+            # Price breaks below S1 = short
+            elif adx_val > 20 and price < s1 and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses above VWAP or trend weakens
-            if price > vwap_val or price < trend:
+            # Exit if trend weakens or price returns to S1
+            if adx_val < 15 or price < s1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses below VWAP or trend weakens
-            if price < vwap_val or price > trend:
+            # Exit if trend weakens or price returns to R1
+            if adx_val < 15 or price > r1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -78,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_Reversion_VolumeSpike_1DTrend"
+name = "4h_Camarilla_Pivot_Breakout_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
