@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d trend filter
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# Long when Bull Power > 0 and 1d EMA50 up; Short when Bear Power > 0 and 1d EMA50 down
-# Works in bull (follows trend) and bear (countertrend reversals at extremes)
-# Target: 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
-name = "6h_ElderRay_BullPower_1dTrend"
-timeframe = "6h"
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter
+# Works in bull (breakouts continue) and bear (mean reversion at opposite band) via price action at key levels
+# Target: 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+name = "4h_Donchian20_Volume_1dADXTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,22 +18,43 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate Elder Ray components
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = ema13 - low
-    
-    # Load daily data for trend filter
+    # Load daily data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Elder Ray and daily EMA50 to 6h
-    bull_power_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), bear_power)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate ADX (14) on daily timeframe
+    # True Range
+    tr1 = np.abs(df_1d['high'] - df_1d['low'])
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Directional Movement
+    up_move = df_1d['high'] - df_1d['high'].shift(1)
+    down_move = df_1d['low'].shift(1) - df_1d['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smooth TR, +DM, -DM
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Directional Indicators
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    # DX and ADX
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align daily ADX to 4h (wait for daily close)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -44,36 +63,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
-        ema50_val = ema50_1d_aligned[i]
+        close_val = close[i]
+        upper_band = high_20[i]
+        lower_band = low_20[i]
+        adx_val = adx_aligned[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: Bull Power positive and 1d trend up (EMA50 rising)
-            if bull_val > 0 and (i == start_idx or ema50_val > ema50_1d_aligned[i-1]):
+            # Long: break above upper band with volume confirmation and strong trend (ADX > 25)
+            if close_val > upper_band and vol_filter and (adx_val > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power positive and 1d trend down (EMA50 falling)
-            elif bear_val > 0 and (i == start_idx or ema50_val < ema50_1d_aligned[i-1]):
+            # Short: break below lower band with volume confirmation and strong trend (ADX > 25)
+            elif close_val < lower_band and vol_filter and (adx_val > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bull Power turns negative or 1d trend turns down
-            if bull_val <= 0 or (i > start_idx and ema50_val < ema50_1d_aligned[i-1]):
+            # Long exit: price falls below lower band or trend weakens (ADX < 20)
+            if close_val < lower_band or (adx_val < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bear Power turns negative or 1d trend turns up
-            if bear_val <= 0 or (i > start_idx and ema50_val > ema50_1d_aligned[i-1]):
+            # Short exit: price rises above upper band or trend weakens (ADX < 20)
+            if close_val > upper_band or (adx_val < 20):
                 signals[i] = 0.0
                 position = 0
             else:
