@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Trend_Reversal_With_Volume
-Hypothesis: On 12h timeframe, reversal signals occur when price closes outside Bollinger Bands
-with volume confirmation and daily EMA trend filter. Bollinger Bands capture volatility expansion
-during reversals, while volume confirms institutional participation. Works in both bull and bear
-markets by catching trend exhaustion and reversals. Target: 15-35 trades/year (60-140 total over 4 years).
+4h_Donchian_Breakout_Volume_Trend_Plus
+Hypothesis: Donchian(20) breakouts with volume confirmation and 4h EMA(34) trend filter capture strong directional moves.
+Works in both bull and bear markets by following momentum with volatility-adjusted exits.
+Target: 25-40 trades/year (100-160 total over 4 years) to balance opportunity and fee drag.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,87 +20,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Donchian channels (20-period high/low)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Bollinger Bands (20, 2) on 12h close
-    bb_period = 20
-    bb_std = 2
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = bb_middle + (bb_std_dev * bb_std)
-    bb_lower = bb_middle - (bb_std_dev * bb_std)
-    
-    # Volume filter: >1.8x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: >1.8x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_filter = volume > (1.8 * vol_ma)
     
-    # 1-day EMA trend filter (34-period)
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 4h EMA trend filter
+    ema_fast = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_slow = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # ATR for volatility-based exit (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0
-    bars_since_entry = 0
+    entry_price = 0.0
+    atr_at_entry = 0.0
     
-    start_idx = bb_period  # Wait for BB to be calculated
+    start_idx = 34  # Warmup for slow EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_fast[i]) or
+            np.isnan(ema_slow[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
         price = close[i]
-        bb_up = bb_upper[i]
-        bb_low = bb_lower[i]
+        upper = high_roll[i]
+        lower = low_roll[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_1d_12h[i]
+        ema_fast_val = ema_fast[i]
+        ema_slow_val = ema_slow[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long reversal: close below lower BB with volume in uptrend context
-            if price < bb_low and vol_ok and price > ema_trend:
-                signals[i] = 0.25
+            # Long: break above upper Donchian with volume in uptrend
+            if price > upper and vol_ok and ema_fast_val > ema_slow_val:
+                signals[i] = 0.30
                 position = 1
-                bars_since_entry = 0
-            # Short reversal: close above upper BB with volume in downtrend context
-            elif price > bb_up and vol_ok and price < ema_trend:
-                signals[i] = -0.25
+                entry_price = price
+                atr_at_entry = atr_val
+            # Short: break below lower Donchian with volume in downtrend
+            elif price < lower and vol_ok and ema_fast_val < ema_slow_val:
+                signals[i] = -0.30
                 position = -1
-                bars_since_entry = 0
+                entry_price = price
+                atr_at_entry = atr_val
         
         elif position == 1:
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day)
-            if bars_since_entry < 2:
-                signals[i] = 0.25
+            # Exit: price closes below lower Donchian OR trend reversal OR ATR-based stop
+            if price < lower or ema_fast_val < ema_slow_val or price < entry_price - 2.5 * atr_at_entry:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.25
-                # Exit: price returns to middle BB or trend reverses
-                if price > bb_middle[i] or price < ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
+                signals[i] = 0.30
         
         elif position == -1:
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day)
-            if bars_since_entry < 2:
-                signals[i] = -0.25
+            # Exit: price closes above upper Donchian OR trend reversal OR ATR-based stop
+            if price > upper or ema_fast_val > ema_slow_val or price > entry_price + 2.5 * atr_at_entry:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = -0.25
-                # Exit: price returns to middle BB or trend reverses
-                if price < bb_middle[i] or price > ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Trend_Reversal_With_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_Trend_Plus"
+timeframe = "4h"
 leverage = 1.0
