@@ -1,18 +1,16 @@
-# 1d_HeikinAshi_SuperTrend_1wVolatility  
-# Uses Heikin-Ashi candles to reduce noise and SuperTrend for trend identification on daily timeframe.  
-# 1w volatility filter (ATR percentile) ensures we only trade when volatility is elevated,  
-# which helps capture trends in both bull and bear markets while avoiding choppy periods.  
-# Heikin-Ashi smooths price action, making trend changes clearer and reducing false signals.  
-# SuperTrend provides clear entry/exit levels with ATR-based trailing stops.  
-# Target: 15-40 trades per year to stay within optimal frequency for 1d timeframe.  
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_HeikinAshi_SuperTrend_1wVolatility"
-timeframe = "1d"
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d ADX filter and volume confirmation.
+# Camarilla levels provide precise support/resistance derived from prior day's range.
+# Breakout above R1 (bullish) or below S1 (bearish) with volume > 2x 20-period average confirms conviction.
+# 1d ADX > 25 ensures we trade only in strong trending markets to avoid whipsaws in ranging conditions.
+# Discrete position sizing (0.25) minimizes trade frequency and fee drag.
+# Target: 12-37 trades/year (50-150 total over 4 years) to balance opportunity and cost.
+name = "12h_Camarilla_R1S1_Breakout_1dADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,92 +18,78 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Calculate Heikin-Ashi candles
-    ha_close = (prices['open'] + prices['high'] + prices['low'] + prices['close']) / 4
-    ha_open = np.zeros(n)
-    ha_open[0] = prices['open'][0]
-    for i in range(1, n):
-        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
-    ha_high = np.maximum(prices['high'], np.maximum(ha_open, ha_close))
-    ha_low = np.minimum(prices['low'], np.minimum(ha_open, ha_close))
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for SuperTrend calculation
+    # Get 1d data for Camarilla pivot calculation (needs prior day's OHLC)
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla levels for each 1d bar: based on prior day's H, L, C
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR for SuperTrend (10-period)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
+    # Prior day's values (shift by 1 to avoid look-ahead)
+    phigh = np.roll(high_1d, 1)
+    plow = np.roll(low_1d, 1)
+    pclose = np.roll(close_1d, 1)
+    # First bar has no prior day
+    phigh[0] = np.nan
+    plow[0] = np.nan
+    pclose[0] = np.nan
+    
+    # Calculate Camarilla R1 and S1 for prior day
+    camarilla_r1 = pclose + (phigh - plow) * 1.1 / 12
+    camarilla_s1 = pclose - (phigh - plow) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe (using prior day's values, so already lagged)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Get 1d data for ADX filter
+    df_1d_adx = get_htf_data(prices, '1d')  # Reuse for ADX calculation
+    
+    # Calculate ADX on 1d data
+    high_1d_adx = df_1d_adx['high'].values
+    low_1d_adx = df_1d_adx['low'].values
+    close_1d_adx = df_1d_adx['close'].values
+    
+    # True Range
+    tr1 = high_1d_adx - low_1d_adx
+    tr2 = np.abs(high_1d_adx - np.roll(close_1d_adx, 1))
+    tr3 = np.abs(low_1d_adx - np.roll(close_1d_adx, 1))
+    tr1[0] = np.nan  # First bar has no previous close
+    tr2[0] = np.nan
+    tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.zeros_like(tr)
-    atr[9] = np.mean(tr[:10])
-    for i in range(10, len(tr)):
-        atr[i] = (atr[i-1] * 9 + tr[i]) / 10
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # SuperTrend calculation (10, 3.0)
-    factor = 3.0
-    upper_band = (high_1d + low_1d) / 2 + factor * atr
-    lower_band = (high_1d + low_1d) / 2 - factor * atr
+    # Directional Movement
+    up_move = np.diff(high_1d_adx, prepend=np.nan)
+    down_move = -np.diff(low_1d_adx, prepend=np.nan)  # Negative of change
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # First element remains nan due to prepend
     
-    super_trend = np.zeros_like(close_1d)
-    super_trend[:] = np.nan
-    uptrend = np.ones_like(close_1d, dtype=bool)
+    # Smoothed DM using Wilder's smoothing (alpha = 1/14)
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, ignore_nan=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, ignore_nan=False).mean().values
     
-    for i in range(10, len(close_1d)):
-        if close_1d[i] > upper_band[i-1]:
-            uptrend[i] = True
-        elif close_1d[i] < lower_band[i-1]:
-            uptrend[i] = False
-        else:
-            uptrend[i] = uptrend[i-1]
-            if uptrend[i] and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if not uptrend[i] and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        if uptrend[i]:
-            super_trend[i] = lower_band[i]
-        else:
-            super_trend[i] = upper_band[i]
+    # DI and DX
+    plus_di = 100 * plus_dm_smooth / atr_1d
+    minus_di = 100 * minus_dm_smooth / atr_1d
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, ignore_nan=False).mean().values
     
-    # Align SuperTrend and trend direction to 1d timeframe
-    super_trend_aligned = align_htf_to_ltf(prices, df_1d, super_trend)
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
+    # Align ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d_adx, adx_1d)
     
-    # Get 1w data for volatility filter (ATR percentile)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ATR for volatility filter
-    tr1_w = high_1w - low_1w
-    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1_w[0] = high_1w[0] - low_1w[0]
-    tr2_w[0] = tr1_w[0]
-    tr3_w[0] = tr1_w[0]
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    atr_w = np.zeros_like(tr_w)
-    atr_w[19] = np.mean(tr_w[:20])
-    for i in range(20, len(tr_w)):
-        atr_w[i] = (atr_w[i-1] * 19 + tr_w[i]) / 20
-    
-    # Calculate ATR percentile rank (50-period lookback)
-    atr_percentile = np.zeros_like(atr_w)
-    for i in range(50, len(atr_w)):
-        lookback = atr_w[max(0, i-49):i+1]
-        rank = np.sum(lookback <= atr_w[i]) / len(lookback) * 100
-        atr_percentile[i] = rank
-    
-    # Align volatility filter to 1d timeframe
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1w, atr_percentile)
+    # Calculate volume spike: current volume > 2.0 * 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -114,45 +98,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(super_trend_aligned[i]) or 
-            np.isnan(uptrend_aligned[i]) or
-            np.isnan(atr_percentile_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        ha_close_val = ha_close.iloc[i]
-        ha_open_val = ha_open[i]
-        ha_high_val = ha_high[i]
-        ha_low_val = ha_low[i]
+        price = close[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
         
-        super_trend_val = super_trend_aligned[i]
-        uptrend_val = bool(uptrend_aligned[i])
-        vol_filter_val = atr_percentile_aligned[i]
+        # Breakout conditions
+        bullish_breakout = price > r1
+        bearish_breakout = price < s1
         
-        # Volatility filter: only trade when volatility is above 40th percentile
-        volatility_filter = vol_filter_val > 40
+        # Strong trend filter: ADX > 25
+        strong_trend = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: Heikin-Ashi bullish (close > open) AND uptrend AND volatility filter
-            if ha_close_val > ha_open_val and uptrend_val and volatility_filter:
+            # Long: Bullish breakout AND strong trend AND volume spike
+            if bullish_breakout and strong_trend and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Heikin-Ashi bearish (close < open) AND downtrend AND volatility filter
-            elif ha_close_val < ha_open_val and not uptrend_val and volatility_filter:
+            # Short: Bearish breakout AND strong trend AND volume spike
+            elif bearish_breakout and strong_trend and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Heikin-Ashi turns bearish OR trend reverses OR volatility drops
-            if ha_close_val < ha_open_val or not uptrend_val or not volatility_filter:
+            # Long exit: Price breaks below S1 (reversal) OR ADX weakens
+            if price < s1 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Heikin-Ashi turns bullish OR trend reverses OR volatility drops
-            if ha_close_val > ha_open_val or uptrend_val or not volatility_filter:
+            # Short exit: Price breaks above R1 (reversal) OR ADX weakens
+            if price > r1 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
