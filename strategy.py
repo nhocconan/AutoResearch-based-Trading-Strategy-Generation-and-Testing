@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_4H_RSI_Volume_Breakout_v1
-Strategy: 4h RSI overbought/oversold with volume spike confirmation and 1D trend filter.
-Long: RSI < 30 + volume spike + price > 1D EMA200 (uptrend).
-Short: RSI > 70 + volume spike + price < 1D EMA200 (downtrend).
-Designed for 4h timeframe: ~20-30 trades/year per symbol (80-120 total over 4 years).
-Works in bull/bear via trend filter and mean-reversion RSI logic.
+1d_Weekly_Momentum_Reversal_v1
+Hypothesis: Weekly momentum reversal on daily timeframe. In strong uptrends (price > weekly EMA20), look for bearish reversals when RSI > 70 and price closes below weekly VWAP. In strong downtrends (price < weekly EMA20), look for bullish reversals when RSI < 30 and price closes above weekly VWAP. Uses weekly trend filter to avoid counter-trend trades, targeting 5-15 trades/year. Works in bull/bear via trend-aligned mean reversion.
 """
 
 import numpy as np
@@ -14,90 +10,92 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter and VWAP
+    df_1w = get_htf_data(prices, '1w')
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Daily EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align daily EMA200 to 4h timeframe
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Weekly VWAP (volume-weighted average price)
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    vwap_1w = (typical_price_1w * volume_1w).cumsum() / volume_1w.cumsum()
+    vwap_1w = vwap_1w.values  # convert to numpy array
     
-    # RSI calculation (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    # Daily RSI(14) for entry signals
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Volume spike detection (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma_20  # Volume at least 2x average
+    # Align weekly data to daily timeframe
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need enough for EMA200 and RSI
+    start_idx = 35  # need enough for weekly EMA20 and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(ema_200_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(ema_20_aligned[i]) or np.isnan(vwap_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = close[i] > ema_200_aligned[i]
-        downtrend = close[i] < ema_200_aligned[i]
+        # Weekly trend conditions
+        weekly_uptrend = close[i] > ema_20_aligned[i]  # price above weekly EMA20
+        weekly_downtrend = close[i] < ema_20_aligned[i]  # price below weekly EMA20
+        
+        # Reversal conditions
+        bearish_reversal = (rsi[i] > 70) and (close[i] < vwap_aligned[i])
+        bullish_reversal = (rsi[i] < 30) and (close[i] > vwap_aligned[i])
         
         if position == 0:
-            # Long: oversold RSI + volume spike + uptrend
-            if rsi[i] < 30 and vol_spike[i] and uptrend:
+            # Long: weekly uptrend + bullish reversal
+            if weekly_uptrend and bullish_reversal:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought RSI + volume spike + downtrend
-            elif rsi[i] > 70 and vol_spike[i] and downtrend:
+            # Short: weekly downtrend + bearish reversal
+            elif weekly_downtrend and bearish_reversal:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI > 50 or trend change
-            if rsi[i] > 50 or not uptrend:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: weekly trend turns down OR bearish reversal
+            if not weekly_uptrend or bearish_reversal:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI < 50 or trend change
-            if rsi[i] < 50 or not downtrend:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: weekly trend turns up OR bullish reversal
+            if not weekly_downtrend or bullish_reversal:
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_4H_RSI_Volume_Breakout_v1"
-timeframe = "4h"
+name = "1d_Weekly_Momentum_Reversal_v1"
+timeframe = "1d"
 leverage = 1.0
