@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_Volume_Spike_Chop_Regime
-Hypothesis: TRIX (triple exponential average) with period 9 detects momentum shifts.
-A volume spike (1.5x 20-period average) confirms the move. Choppiness index > 61.8 filters
-for ranging markets where TRIX is less reliable. Works in bull/bear by capturing momentum
-in trending regimes and avoiding whipsaws in ranges. Target: 20-40 trades/year (80-160 total).
+1h_4h1d_KC_Donchian_Breakout_Volume_Trend
+Hypothesis: Combine 4h Donchian breakout with 1d Keltner channel trend filter and volume confirmation on 1h timeframe.
+The 4h Donchian provides institutional breakout signals, 1d Keltner channel filters for trend direction,
+and volume confirmation ensures breakout validity. Works in bull/bear by following strong momentum.
+Target: 15-37 trades/year (60-150 total over 4 years) to balance opportunity and fee drag.
 """
 
 import numpy as np
@@ -16,80 +16,107 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX calculation: triple EMA of log returns
-    log_returns = np.diff(np.log(close), prepend=np.log(close[0]))
-    ema1 = pd.Series(log_returns).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # first value undefined
-    
-    # 12h data for Choppiness Index
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # 4h data for Donchian channel
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (max(HH14) - min(LL14))) / log10(14)
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = np.abs(df_12h['high'] - df_12h['close'].shift(1))
-    tr3 = np.abs(df_12h['low'] - df_12h['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    hh14 = df_12h['high'].rolling(window=14, min_periods=14).max().values
-    ll14 = df_12h['low'].rolling(window=14, min_periods=14).min().values
-    chop = 100 * (np.log10(np.nansum(pd.Series(atr14).rolling(14, min_periods=14).sum(), axis=0)) / 
-                  np.log10(14)) / np.log10((hh14 - ll14).replace(0, np.nan))
-    chop = np.where((hh14 - ll14) == 0, 100, chop)
-    chop_4h = align_htf_to_ltf(prices, df_12h, chop, additional_delay_bars=0)
+    # 4h Donchian channel (20-period)
+    donch_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Align Donchian to 1h timeframe
+    donch_high_1h = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_1h = align_htf_to_ltf(prices, df_4h, donch_low)
+    
+    # 1d data for Keltner channel trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 1d Keltner channel (20-period)
+    atr_1d = pd.Series(
+        np.maximum(
+            df_1d['high'] - df_1d['low'],
+            np.maximum(
+                abs(df_1d['high'] - df_1d['close'].shift(1)),
+                abs(df_1d['low'] - df_1d['close'].shift(1))
+            )
+        )
+    ).rolling(window=20, min_periods=20).mean().values
+    
+    keltner_mid = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    keltner_upper = keltner_mid + (2 * atr_1d)
+    keltner_lower = keltner_mid - (2 * atr_1d)
+    
+    # Align Keltner to 1h timeframe
+    keltner_upper_1h = align_htf_to_ltf(prices, df_1d, keltner_upper)
+    keltner_lower_1h = align_htf_to_ltf(prices, df_1d, keltner_lower)
+    keltner_mid_1h = align_htf_to_ltf(prices, df_1d, keltner_mid)
+    
+    # Volume filter: >1.8x 24-period average (more selective)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.8 * vol_ma)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 14)  # warmup for volume and chop
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trix[i]) or np.isnan(chop_4h[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(donch_high_1h[i]) or np.isnan(donch_low_1h[i]) or
+            np.isnan(keltner_upper_1h[i]) or np.isnan(keltner_lower_1h[i]) or
+            np.isnan(keltner_mid_1h[i]) or np.isnan(volume_filter[i]) or
+            np.isnan(session_filter[i])):
             signals[i] = 0.0
             continue
         
+        price = close[i]
+        dh = donch_high_1h[i]
+        dl = donch_low_1h[i]
+        ku = keltner_upper_1h[i]
+        kl = keltner_lower_1h[i]
+        km = keltner_mid_1h[i]
+        vol_ok = volume_filter[i]
+        in_session = session_filter[i]
+        
         if position == 0:
-            # Long: TRIX turns up with volume spike in trending market (CHOP <= 61.8)
-            if trix[i] > trix[i-1] and volume_spike[i] and chop_4h[i] <= 61.8:
-                signals[i] = 0.25
+            # Long: break above 4h Donchian high with volume, above 1d Keltner mid (uptrend)
+            if price > dh and vol_ok and price > km and in_session:
+                signals[i] = 0.20
                 position = 1
-            # Short: TRIX turns down with volume spike in trending market
-            elif trix[i] < trix[i-1] and volume_spike[i] and chop_4h[i] <= 61.8:
-                signals[i] = -0.25
+            # Short: break below 4h Donchian low with volume, below 1d Keltner mid (downtrend)
+            elif price < dl and vol_ok and price < km and in_session:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: TRIX turns down or chop increases (range)
-            if trix[i] < trix[i-1] or chop_4h[i] > 61.8:
+            # Long exit: price crosses below 1d Keltner lower or Donchian low
+            if price < kl or price < dl:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: TRIX turns up or chop increases
-            if trix[i] > trix[i-1] or chop_4h[i] > 61.8:
+            # Short exit: price crosses above 1d Keltner upper or Donchian high
+            if price > ku or price > dh:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_TRIX_Volume_Spike_Chop_Regime"
-timeframe = "4h"
+name = "1h_4h1d_KC_Donchian_Breakout_Volume_Trend"
+timeframe = "1h"
 leverage = 1.0
