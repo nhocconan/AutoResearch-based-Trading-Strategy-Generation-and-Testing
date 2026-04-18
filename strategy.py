@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot reversal with daily volatility filter and volume confirmation.
-# Camarilla levels (H3/L3) act as strong support/resistance in ranging markets.
-# Daily ATR filter ensures we only trade when volatility is sufficient to avoid chop.
-# Volume confirmation adds conviction to reversal signals.
-# Designed for low trade frequency (12-37/year) to minimize fee drag in 12h timeframe.
-# Works in sideways markets by fading extreme moves back to the mean.
-# Works in trending markets by only taking reversals in the direction of the higher timeframe trend.
-name = "12h_Camarilla_H3L3_Reversal_Volatility_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Camarilla pivot breakout with daily volume confirmation and EMA trend filter.
+# Uses Camarilla levels (H4/L4) from prior day for mean-reversion breakouts.
+# Daily volume filter ensures institutional participation.
+# 21-period EMA on daily close filters trades in direction of higher timeframe trend.
+# Designed for low trade frequency (20-50/year) with clear entry/exit rules.
+# Works in bull markets (breakouts above H4 in uptrend) and bear markets (breakouts below L4 in downtrend).
+name = "4h_Camarilla_H4L4_Volume_EMA34"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,51 +23,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and ATR filter (ONCE before loop)
+    # Get daily data for Camarilla levels and EMA (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels (H3, L3) from previous day to avoid look-ahead
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate prior day's Camarilla levels (H4, L4)
+    # H4 = close + 1.1 * (high - low) / 2
+    # L4 = close - 1.1 * (high - low) / 2
+    high_d = df_1d['high'].values
+    low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
     
-    # Previous day's values (shift by 1)
-    ph = np.concatenate([[np.nan], high_1d[:-1]])
-    pl = np.concatenate([[np.nan], low_1d[:-1]])
-    pc = np.concatenate([[np.nan], close_1d[:-1]])
+    camarilla_h4 = close_d + 1.1 * (high_d - low_d) / 2
+    camarilla_l4 = close_d - 1.1 * (high_d - low_d) / 2
     
-    # Camarilla calculations
-    range_ = ph - pl
-    H3 = pc + range_ * 1.1 / 6
-    L3 = pc - range_ * 1.1 / 6
+    # Align Camarilla levels to 4h timeframe (use prior day's levels)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Calculate daily ATR (14-period) for volatility filter
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate daily EMA(34) for trend filter
+    ema_34 = pd.Series(close_d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    atr_period = 14
-    atr = np.full_like(tr, np.nan)
-    if len(tr) >= atr_period:
-        atr[atr_period-1] = np.nanmean(tr[:atr_period])
-        for i in range(atr_period, len(tr)):
-            if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
-                atr[i] = atr[i-1] * (1 - 1/atr_period) + tr[i] * (1/atr_period)
-            else:
-                atr[i] = np.nan
-    
-    # ATR multiplier for volatility filter
-    atr_mult = 1.5
-    atr_threshold = atr * atr_mult
-    
-    # Align daily Camarilla levels and ATR threshold to 12h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    atr_threshold_aligned = align_htf_to_ltf(prices, df_1d, atr_threshold)
-    
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 24-period average volume for confirmation (6 hours worth of 4h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -80,8 +57,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(atr_threshold_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
@@ -93,25 +70,22 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_20[i]
-        
-        # Volatility filter: current ATR threshold must be positive (sufficient volatility)
-        vol_filter = not np.isnan(atr_threshold_aligned[i]) and atr_threshold_aligned[i] > 0
+        vol_confirm = volume[i] > vol_ma_24[i]
         
         if position == 0:
-            # Long: price crosses below L3 (oversold) AND volume confirmation AND volatility filter
-            long_signal = close[i] < L3_aligned[i]
-            if vol_confirm and vol_filter and long_signal:
+            # Long: price breaks above H4 AND volume confirmation AND price above daily EMA34 (uptrend)
+            long_breakout = close[i] > camarilla_h4_aligned[i]
+            if vol_confirm and long_breakout and close[i] > ema_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses above H3 (overbought) AND volume confirmation AND volatility filter
-            elif vol_confirm and vol_filter and close[i] > H3_aligned[i]:
+            # Short: price breaks below L4 AND volume confirmation AND price below daily EMA34 (downtrend)
+            elif vol_confirm and close[i] < camarilla_l4_aligned[i] and close[i] < ema_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back above L3 (mean reversion) OR volatility drops
-            exit_condition = close[i] > L3_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Long exit: price falls back below L4 (mean reversion) OR volume drops below average
+            exit_condition = close[i] < camarilla_l4_aligned[i] or volume[i] <= vol_ma_24[i]
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -119,8 +93,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back below H3 (mean reversion) OR volatility drops
-            exit_condition = close[i] < H3_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Short exit: price rises back above H4 (mean reversion) OR volume drops below average
+            exit_condition = close[i] > camarilla_h4_aligned[i] or volume[i] <= vol_ma_24[i]
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
