@@ -3,17 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA with RSI filter and 1w trend confirmation
-# KAMA adapts to market noise - efficient in trending, avoids whipsaws in chop
-# RSI(14) < 30 for long, > 70 for short with 1w trend filter prevents counter-trend trades
-# Target: 20-25 trades/year (80-100 total over 4 years) to minimize fee drag
-name = "1d_KAMA_RSI_1wTrendFilter"
-timeframe = "1d"
+# Hypothesis: 12h Chaikin Oscillator (CO) with 1d EMA50 trend filter and volume confirmation.
+# Chaikin Oscillator = EMA3(ADL) - EMA10(ADL), where ADL = Accumulation/Distribution Line.
+# CO > 0 indicates buying pressure, CO < 0 indicates selling pressure.
+# 1d EMA50 ensures we trade in the direction of the daily trend (long when price > EMA50, short when price < EMA50).
+# Volume confirmation: current volume > 1.5x 20-period average volume.
+# This combination captures momentum with trend alignment, reducing false signals.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+name = "12h_ChaikinOscillator_1dEMA50_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,76 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for EMA50 filter (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate KAMA (adaptive moving average)
-    close_s = pd.Series(close)
-    # Efficiency ratio
-    change = abs(close_s - close_s.shift(10))
-    volatility = abs(close_s.diff()).rolling(window=10, min_periods=1).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if not np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate Accumulation/Distribution Line (ADL)
+    # Avoid division by zero: if high == low, use 0 (no money flow)
+    hl_range = high - low
+    clv = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0)
+    adl = np.cumsum(clv * volume)
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate Chaikin Oscillator: EMA3(ADL) - EMA10(ADL)
+    adl_series = pd.Series(adl)
+    ema3_adl = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10_adl = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin_osc = ema3_adl - ema10_adl
     
-    # Calculate RSI(14)
-    delta = close_s.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate volume confirmation: current volume > 1.5 * 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or np.isnan(ema34_1w_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(chaikin_osc[i]) or np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1w EMA34
-        uptrend = close[i] > ema34_1w_aligned[i]
-        downtrend = close[i] < ema34_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # Long: price > KAMA AND RSI < 30 AND uptrend
-            if close[i] > kama[i] and rsi[i] < 30 and uptrend:
+            # Long: Chaikin Oscillator > 0 (buying pressure) AND uptrend AND volume confirmation
+            if chaikin_osc[i] > 0 and uptrend and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA AND RSI > 70 AND downtrend
-            elif close[i] < kama[i] and rsi[i] > 70 and downtrend:
+            # Short: Chaikin Oscillator < 0 (selling pressure) AND downtrend AND volume confirmation
+            elif chaikin_osc[i] < 0 and downtrend and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < KAMA OR RSI > 50 OR trend reverses
-            if close[i] < kama[i] or rsi[i] > 50 or not uptrend:
+            # Long exit: Chaikin Oscillator turns negative OR trend reverses
+            if chaikin_osc[i] <= 0 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > KAMA OR RSI < 50 OR trend reverses
-            if close[i] > kama[i] or rsi[i] < 50 or not downtrend:
+            # Short exit: Chaikin Oscillator turns positive OR trend reverses
+            if chaikin_osc[i] >= 0 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
