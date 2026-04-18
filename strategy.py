@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-6h_OrderBlock_OrderFlow_Imbalance
-6h strategy using order block identification from 12h timeframe combined with order flow imbalance.
-- Identifies bullish/bearish order blocks from 12h price action
-- Uses volume delta (buying vs selling pressure) for entry confirmation
-- Filters trades based on 1d trend structure
-- Designed for 50-150 total trades over 4 years (12-37/year)
-Works in both bull and bear markets by identifying institutional order flow
+4h_Camarilla_R1S1_Pullback_Volume
+4h strategy using Camarilla pivot levels (R1/S1) with pullback entries and volume confirmation.
+- Long: Pullback to S1 in uptrend (HMA21 > HMA50) with volume > 1.5x average
+- Short: Pullback to R1 in downtrend (HMA21 < HMA50) with volume > 1.5x average
+- Exit: Opposite pullback or trend reversal
+Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
+Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend)
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,106 +23,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for order block identification
-    df_12h = get_htf_data(prices, '12h')
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
-    
-    # Identify order blocks: strong bullish/bearish candles with high volume
-    body_12h = np.abs(close_12h - np.roll(close_12h, 1))
-    body_12h[0] = 0  # first element
-    
-    avg_body_12h = pd.Series(body_12h).rolling(window=20, min_periods=10).mean().values
-    
-    # Bullish order block: strong up candle with volume > 1.5x average
-    bullish_ob = (close_12h > np.roll(close_12h, 1)) & \
-                 (body_12h > 2.0 * avg_body_12h) & \
-                 (volume_12h > 1.5 * pd.Series(volume_12h).rolling(window=20, min_periods=10).mean().values)
-    
-    # Bearish order block: strong down candle with volume > 1.5x average
-    bearish_ob = (close_12h < np.roll(close_12h, 1)) & \
-                 (body_12h > 2.0 * avg_body_12h) & \
-                 (volume_12h > 1.5 * pd.Series(volume_12h).rolling(window=20, min_periods=10).mean().values)
-    
-    # Align order blocks to 6h timeframe
-    bullish_ob_aligned = align_ltf_to_htf(prices, df_12h, bullish_ob.astype(float))
-    bearish_ob_aligned = align_ltf_to_htf(prices, df_12h, bearish_ob.astype(float))
-    
-    # Get 1d data for trend filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    close_1d = df_1d['close'].values
+    # Previous day's OHLC for Camarilla levels
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_open = df_1d['open'].shift(1).values
     
-    # EMA21 and EMA50 for trend filter
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels (R1, S1)
+    # R1 = Close + 1.1*(High-Low)/12
+    # S1 = Close - 1.1*(High-Low)/12
+    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    ema_21_aligned = align_ltf_to_htf(prices, df_1d, ema_21_1d)
-    ema_50_aligned = align_ltf_to_htf(prices, df_1d, ema_50_1d)
+    # Align Camarilla levels to 4h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Order flow imbalance: buying vs selling pressure
-    # Using volume-weighted price change as proxy for order flow
-    price_change = close - np.roll(close, 1)
-    price_change[0] = 0
-    volume_weighted_change = price_change * volume
+    # HMA for trend filter (21 and 50 periods)
+    def hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = np.convolve(arr, np.ones(half)/half, mode='same')
+        wma1 = np.convolve(arr, np.ones(period)/period, mode='same')
+        raw_hma = 2 * wma2 - wma1
+        hma_vals = np.convolve(raw_hma, np.ones(sqrt)/sqrt, mode='same')
+        # Set first 'period' values to NaN
+        hma_vals[:period] = np.nan
+        return hma_vals
     
-    # Positive/negative order flow
-    pos_flow = np.where(volume_weighted_change > 0, volume_weighted_change, 0)
-    neg_flow = np.where(volume_weighted_change < 0, -volume_weighted_change, 0)
+    hma_21 = hma(close, 21)
+    hma_50 = hma(close, 50)
     
-    # Smooth the flow metrics
-    pos_flow_smooth = pd.Series(pos_flow).ewm(span=10, adjust=False, min_periods=5).mean().values
-    neg_flow_smooth = pd.Series(neg_flow).ewm(span=10, adjust=False, min_periods=5).mean().values
-    
-    # Order flow imbalance ratio
-    total_flow = pos_flow_smooth + neg_flow_smooth
-    ofi_ratio = np.where(total_flow > 0, (pos_flow_smooth - neg_flow_smooth) / total_flow, 0)
+    # Volume average (20-period)
+    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_ma[:20] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need enough for indicators
+    start_idx = 50  # need enough for HMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bullish_ob_aligned[i]) or np.isnan(bearish_ob_aligned[i]) or
-            np.isnan(ema_21_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(ofi_ratio[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(hma_21[i]) or np.isnan(hma_50[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions from 1d
-        uptrend = ema_21_aligned[i] > ema_50_aligned[i]
-        downtrend = ema_21_aligned[i] < ema_50_aligned[i]
+        # Trend conditions
+        uptrend = hma_21[i] > hma_50[i]
+        downtrend = hma_21[i] < hma_50[i]
         
-        # Order flow conditions
-        strong_buying = ofi_ratio[i] > 0.3
-        strong_selling = ofi_ratio[i] < -0.3
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # Pullback conditions (price near Camarilla levels)
+        pullback_to_s1 = low[i] <= camarilla_s1_aligned[i] * 1.002 and low[i] >= camarilla_s1_aligned[i] * 0.998
+        pullback_to_r1 = high[i] >= camarilla_r1_aligned[i] * 0.998 and high[i] <= camarilla_r1_aligned[i] * 1.002
         
         if position == 0:
-            # Long: bullish order block + uptrend + strong buying pressure
-            if bullish_ob_aligned[i] > 0.5 and uptrend and strong_buying:
+            # Long: uptrend + volume + pullback to S1
+            if uptrend and vol_confirm and pullback_to_s1:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish order block + downtrend + strong selling pressure
-            elif bearish_ob_aligned[i] > 0.5 and downtrend and strong_selling:
+            # Short: downtrend + volume + pullback to R1
+            elif downtrend and vol_confirm and pullback_to_r1:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish order block formed, trend change, or selling pressure
-            if bearish_ob_aligned[i] > 0.5 or not uptrend or strong_selling:
+            # Long exit: trend reversal or pullback to R1 (opposite level)
+            if not uptrend or pullback_to_r1:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish order block formed, trend change, or buying pressure
-            if bullish_ob_aligned[i] > 0.5 or not downtrend or strong_buying:
+            # Short exit: trend reversal or pullback to S1 (opposite level)
+            if not downtrend or pullback_to_s1:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -130,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_OrderBlock_OrderFlow_Imbalance"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Pullback_Volume"
+timeframe = "4h"
 leverage = 1.0
