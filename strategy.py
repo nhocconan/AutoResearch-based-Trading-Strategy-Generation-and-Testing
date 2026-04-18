@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1dPivot_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "6h"
+name = "1d_WeeklyPivot_R4_S4_Breakout_VolumeFilter_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,80 +17,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot levels and ATR
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily pivot, R1, S1 from previous day
-    prev_close_d = df_1d['close'].shift(1).values
-    prev_high_d = df_1d['high'].shift(1).values
-    prev_low_d = df_1d['low'].shift(1).values
+    # Calculate weekly pivot and R4/S4 from previous weekly bar
+    prev_close_w = df_1w['close'].shift(1).values
+    prev_high_w = df_1w['high'].shift(1).values
+    prev_low_w = df_1w['low'].shift(1).values
     
-    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
-    range_d = prev_high_d - prev_low_d
-    R1_d = pivot_d + range_d
-    S1_d = pivot_d - range_d
+    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3
+    range_w = prev_high_w - prev_low_w
+    R4_w = pivot_w + range_w * 1.1  # R4 = pivot + 1.1*range
+    S4_w = pivot_w - range_w * 1.1  # S4 = pivot - 1.1*range
     
-    # Align daily pivot levels to 6h (wait for daily close)
-    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
-    R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
-    S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
+    # Align weekly R4/S4 to daily (wait for weekly close)
+    R4_w_aligned = align_htf_to_ltf(prices, df_1w, R4_w)
+    S4_w_aligned = align_htf_to_ltf(prices, df_1w, S4_w)
     
-    # Daily ATR for volatility filter (14-period)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Volume filter: current volume > 1.5 * 24-period average (4 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (1.5 * vol_ma_24)
+    # Volume filter: current volume > 2.0 * 50-period average (50 days)
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > (2.0 * vol_ma_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
-            np.isnan(pivot_d_aligned[i]) or np.isnan(atr_14_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(R4_w_aligned[i]) or np.isnan(S4_w_aligned[i]) or
+            np.isnan(vol_ma_50[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R1_val = R1_d_aligned[i]
-        S1_val = S1_d_aligned[i]
-        pivot_val = pivot_d_aligned[i]
-        atr_val = atr_14_aligned[i]
+        R4_val = R4_w_aligned[i]
+        S4_val = S4_w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume and sufficient volatility
-            if close_val > R1_val and vol_filter and atr_val > 0:
-                signals[i] = 0.25
+            # Long: break above R4 with volume
+            if close_val > R4_val and vol_filter:
+                signals[i] = 0.30
                 position = 1
-            # Short: break below S1 with volume and sufficient volatility
-            elif close_val < S1_val and vol_filter and atr_val > 0:
-                signals[i] = -0.25
+            # Short: break below S4 with volume
+            elif close_val < S4_val and vol_filter:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below pivot or ATR drops too low
-            if close_val < pivot_val or atr_val < 0.5:  # Reduced volatility filter
+            # Long exit: price falls back below pivot
+            if close_val < pivot_w[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price rises back above pivot or ATR drops too low
-            if close_val > pivot_val or atr_val < 0.5:
+            # Short exit: price rises back above pivot
+            if close_val > pivot_w[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
