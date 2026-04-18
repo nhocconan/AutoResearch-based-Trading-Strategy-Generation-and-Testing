@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R2_S2_Breakout_Volume_Trend
-Hypothesis: On 12-hour candles, price breakouts above daily R2 or below daily S2 with volume confirmation and daily EMA trend filter capture institutional momentum. Works in bull/bear by following institutional flow. Target: 15-30 trades/year (60-120 total) to minimize fee drag.
+4h_KAMA_Direction_Volume_Trend_Filter
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets.
+Price crossing above/below KAMA with volume confirmation and 12h trend filter captures sustained moves.
+Designed for 4h timeframe with tight entry conditions to avoid overtrading (target: 20-50 trades/year).
 """
 
 import numpy as np
@@ -10,99 +12,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # KAMA (Kaufman Adaptive Moving Average) parameters
+    fast_sc = 0.666  # 2/(2+1)
+    slow_sc = 0.0645 # 2/(30+1)
+    
+    # Calculate Efficiency Ratio and Smoothing Constant
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    # Handle first 9 values where we don't have 10-period data
+    change = np.concatenate([np.full(9, np.nan), change])
+    volatility = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start with first available close
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # 12h EMA trend filter
+    ema_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_4h = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Camarilla levels: R2 = C + (H-L)*1.1/6, S2 = C - (H-L)*1.1/6
-    r2 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    s2 = prev_close - (prev_high - prev_low) * 1.1 / 6
-    
-    # Align to 12h timeframe (waits for 1-day bar to close)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Volume filter: >1.5x 20-period average
+    # Volume filter: >1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
-    
-    # 1-day EMA trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
-    bars_since_entry = 0
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 20  # Warmup for volume MA and KAMA
     
     for i in range(start_idx, n):
-        if (np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_12h_4h[i]) or 
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
         price = close[i]
-        r2_val = r2_12h[i]
-        s2_val = s2_12h[i]
+        kama_val = kama[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_1d_12h[i]
+        ema_trend = ema_12h_4h[i]
         
         if position == 0:
-            # Long: break above R2 with volume in uptrend
-            if price > r2_val and vol_ok and price > ema_trend:
+            # Long: price above KAMA with volume in uptrend
+            if price > kama_val and vol_ok and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: break below S2 with volume in downtrend
-            elif price < s2_val and vol_ok and price < ema_trend:
+            # Short: price below KAMA with volume in downtrend
+            elif price < kama_val and vol_ok and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day)
-            if bars_since_entry < 2:
-                signals[i] = 0.25
+            # Exit: price crosses below KAMA or trend reverses
+            if price < kama_val or price < ema_trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
-                # Exit: price returns to S2 or trend reverses
-                if price < s2_val or price < ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
         
         elif position == -1:
-            bars_since_entry += 1
-            # Minimum holding period: 2 bars (1 day)
-            if bars_since_entry < 2:
-                signals[i] = -0.25
+            # Exit: price crosses above KAMA or trend reverses
+            if price > kama_val or price > ema_trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
-                # Exit: price returns to R2 or trend reverses
-                if price > r2_val or price > ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
     
     return signals
 
-name = "12h_Pivot_R2_S2_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_KAMA_Direction_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
