@@ -1,10 +1,14 @@
-# 4h_Donchian_Breakout_Volume_Trend_Regime_v1
-# 4h strategy combining Donchian breakout with volume confirmation, trend filter, and Chop regime filter.
-# Long: Price breaks above Donchian(20) high + volume > 1.5x 20-period avg + EMA20 > EMA50 + Chop > 61.8 (range)
-# Short: Price breaks below Donchian(20) low + volume > 1.5x 20-period avg + EMA20 < EMA50 + Chop > 61.8 (range)
-# Exit: Opposite breakout or trend reversal or Chop < 38.2 (trend)
-# Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
-# Works in bull markets (breakout continuation) and bear markets (avoids false breakouts via Chop filter)
+#!/usr/bin/env python3
+"""
+1d_TurtleTrendV1
+Daily Turtle Trading System with Volatility Filter
+- Long: Close breaks above 20-day high + ATR filter + ADX trend filter
+- Short: Close breaks below 20-day low + ATR filter + ADX trend filter
+- Exit: Opposite breakout or volatility collapse
+- Uses 1w trend filter to avoid counter-trend trades in strong trends
+- Designed for 15-25 trades/year per symbol (60-100 total over 4 years)
+- Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+"""
 
 import numpy as np
 import pandas as pd
@@ -12,86 +16,103 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get daily data for breakout channels and filters
+    df_1d = get_htf_data(prices, '1d')
     
-    # EMA for trend filter
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-day Donchian channels
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Choppy market indicator (Chop) - 14-period
-    # Chop = 100 * log10(sum(ATR(1) over n) / (max(high-n) - min(low-n))) / log10(n)
-    tr1 = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr1[0] = high[0] - low[0]  # first TR
-    atr = pd.Series(tr1).rolling(window=1, min_periods=1).sum().values  # ATR(1) is just TR
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_val = max_high - min_low
-    # Avoid division by zero
-    range_val = np.where(range_val == 0, 1e-10, range_val)
-    chop = 100 * (np.log10(sum_atr / range_val) / np.log10(14))
+    # Calculate ATR(14) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate ADX(14) for trend strength
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Get weekly data for trend filter (avoid counter-trend trades)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Align all daily data to 1d timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA50 and Chop
+    start_idx = 50  # need enough for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend conditions
-        uptrend = ema_20[i] > ema_50[i]
-        downtrend = ema_20[i] < ema_50[i]
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
+        strong_trend = adx_aligned[i] > 25
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Chop regime filter (only trade in ranging markets)
-        chop_filter = chop[i] > 61.8  # range when Chop > 61.8
+        # Volatility filter - avoid low volatility environments
+        vol_filter = atr_aligned[i] > 0.5 * np.nanmedian(atr_aligned[max(0, i-50):i+1])
         
         # Breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakdown_down = close[i] < donchian_low[i]
+        breakout_up = close[i] > high_20_aligned[i]
+        breakdown_down = close[i] < low_20_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above Donchian high + Chop filter
-            if uptrend and vol_confirm and breakout_up and chop_filter:
+            # Long: uptrend + strong trend + volatility + breakout above 20-day high
+            if uptrend and strong_trend and vol_filter and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below Donchian low + Chop filter
-            elif downtrend and vol_confirm and breakdown_down and chop_filter:
+            # Short: downtrend + strong trend + volatility + breakdown below 20-day low
+            elif downtrend and strong_trend and vol_filter and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal, volume breakdown, Chop trend signal, or opposite breakout
-            if (not uptrend) or (not vol_confirm) or (chop[i] < 38.2) or breakdown_down:
+            # Long exit: trend reversal, volatility collapse, or breakdown below 20-day low
+            if not uptrend or not vol_filter or breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal, volume breakdown, Chop trend signal, or opposite breakout
-            if (not downtrend) or (not vol_confirm) or (chop[i] < 38.2) or breakout_up:
+            # Short exit: trend reversal, volatility collapse, or breakout above 20-day high
+            if not downtrend or not vol_filter or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -99,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Trend_Regime_v1"
-timeframe = "4h"
+name = "1d_TurtleTrendV1"
+timeframe = "1d"
 leverage = 1.0
