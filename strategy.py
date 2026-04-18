@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_DailyPivot_R1S1_Breakout_VolumeSpike_1dEMA34
-Hypothesis: Daily pivot points (R1, S1) from 1D chart act as strong support/resistance.
-Breakouts beyond these levels with volume confirmation and 1D EMA34 trend filter capture momentum.
-Designed for 12-37 trades/year on 12h timeframe with low trade frequency to minimize fee drift.
-Works in bull/bear markets by requiring volume spike and 1D EMA34 trend filter.
+4h_Keltner_Upper_Band_Touch_Volume_Mean_Reversion
+Hypothesis: When price touches the upper Keltner Channel (EMA20 + 2*ATR10) with high volume,
+it often signals overextension and mean reversion downward. Conversely, touching the lower
+band with high volume signals oversold conditions and mean reversion upward. Works in both
+bull and bear markets by fading extremes with volume confirmation.
+Designed for 20-30 trades/year on 4h timeframe with low trade frequency to minimize fee drag.
 """
 
 import numpy as np
@@ -21,84 +22,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1D data for pivot calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Keltner Channel: EMA20 +/- 2*ATR10
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 1D pivot points using standard formula
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # Using previous 1D bar's data to avoid look-ahead
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
-    close_1d = df_1d['close']
+    # ATR10: True Range average
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    upper_band = ema_20 + 2.0 * atr_10
+    lower_band = ema_20 - 2.0 * atr_10
     
-    # Shift by 1 to use previous 1D bar's levels only
-    r1_prev = r1.shift(1).values
-    s1_prev = s1.shift(1).values
-    
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
-    
-    # Get 1D data for EMA trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: 2x 20-period average on 12h
+    # Volume mean: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_high = volume > (1.5 * vol_ma)  # 1.5x volume for signal
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 100
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(ema_20[i]) or 
+            np.isnan(upper_band[i]) or
+            np.isnan(lower_band[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_trend = ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: break above R1 with volume spike and price above 1D EMA (uptrend)
-            if price > r1_val and volume_spike[i] and price > ema_trend:
+            # Long: price touches or crosses below lower band with high volume (oversold bounce)
+            if price <= lower_band[i] and volume_high[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume spike and price below 1D EMA (downtrend)
-            elif price < s1_val and volume_spike[i] and price < ema_trend:
+            # Short: price touches or crosses above upper band with high volume (overbought fade)
+            elif price >= upper_band[i] and volume_high[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long position
+            # Long position: exit when price returns to EMA20 (mean reversion target)
             signals[i] = 0.25
-            # Exit: price returns to S1 or breaks below 1D EMA
-            if price <= s1_val or price < ema_trend:
+            if price >= ema_20[i]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position
+            # Short position: exit when price returns to EMA20 (mean reversion target)
             signals[i] = -0.25
-            # Exit: price returns to R1 or breaks above 1D EMA
-            if price >= r1_val or price > ema_trend:
+            if price <= ema_20[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_DailyPivot_R1S1_Breakout_VolumeSpike_1dEMA34"
-timeframe = "12h"
+name = "4h_Keltner_Upper_Band_Touch_Volume_Mean_Reversion"
+timeframe = "4h"
 leverage = 1.0
