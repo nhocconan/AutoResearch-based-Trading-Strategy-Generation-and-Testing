@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_WilliamsFractal_Breakout_VolumeConfirm_V1
-Hypothesis: Williams Fractal breakouts on 4h with volume confirmation and 1d trend filter.
-Go long when price breaks above recent bearish fractal high AND 1d EMA50 is rising, 
-short when price breaks below recent bullish fractal low AND 1d EMA50 is falling.
-Requires volume > 1.3x 20-period average. Target: 20-40 trades/year by using fractal 
-structure for support/resistance breaks. Works in trending markets via breakouts and 
-in ranging markets via mean reversion at fractal levels.
+6h_WeeklyPivot_Direction_1dVolumeFilter
+Hypothesis: Use weekly pivot points (from previous week) to determine trend direction, and daily volume filter to confirm strength. 
+Go long when price is above weekly pivot AND daily volume > 1.5x 20-day average, short when price is below weekly pivot AND daily volume > 1.5x 20-day average.
+Weekly pivots provide structural support/resistance that works in both bull and bear markets, while volume filter ensures we only trade during active participation.
+Target: 15-30 trades/year by using weekly pivots (low frequency) and volume confirmation to reduce noise.
 """
 
 import numpy as np
@@ -23,109 +21,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for fractals
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Get weekly data for pivot points (previous week's data)
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Williams Fractals: bearish (high) and bullish (low)
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
-    n_4h = len(high_4h)
-    bearish_fractal = np.zeros(n_4h)
-    bullish_fractal = np.zeros(n_4h)
+    # Calculate weekly pivot points: P = (H + L + C)/3
+    # Using previous week's data to avoid look-ahead
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    for i in range(2, n_4h - 2):
-        if (high_4h[i-2] < high_4h[i-1] and high_4h[i] < high_4h[i-1] and
-            high_4h[i-3] < high_4h[i-1] and high_4h[i+1] < high_4h[i-1]):
-            bearish_fractal[i-1] = high_4h[i-1]
-        if (low_4h[i-2] > low_4h[i-1] and low_4h[i] > low_4h[i-1] and
-            low_4h[i-3] > low_4h[i-1] and low_4h[i+1] > low_4h[i-1]):
-            bullish_fractal[i-1] = low_4h[i-1]
+    # Align weekly pivot to 6h timeframe (will use previous week's pivot)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
     
-    # Recent fractal levels: carry forward the last fractal
-    bearish_level = np.full(n_4h, np.nan)
-    bullish_level = np.full(n_4h, np.nan)
-    last_bear = np.nan
-    last_bull = np.nan
-    for i in range(n_4h):
-        if not np.isnan(bearish_fractal[i]):
-            last_bear = bearish_fractal[i]
-        if not np.isnan(bullish_fractal[i]):
-            last_bull = bullish_fractal[i]
-        bearish_level[i] = last_bear
-        bullish_level[i] = last_bull
-    
-    # Align fractal levels to 4h timeframe (no extra delay needed as fractals are confirmed on same bar)
-    bearish_level_aligned = align_htf_to_ltf(prices, df_4h, bearish_level)
-    bullish_level_aligned = align_htf_to_ltf(prices, df_4h, bullish_level)
-    
-    # Get 1d data for EMA50 trend filter
+    # Get daily data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    daily_volume = df_1d['volume'].values
     
-    # 1d EMA50
-    ema_period = 50
-    ema_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= ema_period:
-        multiplier = 2 / (ema_period + 1)
-        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
-    
-    # Align 1d EMA50 to 4h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
+    # 20-day average volume
+    vol_ma = np.full_like(daily_volume, np.nan)
     vol_period = 20
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    
+    if len(daily_volume) >= vol_period:
+        for i in range(vol_period, len(daily_volume)):
+            vol_ma[i] = np.mean(daily_volume[i - vol_period:i])
+    
+    # Align daily volume MA to 6h timeframe
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(vol_period, 2) + 1  # fractals need 2 bars lookback/forward
+    start_idx = max(1, vol_period) + 1  # Need at least one week of data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bearish_level_aligned[i]) or np.isnan(bullish_level_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
-            signals[i] = 0.0
+        if np.isnan(pivot_aligned[i]) or np.isnan(vol_ma_aligned[i]):
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current daily volume > 1.5x 20-day average
+        # Need to get the current day's volume index
+        # Since we're on 6h timeframe, we need to map to daily index
+        vol_confirm = False
+        if i < len(vol_ma_aligned) and not np.isnan(vol_ma_aligned[i]):
+            # Get corresponding daily volume (approximate: 4x 6h bars per day)
+            daily_idx = i // 4
+            if daily_idx < len(daily_volume) and daily_idx < len(vol_ma) and not np.isnan(daily_volume[daily_idx]) and not np.isnan(vol_ma[daily_idx]):
+                vol_confirm = daily_volume[daily_idx] > 1.5 * vol_ma[daily_idx]
         
-        if position == 0:
-            # Long: price breaks above recent bearish fractal resistance AND 1d EMA50 rising
-            if close[i] > bearish_level_aligned[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1] and vol_confirm:
+        if vol_confirm:
+            # Long: price above weekly pivot
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.25
-                position = 1
-            # Short: price breaks below recent bullish fractal support AND 1d EMA50 falling
-            elif close[i] < bullish_level_aligned[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1] and vol_confirm:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Long exit: price breaks below recent bullish fractal support OR 1d EMA50 turns down
-            if close[i] < bullish_level_aligned[i] or ema_1d_aligned[i] < ema_1d_aligned[i-1]:
-                signals[i] = -0.25  # reverse to short
-                position = -1
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: price breaks above recent bearish fractal resistance OR 1d EMA50 turns up
-            if close[i] > bearish_level_aligned[i] or ema_1d_aligned[i] > ema_1d_aligned[i-1]:
-                signals[i] = 0.25  # reverse to long
-                position = 1
-            else:
+            # Short: price below weekly pivot
+            elif close[i] < pivot_aligned[i]:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_WilliamsFractal_Breakout_VolumeConfirm_V1"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Direction_1dVolumeFilter"
+timeframe = "6h"
 leverage = 1.0
