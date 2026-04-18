@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Camarilla_R1S1_Breakout_Volume_Filter
-Hypothesis: Use 4h and 1d Camarilla R1/S1 levels for directional bias on 1h timeframe, requiring volume > 1.5x 20-period average and 4h ADX > 25 to ensure trending conditions. Focus on breakouts with volume confirmation during active session (08-20 UTC) to avoid whipsaw. Target 15-37 trades/year to stay within fee drag limits.
+1h_4h_1d_Camarilla_Trend_Filter
+Hypothesis: Use 4h and 1d Camarilla R1/S1 levels for directional bias on 1h timeframe, with trend filter from 4h ADX > 25 and volume > 1.5x 20-period average. Enter only on breakouts during active session (08-20 UTC). Exit on reversal of 4h/1d level or trend filter failure. Position size fixed at 0.20 to limit risk. Designed for 15-35 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -166,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_Camarilla_R1S1_Breakout_Volume_Filter"
+name = "1h_4h_1d_Camarilla_Trend_Filter"
 timeframe = "1h"
 leverage = 1.0
