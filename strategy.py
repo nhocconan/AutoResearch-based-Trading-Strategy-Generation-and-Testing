@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Midpoint_Reversion_with_Volume_and_1dTrend
-Hypothesis: In ranging markets, price tends to revert to the 12h midpoint (average of high-low).
-Trades are triggered when price deviates significantly from the midpoint, with volume confirmation
-and aligned with the 1d trend (using EMA34). Designed for low-frequency, high-edge setups
-on 12h timeframe to avoid overtrading and perform in both bull and bear regimes.
-Target: ~20-30 trades/year.
+4h_12h_1D_Camarilla_R1S1_Breakout_Volume_Trend
+Hypothesis: Combines 12h Camarilla R1/S1 pivot breakouts with volume confirmation and 1d EMA34 trend filter.
+Uses higher timeframe structure (12h) for signal direction and 1d trend filter to improve performance in both bull and bear markets.
+Target: 25-40 trades/year. Uses Camarilla pivot levels which have proven effective for ETHUSDT and SOLUSDT.
 """
 
 import numpy as np
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 34:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,24 +20,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for midpoint calculation
+    # Get 12h data for Camarilla pivot levels
     df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate 12h Camarilla levels: R1, S1, R2, S2
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 12h midpoint: average of high and low
-    midpoint_12h = (high_12h + low_12h) / 2.0
+    R1 = np.full(len(high_12h), np.nan)
+    S1 = np.full(len(high_12h), np.nan)
+    R2 = np.full(len(high_12h), np.nan)
+    S2 = np.full(len(high_12h), np.nan)
     
-    # Deviation from midpoint as percentage of range
-    range_12h = high_12h - low_12h
-    # Avoid division by zero
-    range_12h = np.where(range_12h == 0, 1e-10, range_12h)
-    deviation_pct = (close[:len(midpoint_12h)] - midpoint_12h) / range_12h * 100
+    for i in range(len(high_12h)):
+        if i == 0:
+            continue
+        range_ = high_12h[i-1] - low_12h[i-1]
+        if range_ <= 0:
+            continue
+        close_prev = close_12h[i-1]
+        R1[i] = close_prev + range_ * 1.1 / 12
+        S1[i] = close_prev - range_ * 1.1 / 12
+        R2[i] = close_prev + range_ * 1.1 / 6
+        S2[i] = close_prev - range_ * 1.1 / 6
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    # Calculate EMA34 on 1d
     ema34_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 34:
         ema34_1d[33] = np.mean(close_1d[0:34])
@@ -53,51 +61,56 @@ def generate_signals(prices):
         vol_ma[i] = np.mean(volume[i-20:i])
     vol_spike = volume > (vol_ma * 1.5)
     
-    # Align 12h deviation and midpoint to lower timeframe (using close length)
-    # We need to map 12h values to each 5m bar (assuming 5m is base, but prices is 12h?)
-    # Since timeframe is 12h, prices are already 12h bars
-    # So we can use the values directly, but ensure alignment for safety
-    deviation_aligned = align_htf_to_ltf(prices, df_12h, deviation_pct)
-    midpoint_aligned = align_htf_to_ltf(prices, df_12h, midpoint_12h)
+    # Align 12h Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_12h, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_12h, S2)
     
-    # Align 1d EMA34 to 12h timeframe
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1d EMA34 to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # warmup for EMA34 and vol MA
+    start_idx = max(34, 20)  # Need EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(deviation_aligned[i]) or np.isnan(midpoint_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: price deviates >1.5% from midpoint, with volume spike
-        # Long when price is significantly below midpoint (oversold in range)
-        # Short when price is significantly above midpoint (overbought in range)
-        if deviation_aligned[i] < -1.5 and vol_spike[i]:
-            # Long bias only if 1d trend is up (price above EMA34)
-            if close[i] > ema34_aligned[i]:
+        if position == 0:
+            # Long: break above R1 with volume spike and 1d uptrend
+            if (close[i] > R1_aligned[i] and vol_spike[i] and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
-        elif deviation_aligned[i] > 1.5 and vol_spike[i]:
-            # Short bias only if 1d trend is down (price below EMA34)
-            if close[i] < ema34_aligned[i]:
+                position = 1
+            # Short: break below S1 with volume spike and 1d downtrend
+            elif (close[i] < S1_aligned[i] and vol_spike[i] and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
-        # Exit when price returns to midpoint (within 0.5%)
-        elif abs(deviation_aligned[i]) < 0.5:
-            signals[i] = 0.0
-        # Otherwise, hold current signal (though we don't track position explicitly,
-        # the deviation condition will naturally flip signal when crossing zero)
-        # But to avoid whipsaw, we decay to zero if not triggered
-        else:
-            # Only hold signal if we were just triggered, otherwise zero
-            # Simple approach: signal only on trigger bar, then zero
-            # This reduces trade frequency
-            pass  # already zero by default
+                position = -1
+        
+        elif position == 1:
+            # Long exit: close below S1 or 1d trend turns down
+            if (close[i] < S1_aligned[i] or close[i] < ema34_1d_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: close above R1 or 1d trend turns up
+            if (close[i] > R1_aligned[i] or close[i] > ema34_1d_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Midpoint_Reversion_with_Volume_and_1dTrend"
-timeframe = "12h"
+name = "4h_12h_1D_Camarilla_R1S1_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
