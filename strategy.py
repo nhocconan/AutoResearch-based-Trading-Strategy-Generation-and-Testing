@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_ThreeLineBreak_Reversal_Confirmation
-Hypothesis: Three Line Break (TLB) reversal signals filtered by 1w EMA trend and volume spike, with ATR-based exit. 
-TLB captures momentum shifts; 1w EMA ensures alignment with higher timeframe trend; volume confirms institutional participation. 
-Works in both bull/bear by following trend direction. Target: 20-30 trades/year to minimize fee drag.
+1d_WeeklyPivot_R1S1_Breakout_With_Volume_Confirmation
+Hypothesis: Weekly pivot R1/S1 breakouts on daily chart with volume spike capture institutional participation.
+Works in bull markets (breakouts above R1) and bear markets (breakdowns below S1). Weekly pivot provides
+more significant support/resistance than daily. Volume confirms institutional interest. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -20,117 +20,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Three Line Break (TLB)
-    # TLB: new line when price moves beyond prior 3 lines in opposite direction
-    tblb_direction = np.zeros(n)  # 1=up, -1=down, 0=no change
-    line_high = np.full(n, np.nan)
-    line_low = np.full(n, np.nan)
-    
-    if n > 0:
-        line_high[0] = high[0]
-        line_low[0] = low[0]
-        tblb_direction[0] = 0
-        
-        reversal_count = 0
-        last_dir = 0
-        
-        for i in range(1, n):
-            if last_dir >= 0:  # in up trend or neutral
-                if low[i] < line_low[i-1]:
-                    reversal_count += 1
-                    if reversal_count >= 3:
-                        tblb_direction[i] = -1
-                        line_high[i] = high[i]
-                        line_low[i] = low[i]
-                        last_dir = -1
-                        reversal_count = 0
-                    else:
-                        tblb_direction[i] = last_dir
-                        line_high[i] = max(line_high[i-1], high[i])
-                        line_low[i] = line_low[i-1]
-                else:
-                    tblb_direction[i] = last_dir
-                    line_high[i] = max(line_high[i-1], high[i])
-                    line_low[i] = min(line_low[i-1], low[i])
-                    reversal_count = 0
-            else:  # in down trend
-                if high[i] > line_high[i-1]:
-                    reversal_count += 1
-                    if reversal_count >= 3:
-                        tblb_direction[i] = 1
-                        line_high[i] = high[i]
-                        line_low[i] = low[i]
-                        last_dir = 1
-                        reversal_count = 0
-                    else:
-                        tblb_direction[i] = last_dir
-                        line_high[i] = line_high[i-1]
-                        line_low[i] = min(line_low[i-1], low[i])
-                else:
-                    tblb_direction[i] = last_dir
-                    line_high[i] = line_high[i-1]
-                    line_low[i] = min(line_low[i-1], low[i])
-                    reversal_count = 0
-    
-    # Multi-timeframe: 1w EMA50 for trend filter
+    # Weekly pivot from previous week
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume spike: >2.0x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Weekly pivot levels: P = (H+L+C)/3, R1 = C + (H-L)*1.1/2, S1 = C - (H-L)*1.1/2
+    pivot_w = (high_1w + low_1w + close_1w) / 3.0
+    r1_w = close_1w + (high_1w - low_1w) * 1.1 / 2.0
+    s1_w = close_1w - (high_1w - low_1w) * 1.1 / 2.0
+    
+    # Align to daily: previous week's levels available after weekly bar closes
+    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
+    
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 30)  # Warmup for EMA and volume
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(tblb_direction[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or
+        if (np.isnan(r1_w_aligned[i]) or 
+            np.isnan(s1_w_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        tlb_dir = tblb_direction[i]
-        ema50 = ema_50_1w_aligned[i]
+        r1_val = r1_w_aligned[i]
+        s1_val = s1_w_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: TLB up + volume spike + above weekly EMA
-            if tlb_dir == 1 and vol_spike and price > ema50:
+            # Long: price breaks above weekly R1 with volume spike
+            if price > r1_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: TLB down + volume spike + below weekly EMA
-            elif tlb_dir == -1 and vol_spike and price < ema50:
+            # Short: price breaks below weekly S1 with volume spike
+            elif price < s1_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: TLB reversal down OR price crosses below weekly EMA
-            if tlb_dir == -1:
-                signals[i] = 0.0
-                position = 0
-            elif price < ema50:
+            # Exit: price closes below weekly pivot
+            if price < pivot_w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: TLB reversal up OR price crosses above weekly EMA
-            if tlb_dir == 1:
-                signals[i] = 0.0
-                position = 0
-            elif price > ema50:
+            # Exit: price closes above weekly pivot
+            if price > pivot_w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_ThreeLineBreak_Reversal_Confirmation"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1S1_Breakout_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
