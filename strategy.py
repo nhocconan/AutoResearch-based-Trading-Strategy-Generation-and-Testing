@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Bollinger Squeeze Breakout with Volume and 12h Trend Filter
-Uses Bollinger Band width contraction (squeeze) followed by expansion with volume confirmation.
-Breakout direction determined by 12h EMA trend filter. Designed for low trade frequency
-with clear entry/exit rules to minimize whipsaw in both bull and bear markets.
+4h Camarilla Pivot Reversal with Volume Spike and RSI Filter
+Targets reversals at key Camarilla levels (R1/S1) with volume confirmation and RSI momentum filter.
+Designed for low trade frequency (target: 20-50 trades/year) with strong edge in ranging markets.
+Uses 1d Camarilla levels for structure and 1h RSI for momentum confirmation.
+Works in both bull and bear markets by fading extremes at key pivot levels.
 """
 
 import numpy as np
@@ -15,39 +16,54 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + (bb_std * std)
-    lower = sma - (bb_std * std)
-    bb_width = (upper - lower) / sma  # Normalized width
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bollinger Squeeze detection: width below 20-period average
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
+    # Calculate Camarilla pivot levels for current day (based on previous day)
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We use previous day's OHLC to calculate today's levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # First day uses same day
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Breakout detection: price outside bands after squeeze
-    breakout_up = (close > upper) & squeeze
-    breakout_down = (close < lower) & squeeze
+    rang = prev_high - prev_low
+    camarilla_r1 = prev_close + rang * 1.1 / 12
+    camarilla_s1 = prev_close - rang * 1.1 / 12
     
-    # Volume confirmation: 1.5x 4-period average
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Get 1h data for RSI filter
+    df_1h = get_htf_data(prices, '1h')
+    close_1h = df_1h['close'].values
+    
+    # Calculate 1h RSI (14-period)
+    delta = np.diff(close_1h, prepend=close_1h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1h, rsi)
+    
+    # Volume spike detection (2x 4-period average)
     vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma)
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -56,46 +72,52 @@ def generate_signals(prices):
     start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(bb_width_ma[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend = ema_34_12h_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        rsi_val = rsi_aligned[i]
         
         if position == 0:
-            # Long: bullish breakout above upper BB with volume and above 12h EMA
-            if (breakout_up[i] and 
-                volume_confirmed[i] and 
-                price > ema_trend):
+            # Long: price touches S1 with volume spike and RSI oversold (<30)
+            if (abs(price - s1) < 0.001 * s1 and  # Within 0.1% of S1
+                volume_spike[i] and 
+                rsi_val < 30):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: bearish breakout below lower BB with volume and below 12h EMA
-            elif (breakout_down[i] and 
-                  volume_confirmed[i] and 
-                  price < ema_trend):
+            # Short: price touches R1 with volume spike and RSI overbought (>70)
+            elif (abs(price - r1) < 0.001 * r1 and  # Within 0.1% of R1
+                  volume_spike[i] and 
+                  rsi_val > 70):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long position: hold until reversal below 12h EMA
+            # Long position management
             signals[i] = 0.25
-            if price < ema_trend:  # Trend reversal
+            # Exit: price moves back above midpoint or RSI overbought
+            midpoint = (r1 + s1) / 2
+            if price > midpoint or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position: hold until reversal above 12h EMA
+            # Short position management
             signals[i] = -0.25
-            if price > ema_trend:  # Trend reversal
+            # Exit: price moves back below midpoint or RSI oversold
+            midpoint = (r1 + s1) / 2
+            if price < midpoint or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Bollinger_Squeeze_Breakout_Volume_12hTrend"
-timeframe = "6h"
+name = "4h_Camarilla_Pivot_Reversal_Volume_RSI"
+timeframe = "4h"
 leverage = 1.0
