@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Daily_Camarilla_Breakout_V1
-Hypothesis: Use daily Camarilla R1/S1 levels as support/resistance on 4h chart.
-Breakouts above R1 or below S1 with volume confirmation during active session (08-20 UTC).
-Long when 4h close > daily R1, short when 4h close < daily S1.
-Uses volume filter (1.5x 20-period average) and volatility filter (ATR < 2x 50-period ATR).
-Fixed position size 0.25. Designed for fewer trades (~20-40/year) to reduce fee drag.
-Works in bull/bear via session timing and volatility regime filter.
+4h_1D_Camarilla_R1S1_Breakout_Volume
+Hypothesis: Use 1D Camarilla R1/S1 for directional bias, 4H for entry with volume confirmation.
+Long when price breaks above daily R1 with volume > 1.5x average during active session (08-20 UTC).
+Short when price breaks below daily S1 with volume > 1.5x average during active session.
+Fixed position size 0.25. Added volatility filter (ATR) to avoid chop.
+Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
+Works in bull/bear via volatility regime filter and session timing.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -43,7 +43,7 @@ def generate_signals(prices):
     r1 = prev_close + range_1d * 1.1 / 12
     s1 = prev_close - range_1d * 1.1 / 12
     
-    # Volatility filter: ATR(20) on daily timeframe
+    # Volatility filter: use ATR(20) to avoid choppy markets
     tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
     tr2 = np.absolute(np.roll(close_1d, 1) - low_1d)
     tr = np.maximum(tr1, tr2)
@@ -59,23 +59,21 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
-    # Volume confirmation: 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # need enough for ATR and volume MA
+    start_idx = 50  # need enough for ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(atr_20_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(atr_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
         # Volatility filter: avoid extreme volatility (stop hunting)
         vol_ma_long = pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values
@@ -112,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Daily_Camarilla_Breakout_V1"
+name = "4h_1D_Camarilla_R1S1_Breakout_Volume"
 timeframe = "4h"
 leverage = 1.0
