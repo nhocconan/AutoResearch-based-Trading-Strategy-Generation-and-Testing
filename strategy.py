@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w EMA(20) trend filter + 20-bar high/low breakout with volume confirmation.
-# Long when price breaks above 20-bar high with volume > 1.5x 20-bar average and price > 1w EMA(20).
-# Short when price breaks below 20-bar low with volume > 1.5x 20-bar average and price < 1w EMA(20).
-# Exit when price crosses back over 20-bar moving average.
-# Uses weekly EMA for trend filter to avoid counter-trend trades and volume to confirm conviction.
-# Designed for ~10-25 trades/year on daily timeframe.
-name = "1d_1wEMA20_Breakout_Volume"
-timeframe = "1d"
+# Hypothesis: 12h Camarilla Pivot R1/S1 breakout with volume confirmation and 1d ADX trend filter.
+# Long when price breaks above R1 with volume > 1.5x 24-period average and ADX > 25.
+# Short when price breaks below S1 with same conditions.
+# Exit when price returns to the 1d pivot point (PP).
+# Uses 1d pivot levels for structure, volume for conviction, and ADX to avoid ranging markets.
+# Designed for ~15-30 trades/year on 12h timeframe.
+name = "12h_Pivot_R1_S1_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,65 +23,108 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # 1d data for pivot points and ADX
+    df_1d = get_htf_data(prices, '1d')
     
-    # EMA(20) on 1w close
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate daily pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-period high/low for breakout levels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pp - low_1d
+    s1 = 2 * pp - high_1d
+    r2 = pp + (high_1d - low_1d)
+    s2 = pp - (high_1d - low_1d)
     
-    # 20-period moving average for exit
-    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # Align pivot levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # ADX(14) on 1d for trend strength
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - close_1d)
+    tr3 = np.abs(low_1d - close_1d)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    tr_14 = wilders_smooth(tr, 14)
+    plus_dm_14 = wilders_smooth(plus_dm, 14)
+    minus_dm_14 = wilders_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di_14 = np.where(tr_14 != 0, (plus_dm_14 / tr_14) * 100, 0)
+    minus_di_14 = np.where(tr_14 != 0, (minus_dm_14 / tr_14) * 100, 0)
+    
+    dx = np.where((plus_di_14 + minus_di_14) != 0, 
+                  np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14) * 100, 0)
+    adx_1d = wilders_smooth(dx, 14)
+    
+    # Align ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume filter: current volume > 1.5x 24-period average (24 * 12h = 12 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(ma_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_val = ema_20_1w_aligned[i]
-        high_level = high_20[i]
-        low_level = low_20[i]
-        ma_val = ma_20[i]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        adx_val = adx_1d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above 20-bar high with volume and trend alignment
-            if close_val > high_level and vol_filter and close_val > ema_val:
+            # Long: price breaks above R1 with volume and trend
+            if close_val > r1_val and vol_filter and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-bar low with volume and trend alignment
-            elif close_val < low_level and vol_filter and close_val < ema_val:
+            # Short: price breaks below S1 with volume and trend
+            elif close_val < s1_val and vol_filter and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below 20-bar MA
-            if close_val < ma_val:
+            # Long exit: price returns to pivot point
+            if close_val <= pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above 20-bar MA
-            if close_val > ma_val:
+            # Short exit: price returns to pivot point
+            if close_val >= pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
