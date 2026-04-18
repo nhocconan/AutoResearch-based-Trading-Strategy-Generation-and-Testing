@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power with 1d Trend and Volume Filter
-Hypothesis: Elder Ray Bull/Bear Power identifies institutional buying/selling pressure.
-Combining with 1d EMA trend filter and volume confirmation captures sustained moves.
-Works in bull markets (Bull Power > 0 + uptrend) and bear markets (Bear Power < 0 + downtrend).
-Targets 20-30 trades/year to minimize fee drag while capturing institutional flows.
+4h Donchian Breakout with 12h Trend and Volume Filter
+Hypothesis: Price breaking 20-period Donchian channels captures momentum moves.
+Combined with 12h EMA trend filter and volume confirmation to avoid false breakouts.
+Works in both bull and bear markets by only taking trades in direction of higher timeframe trend.
+Target: 25-35 trades/year to minimize fee decay while capturing strong trending moves.
 """
 
 import numpy as np
@@ -21,21 +21,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # 1d EMA20 for trend filter
-    ema20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # 12h EMA34 for trend filter
+    ema34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Calculate Elder Ray components
-    # Bull Power = High - EMA(13)
-    # Bear Power = Low - EMA(13)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.5x 20-period volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,41 +41,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Warmup for indicators
+    start_idx = 35  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        trend = ema20_1d_aligned[i]
-        bp = bull_power[i]
-        br = bear_power[i]
+        trend = ema34_12h_aligned[i]
+        upper = high_20[i]
+        lower = low_20[i]
         vol_ok = vol_filter[i]
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) + volume + uptrend
-            if bp > 0 and vol_ok and price > trend:
+            # Long: price breaks above upper Donchian with volume, in uptrend
+            if price > upper and vol_ok and price > trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (selling pressure) + volume + downtrend
-            elif br < 0 and vol_ok and price < trend:
+            # Short: price breaks below lower Donchian with volume, in downtrend
+            elif price < lower and vol_ok and price < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if Bull Power turns negative or trend weakens
-            if bp <= 0 or price < trend:
+            # Exit if price returns below lower Donchian or trend weakens
+            if price < lower or price < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if Bear Power turns positive or trend weakens
-            if br >= 0 or price > trend:
+            # Exit if price returns above upper Donchian or trend weakens
+            if price > upper or price > trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Power_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
