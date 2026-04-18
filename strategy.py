@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_Strict"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,65 +17,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for Donchian breakout and trend
+    df_w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous daily bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Weekly Donchian breakout (20-period)
+    dh = pd.Series(df_w['high']).rolling(window=20, min_periods=20).max().values
+    dl = pd.Series(df_w['low']).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    R1 = pivot + (range_hl * 1.1 / 12)
-    S1 = pivot - (range_hl * 1.1 / 12)
+    # Weekly trend: price > weekly EMA50
+    ema50_w = pd.Series(df_w['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align daily R1/S1 to 4h (wait for daily close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align weekly levels to daily
+    dh_aligned = align_htf_to_ltf(prices, df_w, dh)
+    dl_aligned = align_htf_to_ltf(prices, df_w, dl)
+    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
     
-    # Volume filter: current volume > 1.8 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_20)
+    # Daily volume filter: current volume > 1.5 * 10-day average
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_filter = volume > (1.5 * vol_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or
+            np.isnan(ema50_w_aligned[i]) or np.isnan(vol_ma_10[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
+        dh_val = dh_aligned[i]
+        dl_val = dl_aligned[i]
+        ema50_w_val = ema50_w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume confirmation
-            if close_val > R1_val and vol_filter:
+            # Long: break above weekly Donchian high with trend and volume
+            if close_val > dh_val and close_val > ema50_w_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume confirmation
-            elif close_val < S1_val and vol_filter:
+            # Short: break below weekly Donchian low with counter-trend and volume
+            elif close_val < dl_val and close_val < ema50_w_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below S1
-            if close_val < S1_val:
+            # Long exit: price falls below weekly Donchian low
+            if close_val < dl_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1
-            if close_val > R1_val:
+            # Short exit: price rises above weekly Donchian high
+            if close_val > dh_val:
                 signals[i] = 0.0
                 position = 0
             else:
