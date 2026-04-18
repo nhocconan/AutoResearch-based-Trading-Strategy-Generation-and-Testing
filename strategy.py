@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_20_Breakout_Volume_Confirm
-Hypothesis: Uses Donchian channel (20-period) breakout with volume confirmation and 1d EMA trend filter on 12h timeframe.
-Enters long when price breaks above upper Donchian band with volume spike and 1d EMA50 rising.
-Enters short when price breaks below lower Donchian band with volume spike and 1d EMA50 falling.
-Designed for low-moderate trade frequency (~15-25/year) with trend-following capability in both bull and bear markets.
+4h_Pivot_R1S1_Breakout_12hEMA34_Volume_Filtered
+Hypothesis: Uses Camarilla pivot levels from daily timeframe combined with EMA34 trend filter on 12h timeframe.
+Enters long when price breaks above R1 level with EMA34 rising and volume confirmation.
+Enters short when price breaks below S1 level with EMA34 falling and volume confirmation.
+Designed for low-moderate trade frequency (~20-50/year) with strong performance in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,36 +21,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
-    
-    # 1d EMA50 for trend filter (HTF)
+    # === DAILY CAMARILLA PIVOT LEVELS (HTF) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    k = 2 / (50 + 1)
-    for i in range(50, len(close_1d)):
-        if i == 50:
-            ema50_1d[i] = np.mean(close_1d[0:51])
-        else:
-            ema50_1d[i] = close_1d[i] * k + ema50_1d[i-1] * (1 - k)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1d EMA50 slope
-    ema50_1d_slope = np.full(n, np.nan)
+    # Calculate Camarilla pivots: P = (H+L+C)/3
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    hl_range = df_1d['high'] - df_1d['low']
+    
+    camarilla_pivot = typical_price.values
+    camarilla_r1 = typical_price.values + hl_range.values * 1.1 / 12
+    camarilla_s1 = typical_price.values - hl_range.values * 1.1 / 12
+    
+    # Align to 4h timeframe with proper delay (use previous day's close for calculation)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # === 12H EMA34 TREND FILTER (MTF) ===
+    df_12h = get_htf_data(prices, '12h')
+    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # EMA34 slope for trend direction
+    ema34_slope = np.full(n, np.nan)
     for i in range(1, n):
-        if not np.isnan(ema50_1d_aligned[i]) and not np.isnan(ema50_1d_aligned[i-1]):
-            ema50_1d_slope[i] = ema50_1d_aligned[i] - ema50_1d_aligned[i-1]
+        if not np.isnan(ema34_aligned[i]) and not np.isnan(ema34_aligned[i-1]):
+            ema34_slope[i] = ema34_aligned[i] - ema34_aligned[i-1]
     
-    # Volume confirmation: current volume > 1.8x 30-period average
+    # === VOLUME CONFIRMATION ===
     vol_ma = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma[i] = np.mean(volume[i-30:i])
-    vol_spike = volume > (vol_ma * 1.8)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,31 +61,33 @@ def generate_signals(prices):
     start_idx = 60  # Warmup
     
     for i in range(start_idx, n):
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_1d_slope[i]) or np.isnan(vol_ma[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or np.isnan(ema34_slope[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above upper Donchian with volume spike and rising 1d EMA50
-            if close[i] > upper[i] and vol_spike[i] and ema50_1d_slope[i] > 0:
+            # Long: Price breaks above R1 with rising EMA34 and volume spike
+            if close[i] > r1_aligned[i] and ema34_slope[i] > 0 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian with volume spike and falling 1d EMA50
-            elif close[i] < lower[i] and vol_spike[i] and ema50_1d_slope[i] < 0:
+            # Short: Price breaks below S1 with falling EMA34 and volume spike
+            elif close[i] < s1_aligned[i] and ema34_slope[i] < 0 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: break below lower Donchian or 1d EMA50 turns down
-            if close[i] < lower[i] or ema50_1d_slope[i] <= 0:
+            # Exit: Price returns to pivot level or EMA34 turns down
+            if close[i] < pivot_aligned[i] or ema34_slope[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: break above upper Donchian or 1d EMA50 turns up
-            if close[i] > upper[i] or ema50_1d_slope[i] >= 0:
+            # Exit: Price returns to pivot level or EMA34 turns up
+            if close[i] > pivot_aligned[i] or ema34_slope[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_20_Breakout_Volume_Confirm"
-timeframe = "12h"
+name = "4h_Pivot_R1S1_Breakout_12hEMA34_Volume_Filtered"
+timeframe = "4h"
 leverage = 1.0
