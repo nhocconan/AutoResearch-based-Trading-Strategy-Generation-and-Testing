@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_TrendFilter_v3
-Hypothesis: Use daily Camarilla R1/S1 levels for directional bias on 4h timeframe. Enter long when price breaks above R1 with volume > 1.5x 20-period average and 4h ADX > 25. Enter short when price breaks below S1 with same conditions. Exit when price returns to the opposite level or ADX drops below 20. This reduces whipsaw and focuses on trending moves, targeting 20-40 trades/year. Works in bull/bear via ADX trend filter.
+6h_1D_1W_Camarilla_MultiTF_Structure_v1
+Hypothesis: Use 1-day and 1-week Camarilla levels to define major support/resistance zones, with 6h entries on breakouts from these zones, filtered by volume spikes and ADX trend strength. This structure-based approach aims to capture major moves while avoiding chop, working in both bull and bear markets by following institutional levels. Target: 20-50 trades per year.
 """
 
 import numpy as np
@@ -18,44 +18,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Get daily and weekly data for structural context
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Get 4h data for ADX filter
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Daily calculations for Camarilla
+    # Daily calculations for Camarilla levels (using previous day's OHLC)
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Previous day's OHLC
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
     
-    # Daily Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    range_1d = prev_high - prev_low
-    r1_1d = prev_close + range_1d * 1.1 / 12
-    s1_1d = prev_close - range_1d * 1.1 / 12
+    # Daily Camarilla levels: R3/S3 (stronger barriers)
+    range_1d = prev_high_1d - prev_low_1d
+    r3_1d = prev_close_1d + range_1d * 1.1 / 4
+    s3_1d = prev_close_1d - range_1d * 1.1 / 4
     
-    # 4h ADX for trend strength filter
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Weekly calculations for Camarilla levels
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Previous week's OHLC
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w[0] = close_1w[0]
+    prev_high_1w[0] = high_1w[0]
+    prev_low_1w[0] = low_1w[0]
+    
+    # Weekly Camarilla levels: R3/S3 (stronger barriers)
+    range_1w = prev_high_1w - prev_low_1w
+    r3_1w = prev_close_1w + range_1w * 1.1 / 4
+    s3_1w = prev_close_1w - range_1w * 1.1 / 4
+    
+    # 6h ADX for trend strength filter
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
     # True Range
-    tr1 = np.maximum(high_4h - low_4h, np.abs(high_4h - np.roll(close_4h, 1)))
-    tr2 = np.abs(np.roll(close_4h, 1) - low_4h)
+    tr1 = np.maximum(high_6h - low_6h, np.abs(high_6h - np.roll(close_6h, 1)))
+    tr2 = np.abs(np.roll(close_6h, 1) - low_6h)
     tr = np.maximum(tr1, tr2)
-    tr[0] = high_4h[0] - low_4h[0]
+    tr[0] = high_6h[0] - low_6h[0]
     
     # Directional Movement
-    up_move = np.maximum(high_4h - np.roll(high_4h, 1), 0)
-    down_move = np.maximum(np.roll(low_4h, 1) - low_4h, 0)
+    up_move = np.maximum(high_6h - np.roll(high_6h, 1), 0)
+    down_move = np.maximum(np.roll(low_6h, 1) - low_6h, 0)
     up_move[0] = 0
     down_move[0] = 0
     
@@ -86,10 +103,12 @@ def generate_signals(prices):
     for i in range(2*adx_period + 1, len(dx)):
         adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
     
-    # Align higher timeframe data to 4h
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    # Align all higher timeframe data to 6h
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    adx_6h_aligned = align_htf_to_ltf(prices, df_6h, adx)
     
     # Precompute volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -97,43 +116,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for ADX and volume MA
+    start_idx = 50  # need enough for calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(adx_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(adx_6h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
         
-        # Trend filter: ADX > 25 to avoid chop, exit if ADX < 20
-        trend_enter = adx_4h_aligned[i] > 25
-        trend_exit = adx_4h_aligned[i] < 20
+        # Trend filter: ADX > 25 to ensure trending conditions
+        trend_filter = adx_6h_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above daily R1 with volume and trend filter
-            if close[i] > r1_1d_aligned[i] and vol_confirm and trend_enter:
+            # Long: price breaks above both daily and weekly R3 with volume and trend
+            if (close[i] > r3_1d_aligned[i] and close[i] > r3_1w_aligned[i] and 
+                vol_confirm and trend_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily S1 with volume and trend filter
-            elif close[i] < s1_1d_aligned[i] and vol_confirm and trend_enter:
+            # Short: price breaks below both daily and weekly S3 with volume and trend
+            elif (close[i] < s3_1d_aligned[i] and close[i] < s3_1w_aligned[i] and 
+                  vol_confirm and trend_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below S1 or trend weakens
-            if close[i] < s1_1d_aligned[i] or trend_exit:
+            # Long exit: price returns below daily R3 or weekly R3 or trend fails
+            if (close[i] < r3_1d_aligned[i] or close[i] < r3_1w_aligned[i] or 
+                not trend_filter):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above R1 or trend weakens
-            if close[i] > r1_1d_aligned[i] or trend_exit:
+            # Short exit: price returns above daily S3 or weekly S3 or trend fails
+            if (close[i] > s3_1d_aligned[i] or close[i] > s3_1w_aligned[i] or 
+                not trend_filter):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -141,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_TrendFilter_v3"
-timeframe = "4h"
+name = "6h_1D_1W_Camarilla_MultiTF_Structure_v1"
+timeframe = "6h"
 leverage = 1.0
