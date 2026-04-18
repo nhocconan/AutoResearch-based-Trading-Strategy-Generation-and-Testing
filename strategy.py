@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-6h Daily Range Breakout with Volume Spike and 1-week Trend Filter
-Breakout above/below previous day's range + volume spike + weekly EMA trend filter
-Designed to capture momentum in both bull and bear markets with low trade frequency
+1h RSI(2) Mean Reversion with 4h Trend Filter and Session Filter
+Strategy buys when RSI(2) < 10 in uptrend (price > 4h EMA50) and sells when RSI(2) > 90 in downtrend (price < 4h EMA50).
+Uses 4h EMA50 for trend filter and restricts trading to 08-20 UTC to avoid low-liquidity hours.
+Target: 15-30 trades/year per symbol with disciplined entries to avoid fee drag.
 """
 
 import numpy as np
@@ -11,91 +12,81 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for daily range calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate previous day's range (high - low)
-    daily_range = high_1d - low_1d
-    prev_high = high_1d  # current day's high (will be shifted)
-    prev_low = low_1d    # current day's low (will be shifted)
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align daily range data to 6h
-    daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    # Calculate RSI(2) on 1h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(100).values  # fill NaN with 100 for first bar
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA20 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume spike detection (2x 24-period average - 4 days worth)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 30  # need enough history for calculations
+    start_idx = 50  # need enough history for EMA50 and RSI(2)
     
     for i in range(start_idx, n):
-        if (np.isnan(daily_range_aligned[i]) or np.isnan(prev_high_aligned[i]) or 
-            np.isnan(prev_low_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        daily_range_val = daily_range_aligned[i]
-        prev_high_val = prev_high_aligned[i]
-        prev_low_val = prev_low_aligned[i]
-        ema_trend = ema_20_1w_aligned[i]
+        ema_trend = ema_50_4h_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: breakout above previous day's high + volume spike + above weekly EMA
-            if (price > prev_high_val and 
-                volume_spike[i] and 
-                price > ema_trend):
-                signals[i] = 0.25
+            # Long: RSI(2) < 10 (oversold) in uptrend (price > 4h EMA50)
+            if rsi_val < 10 and price > ema_trend:
+                signals[i] = 0.20
                 position = 1
-            # Short: breakout below previous day's low + volume spike + below weekly EMA
-            elif (price < prev_low_val and 
-                  volume_spike[i] and 
-                  price < ema_trend):
-                signals[i] = -0.25
+            # Short: RSI(2) > 90 (overbought) in downtrend (price < 4h EMA50)
+            elif rsi_val > 90 and price < ema_trend:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below previous day's low or trend reversal
-            if price < prev_low_val or price < ema_trend:
+            # Long exit: RSI(2) > 50 (mean reversion complete) or trend change
+            if rsi_val > 50 or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price closes above previous day's high or trend reversal
-            if price > prev_high_val or price > ema_trend:
+            # Short exit: RSI(2) < 50 (mean reversion complete) or trend change
+            if rsi_val < 50 or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "6h_DailyRangeBreakout_Volume_WeeklyTrend"
-timeframe = "6h"
+name = "1h_RSI2_MeanReversion_4hEMA50Trend_Session"
+timeframe = "1h"
 leverage = 1.0
