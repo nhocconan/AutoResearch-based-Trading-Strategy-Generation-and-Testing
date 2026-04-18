@@ -13,34 +13,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for calculations (ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for calculations (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h ATR (14-period) for volatility
-    tr1 = df_4h['high'] - df_4h['low']
-    tr2 = np.abs(df_4h['high'] - np.roll(df_4h['close'], 1))
-    tr3 = np.abs(df_4h['low'] - np.roll(df_4h['close'], 1))
+    # Calculate 1d ATR (14-period) for volatility
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
+    tr3 = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d ATR (14-period) for volatility filter
-    tr1_1d = df_1d['high'] - df_1d['low']
-    tr2_1d = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
-    tr3_1d = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
-    tr2_1d[0] = np.nan
-    tr3_1d[0] = np.nan
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d Donchian Channels (20-period)
-    donch_high_1d = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate 1d ADX (14-period) for trend strength
-    # +DI and -DI calculation
     up_move = df_1d['high'] - np.roll(df_1d['high'], 1)
     down_move = np.roll(df_1d['low'], 1) - df_1d['low']
     up_move[0] = np.nan
@@ -48,20 +33,31 @@ def generate_signals(prices):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    tr = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    atr_adx = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr_adx = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_adx = pd.Series(tr_adx).rolling(window=14, min_periods=14).mean().values
     
     plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_adx
     minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_adx
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
+    # Calculate 1d Bollinger Bands (20, 2.0)
+    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + 2 * std_20_1d
+    lower_bb_1d = sma_20_1d - 2 * std_20_1d
+    
+    # Calculate 1d Donchian Channels (20-period)
+    donch_high_1d = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    
     # Align indicators to 4h timeframe
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
     donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Calculate 4h Bollinger Bands (20, 2.0)
     sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
@@ -79,11 +75,12 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr_4h_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or
+        if (np.isnan(atr_1d_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(upper_bb_1d_aligned[i]) or
+            np.isnan(lower_bb_1d_aligned[i]) or
             np.isnan(donch_high_1d_aligned[i]) or
             np.isnan(donch_low_1d_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
             np.isnan(sma_20[i]) or
             np.isnan(std_20[i])):
             signals[i] = 0.0
