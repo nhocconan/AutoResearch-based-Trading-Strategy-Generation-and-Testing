@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_HTF_4h1d_DualTrend_Filter
-Hypothesis: Uses 4h EMA(34) and 1d EMA(34) as dual trend filters for 1h entries.
-Long when both timeframes show uptrend, short when both show downtrend.
-Requires 1h price to be near EMA(34) for pullback entries, reducing whipsaw.
-Targets 15-30 trades/year by requiring confluence of two higher timeframes.
-Works in bull/bear by following established trends on higher timeframes.
+12h_1D_Camarilla_Pivot_Breakout_Volume
+Hypothesis: Uses 1d Camarilla pivot levels (R1/S1) for breakout entries on 12h timeframe with volume confirmation.
+Camarilla levels provide statistically significant support/resistance in ranging and trending markets.
+Volume filter ensures breakouts have conviction. Targets 15-25 trades/year per symbol.
+Works in bull/bear via mean-reversion at extremes and breakout continuation.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,91 +21,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for dual trend filters
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA(34) for trend filter
-    close_4h = df_4h['close'].values
-    ema34_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 34:
-        ema34_4h[33] = np.mean(close_4h[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_4h)):
-            ema34_4h[i] = close_4h[i] * alpha + ema34_4h[i-1] * (1 - alpha)
-    
-    # Calculate 1d EMA(34) for trend filter
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = close_1d[i] * alpha + ema34_1d[i-1] * (1 - alpha)
     
-    # Align HTF EMAs to 1h timeframe
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Camarilla multipliers
+    R1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    S1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    R2 = close_1d + (high_1d - low_1d) * 1.1 / 6
+    S2 = close_1d - (high_1d - low_1d) * 1.1 / 6
     
-    # 1h EMA(34) for pullback entry reference
-    ema34_1h = np.full(n, np.nan)
-    if n >= 34:
-        ema34_1h[33] = np.mean(close[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, n):
-            ema34_1h[i] = close[i] * alpha + ema34_1h[i-1] * (1 - alpha)
+    # Volume spike: current volume > 1.5 x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 1.5)
+    
+    # Align 1d levels to 12h timeframe
+    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    R2_12h = align_htf_to_ltf(prices, df_1d, R2)
+    S2_12h = align_htf_to_ltf(prices, df_1d, S2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(ema34_1h[i])):
+        if (np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or 
+            np.isnan(R2_12h[i]) or np.isnan(S2_12h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend alignment: both 4h and 1d must agree
-        uptrend_4h = close[i] > ema34_4h_aligned[i]
-        uptrend_1d = close[i] > ema34_1d_aligned[i]
-        downtrend_4h = close[i] < ema34_4h_aligned[i]
-        downtrend_1d = close[i] < ema34_1d_aligned[i]
-        
-        both_uptrend = uptrend_4h and uptrend_1d
-        both_downtrend = downtrend_4h and downtrend_1d
-        
-        # Price near 1h EMA for pullback entry (within 1%)
-        near_ema = abs(close[i] - ema34_1h[i]) / ema34_1h[i] < 0.01
-        
         if position == 0:
-            # Long: both timeframes uptrend + price near 1h EMA (pullback)
-            if both_uptrend and near_ema:
-                signals[i] = 0.20
+            # Long: break above R1 with volume
+            if close[i] > R1_12h[i] and vol_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: both timeframes downtrend + price near 1h EMA (pullback)
-            elif both_downtrend and near_ema:
-                signals[i] = -0.20
+            # Short: break below S1 with volume
+            elif close[i] < S1_12h[i] and vol_spike[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend breaks on either timeframe or price moves >1.5% from EMA
-            if not (uptrend_4h and uptrend_1d) or abs(close[i] - ema34_1h[i]) / ema34_1h[i] > 0.015:
+            # Long exit: close below S1 (mean reversion) or break R2 (take profit)
+            if close[i] < S1_12h[i] or close[i] > R2_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend breaks on either timeframe or price moves >1.5% from EMA
-            if not (downtrend_4h and downtrend_1d) or abs(close[i] - ema34_1h[i]) / ema34_1h[i] > 0.015:
+            # Short exit: close above R1 (mean reversion) or break S2 (take profit)
+            if close[i] > R1_12h[i] or close[i] < S2_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_HTF_4h1d_DualTrend_Filter"
-timeframe = "1h"
+name = "12h_1D_Camarilla_Pivot_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
