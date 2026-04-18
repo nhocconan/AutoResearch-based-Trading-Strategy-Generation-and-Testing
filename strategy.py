@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_1dTrend_VolumeFilter
-Breakout above/below Donchian(20) with 1d EMA(50) trend filter and volume confirmation.
-Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
-Works in both bull and bear markets via daily trend filter.
+4h_Camarilla_R1S1_Breakout_1dTrend_Volume
+- Uses daily Camarilla pivot levels (R1/S1) with 1d EMA trend filter and volume confirmation.
+- Designed for 60-120 trades/year to minimize fee drag. Works in both bull and bear via 1d trend filter.
 """
 
 import numpy as np
@@ -20,28 +19,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
+    # Get daily data for Camarilla pivots and EMA
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on daily close
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2/51) + (ema_50_1d[i-1] * 49/51)
+    # Calculate Camarilla pivot levels from previous day
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    R1 = close_1d + range_hl * 1.1 / 12
+    S1 = close_1d - range_hl * 1.1 / 12
     
-    # Align daily EMA to 4h timeframe
-    ema_50_1d_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate EMA(34) on daily close
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2/35) + (ema_34_1d[i-1] * 33/35)
     
-    # Calculate Donchian(20) on 4h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Align daily indicators to 4h timeframe
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    ema_34_1d_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for dynamic sizing and stops
+    # Calculate 4h ATR(14)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = np.full(n, np.nan)
@@ -59,31 +61,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 20)  # need EMA, Donchian, volume MA
+    start_idx = max(34, 20)  # need EMA, ATR, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_1d_4h[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or np.isnan(ema_34_1d_4h[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.8 * 20-period average
+        vol_confirmed = volume[i] > 1.8 * vol_ma[i]
         
-        # Trend filter: price above/below 1d EMA50
-        trend_up = close[i] > ema_50_1d_4h[i]
-        trend_down = close[i] < ema_50_1d_4h[i]
+        # Trend filter: price above/below 1d EMA34
+        trend_up = close[i] > ema_34_1d_4h[i]
+        trend_down = close[i] < ema_34_1d_4h[i]
         
         if position == 0:
-            # Long entry: break above Donchian high + 0.1*ATR, with volume and trend filter
-            if (close[i] > donchian_high[i] + 0.1 * atr[i] and 
+            # Long entry: close above R1 + 0.2*ATR, with volume and trend filter
+            if (close[i] > R1_4h[i] + 0.2 * atr[i] and 
                 vol_confirmed and 
                 trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below Donchian low - 0.1*ATR, with volume and trend filter
-            elif (close[i] < donchian_low[i] - 0.1 * atr[i] and 
+            # Short entry: close below S1 - 0.2*ATR, with volume and trend filter
+            elif (close[i] < S1_4h[i] - 0.2 * atr[i] and 
                   vol_confirmed and 
                   trend_down):
                 signals[i] = -0.25
@@ -92,16 +94,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: close below Donchian low or ATR-based stop
-            if close[i] < donchian_low[i] - 0.5 * atr[i]:
+            # Long exit: close below S1 or ATR-based stop
+            if close[i] < S1_4h[i] - 0.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above Donchian high or ATR-based stop
-            if close[i] > donchian_high[i] + 0.5 * atr[i]:
+            # Short exit: close above R1 or ATR-based stop
+            if close[i] > R1_4h[i] + 0.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dTrend_VolumeFilter"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
