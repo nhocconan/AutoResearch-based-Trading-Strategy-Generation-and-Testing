@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 """
-1d Weekly Donchian Breakout with Volume and ADX Filter
-Hypothesis: Weekly Donchian channels capture long-term market structure. Breakouts
-with volume confirmation and ADX > 20 filter capture strong trends in both bull
-and bear markets. The 1d timeframe reduces trade frequency to minimize fee drag,
-while weekly trend filter ensures we trade with the dominant trend. Volume
-confirms institutional participation. This strategy targets 10-25 trades/year.
+12h Williams Alligator with 1d Trend Filter
+Hypothesis: Williams Alligator identifies market phases (sleeping, awakening, feeding). 
+In trending markets (JAWS > TEETH > LIPS for down, reverse for up), we follow the trend.
+We use 1d EMA50 as higher timeframe trend filter to ensure alignment with daily momentum.
+Entry occurs when Alligator is aligned in trend direction and price crosses TEETH (8-period SMMA).
+This strategy aims for 15-25 trades/year to minimize fee decay while capturing sustained moves.
+Works in both bull and bear markets by only trading in direction of higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(source, length):
+    """Smoothed Moving Average (SMMA)"""
+    if len(source) < length:
+        return np.full_like(source, np.nan, dtype=float)
+    smma = np.full_like(source, np.nan, dtype=float)
+    smma[length-1] = np.mean(source[:length])
+    for i in range(length, len(source)):
+        smma[i] = (smma[i-1] * (length-1) + source[i]) / length
+    return smma
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,83 +33,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly Donchian channels (20-period)
-    donchian_high = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # ADX filter on weekly (trend strength)
-    # Calculate directional movement
-    up_move = pd.Series(df_1w['high'].values).diff()
-    down_move = -pd.Series(df_1w['low'].values).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Williams Alligator components (13,8,5 SMMA of median price)
+    median_price = (high + low) / 2.0
+    jaws = smma(median_price, 13)  # Blue line (13-period)
+    teeth = smma(median_price, 8)   # Red line (8-period)
+    lips = smma(median_price, 5)    # Green line (5-period)
     
-    # True range
-    tr1 = pd.Series(df_1w['high'].values) - pd.Series(df_1w['low'].values)
-    tr2 = np.abs(pd.Series(df_1w['high'].values) - pd.Series(df_1w['close'].values).shift(1))
-    tr3 = np.abs(pd.Series(df_1w['low'].values) - pd.Series(df_1w['close'].values).shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Smoothed values
-    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # DI values
-    plus_di = 100 * plus_dm_smooth / atr_1w
-    minus_di = 100 * minus_dm_smooth / atr_1w
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx_1w = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    # Align Alligator components to LTF
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx = adx_1w_aligned[i]
-        vol_ok = vol_filter[i]
+        jaw = jaws_aligned[i]
+        tooth = teeth_aligned[i]
+        lip = lips_aligned[i]
+        trend = ema50_1d_aligned[i]
         
+        # Check Alligator alignment: Mouth open in direction of trend
+        # Up alignment: Lips > Teeth > Jaws AND price above teeth
+        # Down alignment: Lips < Teeth < Jaws AND price below teeth
         if position == 0:
-            # Long: price breaks above weekly Donchian high with volume and trend strength
-            if price > donchian_high_aligned[i] and vol_ok and adx > 20:
+            # Long: Alligator aligned up, price crosses above teeth, uptrend
+            if lip > tooth and tooth > jaw and price > tooth and price > trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian low with volume and trend strength
-            elif price < donchian_low_aligned[i] and vol_ok and adx > 20:
+            # Short: Alligator aligned down, price crosses below teeth, downtrend
+            elif lip < tooth and tooth < jaw and price < tooth and price < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if price returns to weekly Donchian low or trend weakens
-            if price < donchian_low_aligned[i] or adx < 15:
+            # Exit if Alligator alignment breaks or price crosses below teeth
+            if not (lip > tooth and tooth > jaw) or price < tooth:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price returns to weekly Donchian high or trend weakens
-            if price > donchian_high_aligned[i] or adx < 15:
+            # Exit if Alligator alignment breaks or price crosses above teeth
+            if not (lip < tooth and tooth < jaw) or price > tooth:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_Volume_ADX"
-timeframe = "1d"
+name = "12h_Williams_Alligator_1dTrend"
+timeframe = "12h"
 leverage = 1.0
