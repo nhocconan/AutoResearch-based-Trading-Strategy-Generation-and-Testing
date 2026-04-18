@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Pivot Reversal with Volume Confirmation and 1d EMA200 Trend Filter
-# Weekly pivots from prior week provide strong support/resistance levels.
-# Price rejection at weekly R1/S1 with volume confirmation indicates institutional defense of levels.
-# 1d EMA200 filter ensures alignment with long-term trend to avoid counter-trend trades.
-# Works in bull markets (bounces off weekly S1) and bear markets (rejections at weekly R1).
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
-name = "6h_WeeklyPivot_R1S1_Reversal_Volume_EMA200"
-timeframe = "6h"
+# Hypothesis: 12h Donchian(20) Breakout + Volume Spike + ADX Trend Filter
+# Donchian channel breakout provides clear trend following signals with defined risk.
+# Volume spike confirms institutional participation in the breakout.
+# ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranges.
+# Works in bull markets (breakouts above upper channel) and bear markets (breakdowns below lower channel).
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+name = "12h_Donchian20_VolumeSpike_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,76 +23,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data for ADX calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot levels from previous week's OHLC
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # Calculate Donchian channels (20-period) on 12h data
+    # Using rolling window with proper min_periods
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly pivot and support/resistance levels (using previous week)
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3
-    range_weekly = high_weekly - low_weekly
+    # Calculate ADX on daily data
+    # ADX requires +DM, -DM, and TR
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly R1 and S1 levels
-    r1_weekly = close_weekly + (range_weekly * 1.1 / 12)
-    s1_weekly = close_weekly - (range_weekly * 1.1 / 12)
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value has no previous close
     
-    # Align weekly pivot levels to 6h timeframe (using previous week's values)
-    r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1_weekly)
-    s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1_weekly)
+    # Calculate Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
     
-    # Get daily data for EMA200 trend filter
-    df_daily = get_htf_data(prices, '1d')
-    close_daily = df_daily['close'].values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate EMA200 on daily data
-    ema_200_daily = pd.Series(close_daily).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_200_daily)
+    # Smooth the values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.mean(data[:period])
+            # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current/period
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1]/period) + data[i]/period
+        return result
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume (5 days on 6h chart)
+    tr_smoothed = wilders_smooth(tr, 14)
+    plus_dm_smoothed = wilders_smooth(plus_dm, 14)
+    minus_dm_smoothed = wilders_smooth(minus_dm, 14)
+    
+    # Calculate DI+ and DI-
+    plus_di = 100 * plus_dm_smoothed / tr_smoothed
+    minus_di = 100 * minus_dm_smoothed / tr_smoothed
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smooth(dx, 14)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for EMA200 calculation
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_weekly_aligned[i]) or np.isnan(s1_weekly_aligned[i]) or
-            np.isnan(ema_200_daily_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r1_weekly_val = r1_weekly_aligned[i]
-        s1_weekly_val = s1_weekly_aligned[i]
-        ema_val = ema_200_daily_aligned[i]
+        upper_channel = high_roll[i]
+        lower_channel = low_roll[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Long: Price bounces off weekly S1 with volume confirmation and above EMA200
-            if close_val > s1_weekly_val and low[i] <= s1_weekly_val and volume_confirm[i] and close_val > ema_val:
+            # Long: Close above upper Donchian channel AND ADX > 25 AND volume spike
+            if close_val > upper_channel and adx_val > 25 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price rejects at weekly R1 with volume confirmation and below EMA200
-            elif close_val < r1_weekly_val and high[i] >= r1_weekly_val and volume_confirm[i] and close_val < ema_val:
+            # Short: Close below lower Donchian channel AND ADX > 25 AND volume spike
+            elif close_val < lower_channel and adx_val > 25 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price breaks below weekly S1 or reaches weekly R1
-            if close_val < s1_weekly_val or close_val >= r1_weekly_val:
+            # Long exit: Close below lower Donchian channel (trend reversal) or at upper channel (take profit)
+            if close_val < lower_channel or close_val >= upper_channel:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price breaks above weekly R1 or reaches weekly S1
-            if close_val > r1_weekly_val or close_val <= s1_weekly_val:
+            # Short exit: Close above upper Donchian channel (trend reversal) or at lower channel (take profit)
+            if close_val > upper_channel or close_val <= lower_channel:
                 signals[i] = 0.0
                 position = 0
             else:
