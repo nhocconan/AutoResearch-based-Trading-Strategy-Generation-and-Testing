@@ -1,8 +1,14 @@
-# 4h_TRIX_1dVix_Filtered_Signal_v1
-# Hypothesis: Use TRIX(12,9) on 4h for momentum signal, combined with 1d VIX-like volatility index to filter noise.
-# TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. VIX filter enters only when volatility is elevated (>1.5x avg)
-# to capture breakouts during high volatility periods. Works in both bull and bear by trading volatility expansion.
-# Target: 20-40 trades/year per symbol to minimize fee drag.
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
+"""
+1d_1W_Camarilla_S1_R1_Breakout_Volume
+Hypothesis: Use weekly high/low as structural bias and daily Camarilla R1/S1 for entries.
+Long when price breaks above weekly high and daily R1 with volume confirmation.
+Short when price breaks below weekly low and daily S1 with volume confirmation.
+Filters: volume > 1.5x 20-day average, avoid extreme volatility (ATR).
+Position size: 0.25. Target: 10-20 trades/year to minimize fee drag.
+Works in bull/bear via structural bias and volume confirmation.
+"""
 
 import numpy as np
 import pandas as pd
@@ -10,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,66 +24,108 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX calculation on 4h close
-    ema1 = pd.Series(close).ewm(span=12, adjust=False).mean()
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False).mean()
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False).mean()
-    trix_raw = pd.Series(ema3).pct_change(periods=1) * 100
-    trix = trix_raw.values
+    # Get weekly data for structural bias (weekly high/low)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d volatility index (VIX-like): ATR(14) normalized by SMA(20)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    # Daily Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    range_1d = prev_high - prev_low
+    r1 = prev_close + range_1d * 1.1 / 12
+    s1 = prev_close - range_1d * 1.1 / 12
+    
+    # Weekly structural bias: use previous week's high/low
+    prev_week_high = np.roll(high_1w, 1)
+    prev_week_low = np.roll(low_1w, 1)
+    prev_week_high[0] = high_1w[0]
+    prev_week_low[0] = low_1w[0]
+    
+    # Volatility filter: ATR(20) daily to avoid choppy markets
+    tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.absolute(np.roll(close_1d, 1) - low_1d)
+    tr = np.maximum(tr1, tr2)
     tr[0] = high_1d[0] - low_1d[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    vix_proxy = atr_14 / sma_20
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Align TRIX and VIX proxy to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    vix_aligned = align_htf_to_ltf(prices, df_1d, vix_proxy)
+    # Align all data to daily timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, prev_week_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, prev_week_low)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
     
-    # VIX filter: elevated volatility (>1.5x 50-period average)
-    vix_ma = pd.Series(vix_aligned).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = vix_aligned > 1.5 * vix_ma
+    # Precompute volume moving average (20-day)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 60  # need enough for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(trix_aligned[i]) or np.isnan(vix_aligned[i]) or np.isnan(vix_ma[i]):
+        # Skip if any required data is not available
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(atr_20_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-            
-        # Long: TRIX crosses above 0 with elevated volatility
-        if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and volatility_filter[i]:
-            signals[i] = 0.25
-            position = 1
-        # Short: TRIX crosses below 0 with elevated volatility
-        elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and volatility_filter[i]:
-            signals[i] = -0.25
-            position = -1
-        # Exit: TRIX crosses zero in opposite direction
-        elif position == 1 and trix_aligned[i] < 0:
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and trix_aligned[i] > 0:
-            signals[i] = 0.0
-            position = 0
-        else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # Volatility filter: avoid extreme volatility (stop hunting)
+        atr_ma = pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values
+        vol_filter = (np.isnan(atr_ma[i]) or atr_20_aligned[i] < atr_ma[i] * 2)
+        
+        if position == 0:
+            # Long: price breaks above weekly high AND daily R1 with volume confirmation
+            if (close[i] > weekly_high_aligned[i] and 
+                close[i] > r1_aligned[i] and 
+                vol_confirm and vol_filter):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below weekly low AND daily S1 with volume confirmation
+            elif (close[i] < weekly_low_aligned[i] and 
+                  close[i] < s1_aligned[i] and 
+                  vol_confirm and vol_filter):
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: price returns below weekly high OR daily R1
+            if close[i] < weekly_high_aligned[i] or close[i] < r1_aligned[i]:
+                signals[i] = -0.25  # reverse to short
+                position = -1
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price returns above weekly low OR daily S1
+            if close[i] > weekly_low_aligned[i] or close[i] > s1_aligned[i]:
+                signals[i] = 0.25  # reverse to long
+                position = 1
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_TRIX_1dVix_Filtered_Signal_v1"
-timeframe = "4h"
+name = "1d_1W_Camarilla_S1_R1_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
