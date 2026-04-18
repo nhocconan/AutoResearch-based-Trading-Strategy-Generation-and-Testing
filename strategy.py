@@ -3,122 +3,101 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter.
-# Long when price breaks above Donchian high(20) with volume > 1.5x 20-period average and 1d ADX > 25.
-# Short when price breaks below Donchian low(20) with volume > 1.5x 20-period average and 1d ADX > 25.
-# Exit when price returns to Donchian midpoint or ATR-based stop.
-# Uses Donchian channels for structure, volume surge for conviction, ADX for trend strength filter.
-# Designed for ~20-40 trades/year per symbol.
-name = "4h_Donchian_20_Volume_ADX_Filter"
-timeframe = "4h"
+# Hypothesis: 1h momentum with 4h trend filter and 1d volatility filter.
+# Long when: 1h RSI(14) > 55, price > 4h EMA(50), and 1d ATR ratio < 0.8 (low volatility)
+# Short when: 1h RSI(14) < 45, price < 4h EMA(50), and 1d ATR ratio < 0.8
+# Exit when RSI crosses back to 50 or volatility increases.
+# Uses momentum for entry, higher timeframe for trend direction, and volatility filter to avoid chop.
+# Designed for ~20-30 trades/year per symbol.
+name = "1h_RSI_EMA50_ATRFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 1d data for ADX trend filter
+    # 4h data for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
+    
+    # 1d data for ATR volatility filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate ADX(14) on 1d timeframe
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
+    # Calculate ATR(14) on 1d
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Calculate 10-period SMA of ATR for ratio
+    atr_ma_10 = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
+    atr_ratio = atr_1d / (atr_ma_10 + 1e-10)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    atr_1d = wilder_smooth(tr, 14)
-    plus_di_1d = 100 * wilder_smooth(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * wilder_smooth(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
-    adx_1d = wilder_smooth(dx_1d, 14)
+    # 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Handle division by zero and NaN
-    adx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, adx_1d)
-    adx_1d = np.nan_to_num(adx_1d, nan=0.0)
-    
-    # Align ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Donchian Channel (20) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
-    
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_4h_50_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        mid = donchian_mid[i]
-        adx_val = adx_1d_aligned[i]
-        vol_filter = volume_filter[i]
+        price = close[i]
+        ema_4h = ema_4h_50_aligned[i]
+        atr_ratio_val = atr_ratio_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume surge and strong trend (ADX > 25)
-            if high_val > upper and vol_filter and adx_val > 25:
-                signals[i] = 0.25
+            # Long: RSI > 55, price above 4h EMA50, low volatility (ATR ratio < 0.8)
+            if rsi_val > 55 and price > ema_4h and atr_ratio_val < 0.8:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian low with volume surge and strong trend (ADX > 25)
-            elif low_val < lower and vol_filter and adx_val > 25:
-                signals[i] = -0.25
+            # Short: RSI < 45, price below 4h EMA50, low volatility (ATR ratio < 0.8)
+            elif rsi_val < 45 and price < ema_4h and atr_ratio_val < 0.8:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to Donchian midpoint
-            if close_val <= mid:
+            # Long exit: RSI < 50 or volatility increases (ATR ratio > 1.2)
+            if rsi_val < 50 or atr_ratio_val > 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price returns to Donchian midpoint
-            if close_val >= mid:
+            # Short exit: RSI > 50 or volatility increases (ATR ratio > 1.2)
+            if rsi_val > 50 or atr_ratio_val > 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
