@@ -1,113 +1,134 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_TK_Cross_WeeklyTrend
-Ichimoku strategy on 6h with weekly trend filter:
-- Long when Tenkan-sen > Kijun-sen (TK cross up) AND price above cloud
-- Short when Tenkan-sen < Kijun-sen (TK cross down) AND price below cloud
-- Weekly trend filter: only long when price > weekly EMA34, short when price < weekly EMA34
-- Designed for 15-25 trades/year per symbol (~60-100 total over 4 years)
-Works in trending markets (TK cross with trend) and avoids false signals in ranging markets (cloud filter)
+12h_KAMA_Direction_Volume_Regime
+KAMA direction signal on 12h with volume confirmation and 1d chop filter:
+- Long when KAMA slope > 0 + volume > 1.5x 20-period average + chop > 61.8 (range)
+- Short when KAMA slope < 0 + volume > 1.5x 20-period average + chop > 61.8 (range)
+- Exit when KAMA slope changes sign
+- Designed for 12-30 trades/year per symbol
+Works in choppy markets (range-bound conditions) with volume confirmation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku Cloud components: Tenkan-sen, Kijun-sen, Senkou Span A/B."""
-    n = len(high)
+def calculate_kama(close, er_length=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    n = len(close)
+    kama = np.full(n, np.nan)
+    if n < er_length:
+        return kama
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    er = np.concatenate([np.full(er_length-1, np.nan), er])
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Smoothing Constants
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # KAMA calculation
+    kama[er_length-1] = close[er_length-1]
+    for i in range(er_length, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
+    return kama
+
+def calculate_chop(high, low, close, period=14):
+    """Calculate Choppiness Index."""
+    n = len(close)
+    chop = np.full(n, np.nan)
     
-    return tenkan, kijun, senkou_a, senkou_b
+    for i in range(period-1, n):
+        atr_sum = 0
+        for j in range(i-period+1, i+1):
+            tr = max(high[j] - low[j], 
+                     abs(high[j] - close[j-1]) if j > 0 else 0,
+                     abs(low[j] - close[j-1]) if j > 0 else 0)
+            atr_sum += tr
+        
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        if highest_high != lowest_low:
+            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+        else:
+            chop[i] = 50
+    
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get daily data for chop filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA34
-    close_1w_series = pd.Series(close_1w)
-    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, period=14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate Ichimoku components
-    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
+    # Calculate KAMA on 12h data
+    kama = calculate_kama(close, er_length=10, fast=2, slow=30)
+    
+    # KAMA slope (1-period change)
+    kama_slope = np.diff(kama, prepend=np.nan)
+    
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # need 52 for Senkou B + buffer
+    start_idx = 30  # need 10 for ER + 20 for vol MA + buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(kama_slope[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_ok = volume[i] > 1.5 * vol_ma[i]
         
-        # TK cross conditions
-        tk_cross_up = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        tk_cross_down = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
-        
-        # Price relative to cloud
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
-        # Weekly trend filter
-        price_above_weekly_ema = close[i] > ema_34_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_34_1w_aligned[i]
+        # Chop filter: chop > 61.8 indicates ranging market
+        chop_ok = chop_1d_aligned[i] > 61.8
         
         if position == 0:
-            # Long: TK cross up + price above cloud + weekly uptrend
-            if tk_cross_up and price_above_cloud and price_above_weekly_ema:
+            # Long: KAMA slope up + volume + chop
+            if kama_slope[i] > 0 and volume_ok and chop_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: TK cross down + price below cloud + weekly downtrend
-            elif tk_cross_down and price_below_cloud and price_below_weekly_ema:
+            # Short: KAMA slope down + volume + chop
+            elif kama_slope[i] < 0 and volume_ok and chop_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: TK cross down OR price below cloud OR weekly trend turns down
-            if tk_cross_down or close[i] < cloud_top or close[i] < ema_34_1w_aligned[i]:
+            # Long exit: KAMA slope turns down
+            if kama_slope[i] < 0:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TK cross up OR price above cloud OR weekly trend turns up
-            if tk_cross_up or close[i] > cloud_bottom or close[i] > ema_34_1w_aligned[i]:
+            # Short exit: KAMA slope turns up
+            if kama_slope[i] > 0:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -115,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_TK_Cross_WeeklyTrend"
-timeframe = "6h"
+name = "12h_KAMA_Direction_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
