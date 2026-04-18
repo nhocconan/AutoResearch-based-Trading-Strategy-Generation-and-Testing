@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot (R1/S1) breakout with daily volume confirmation and ADX trend filter.
-# Camarilla levels from daily high/low provide institutional reversal points.
+# Hypothesis: 4h Donchian breakout with daily ADX filter and volume confirmation.
+# Donchian channels capture breakouts from price consolidation.
+# Daily ADX > 25 filters for trending markets only, avoiding chop.
 # Volume confirmation ensures breakout conviction.
-# ADX filter ensures we only trade in trending markets (ADX > 25) to avoid chop.
-# Works in bull markets (breakouts above R1) and bear markets (breakdowns below S1).
-# Designed for low trade frequency (12-37/year) to minimize fee drag in 12h timeframe.
-name = "12h_Camarilla_R1S1_Breakout_Volume_ADX"
-timeframe = "12h"
+# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
+# Works in bull markets (breakouts above upper band) and bear markets (breakouts below lower band).
+name = "4h_Donchian20_DailyADX_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,55 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and ADX (ONCE before loop)
+    # Get daily data for ADX filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from previous day's range
-    # Formula: Range = (High - Low), then levels based on Close
+    # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    upper_band = high_20
+    lower_band = low_20
+    
+    # Calculate daily ADX (14-period)
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_high = np.roll(high_d, 1)
-    prev_low = np.roll(low_d, 1)
-    prev_close = np.roll(close_d, 1)
-    prev_high[0] = np.nan  # First day has no previous
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Calculate pivot and Camarilla levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels: R1 = Close + (Range * 1.1/12), S1 = Close - (Range * 1.1/12)
-    r1 = prev_close + (range_val * 1.1 / 12)
-    s1 = prev_close - (range_val * 1.1 / 12)
-    
-    # Align daily Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Calculate ADX (14-period) on daily data
-    # +DM, -DM, TR calculation
-    high_diff = np.diff(prev_high, prepend=np.nan)
-    low_diff = np.diff(prev_low, prepend=np.nan)
-    
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
-    
     # True Range
-    tr1 = prev_high - prev_low
-    tr2 = np.abs(prev_high - np.roll(prev_close, 1))
-    tr3 = np.abs(prev_low - np.roll(prev_close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan  # First element has no previous close
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Smooth with Wilder's smoothing (EMA with alpha=1/14)
+    # Directional Movement
+    dm_plus = np.where((high_d[1:] - high_d[:-1]) > (low_d[:-1] - low_d[1:]), 
+                       np.maximum(high_d[1:] - high_d[:-1], 0), 0)
+    dm_minus = np.where((low_d[:-1] - low_d[1:]) > (high_d[1:] - high_d[:-1]), 
+                        np.maximum(low_d[:-1] - low_d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/14)
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) >= period:
-            # First value is simple average
             result[period-1] = np.nanmean(data[:period])
             for i in range(period, len(data)):
                 if not np.isnan(result[i-1]) and not np.isnan(data[i]):
@@ -80,17 +63,27 @@ def generate_signals(prices):
                     result[i] = np.nan
         return result
     
-    atr = wilders_smoothing(tr, 14)
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    tr_smooth = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align daily ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # ADX threshold for trending market
+    adx_threshold = 25
+    adx_trending = adx >= adx_threshold
     
-    # Calculate 24-period average volume for confirmation (2 days of 12h data)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Align daily ADX to 4h timeframe
+    adx_trending_aligned = align_htf_to_ltf(prices, df_1d, adx_trending)
+    
+    # Calculate 20-period average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -102,8 +95,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -115,25 +108,25 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_24[i]
+        vol_confirm = volume[i] > vol_ma_20[i]
         
-        # Trend filter: ADX > 25 indicates trending market
-        trend_filter = adx_aligned[i] > 25
+        # Trend filter: daily ADX indicates trending market
+        trend_filter = adx_trending_aligned[i] if not np.isnan(adx_trending_aligned[i]) else False
         
         if position == 0:
-            # Long: price breaks above R1 AND volume confirmation AND trend filter
-            long_breakout = close[i] > r1_aligned[i]
+            # Long: price breaks above upper band AND volume confirmation AND trend filter
+            long_breakout = close[i] > upper_band[i]
             if vol_confirm and trend_filter and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND volume confirmation AND trend filter
-            elif vol_confirm and trend_filter and close[i] < s1_aligned[i]:
+            # Short: price breaks below lower band AND volume confirmation AND trend filter
+            elif vol_confirm and trend_filter and close[i] < lower_band[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below S1 OR ADX drops below 20 (trend weakening)
-            exit_condition = close[i] < s1_aligned[i] or adx_aligned[i] < 20
+            # Long exit: price falls below lower band OR ADX drops below threshold (trend weakening)
+            exit_condition = close[i] < lower_band[i] or (np.isnan(adx_trending_aligned[i]) or not adx_trending_aligned[i])
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -141,8 +134,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 OR ADX drops below 20 (trend weakening)
-            exit_condition = close[i] > r1_aligned[i] or adx_aligned[i] < 20
+            # Short exit: price rises above upper band OR ADX drops below threshold (trend weakening)
+            exit_condition = close[i] > upper_band[i] or (np.isnan(adx_trending_aligned[i]) or not adx_trending_aligned[i])
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
