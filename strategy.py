@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with daily trend filter and volume confirmation.
-# Uses daily EMA13 for trend direction, Alligator lines for entry signals, and volume filter.
-# Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing trends.
+# Hypothesis: Weekly Bollinger Band breakout with daily trend filter and volume confirmation on 12h timeframe.
+# Uses weekly BB(20,2) to identify volatility expansion and daily EMA20 for trend direction.
+# Enters on 12h breakouts above/below BB bands with volume confirmation (>1.5x 20-period volume MA).
+# Designed for fewer trades (target 15-30/year) to avoid fee drag in both bull and bear markets.
+# Weekly timeframe provides structural context; daily EMA filters trend; volume confirms momentum.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     open_price = prices['open'].values
@@ -18,52 +20,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA13 trend filter
+    # Get weekly data for Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Bollinger Bands (20,2) on weekly close
+    sma_20_1w = np.full(len(close_1w), np.nan)
+    std_20_1w = np.full(len(close_1w), np.nan)
+    for i in range(20, len(close_1w)):
+        sma_20_1w[i] = np.mean(close_1w[i-20:i])
+        std_20_1w[i] = np.std(close_1w[i-20:i])
+    
+    upper_bb_1w = sma_20_1w + 2 * std_20_1w
+    lower_bb_1w = sma_20_1w - 2 * std_20_1w
+    
+    # Align weekly Bollinger Bands to 12h timeframe
+    upper_bb_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_bb_1w)
+    lower_bb_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_bb_1w)
+    
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(13) on daily close for trend direction
-    close_1d_series = pd.Series(close_1d)
-    ema_13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate EMA(20) on daily close
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align daily EMA13 to 12h timeframe
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    
-    # Calculate Williams Alligator on 12h data
-    # Jaw: 13-period SMMA shifted 8 bars ahead
-    # Teeth: 8-period SMMA shifted 5 bars ahead  
-    # Lips: 5-period SMMA shifted 3 bars ahead
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            # First value is simple average
-            result[period-1] = np.mean(arr[:period])
-            # Subsequent values: (prev*(period-1) + current) / period
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Shift as per Alligator definition
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # Calculate 12h ATR for position sizing and stops
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align daily EMA20 to 12h timeframe
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -73,55 +58,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # need daily EMA13, volume MA
+    start_idx = max(20, 20)  # need weekly BB, daily EMA, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr_12h[i]) or np.isnan(lips_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or np.isnan(jaw_shifted[i])):
+        if (np.isnan(upper_bb_1w_aligned[i]) or np.isnan(lower_bb_1w_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3 * 20-period average
-        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: price above daily EMA13 (uptrend) or below (downtrend)
-        trend_up = close[i] > ema_13_1d_aligned[i]
-        trend_down = close[i] < ema_13_1d_aligned[i]
-        
-        # Alligator signals: Lips above Teeth above Jaw = uptrend
-        # Lips below Teeth below Jaw = downtrend
-        alligator_long = (lips_shifted[i] > teeth_shifted[i] and 
-                         teeth_shifted[i] > jaw_shifted[i])
-        alligator_short = (lips_shifted[i] < teeth_shifted[i] and 
-                          teeth_shifted[i] < jaw_shifted[i])
+        # Trend filter: price above daily EMA20 (uptrend) or below (downtrend)
+        trend_up = close[i] > ema_20_1d_aligned[i]
+        trend_down = close[i] < ema_20_1d_aligned[i]
         
         if position == 0:
-            # Long entry: Alligator bullish alignment + volume + trend filter
-            if (alligator_long and vol_confirmed and trend_up):
+            # Long entry: price breaks above weekly upper BB with volume and trend filter
+            if (close[i] > upper_bb_1w_aligned[i] and 
+                vol_confirmed and 
+                trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Alligator bearish alignment + volume + trend filter
-            elif (alligator_short and vol_confirmed and trend_down):
+            # Short entry: price breaks below weekly lower BB with volume and trend filter
+            elif (close[i] < lower_bb_1w_aligned[i] and 
+                  vol_confirmed and 
+                  trend_down):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: Alligator bearish crossover or ATR stop
-            if (lips_shifted[i] < teeth_shifted[i] or 
-                close[i] < open_price[i] - 2.0 * atr_12h[i]):
+            # Long exit: price crosses below weekly lower BB or reverse signal
+            if close[i] < lower_bb_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Alligator bullish crossover or ATR stop
-            if (lips_shifted[i] > teeth_shifted[i] or 
-                close[i] > open_price[i] + 2.0 * atr_12h[i]):
+            # Short exit: price crosses above weekly upper BB or reverse signal
+            if close[i] > upper_bb_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_DailyEMA13_VolumeFilter"
+name = "12h_WeeklyBB20_2_DailyEMA20_VolumeFilter"
 timeframe = "12h"
 leverage = 1.0
