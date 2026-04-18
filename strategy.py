@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_12h_Donchian_Breakout_with_Volume_and_1dTrend
-Hypothesis: 6s Donchian(20) breakouts filtered by 12h trend (EMA34) and volume confirmation.
-Only take long when price breaks above 6h Donchian high, 12h EMA34 is rising, and volume > 1.5x average.
-Short when price breaks below 6h Donchian low, 12h EMA34 is falling, and volume > 1.5x average.
-Uses ATR-based volatility filter to avoid choppy markets.
-Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
-Works in bull/bear via trend filter and volume confirmation.
+4h_1D_Camarilla_R1S1_Breakout_Volume_V1
+Hypothesis: Use daily Camarilla R1/S1 levels for directional bias on 4h timeframe.
+Enter long when price breaks above daily R1 with volume > 1.3x average during active session (08-20 UTC).
+Enter short when price breaks below daily S1 with volume > 1.3x average during active session.
+Fixed position size 0.25. Uses volatility filter (ATR) to avoid chop.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+Works in bull/bear via volatility regime filter and session timing.
 """
 
 import numpy as np
@@ -23,77 +23,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA34 for trend direction
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 12h EMA34 slope for trend strength (rising/falling)
-    ema_slope = np.diff(ema_34_12h_aligned, prepend=ema_34_12h_aligned[0])
-    ema_rising = ema_slope > 0
-    ema_falling = ema_slope < 0
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # first day uses same day
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    # 6h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    range_1d = prev_high - prev_low
+    r1 = prev_close + range_1d * 1.1 / 12
+    s1 = prev_close - range_1d * 1.1 / 12
     
-    # Volatility filter: ATR(20) to avoid choppy markets
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(np.roll(close, 1) - low)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]
+    # Volatility filter: use ATR(20) to avoid choppy markets
+    tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.absolute(np.roll(close_1d, 1) - low_1d)
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high_1d[0] - low_1d[0]  # first day
     atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align all daily data to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
+    
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # need enough for EMA and Donchian
+    start_idx = 50  # need enough for ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr_20[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(atr_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > 1.3 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
-        # Volatility filter: avoid extreme volatility
-        vol_ma_long = pd.Series(atr_20).rolling(window=50, min_periods=50).mean().values
-        vol_filter = (not np.isnan(vol_ma_long[i])) and (atr_20[i] < vol_ma_long[i] * 2)
+        # Volatility filter: avoid extreme volatility (stop hunting)
+        vol_ma_long = pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr_20_aligned[i] < vol_ma_long[i] * 2 if not np.isnan(vol_ma_long[i]) else False
+        
+        # Only trade during active session
+        in_session = session_mask[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with uptrend and volume
-            if (close[i] > donchian_high[i] and ema_rising[i] and 
-                vol_confirm and vol_filter):
+            # Long: price breaks above R1 with volume and volatility filter during session
+            if close[i] > r1_aligned[i] and vol_confirm and vol_filter and in_session:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with downtrend and volume
-            elif (close[i] < donchian_low[i] and ema_falling[i] and 
-                  vol_confirm and vol_filter):
+            # Short: price breaks below S1 with volume and volatility filter during session
+            elif close[i] < s1_aligned[i] and vol_confirm and vol_filter and in_session:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below Donchian low or trend changes
-            if close[i] < donchian_low[i] or not ema_rising[i] or not vol_filter:
+            # Long exit: price returns below R1 or volatility spike or outside session
+            if close[i] < r1_aligned[i] or not vol_filter or not in_session:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above Donchian high or trend changes
-            if close[i] > donchian_high[i] or not ema_falling[i] or not vol_filter:
+            # Short exit: price returns above S1 or volatility spike or outside session
+            if close[i] > s1_aligned[i] or not vol_filter or not in_session:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -101,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Donchian_Breakout_with_Volume_and_1dTrend"
-timeframe = "6h"
+name = "4h_1D_Camarilla_R1S1_Breakout_Volume_V1"
+timeframe = "4h"
 leverage = 1.0
