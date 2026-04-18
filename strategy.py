@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1h Volume-Weighted RSI with 4h EMA Trend and 1d Volatility Filter
-Combines VW-RSI (7) for mean-reversion entries, 4h EMA50 for trend alignment,
-and 1d ATR percentile to filter low-volatility chop. Designed for 15-30 trades/year
-with discrete sizing to minimize fee drag. Works in both bull (dips in uptrend)
-and bear (bounces in downtrend) by fading extremes only when trend agrees.
+6h Elder Ray Power + Weekly Trend Filter
+Uses Elder Ray Bull/Bear Power from 1d to gauge institutional buying/selling pressure,
+combined with 1-week EMA trend filter. Takes long when bull power > 0 and above weekly EMA,
+short when bear power < 0 and below weekly EMA. Includes volume confirmation to avoid false signals.
+Designed for low trade frequency with edge in both bull (bull power persistence) and bear (bear power persistence) markets.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,96 +21,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate VW-RSI(7): RSI on typical price weighted by volume
-    typical_price = (high + low + close) / 3.0
-    change = np.diff(typical_price, prepend=typical_price[0])
-    pos_change = np.where(change > 0, change, 0.0)
-    neg_change = np.where(change < 0, -change, 0.0)
-    
-    # Volume-weighted smoothing
-    vol_pos = pos_change * volume
-    vol_neg = neg_change * volume
-    
-    vol_pos_ema = pd.Series(vol_pos).ewm(alpha=1/7, adjust=False).values
-    vol_neg_ema = pd.Series(vol_neg).ewm(alpha=1/7, adjust=False).values
-    
-    rs = vol_pos_ema / (vol_neg_ema + 1e-10)
-    vwrsi = 100.0 - (100.0 / (1.0 + rs))
-    
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Get 1d data for ATR percentile volatility filter
+    # Get 1d data for Elder Ray calculation (EMA13)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on 1d
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.absolute(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, tr2)
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate EMA13 for 1d (used in Elder Ray)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # ATR percentile rank (50-day lookback) - avoid low volatility
-    atr_percentile = pd.Series(atr_14).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
+    
+    # Align Elder Ray powers to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1-week EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Volume spike detection (1.5x 6-period average to reduce noise)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 100  # warmup period
+    start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(vwrsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(atr_percentile_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
+        ema_trend = ema34_1w_aligned[i]
         price = close[i]
-        rsi_val = vwrsi[i]
-        ema_trend = ema_50_4h_aligned[i]
-        vol_filter = atr_percentile_aligned[i]
-        
-        # Only trade when volatility is sufficient (above 30th percentile)
-        if vol_filter < 0.3:
-            signals[i] = 0.0
-            position = 0
-            continue
         
         if position == 0:
-            # Long: VW-RSI oversold (<30) and price above 4h EMA (uptrend)
-            if rsi_val < 30.0 and price > ema_trend:
-                signals[i] = 0.20
+            # Long: bull power positive (buying pressure) + price above weekly EMA + volume spike
+            if (bull_power > 0 and 
+                price > ema_trend and 
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: VW-RSI overbought (>70) and price below 4h EMA (downtrend)
-            elif rsi_val > 70.0 and price < ema_trend:
-                signals[i] = -0.20
+            # Short: bear power negative (selling pressure) + price below weekly EMA + volume spike
+            elif (bear_power < 0 and 
+                  price < ema_trend and 
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long position: hold until RSI reaches 50 (mean reversion target)
-            signals[i] = 0.20
-            if rsi_val >= 50.0:
+            # Long position: hold while bull power remains positive
+            signals[i] = 0.25
+            # Exit: bull power turns negative (selling pressure taking over)
+            if bull_power <= 0:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position: hold until RSI reaches 50
-            signals[i] = -0.20
-            if rsi_val <= 50.0:
+            # Short position: hold while bear power remains negative
+            signals[i] = -0.25
+            # Exit: bear power turns positive (buying pressure taking over)
+            if bear_power >= 0:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_VWRSI_4hEMA50_1dATRPercentile_Filter"
-timeframe = "1h"
+name = "6h_ElderRay_Power_WeeklyEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
