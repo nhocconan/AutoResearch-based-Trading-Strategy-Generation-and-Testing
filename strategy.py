@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian_20_Volume_Trend_HTF12h"
-timeframe = "4h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,18 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get daily data for Pivot Points
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Pivot Points for previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
+    
+    # Pivot Point calculation
+    pp = (high_prev + low_prev + close_prev) / 3.0
+    r1 = 2 * pp - low_prev
+    s1 = 2 * pp - high_prev
+    
+    # Align Pivot levels to 12h timeframe (using previous day's values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
-    
-    # Trend filter: 12h EMA34
-    df_12h = get_htf_data(prices, '12h')
-    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     # ATR for stop loss
     tr1 = high - np.roll(low, 1)
@@ -42,39 +50,37 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 60  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(ema34_12h_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        hh_val = highest_high[i]
-        ll_val = lowest_low[i]
-        ema_val = ema34_12h_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: Break above Donchian high with volume and above 12h EMA34
-            if high_val > hh_val and volume_filter[i] and close_val > ema_val:
+            # Long: Break above R1 with volume
+            if high_val > r1_val and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short: Break below Donchian low with volume and below 12h EMA34
-            elif low_val < ll_val and volume_filter[i] and close_val < ema_val:
+            # Short: Break below S1 with volume
+            elif low_val < s1_val and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         
         elif position == 1:
             # Long exit: Stop loss or reverse signal
-            if low_val <= entry_price - 2.0 * atr_val or low_val < ll_val:
+            if low_val <= entry_price - 2.0 * atr_val or low_val < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,7 +88,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: Stop loss or reverse signal
-            if high_val >= entry_price + 2.0 * atr_val or high_val > hh_val:
+            if high_val >= entry_price + 2.0 * atr_val or high_val > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
