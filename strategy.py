@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Weekly Donchian Breakout + Volume Spike + ADX Trend Filter
-Long when price breaks above weekly Donchian(20) high with volume spike and ADX > 25.
-Short when price breaks below weekly Donchian(20) low with volume spike and ADX > 25.
-Uses weekly timeframe for structure and daily for entry timing to reduce false breakouts.
-Designed for low trade frequency with clear trend-following edge in both bull and bear markets.
+4h_RSI_40_60_TrendPullback_VolumeFilter
+Long: RSI < 40 + price > EMA50 + volume spike + 1d trend up
+Short: RSI > 60 + price < EMA50 + volume spike + 1d trend down
+Exit: RSI crosses 50 or trend flips
+Designed for 4h timeframe with moderate trade frequency and trend-following + mean reversion blend.
+Works in bull via pullbacks to EMA50, works in bear via bounces off EMA50 in downtrend.
 """
 
 import numpy as np
@@ -21,104 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Donchian channels (20-period high/low)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # Calculate daily EMA50 for trend direction
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ADX(14) for trend strength on daily data
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # first value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # EMA50 on 4h
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA-like)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.nansum(data[:period]) / period
-            # Subsequent values: previous * (period-1)/period + current/period
-            for i in range(period, len(data)):
-                if not np.isnan(result[i-1]):
-                    result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Volume spike detection (2x 20-period average)
+    # Volume spike (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # need enough history for calculations
+    start_idx = 50  # need enough history
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(adx[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(ema_50[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        above_ema50 = price > ema_50[i]
+        below_ema50 = price < ema_50[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: break above weekly Donchian high with volume spike and strong trend
-            if (price > donchian_high_aligned[i] and 
-                volume_spike[i] and 
-                adx[i] > 25):
+            # Long: RSI < 40 (oversold), price above EMA50, uptrend, volume spike
+            if (rsi_val < 40 and above_ema50 and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly Donchian low with volume spike and strong trend
-            elif (price < donchian_low_aligned[i] and 
-                  volume_spike[i] and 
-                  adx[i] > 25):
+            # Short: RSI > 60 (overbought), price below EMA50, downtrend, volume spike
+            elif (rsi_val > 60 and below_ema50 and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: price breaks below weekly Donchian low (trend reversal)
-            if price < donchian_low_aligned[i]:
+            # Exit: RSI crosses above 50 or trend flips down
+            if rsi_val > 50 or ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: price breaks above weekly Donchian high (trend reversal)
-            if price > donchian_high_aligned[i]:
+            # Exit: RSI crosses below 50 or trend flips up
+            if rsi_val < 50 or ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_Volume_ADXFilter"
-timeframe = "1d"
+name = "4h_RSI_40_60_TrendPullback_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
