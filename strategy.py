@@ -1,13 +1,12 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_1D_AroonOscillator_Volume_Breakout
-Hypothesis: Use daily Aroon Oscillator to detect trend strength and direction, combined with volume confirmation and ATR filter for breakout entries.
-Long when Aroon Oscillator > 50 (strong uptrend) and price breaks above 6h high of last 20 bars with volume > 1.8x average.
-Short when Aroon Oscillator < -50 (strong downtrend) and price breaks below 6h low of last 20 bars with volume > 1.8x average.
-Aroon Oscillator provides trend filter to avoid counter-trend trades, reducing whipsaw in choppy markets.
-Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
-Works in bull/bear via trend filter and volume confirmation.
+4h_1D_Camarilla_R1S1_Breakout_Volume_V4
+Hypothesis: Use 1D Camarilla R1/S1 for directional bias with 4H entry, but with tighter volume confirmation (3x average) and reduced session window (12-20 UTC) to cut trades.
+Long when price breaks above daily R1 with volume > 3.0x average during 12-20 UTC.
+Short when price breaks below daily S1 with volume > 3.0x average during 12-20 UTC.
+Fixed position size 0.25. Added volatility filter (ATR) to avoid chop.
+Target: 10-20 trades/year per symbol (40-80 total over 4 years) to minimize fee drag.
+Works in bull/bear via volatility regime filter and session timing.
 """
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,123 +23,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Aroon Oscillator (trend filter)
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Aroon Oscillator calculation: Aroon Up - Aroon Down
-    # Aroon Up = ((period - periods since highest high) / period) * 100
-    # Aroon Down = ((period - periods since lowest low) / period) * 100
-    period = 25  # typical Aroon period
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # first day uses same day
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    def calculate_aroon(high_arr, low_arr, period):
-        n_days = len(high_arr)
-        aroon_up = np.full(n_days, np.nan)
-        aroon_down = np.full(n_days, np.nan)
-        
-        for i in range(period, n_days):
-            # Find highest high in last 'period' days
-            window_high = high_arr[i-period+1:i+1]
-            highest_high_idx = np.argmax(window_high)
-            periods_since_high = period - 1 - highest_high_idx
-            aroon_up[i] = ((period - periods_since_high) / period) * 100
-            
-            # Find lowest low in last 'period' days
-            window_low = low_arr[i-period+1:i+1]
-            lowest_low_idx = np.argmin(window_low)
-            periods_since_low = period - 1 - lowest_low_idx
-            aroon_down[i] = ((period - periods_since_low) / period) * 100
-        
-        # For first 'period' days, use available data
-        for i in range(period):
-            window_high = high_arr[:i+1]
-            highest_high_idx = np.argmax(window_high)
-            periods_since_high = i - highest_high_idx
-            aroon_up[i] = ((period - periods_since_high) / period) * 100
-            
-            window_low = low_arr[:i+1]
-            lowest_low_idx = np.argmin(window_low)
-            periods_since_low = i - lowest_low_idx
-            aroon_down[i] = ((period - periods_since_low) / period) * 100
-        
-        aroon_osc = aroon_up - aroon_down
-        return aroon_osc
+    # Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    range_1d = prev_high - prev_low
+    r1 = prev_close + range_1d * 1.1 / 12
+    s1 = prev_close - range_1d * 1.1 / 12
     
-    aroon_osc = calculate_aroon(high_1d, low_1d, period)
-    
-    # Precompute 6h breakout levels: high/low of last 20 periods
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Volatility filter: ATR(20) to avoid extreme volatility
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]  # first period
+    # Volatility filter: use ATR(20) to avoid choppy markets
+    tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.absolute(np.roll(close_1d, 1) - low_1d)
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high_1d[0] - low_1d[0]  # first day
     atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr_ma = pd.Series(atr_20).rolling(window=50, min_periods=50).mean().values
     
-    # Aroon Oscillator alignment to 6h timeframe
-    aroon_osc_aligned = align_htf_to_ltf(prices, df_1d, aroon_osc)
+    # Align all daily data to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
     
-    # Precompute session filter (08-20 UTC)
+    # Precompute session filter (12-20 UTC) - narrower window to reduce trades
     hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    session_mask = (hours >= 12) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # need enough for indicators
+    start_idx = 50  # need enough for ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(aroon_osc_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_20[i]) or 
-            np.isnan(atr_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(atr_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        vol_confirm = volume[i] > 1.8 * vol_ma[i]
+        # Volume confirmation: current volume > 3.0x 20-period average (much stricter)
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > 3.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
-        # Volatility filter: avoid extreme volatility
-        vol_filter = atr_20[i] < atr_ma[i] * 2
+        # Volatility filter: avoid extreme volatility (stop hunting)
+        vol_ma_long = pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr_20_aligned[i] < vol_ma_long[i] * 2 if not np.isnan(vol_ma_long[i]) else False
         
         # Only trade during active session
         in_session = session_mask[i]
         
         if position == 0:
-            # Long: strong uptrend (Aroon > 50) and breakout above recent high with volume
-            if (aroon_osc_aligned[i] > 50 and close[i] > high_20[i] and 
-                vol_confirm and vol_filter and in_session):
+            # Long: price breaks above R1 with volume and volatility filter during session
+            if close[i] > r1_aligned[i] and vol_confirm and vol_filter and in_session:
                 signals[i] = 0.25
                 position = 1
-            # Short: strong downtrend (Aroon < -50) and breakdown below recent low with volume
-            elif (aroon_osc_aligned[i] < -50 and close[i] < low_20[i] and 
-                  vol_confirm and vol_filter and in_session):
+            # Short: price breaks below S1 with volume and volatility filter during session
+            elif close[i] < s1_aligned[i] and vol_confirm and vol_filter and in_session:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend weakens (Aroon <= 0) or breakdown below recent low or outside session
-            if (aroon_osc_aligned[i] <= 0 or close[i] < low_20[i] or 
-                not vol_filter or not in_session):
+            # Long exit: price returns below R1 or volatility spike or outside session
+            if close[i] < r1_aligned[i] or not vol_filter or not in_session:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend weakens (Aroon >= 0) or breakout above recent high or outside session
-            if (aroon_osc_aligned[i] >= 0 or close[i] > high_20[i] or 
-                not vol_filter or not in_session):
+            # Short exit: price returns above S1 or volatility spike or outside session
+            if close[i] > s1_aligned[i] or not vol_filter or not in_session:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -148,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1D_AroonOscillator_Volume_Breakout"
-timeframe = "6h"
+name = "4h_1D_Camarilla_R1S1_Breakout_Volume_V4"
+timeframe = "4h"
 leverage = 1.0
