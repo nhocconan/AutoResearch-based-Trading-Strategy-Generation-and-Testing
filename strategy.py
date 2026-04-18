@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Breakout_VolumeTrend
-4h strategy using Keltner Channel breakouts with volume confirmation and trend filter.
-- Long: Close breaks above upper Keltner band + volume > 1.5x 20-period avg + EMA34 > EMA200
-- Short: Close breaks below lower Keltner band + volume > 1.5x 20-period avg + EMA34 < EMA200
-- Exit: Opposite breakout or trend reversal (EMA34 crosses EMA200)
-Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+1d_Camarilla_Pivot_Volume_Trend
+1d strategy using daily Camarilla pivot levels with volume confirmation and weekly trend filter.
+- Long: Close > H3 + volume > 1.5x weekly avg + weekly EMA34 > EMA89
+- Short: Close < L3 + volume > 1.5x weekly avg + weekly EMA34 < EMA89
+- Exit: Opposite pivot level touch or trend reversal
+Designed for ~5-15 trades/year per symbol (20-60 total over 4 years)
+Works in bull markets (trend continuation) and bear markets (mean reversion at extremes)
 """
 
 import numpy as np
@@ -23,90 +23,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for Keltner Channels
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = (atr[i-1] * 19 + tr[i]) / 20  # 20-period ATR
+    # Get weekly data for trend filter and volume average
+    df_1w = get_htf_data(prices, '1w')
     
-    # 20-period EMA for Keltner middle line
-    ema20 = np.zeros(n)
-    ema20[0] = close[0]
-    for i in range(1, n):
-        ema20[i] = (close[i] * 0.1) + (ema20[i-1] * 0.9)
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Keltner Channels (20, 2.0)
-    keltner_upper = ema20 + (2.0 * atr)
-    keltner_lower = ema20 - (2.0 * atr)
+    # Weekly EMA34 and EMA89 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_89_1w = pd.Series(close_1w).ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Get daily data for trend filter and volume average
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_89_aligned = align_htf_to_ltf(prices, df_1w, ema_89_1w)
+    
+    # Weekly volume average (10-period)
+    vol_ma_10 = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_10)
+    
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Daily EMA34 and EMA200 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Camarilla pivot levels for each day
+    # H3 = close + 1.1*(high-low)*1.1/2
+    # L3 = close - 1.1*(high-low)*1.1/2
+    # Using previous day's OHLC for current day's levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # first bar uses current bar
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Align Camarilla levels to daily timeframe (no additional delay needed)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need enough for EMA200
+    start_idx = 89  # need enough for EMA89
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(ema_89_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or
+            np.isnan(camarilla_l3_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend conditions
-        uptrend = ema_34_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_34_aligned[i] < ema_200_aligned[i]
+        uptrend = ema_34_aligned[i] > ema_89_aligned[i]
+        downtrend = ema_34_aligned[i] < ema_89_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > keltner_upper[i]
-        breakdown_down = close[i] < keltner_lower[i]
+        # Camarilla pivot conditions
+        above_h3 = close[i] > camarilla_h3_aligned[i]
+        below_l3 = close[i] < camarilla_l3_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above upper Keltner band
-            if uptrend and vol_confirm and breakout_up:
+            # Long: uptrend + volume + above H3
+            if uptrend and vol_confirm and above_h3:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below lower Keltner band
-            elif downtrend and vol_confirm and breakdown_down:
+            # Short: downtrend + volume + below L3
+            elif downtrend and vol_confirm and below_l3:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below lower band
-            if not uptrend or (vol_confirm and breakdown_down):
+            # Long exit: trend change, volume confirmation, or below L3 (mean reversion)
+            if not uptrend or (vol_confirm and below_l3):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above upper band
-            if not downtrend or (vol_confirm and breakout_up):
+            # Short exit: trend change, volume confirmation, or above H3 (mean reversion)
+            if not downtrend or (vol_confirm and above_h3):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -114,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Keltner_Breakout_VolumeTrend"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
