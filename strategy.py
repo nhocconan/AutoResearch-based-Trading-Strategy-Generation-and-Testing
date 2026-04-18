@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h KAMA Direction + Daily RSI + Volume Spike
-Strategy: Go long when KAMA is rising and RSI < 30 (oversold) with volume spike,
-          short when KAMA is falling and RSI > 70 (overbought) with volume spike.
-          Uses daily RSI for mean-reversion edge and KAMA for trend direction.
-          Designed for low trade frequency with mean-reversion in ranging markets
-          and trend following in trending markets.
+12h Bullish/Bearish Engulfing with 1w EMA Trend and Volume Confirmation
+Hypothesis: Engulfing candles on 12h timeframe signal strong momentum reversals.
+            Filter by weekly EMA200 to ensure trades align with long-term trend.
+            Volume confirmation ensures institutional participation.
+            Designed for low-frequency, high-conviction trades in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,46 +13,24 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
+    open_price = prices['open'].values
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily RSI(14)
-    daily_close = df_1d['close'].values
-    delta = np.diff(daily_close, prepend=daily_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate weekly EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate KAMA on 12h close
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if hasattr(np.sum, 'axis') else np.sum(np.abs(np.diff(close, prepend=close[0])))
-    # Correct volatility calculation for 10-period
-    volatility = np.zeros_like(close)
-    for i in range(1, len(close)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-        if i >= 10:
-            volatility[i] -= np.abs(close[i-10] - close[i-11]) if i >= 11 else 0
-    er = np.where(volatility > 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Align daily RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align weekly EMA to 12h timeframe
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     # Volume spike detection (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,47 +39,56 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # need enough history for calculations
+    start_idx = 200  # need enough history for EMA and pattern
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_aligned[i]) or 
-            np.isnan(kama[i]) or
+        if (np.isnan(ema_200_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        kama_val = kama[i]
-        rsi_val = rsi_aligned[i]
+        # Bullish engulfing: current green candle fully engulfs previous red candle
+        bullish_engulf = (close[i] > open_price[i] and  # current green
+                          close[i-1] < open_price[i-1] and  # previous red
+                          close[i] >= open_price[i-1] and   # current close >= prev open
+                          open_price[i] <= close[i-1])      # current open <= prev close
+        
+        # Bearish engulfing: current red candle fully engulfs previous green candle
+        bearish_engulf = (close[i] < open_price[i] and  # current red
+                          close[i-1] > open_price[i-1] and  # previous green
+                          close[i] <= open_price[i-1] and   # current close <= prev open
+                          open_price[i] >= close[i-1])      # current open >= prev close
+        
+        ema_200 = ema_200_1w_aligned[i]
         
         if position == 0:
-            # Long: KAMA rising, RSI oversold, volume spike
-            if i > 1 and kama_val > kama[i-1] and rsi_val < 30 and volume_spike[i]:
+            # Long: bullish engulfing above weekly EMA200 with volume spike
+            if bullish_engulf and close[i] > ema_200 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling, RSI overbought, volume spike
-            elif i > 1 and kama_val < kama[i-1] and rsi_val > 70 and volume_spike[i]:
+            # Short: bearish engulfing below weekly EMA200 with volume spike
+            elif bearish_engulf and close[i] < ema_200 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: KAMA falling or RSI overbought
-            if i > 0 and (kama_val < kama[i-1] or rsi_val > 70):
+            # Exit: bearish engulfing or price crosses below weekly EMA200
+            if bearish_engulf or close[i] < ema_200:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: KAMA rising or RSI oversold
-            if i > 0 and (kama_val > kama[i-1] or rsi_val < 30):
+            # Exit: bullish engulfing or price crosses above weekly EMA200
+            if bullish_engulf or close[i] > ema_200:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_KAMA_RSI_VolumeSpike"
+name = "12h_Engulfing_Trend_Volume"
 timeframe = "12h"
 leverage = 1.0
