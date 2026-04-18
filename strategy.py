@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1S1_Breakout_Volume_Confirmation
-Hypothesis: Daily Camarilla R1/S1 levels provide strong support/resistance. Breakouts above R1 or below S1 with volume confirmation capture strong momentum moves in both bull and bear markets. Uses 1D Camarilla levels and 4H volume confirmation to limit trades and improve win rate.
+1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter
+Hypothesis: Use weekly Camarilla pivot levels to identify breakout points on daily chart. Go long when price breaks above S4 with volume confirmation, short when breaks below R4. Uses weekly structure for stronger support/resistance and daily volume for confirmation. Designed to work in both bull and bear markets by capturing strong momentum moves. Targets 15-25 trades/year with position size 0.25.
 """
 
 import numpy as np
@@ -18,21 +18,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla R1 and S1 levels
-    # R1 = Close + 1.0833 * (High - Low)
-    # S1 = Close - 1.0833 * (High - Low)
-    camarilla_r1 = close_1d + 1.0833 * (high_1d - low_1d)
-    camarilla_s1 = close_1d - 1.0833 * (high_1d - low_1d)
+    # Calculate weekly Camarilla levels
+    # R4 = Close + 1.5 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    camarilla_r4 = close_1w + 1.5 * (high_1w - low_1w)
+    camarilla_s4 = close_1w - 1.5 * (high_1w - low_1w)
     
-    # Align Camarilla levels to 4h timeframe (wait for daily bar close)
-    r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align weekly Camarilla levels to daily timeframe (wait for weekly bar close)
+    r4_1d = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    s4_1d = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
     # Calculate volume average (20-period) for confirmation
     vol_ma = np.full(n, np.nan)
@@ -46,7 +46,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -55,28 +55,28 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation
-            if close[i] > r1_4h[i] and vol_confirmed:
+            # Long entry: price breaks above S4 with volume confirmation
+            if close[i] > s4_1d[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation
-            elif close[i] < s1_4h[i] and vol_confirmed:
+            # Short entry: price breaks below R4 with volume confirmation
+            elif close[i] < r4_1d[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses back below R1
-            if close[i] < r1_4h[i]:
+            # Long exit: price crosses back below S4
+            if close[i] < s4_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above S1
-            if close[i] > s1_4h[i]:
+            # Short exit: price crosses back above R4
+            if close[i] > r4_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1S1_Breakout_Volume_Confirmation"
-timeframe = "4h"
+name = "1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
