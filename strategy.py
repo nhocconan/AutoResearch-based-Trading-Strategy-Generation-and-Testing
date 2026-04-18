@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
+# #!/usr/bin/env python3
 """
-4h Triangular Moving Average (TMA) Pullback with Volume Confirmation and Weekly Trend Filter
-Hypothesis: TMA acts as dynamic support/resistance. Pullbacks to TMA with volume confirmation
-and weekly trend alignment capture high-probability mean-reversion bounces in both bull and bear markets.
-Designed for 15-35 trades/year on 4h timeframe. Uses weekly EMA50 for trend filter to avoid counter-trend trades.
+6h Bollinger Band Squeeze Breakout with Volume Spike and Daily Trend Filter
+Hypothesis: Bollinger Band squeeze (low volatility) followed by breakout with volume
+captures explosive moves. Daily EMA50 filters direction to avoid counter-trend trades.
+Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
+Designed for 12-37 trades/year on 6h timeframe with strict entry conditions.
 """
 
 import numpy as np
@@ -20,78 +21,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA trend filter (once before loop)
-    df_w = get_htf_data(prices, '1w')
+    # Get daily data for EMA filter (once before loop)
+    df_d = get_htf_data(prices, '1d')
     
-    # Weekly EMA50 for trend filter
-    ema_50_w = pd.Series(df_w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_w_aligned = align_htf_to_ltf(prices, df_w, ema_50_w)
+    # Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + (bb_std * bb_stddev)
+    lower = sma - (bb_std * bb_stddev)
+    bb_width = (upper - lower) / sma  # normalized width
     
-    # Triangular Moving Average (TMA) on 4h: SMA of SMA
-    # TMA(20) = SMA(SMA(close, 10), 10)
-    sma1 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
-    tma = pd.Series(sma1).rolling(window=10, min_periods=10).mean().values
+    # Bollinger Squeeze: width below 20-period average of width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
     
-    # Volume spike: 2x 20-period average on 4h
+    # Daily EMA50 for trend filter
+    ema_50 = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_d, ema_50)
+    
+    # Volume spike: 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
-    
-    # ATR for stop loss (4h ATR)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # enough for TMA calculation
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(tma[i]) or 
-            np.isnan(ema_50_w_aligned[i]) or
-            np.isnan(atr[i]) or
+        if (np.isnan(sma[i]) or 
+            np.isnan(upper[i]) or
+            np.isnan(lower[i]) or
+            np.isnan(ema_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        tma_val = tma[i]
-        ema_50_w = ema_50_w_aligned[i]
-        atr_val = atr[i]
+        ema = ema_aligned[i]
         
         if position == 0:
-            # Long: pullback to TMA support in uptrend (price above weekly EMA50)
-            if price > ema_50_w and price <= tma_val + 0.1 * atr_val and volume_spike[i]:
+            # Long: break above upper BB with volume spike and squeeze + price above EMA50
+            if price > upper[i] and volume_spike[i] and squeeze[i] and price > ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: pullback to TMA resistance in downtrend (price below weekly EMA50)
-            elif price < ema_50_w and price >= tma_val - 0.1 * atr_val and volume_spike[i]:
+            # Short: break below lower BB with volume spike and squeeze + price below EMA50
+            elif price < lower[i] and volume_spike[i] and squeeze[i] and price < ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: price moves above TMA resistance or ATR trailing stop
-            if price >= tma_val + 0.2 * atr_val or price < (high[i] - 1.5 * atr_val):
+            # Exit: price returns to middle Bollinger Band (mean reversion)
+            if price < sma[i]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: price moves below TMA support or ATR trailing stop
-            if price <= tma_val - 0.2 * atr_val or price > (low[i] + 1.5 * atr_val):
+            # Exit: price returns to middle Bollinger Band
+            if price > sma[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_TMA_Pullback_VolumeSpike_WeeklyEMA50"
-timeframe = "4h"
+name = "6h_BollingerSqueeze_Breakout_Volume_EMA50"
+timeframe = "6h"
 leverage = 1.0
