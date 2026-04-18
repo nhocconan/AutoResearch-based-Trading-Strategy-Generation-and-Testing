@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_Pullback_RSI_Volume_Trend_v1
-Strategy: 1h pullback to EMA21 in uptrend/downtrend with RSI filter and volume confirmation.
-Long: Uptrend (EMA21 > EMA50) + price pulls back to EMA21 + RSI < 40 + volume > 1.5x avg.
-Short: Downtrend (EMA21 < EMA50) + price pulls back to EMA21 + RSI > 60 + volume > 1.5x avg.
-Designed for 1h timeframe: ~20-40 trades/year per symbol (80-160 total over 4 years).
-Works in bull via trend-following pulls back; works in bear via shorting bounces in downtrend.
+6h_OrderBlock_Bounce_v1
+Strategy: 6h Order Block bounce with weekly trend filter.
+Long: Price bounces from bullish order block (bullish candle before downtrend) in weekly uptrend.
+Short: Price rejects from bearish order block (bearish candle before uptrend) in weekly downtrend.
+Uses weekly order blocks identified from prior candle's close vs open.
 """
 
 import numpy as np
@@ -22,87 +21,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (more stable than 1h EMA cross)
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly data for order blocks and trend
+    df_1w = get_htf_data(prices, '1w')
     
-    close_4h = df_4h['close'].values
-    # 4h EMA21 and EMA50 for trend filter
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Align 4h EMA to 1h timeframe
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly OHLC
+    weekly_open = df_1w['open'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_volume = df_1w['volume'].values
     
-    # 1h indicators for entry timing
-    close_s = pd.Series(close)
-    ema_21_1h = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50_1h = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    # RSI(14)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
-    # Volume average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Identify order blocks: bullish (close > open) and bearish (close < open)
+    bullish_ob = weekly_close > weekly_open
+    bearish_ob = weekly_close < weekly_open
+    
+    # Order block levels: use the body of the candle
+    ob_top = np.maximum(weekly_open, weekly_close)  # higher of open/close
+    ob_bottom = np.minimum(weekly_open, weekly_close)  # lower of open/close
+    
+    # Weekly trend: EMA50 vs EMA200
+    weekly_ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema_200 = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    weekly_uptrend = weekly_ema_50 > weekly_ema_200
+    weekly_downtrend = weekly_ema_50 < weekly_ema_200
+    
+    # Align weekly data to 6h timeframe
+    ob_top_aligned = align_htf_to_ltf(prices, df_1w, ob_top)
+    ob_bottom_aligned = align_htf_to_ltf(prices, df_1w, ob_bottom)
+    bullish_ob_aligned = align_htf_to_ltf(prices, df_1w, bullish_ob.astype(float))
+    bearish_ob_aligned = align_htf_to_ltf(prices, df_1w, bearish_ob.astype(float))
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA50 and RSI
+    start_idx = 50  # need enough for weekly EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(ema_21_1h[i]) or np.isnan(ema_50_1h[i]) or
-            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ob_top_aligned[i]) or np.isnan(ob_bottom_aligned[i]) or
+            np.isnan(bullish_ob_aligned[i]) or np.isnan(bearish_ob_aligned[i]) or
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend from 4h EMA (more reliable)
-        uptrend = ema_21_4h_aligned[i] > ema_50_4h_aligned[i]
-        downtrend = ema_21_4h_aligned[i] < ema_50_4h_aligned[i]
+        # Order block bounce conditions
+        # Long: price touches or enters bullish OB and weekly uptrend
+        long_condition = (bullish_ob_aligned[i] > 0.5 and 
+                         low[i] <= ob_top_aligned[i] and 
+                         high[i] >= ob_bottom_aligned[i] and
+                         weekly_uptrend_aligned[i] > 0.5)
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
-        
-        # Pullback to 1h EMA21 with RSI filter
-        near_ema21 = abs(close[i] - ema_21_1h[i]) < (0.005 * ema_21_1h[i])  # within 0.5%
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
+        # Short: price touches or enters bearish OB and weekly downtrend
+        short_condition = (bearish_ob_aligned[i] > 0.5 and
+                          high[i] >= ob_bottom_aligned[i] and
+                          low[i] <= ob_top_aligned[i] and
+                          weekly_downtrend_aligned[i] > 0.5)
         
         if position == 0:
-            # Long: uptrend + pullback to EMA21 + oversold RSI + volume
-            if uptrend and near_ema21 and rsi_oversold and vol_confirm:
-                signals[i] = 0.20
+            if long_condition:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + pullback to EMA21 + overbought RSI + volume
-            elif downtrend and near_ema21 and rsi_overbought and vol_confirm:
-                signals[i] = -0.20
+            elif short_condition:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, RSI overbought, or price breaks below EMA21
-            if not uptrend or rsi[i] > 70 or close[i] < ema_21_1h[i]:
-                signals[i] = 0.0  # exit to flat
-                position = 0
+            # Exit long: price breaks below OB bottom or trend change
+            if low[i] < ob_bottom_aligned[i] or weekly_uptrend_aligned[i] < 0.5:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, RSI oversold, or price breaks above EMA21
-            if not downtrend or rsi[i] < 30 or close[i] > ema_21_1h[i]:
-                signals[i] = 0.0  # exit to flat
-                position = 0
+            # Exit short: price breaks above OB top or trend change
+            if high[i] > ob_top_aligned[i] or weekly_downtrend_aligned[i] < 0.5:
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Pullback_RSI_Volume_Trend_v1"
-timeframe = "1h"
+name = "6h_OrderBlock_Bounce_v1"
+timeframe = "6h"
 leverage = 1.0
