@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h 12-hour EMA Trend + 4h Bollinger Breakout with Volume Confirmation
-Uses 12h EMA for trend direction and 4h Bollinger Bands for entry signals.
-Long when price breaks above upper band with volume and 12h EMA uptrend.
-Short when price breaks below lower band with volume and 12h EMA downtrend.
-Aims for low trade frequency with strong trend-following edge in both bull and bear markets.
+1h EMA Pullback + Volume Spike + 4h Trend Filter
+Trades pullbacks to 21 EMA in 4h trend direction with volume confirmation.
+Designed for low trade frequency (15-30/year) with high win rate in trending markets.
+Uses 4h EMA for trend direction, 1h EMA for entry timing, volume spike for confirmation.
 """
 
 import numpy as np
@@ -21,71 +20,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 4h data for trend direction (once before loop)
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA (34 period)
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 4h EMA21 for trend direction
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Bollinger Bands on 4h (20 period, 2 std)
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std)
-    lower_band = sma - (bb_std * std)
+    # 1h EMA21 for entry timing
+    ema_21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Volume spike detection (2x 4-period average)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection (2x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(50, bb_period)  # need enough history
+    start_idx = 40  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(sma[i]) or 
-            np.isnan(std[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_21_1h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend_up = ema_12h_aligned[i] > sma[i]  # EMA above SMA indicates uptrend
-        ema_trend_down = ema_12h_aligned[i] < sma[i]  # EMA below SMA indicates downtrend
+        ema_4h = ema_21_4h_aligned[i]
+        ema_1h = ema_21_1h[i]
         
         if position == 0:
-            # Long: price breaks above upper band with volume and 12h EMA uptrend
-            if (price > upper_band[i] and 
-                volume_spike[i] and ema_trend_up):
-                signals[i] = 0.25
+            # Long: price above 4h EMA (uptrend) + pulls back to 1h EMA + volume spike
+            if (price > ema_4h and 
+                price <= ema_1h * 1.005 and  # within 0.5% above EMA (pullback)
+                price >= ema_1h * 0.995 and  # within 0.5% below EMA
+                volume_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below lower band with volume and 12h EMA downtrend
-            elif (price < lower_band[i] and 
-                  volume_spike[i] and ema_trend_down):
-                signals[i] = -0.25
+            # Short: price below 4h EMA (downtrend) + pulls back to 1h EMA + volume spike
+            elif (price < ema_4h and 
+                  price <= ema_1h * 1.005 and  # within 0.5% above EMA (pullback)
+                  price >= ema_1h * 0.995 and  # within 0.5% below EMA
+                  volume_spike[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Long position management
-            signals[i] = 0.25
-            # Exit: price crosses below middle band (mean reversion)
-            if price < sma[i]:
+            signals[i] = 0.20
+            # Exit: price breaks below 1h EMA (trend weakness)
+            if price < ema_1h:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
-            signals[i] = -0.25
-            # Exit: price crosses above middle band (mean reversion)
-            if price > sma[i]:
+            signals[i] = -0.20
+            # Exit: price breaks above 1h EMA (trend weakness)
+            if price > ema_1h:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_12hEMA34_BollingerBreakout_Volume"
-timeframe = "4h"
+name = "1h_EMA_Pullback_VolumeSpike_4hTrend"
+timeframe = "1h"
 leverage = 1.0
