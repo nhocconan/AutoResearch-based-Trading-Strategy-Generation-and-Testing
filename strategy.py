@@ -1,7 +1,10 @@
-# 6H_WEEKLY_PIVOT_BREAKOUT_1D_TREND
-# Hypothesis: 6-hour breakouts above weekly R1 or below weekly S1 with 1-day EMA34 trend filter and volume confirmation.
-# Weekly pivots provide weekly support/resistance structure, EMA34 filters daily trend direction, volume confirms breakout strength.
-# Designed for low trade frequency (target: 12-37/year) with strong performance in both bull and bear markets.
+#!/usr/bin/env python3
+"""
+12h_Camarilla_R1S1_Breakout_1dTrend_Volume
+Hypothesis: 12-hour breakouts above Camarilla R1 or below S1 with 1-day EMA34 trend filter and volume confirmation.
+Camarilla levels provide precise daily support/resistance, EMA34 filters trend direction, volume confirms breakout strength.
+Designed for low trade frequency (target: 12-37/year) with strong performance in both bull and bear markets.
+"""
 
 import numpy as np
 import pandas as pd
@@ -9,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,66 +32,69 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema34_1d[i] = close_1d[i] * alpha + ema34_1d[i-1] * (1 - alpha)
     
-    # Align 1-day EMA34 to 6h timeframe
+    # Align 1-day EMA34 to 12h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate weekly pivots from previous week
-    # Weekly Pivot: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H
-    weekly_p = np.full(n, np.nan)
-    weekly_r1 = np.full(n, np.nan)
-    weekly_s1 = np.full(n, np.nan)
+    # Calculate Camarilla levels from previous day
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
     
     for i in range(1, n):
-        # Use previous week's OHLC (approximate using daily data from 1d timeframe)
-        # Since we don't have weekly data directly, we'll approximate using 5 daily periods
-        if i >= 5:  # Approximate weekly lookback (5 days)
-            week_high = np.max(high[i-5:i])
-            week_low = np.min(low[i-5:i])
-            week_close = close[i-1]
-            weekly_p[i] = (week_high + week_low + week_close) / 3
-            weekly_r1[i] = 2 * weekly_p[i] - week_low
-            weekly_s1[i] = 2 * weekly_p[i] - week_high
+        # Use previous day's OHLC (using daily data from 1d aggregation)
+        # For 12h data, we need to look back to previous day's values
+        if i >= 2:  # Need at least 2 bars for previous day
+            # Get previous day's high, low, close from 1d data
+            # Since we're using 12h timeframe, we need to map to daily bars
+            prev_day_idx = i - 2  # Previous day in 12h terms (2 bars = 1 day)
+            if prev_day_idx < len(df_1d):
+                prev_high = df_1d['high'].iloc[prev_day_idx]
+                prev_low = df_1d['low'].iloc[prev_day_idx]
+                prev_close = df_1d['close'].iloc[prev_day_idx]
+                range_val = prev_high - prev_low
+                camarilla_r1[i] = prev_close + range_val * 1.1 / 12
+                camarilla_s1[i] = prev_close - range_val * 1.1 / 12
     
-    # Volume spike: current volume > 2.0 x 20-period average
+    # Volume spike: current volume > 1.8 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 5)  # Ensure all indicators ready
+    start_idx = max(34, 20, 2)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_r1[i]) or np.isnan(weekly_s1[i]) or 
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above weekly R1 with volume spike and 1d uptrend
-            if (close[i] > weekly_r1[i] and vol_spike[i] and 
+            # Long: break above Camarilla R1 with volume spike and 1d uptrend
+            if (close[i] > camarilla_r1[i] and vol_spike[i] and 
                 close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S1 with volume spike and 1d downtrend
-            elif (close[i] < weekly_s1[i] and vol_spike[i] and 
+            # Short: break below Camarilla S1 with volume spike and 1d downtrend
+            elif (close[i] < camarilla_s1[i] and vol_spike[i] and 
                   close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below weekly S1 or 1d trend turns down
-            if (close[i] < weekly_s1[i] or close[i] < ema34_1d_aligned[i]):
+            # Long exit: close below Camarilla S1 or 1d trend turns down
+            if (close[i] < camarilla_s1[i] or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above weekly R1 or 1d trend turns up
-            if (close[i] > weekly_r1[i] or close[i] > ema34_1d_aligned[i]):
+            # Short exit: close above Camarilla R1 or 1d trend turns up
+            if (close[i] > camarilla_r1[i] or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WEEKLY_PIVOT_BREAKOUT_1D_TREND"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
