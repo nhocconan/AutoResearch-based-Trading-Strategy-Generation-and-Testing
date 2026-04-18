@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Trend_12hTrendFilter_V1
-Hypothesis: Trend-following strategy using Vortex Indicator on 4h for entry/exit, filtered by 12h EMA34 trend direction. The Vortex Indicator identifies trend direction and strength by comparing positive and negative vortex movement. Combined with 12h EMA34 trend filter to avoid counter-trend trades, this should work in both bull and bear markets by following the higher timeframe trend. Volume confirmation (>1.5x 24-period average) adds robustness. Target: 20-40 trades/year via trend-following with higher timeframe filter.
+1h_Camarilla_Pivot_R1_S1_Breakout_Volume_4hTrend
+Hypothesis: Camarilla pivot R1/S1 breakout on 1h with volume confirmation and 4h trend filter.
+Trade breakouts of R1 (resistance 1) and S1 (support 1) from previous day's Camarilla pivot levels.
+Only take long when price breaks above R1 with volume > 1.5x 24-period average and 4h close > 4h open (bullish).
+Only take short when price breaks below S1 with volume > 1.5x 24-period average and 4h close < 4h open (bearish).
+Session filter: 08-20 UTC to avoid low-volume periods. Fixed position size 0.20.
+Designed for 15-30 trades/year (~60-120 over 4 years) to avoid fee drag. Works in bull/bear by following intraday breakouts with trend alignment.
 """
 
 import numpy as np
@@ -18,70 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get daily data for Camarilla pivot calculation (previous day's OHLC)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h EMA34 for trend filter
-    ema_period = 34
-    close_12h = df_12h['close'].values
-    ema_12h = np.full_like(close_12h, np.nan)
+    # Calculate Camarilla pivot levels for each day
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    camarilla_r1 = np.full_like(close_1d, np.nan)
+    camarilla_s1 = np.full_like(close_1d, np.nan)
     
-    if len(close_12h) >= ema_period:
-        # Calculate EMA using Wilder's smoothing (alpha = 1/period)
-        alpha = 1.0 / ema_period
-        ema_12h[0] = close_12h[0]
-        for i in range(1, len(close_12h)):
-            ema_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_12h[i-1]
+    valid = ~(np.isnan(high_1d) | np.isnan(low_1d) | np.isnan(close_1d))
+    camarilla_r1[valid] = close_1d[valid] + 1.1 * (high_1d[valid] - low_1d[valid]) / 12
+    camarilla_s1[valid] = close_1d[valid] - 1.1 * (high_1d[valid] - low_1d[valid]) / 12
     
-    # Align 12h EMA to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align Camarilla levels to 1h timeframe (previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Vortex Indicator on 4h
-    vortex_period = 14
-    
-    # Calculate True Range
-    tr = np.maximum(
-        high[1:] - low[1:],
-        np.maximum(
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-    )
-    # Prepend first TR value (high-low for first bar)
-    tr = np.concatenate([[high[0] - low[0]], tr])
-    
-    # Calculate +VM and -VM
-    vm_plus = np.abs(high[1:] - low[:-1])
-    vm_minus = np.abs(low[1:] - high[:-1])
-    # Prepend first values
-    vm_plus = np.concatenate([[0], vm_plus])
-    vm_minus = np.concatenate([[0], vm_minus])
-    
-    # Sum over vortex_period
-    tr_sum = np.full_like(tr, np.nan)
-    vm_plus_sum = np.full_like(vm_plus, np.nan)
-    vm_minus_sum = np.full_like(vm_minus, np.nan)
-    
-    if len(tr) >= vortex_period:
-        for i in range(vortex_period - 1, len(tr)):
-            tr_sum[i] = np.sum(tr[i - vortex_period + 1:i + 1])
-            vm_plus_sum[i] = np.sum(vm_plus[i - vortex_period + 1:i + 1])
-            vm_minus_sum[i] = np.sum(vm_minus[i - vortex_period + 1:i + 1])
-    
-    # Calculate VI+ and VI-
-    vi_plus = np.full_like(tr, np.nan)
-    vi_minus = np.full_like(tr, np.nan)
-    
-    if len(tr) >= vortex_period:
-        for i in range(vortex_period - 1, len(tr)):
-            if tr_sum[i] != 0:
-                vi_plus[i] = vm_plus_sum[i] / tr_sum[i]
-                vi_minus[i] = vm_minus_sum[i] / tr_sum[i]
-    
-    # Align Vortex to 4h timeframe (same as input, but using alignment for consistency)
+    # Get 4h data for trend filter
     df_4h = get_htf_data(prices, '4h')
-    vi_plus_aligned = align_htf_to_ltf(prices, df_4h, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_4h, vi_minus)
+    close_4h = df_4h['close'].values
+    open_4h = df_4h['open'].values
+    
+    # 4h trend: bullish if close > open, bearish if close < open
+    bullish_4h = close_4h > open_4h
+    bearish_4h = close_4h < open_4h
+    
+    # Align 4h trend to 1h timeframe
+    bullish_4h_aligned = align_htf_to_ltf(prices, df_4h, bullish_4h.astype(float))
+    bearish_4h_aligned = align_htf_to_ltf(prices, df_4h, bearish_4h.astype(float))
     
     # Volume confirmation: volume > 1.5x 24-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -91,49 +64,40 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    volume_confirm = volume > 1.5 * vol_ma
     
-    start_idx = max(vortex_period, vol_period, 30)  # Ensure enough data
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
+    signals = np.zeros(n)
+    
+    start_idx = max(24, 1)  # Need volume MA and at least 1 bar
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(bullish_4h_aligned[i]) or np.isnan(bearish_4h_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Check session
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
         
-        if position == 0:
-            # Long: VI+ > VI- (bullish trend) + 12h EMA above price (uptrend) + volume
-            if vi_plus_aligned[i] > vi_minus_aligned[i] and close[i] > ema_12h_aligned[i] and vol_confirm:
-                signals[i] = 0.25
-                position = 1
-            # Short: VI- > VI+ (bearish trend) + 12h EMA below price (downtrend) + volume
-            elif vi_minus_aligned[i] > vi_plus_aligned[i] and close[i] < ema_12h_aligned[i] and vol_confirm:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Long exit: VI- > VI+ (trend reversal) or 12h EMA below price (trend change)
-            if vi_minus_aligned[i] > vi_plus_aligned[i] or close[i] < ema_12h_aligned[i]:
-                signals[i] = -0.25  # reverse to short
-                position = -1
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: VI+ > VI- (trend reversal) or 12h EMA above price (trend change)
-            if vi_plus_aligned[i] > vi_minus_aligned[i] or close[i] > ema_12h_aligned[i]:
-                signals[i] = 0.25  # reverse to long
-                position = 1
-            else:
-                signals[i] = -0.25
+        # Long: price breaks above R1 with volume and 4h bullish trend
+        if close[i] > r1_aligned[i] and volume_confirm[i] and bullish_4h_aligned[i] > 0.5:
+            signals[i] = 0.20
+        # Short: price breaks below S1 with volume and 4h bearish trend
+        elif close[i] < s1_aligned[i] and volume_confirm[i] and bearish_4h_aligned[i] > 0.5:
+            signals[i] = -0.20
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "4h_Vortex_Trend_12hTrendFilter_V1"
-timeframe = "4h"
+name = "1h_Camarilla_Pivot_R1_S1_Breakout_Volume_4hTrend"
+timeframe = "1h"
 leverage = 1.0
