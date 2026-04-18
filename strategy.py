@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Trend_Follow_with_Volume_and_Session_Filter
-Hypothesis: Use 4h/1d trend direction (EMA cross) for signal direction, 1h for entry timing with volume confirmation, and session filter (08-20 UTC) to reduce noise. Designed to work in both bull and bear markets by following higher timeframe trends with confirmation.
+6h_WeeklyPivot_R3S3_Fade_R4S4_Breakout_Volume_v1
+Hypothesis: Use 1-week Pivot Points (R3, S3, R4, S4) with volume confirmation to capture mean-reversion at extreme weekly levels (R3/S3) and breakout continuation at stronger levels (R4/S4). Works in both bull/bear markets by fading extremes and riding breakouts with volume confirmation. Targets 15-25 trades/year on 6H timeframe.
 """
 
 import numpy as np
@@ -17,29 +17,38 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # 4h EMA trend (fast/slow crossover)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_fast = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_slow = pd.Series(close_4h).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema_fast_aligned = align_htf_to_ltf(prices, df_4h, ema_fast)
-    ema_slow_aligned = align_htf_to_ltf(prices, df_4h, ema_slow)
+    # Calculate Weekly Pivot Points from previous week (1w timeframe)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # 1d EMA for additional trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Volume confirmation: >1.5x 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Use previous week's data for pivot calculation (avoid look-ahead)
+    prev_high = high_1w[:-1]  # All except last (current forming) week
+    prev_low = low_1w[:-1]
+    prev_close = close_1w[:-1]
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Pivot Point calculation
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    # R3, S3, R4, S4 levels
+    r3 = pp + 2 * (prev_high - prev_low)
+    s3 = pp - 2 * (prev_high - prev_low)
+    r4 = pp + 3 * (prev_high - prev_low)
+    s4 = pp - 3 * (prev_high - prev_low)
+    
+    # Align to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w[:-1], r3)  # Use df_1w[:-1] to match prev data
+    s3_aligned = align_htf_to_ltf(prices, df_1w[:-1], s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w[:-1], r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w[:-1], s4)
+    
+    # Volume confirmation: >1.8x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
@@ -47,45 +56,55 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_fast_aligned[i]) or np.isnan(ema_slow_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(in_session[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_fast_val = ema_fast_aligned[i]
-        ema_slow_val = ema_slow_aligned[i]
-        ema_1d_val = ema_1d_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        r4_val = r4_aligned[i]
+        s4_val = s4_aligned[i]
         vol_spike = volume_spike[i]
-        session_ok = in_session[i]
         
         if position == 0:
-            # Long: 4h EMA bullish + price above 1d EMA + volume + session
-            if ema_fast_val > ema_slow_val and price > ema_1d_val and vol_spike and session_ok:
-                signals[i] = 0.20
+            # Fade at R3/S3: Short at R3 with volume, Long at S3 with volume
+            if price > r3_val and vol_spike:
+                signals[i] = -0.25
+                position = -1
+            elif price < s3_val and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h EMA bearish + price below 1d EMA + volume + session
-            elif ema_fast_val < ema_slow_val and price < ema_1d_val and vol_spike and session_ok:
-                signals[i] = -0.20
+            # Breakout continuation at R4/S4: Long at R4 break, Short at S4 break
+            elif price > r4_val and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            elif price < s4_val and vol_spike:
+                signals[i] = -0.25
                 position = -1
         
-        elif position == 1:
-            signals[i] = 0.20
-            # Exit: 4h EMA bearish or price below 1d EMA
-            if ema_fast_val < ema_slow_val or price < ema_1d_val:
+        elif position == 1:  # Long position
+            signals[i] = 0.25
+            # Exit conditions: 
+            # 1. Mean reversion: price returns to pivot area (between S3 and R3)
+            # 2. Opposite extreme touched
+            if (price >= s3_val and price <= r3_val) or price < s4_val:
                 signals[i] = 0.0
                 position = 0
         
-        elif position == -1:
-            signals[i] = -0.20
-            # Exit: 4h EMA bullish or price above 1d EMA
-            if ema_fast_val > ema_slow_val or price > ema_1d_val:
+        elif position == -1:  # Short position
+            signals[i] = -0.25
+            # Exit conditions:
+            # 1. Mean reversion: price returns to pivot area (between S3 and R3)
+            # 2. Opposite extreme touched
+            if (price >= s3_val and price <= r3_val) or price > r4_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_4h_1d_Trend_Follow_with_Volume_and_Session_Filter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R3S3_Fade_R4S4_Breakout_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
