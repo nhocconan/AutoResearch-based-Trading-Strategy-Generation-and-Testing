@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_Direction_1dRSI_Pullback
-Hypothesis: Trade KAMA trend direction with 1d RSI pullback for high-probability entries in both bull and bear markets.
-KAMA adapts to market efficiency, reducing whipsaw in sideways markets while capturing strong trends.
-Enter long when KAMA turns up (bullish shift) and 1d RSI < 35 (oversold pullback in uptrend).
-Enter short when KAMA turns down (bearish shift) and 1d RSI > 65 (overbought pullback in downtrend).
-Require volume > 2x 24-period average for confirmation to avoid low-probability breakouts.
-Uses tight entry conditions to limit trades to 20-40 per year, reducing fee drag.
-Works in bull by following adaptive trend and in bear by capturing mean-reversion pullbacks.
+4h_Donchian20_Breakout_1dVolSpike_ATRFilter
+Hypothesis: Breakout above/below Donchian channel (20-period high/low) on 4h with 1-day volume spike confirmation (volume > 2x 20-day average) and ATR filter (ATR(14) > 0.5 * ATR(50)). Exit on opposite Donchian break or ATR-based trailing stop. Designed to capture strong trending moves while filtering false breakouts in choppy markets. Volume spike ensures institutional participation; ATR filter avoids low-volatility false signals. Works in bull/bear by following breakout direction. Targets ~25-40 trades/year via strict volume and volatility filters.
 """
 
 import numpy as np
@@ -16,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,106 +18,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI
+    # Get 1d data for volume and ATR
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d RSI(14) with proper Wilder smoothing
-    rsi_period = 14
+    # 1d Volume 20-period average
+    vol_ma = np.full_like(df_1d['volume'].values, np.nan)
+    vol_period = 20
+    vol_arr = df_1d['volume'].values
+    if len(vol_arr) >= vol_period:
+        for i in range(vol_period, len(vol_arr)):
+            vol_ma[i] = np.mean(vol_arr[i - vol_period:i])
+    
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    
+    # 1d ATR(14) and ATR(50)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    rsi_1d = np.full_like(close_1d, np.nan)
     
-    if len(close_1d) >= rsi_period + 1:
-        delta = np.diff(close_1d)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        # First average gain/loss
-        avg_gain = np.full_like(close_1d, np.nan)
-        avg_loss = np.full_like(close_1d, np.nan)
-        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
-        
-        # Wilder smoothing
-        for i in range(rsi_period + 1, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_1d = 100 - (100 / (1 + rs))
+    def calc_atr(h, l, c, period):
+        tr = np.full_like(h, np.nan)
+        for i in range(1, len(h)):
+            tr[i] = max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
+        atr = np.full_like(h, np.nan)
+        if len(h) >= period + 1:
+            atr[period] = np.mean(tr[1:period+1])
+            for i in range(period+1, len(h)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    # Align 1d RSI to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    atr14_1d = calc_atr(high_1d, low_1d, close_1d, 14)
+    atr50_1d = calc_atr(high_1d, low_1d, close_1d, 50)
     
-    # KAMA on 4h - get 4h data once
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50_1d)
+    
+    # Get 4h data for Donchian channel
     df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # KAMA parameters
-    fast_sc = 2 / (2 + 1)    # 2-period EMA smoothing constant
-    slow_sc = 2 / (30 + 1)   # 30-period EMA smoothing constant
+    # Donchian channel (20-period high/low)
+    donch_high = np.full_like(high_4h, np.nan)
+    donch_low = np.full_like(low_4h, np.nan)
+    period = 20
+    if len(high_4h) >= period:
+        for i in range(period-1, len(high_4h)):
+            donch_high[i] = np.max(high_4h[i - period + 1:i + 1])
+            donch_low[i] = np.min(low_4h[i - period + 1:i + 1])
     
-    kama = np.full_like(close_4h, np.nan)
-    
-    if len(close_4h) >= 1:
-        kama[0] = close_4h[0]
-        for i in range(1, len(close_4h)):
-            # Efficiency ratio: measures market efficiency (0 to 1)
-            change = abs(close_4h[i] - close_4h[i-1])
-            volatility = 0
-            for j in range(1, i+1):
-                volatility += abs(close_4h[j] - close_4h[j-1])
-            er = change / volatility if volatility != 0 else 0
-            # Smoothing constant: adaptive based on efficiency ratio
-            sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-            kama[i] = kama[i-1] + sc * (close_4h[i] - kama[i-1])
-    
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
-    
-    # Volume confirmation: volume > 2x 24-period average
-    vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24
-    
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, vol_period)  # KAMA needs ~30 periods, vol MA needs 24
+    start_idx = max(50, 20)  # Need ATR50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i]) or np.isnan(atr14_aligned[i]) or 
+            np.isnan(atr50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation: volume > 2x 20-day average
+        vol_confirm = volume[i] > 2.0 * vol_ma_aligned[i]
+        
+        # ATR filter: ATR(14) > 0.5 * ATR(50)
+        atr_filter = atr14_aligned[i] > 0.5 * atr50_aligned[i]
         
         if position == 0:
-            # Long: KAMA turning up + RSI pullback (<35) + volume confirmation
-            if i > 0 and not np.isnan(kama_aligned[i-1]) and kama_aligned[i] > kama_aligned[i-1] and rsi_1d_aligned[i] < 35 and vol_confirm:
+            # Long: breakout above Donchian high + volume + ATR filter
+            if close[i] > donch_high_aligned[i] and vol_confirm and atr_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turning down + RSI pullback (>65) + volume confirmation
-            elif i > 0 and not np.isnan(kama_aligned[i-1]) and kama_aligned[i] < kama_aligned[i-1] and rsi_1d_aligned[i] > 65 and vol_confirm:
+            # Short: breakout below Donchian low + volume + ATR filter
+            elif close[i] < donch_low_aligned[i] and vol_confirm and atr_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA turns down or RSI > 65 (overbought)
-            if (i > 0 and not np.isnan(kama_aligned[i-1]) and kama_aligned[i] < kama_aligned[i-1]) or rsi_1d_aligned[i] > 65:
+            # Long exit: close below Donchian low OR ATR-based stop (2*ATR below entry)
+            # Simplified: exit on opposite Donchian break
+            if close[i] < donch_low_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA turns up or RSI < 35 (oversold)
-            if (i > 0 and not np.isnan(kama_aligned[i-1]) and kama_aligned[i] > kama_aligned[i-1]) or rsi_1d_aligned[i] < 35:
+            # Short exit: close above Donchian high OR ATR-based stop
+            # Simplified: exit on opposite Donchian break
+            if close[i] > donch_high_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -131,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_Direction_1dRSI_Pullback"
+name = "4h_Donchian20_Breakout_1dVolSpike_ATRFilter"
 timeframe = "4h"
 leverage = 1.0
