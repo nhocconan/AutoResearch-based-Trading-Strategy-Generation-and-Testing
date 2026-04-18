@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1-week trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) and price > 1-week EMA(50) with volume > 1.5x average.
-# Short when Williams %R > -20 (overbought) and price < 1-week EMA(50) with volume > 1.5x average.
-# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts).
-# Williams %R identifies reversal points in ranging markets, 1-week EMA filters trend direction,
-# volume confirms conviction. Designed for ~15-25 trades/year on 12h timeframe.
-name = "12h_WilliamsR_1wEMA50_VolumeFilter"
-timeframe = "12h"
+# Hypothesis: 4h Bollinger Band breakout with 1d RSI trend filter and volume confirmation.
+# Long when price breaks above upper BB(20,2) with RSI(14) > 50 and volume > 1.5x 24-bar average.
+# Short when price breaks below lower BB(20,2) with RSI(14) < 50 and volume > 1.5x 24-bar average.
+# Exit when price crosses back inside Bollinger Bands.
+# Uses 1d RSI to filter counter-trend trades, volume to confirm conviction, and Bollinger Bands for volatility-based entry.
+# Designed for ~30-50 trades/year with low turnover to minimize fee drag.
+name = "4h_BollingerBreakout_1dRSI_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,61 +23,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-week data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # 1d data for RSI trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # EMA(50) on 1-week close
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # RSI(14) on 1d close
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = (100 - (100 / (1 + rs))).values
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Williams %R (14-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Bollinger Bands(20,2) on 4h close
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Volume filter: current volume > 1.5 * 24-period average (24 * 12h = 12 days)
+    # Volume filter: current volume > 1.5 * 24-period average (24 * 4h = 4 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_filter = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(williams_r[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(rsi_14_1d_aligned[i]) or np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        wr_val = williams_r[i]
-        ema_val = ema_50_1w_aligned[i]
+        rsi_val = rsi_14_1d_aligned[i]
+        upper = upper_bb[i]
+        lower = lower_bb[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: oversold with uptrend bias and volume
-            if wr_val < -80 and close_val > ema_val and vol_filter:
+            # Long: price breaks above upper BB with RSI > 50 and volume
+            if close_val > upper and rsi_val > 50 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought with downtrend bias and volume
-            elif wr_val > -20 and close_val < ema_val and vol_filter:
+            # Short: price breaks below lower BB with RSI < 50 and volume
+            elif close_val < lower and rsi_val < 50 and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R crosses above -50 (recovering from oversold)
-            if wr_val > -50:
+            # Long exit: price crosses back inside BB (below upper)
+            if close_val < upper:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses below -50 (declining from overbought)
-            if wr_val < -50:
+            # Short exit: price crosses back inside BB (above lower)
+            if close_val > lower:
                 signals[i] = 0.0
                 position = 0
             else:
