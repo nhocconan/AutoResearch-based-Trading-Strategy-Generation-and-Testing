@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Channel_Breakout_With_Volume_and_1wTrend
-Hypothesis: Breakouts above Keltner upper band with volume confirmation and above 1-week EMA50 indicate strong momentum in bull markets, while breakdowns below lower band with volume and below 1-week EMA50 capture bear market moves. Keltner channels adapt to volatility better than fixed bands, and weekly trend ensures alignment with higher-timeframe momentum. Designed for low trade frequency (target 20-50/year) to minimize fee decay while capturing sustained trends.
+1d_KAMA_Trend_With_RSI_Filter
+Hypothesis: Use 1d KAMA to determine trend direction and RSI for momentum confirmation. Enter long when KAMA turns up and RSI > 50, short when KAMA turns down and RSI < 50. This strategy aims to capture medium-term trends while avoiding whipsaws in sideways markets. Designed for low trade frequency to minimize fee drag, with trend following that works in both bull and bear markets by adapting to price action.
 """
 
 import numpy as np
@@ -10,76 +10,96 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Keltner Channel (20, 2.0) on 4h
-    # Middle = EMA20, Width = ATR(10) * 2
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_10 = pd.Series(high - low).ewm(span=10, adjust=False, min_periods=10).mean().values
-    upper = ema_20 + 2.0 * atr_10
-    lower = ema_20 - 2.0 * atr_10
+    # KAMA calculation
+    def kama(close, er_length=10, fast_sc=2, slow_sc=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        # Handle volatility calculation properly
+        vol_sum = np.zeros_like(close)
+        for i in range(len(close)):
+            start = max(0, i - 9)
+            vol_sum[i] = np.sum(np.abs(np.diff(close[start:i+1]))) if i > 0 else 0
+        er = np.where(vol_sum > 0, change / vol_sum, 0)
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Volume spike: >1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Calculate KAMA
+    kama_vals = kama(close)
     
-    # 1-week EMA50 trend filter
+    # RSI calculation
+    def rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).rolling(window=length, min_periods=length).mean().values
+        avg_loss = pd.Series(loss).rolling(window=length, min_periods=length).mean().values
+        rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_vals = rsi(close)
+    
+    # Weekly trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Need all indicators
+    start_idx = 50  # Need KAMA and RSI warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(kama_vals[i]) or 
+            np.isnan(rsi_vals[i]) or
+            np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # KAMA direction: current vs previous
+        kama_up = kama_vals[i] > kama_vals[i-1]
+        kama_down = kama_vals[i] < kama_vals[i-1]
+        rsi_val = rsi_vals[i]
+        weekly_ema = ema_1w_aligned[i]
         price = close[i]
-        up = upper[i]
-        lowb = lower[i]
-        vol_spike = volume_spike[i]
-        ema_50_val = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: price > upper band with volume spike and above weekly EMA50
-            if price > up and vol_spike and price > ema_50_val:
+            # Long: KAMA turning up, RSI > 50, and above weekly EMA
+            if kama_up and rsi_val > 50 and price > weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < lower band with volume spike and below weekly EMA50
-            elif price < lowb and vol_spike and price < ema_50_val:
+            # Short: KAMA turning down, RSI < 50, and below weekly EMA
+            elif kama_down and rsi_val < 50 and price < weekly_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < middle line (EMA20) or loss of weekly trend
-            if price < ema_20[i] or price < ema_50_val:
+            # Exit: KAMA turns down or RSI < 40
+            if kama_down or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > middle line or above weekly EMA50
-            if price > ema_20[i] or price > ema_50_val:
+            # Exit: KAMA turns up or RSI > 60
+            if kama_up or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Keltner_Channel_Breakout_With_Volume_and_1wTrend"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
