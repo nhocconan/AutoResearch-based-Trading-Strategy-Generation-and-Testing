@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_Zero_Cross_With_Volume_Spike_and_1dTrend
-Hypothesis: Go long when TRIX crosses above zero with volume spike and price above 1d EMA50; short when TRIX crosses below zero with volume spike and price below 1d EMA50. TRIX is a momentum oscillator that filters out insignificant price movements, effective in trending markets. Volume spike confirms institutional participation, and 1d EMA50 ensures alignment with long-term trend. Designed for low trade frequency to minimize fee drain while capturing high-probability momentum shifts.
+1d_TRIX_Zero_Cross_With_WeeklyTrend_and_Volume
+Hypothesis: Use TRIX(9) zero cross for momentum on daily timeframe, filtered by weekly trend (EMA34) and volume spike (>1.5x 20-day avg). TRIX captures smoothed momentum reversals, weekly trend ensures direction alignment, volume confirms institutional interest. Designed for low trade frequency (<25/year) to minimize fee drag while capturing multi-day momentum shifts in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf  # Note: align_ltf_to_htf is not used; using align_htf_to_ltf as per standard
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -16,66 +16,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX (1-period ROC of triple EMA)
-    # TRIX = 100 * (EMA3 - EMA3_prev) / EMA3_prev
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # First value has no previous
+    # TRIX(9) on daily close
+    # TRIX = EMA(EMA(EMA(close, 9), 9), 9); then % change
+    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = pd.Series(ema3).pct_change() * 100
+    trix = trix.fillna(0).values
     
-    # 1d EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume spike: >2.0x 20-period average
+    # Volume spike: >1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Need EMA50 and TRIX warmup
+    start_idx = 40  # Need TRIX warmup and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_spike[i]):
+        if (np.isnan(trix[i]) or 
+            np.isnan(ema_1w_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        ema50_val = ema50_1d_aligned[i]
+        trix_val = trix[i]
+        ema_1w_val = ema_1w_aligned[i]
         vol_spike = volume_spike[i]
-        trix_now = trix[i]
-        trix_prev = trix[i-1] if i > 0 else 0
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume spike and above 1d EMA50
-            if trix_now > 0 and trix_prev <= 0 and vol_spike and price > ema50_val:
+            # Long: TRIX crosses above zero with volume spike and above weekly EMA
+            if trix_val > 0 and trix[i-1] <= 0 and vol_spike and close[i] > ema_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume spike and below 1d EMA50
-            elif trix_now < 0 and trix_prev >= 0 and vol_spike and price < ema50_val:
+            # Short: TRIX crosses below zero with volume spike and below weekly EMA
+            elif trix_val < 0 and trix[i-1] >= 0 and vol_spike and close[i] < ema_1w_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: TRIX crosses below zero or price below 1d EMA50
-            if trix_now < 0 and trix_prev >= 0 or price < ema50_val:
+            # Exit: TRIX crosses below zero or below weekly EMA
+            if trix_val < 0 or close[i] < ema_1w_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: TRIX crosses above zero or price above 1d EMA50
-            if trix_now > 0 and trix_prev <= 0 or price > ema50_val:
+            # Exit: TRIX crosses above zero or above weekly EMA
+            if trix_val > 0 or close[i] > ema_1w_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_TRIX_Zero_Cross_With_Volume_Spike_and_1dTrend"
-timeframe = "4h"
+name = "1d_TRIX_Zero_Cross_With_WeeklyTrend_and_Volume"
+timeframe = "1d"
 leverage = 1.0
