@@ -1,9 +1,8 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Confirmation and ADX Trend Filter
-Hypothesis: Donchian channel breakouts capture momentum moves. Volume confirms institutional participation. 
-ADX filter ensures we only trade in trending markets (ADX > 25), avoiding whipsaws in ranging conditions.
-Works in both bull and bear markets by following breakout direction.
+4h Camarilla Pivot R1/S1 Breakout with Volume Spike and ADX Trend Filter
+Hypothesis: Camarilla pivot levels act as key support/resistance. Breakouts above R1 or below S1 with volume confirmation capture institutional moves. ADX filter (ADX > 25 on daily) ensures trading only in trending markets, reducing whipsaws in ranges. Works in both bull and bear markets by following breakout direction.
 """
 
 import numpy as np
@@ -63,22 +62,6 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
-    if len(high) < period:
-        return np.full_like(high, np.nan)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = np.zeros_like(high)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    return atr
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -89,38 +72,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX filter
+    # Get daily data for Camarilla pivot and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate ADX on daily timeframe
+    # Calculate Camarilla pivot levels from previous day
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    
+    # Align to 4h timeframe (values from previous day's close)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Calculate ADX on daily timeframe for trend filter
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Donchian channel (20-period)
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    
-    for i in range(len(high)):
-        if i < 19:
-            highest_high[i] = np.max(high[0:i+1]) if i >= 0 else high[i]
-            lowest_low[i] = np.min(low[0:i+1]) if i >= 0 else low[i]
-        else:
-            highest_high[i] = np.max(high[i-19:i+1])
-            lowest_low[i] = np.min(low[i-19:i+1])
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i < 19:
             vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -128,8 +113,9 @@ def generate_signals(prices):
     start_idx = 40  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -137,26 +123,26 @@ def generate_signals(prices):
         trending = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long breakout: price breaks above 20-period high with volume in trending market
-            if (close[i] > highest_high[i] and vol_spike[i] and trending):
+            # Long breakout: price breaks above R1 with volume in trending market
+            if (close[i] > r1_1d_aligned[i] and vol_spike[i] and trending):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below 20-period low with volume in trending market
-            elif (close[i] < lowest_low[i] and vol_spike[i] and trending):
+            # Short breakdown: price breaks below S1 with volume in trending market
+            elif (close[i] < s1_1d_aligned[i] and vol_spike[i] and trending):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below 20-period low or volatility ends
-            if close[i] < lowest_low[i] or not vol_spike[i]:
+            # Exit long: price returns below pivot or volatility ends
+            if close[i] < pivot_1d_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above 20-period high or volatility ends
-            if close[i] > highest_high[i] or not vol_spike[i]:
+            # Exit short: price returns above pivot or volatility ends
+            if close[i] > pivot_1d_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -164,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADXFilter"
+name = "4h_Camarilla_R1S1_Breakout_Volume_ADXFilter"
 timeframe = "4h"
 leverage = 1.0
