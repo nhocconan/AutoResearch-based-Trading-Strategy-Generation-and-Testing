@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with weekly ADX trend filter and volume confirmation.
-# Camarilla levels provide precise support/resistance levels derived from prior day's range.
-# Weekly ADX filter ensures we only trade in trending markets to avoid whipsaws in ranges.
+# Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation.
+# Donchian channels provide clear breakout levels based on price extremes.
+# 12h EMA trend filter ensures we only trade in the direction of higher timeframe trend.
 # Volume confirmation adds conviction to breakouts.
-# Designed for low trade frequency (12-37/year) to minimize fee drag in 12h timeframe.
-# Works in bull markets (breakouts above resistance) and bear markets (breakouts below support).
-name = "12h_Camarilla_R1_S1_Breakout_WeeklyADX_Volume"
-timeframe = "12h"
+# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
+# Works in bull markets (breakouts above upper band in uptrend) and bear markets (breakouts below lower band in downtrend).
+name = "4h_Donchian20_12hEMA21_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,83 +23,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ADX filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for EMA trend filter (ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Get daily data for Camarilla pivots (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    upper_band = high_20
+    lower_band = low_20
     
-    # Calculate weekly ADX (14-period)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    # Calculate 12h EMA (21-period)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # True Range calculation for weekly
-    tr1_w = high_w[1:] - low_w[1:]
-    tr2_w = np.abs(high_w[1:] - close_w[:-1])
-    tr3_w = np.abs(low_w[1:] - close_w[:-1])
-    tr_w = np.concatenate([[np.nan], np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))])
-    
-    # Directional Movement
-    dm_plus_w = np.where((high_w[1:] - high_w[:-1]) > (low_w[:-1] - low_w[1:]), 
-                         np.maximum(high_w[1:] - high_w[:-1], 0), 0)
-    dm_minus_w = np.where((low_w[:-1] - low_w[1:]) > (high_w[1:] - high_w[:-1]), 
-                          np.maximum(low_w[:-1] - low_w[1:], 0), 0)
-    dm_plus_w = np.concatenate([[0], dm_plus_w])
-    dm_minus_w = np.concatenate([[0], dm_minus_w])
-    
-    # Smoothed values using Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[:period])
-            for i in range(period, len(data)):
-                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                    result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
-                else:
-                    result[i] = np.nan
-        return result
-    
-    atr_w = wilders_smooth(tr_w, 14)
-    dm_plus_smooth = wilders_smooth(dm_plus_w, 14)
-    dm_minus_smooth = wilders_smooth(dm_minus_w, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_w > 0, 100 * dm_plus_smooth / atr_w, 0)
-    di_minus = np.where(atr_w > 0, 100 * dm_minus_smooth / atr_w, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smooth(dx, 14)
-    
-    # Align weekly ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Calculate daily Camarilla pivot levels
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
-    
-    # Pivot point
-    pivot = (high_d + low_d + close_d) / 3
-    
-    # Camarilla levels
-    range_d = high_d - low_d
-    r1 = close_d + (range_d * 1.1 / 12)
-    s1 = close_d - (range_d * 1.1 / 12)
-    r2 = close_d + (range_d * 1.1 / 6)
-    s2 = close_d - (range_d * 1.1 / 6)
-    r3 = close_d + (range_d * 1.1 / 4)
-    s3 = close_d - (range_d * 1.1 / 4)
-    r4 = close_d + (range_d * 1.1 / 2)
-    s4 = close_d - (range_d * 1.1 / 2)
-    
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Calculate 24-period average volume for confirmation (2 days of 12h data)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate 20-period average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -111,8 +50,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -124,25 +63,23 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_24[i]
-        
-        # Trend filter: ADX > 25 indicates trending market
-        trend_filter = adx_aligned[i] > 25
+        vol_confirm = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above R1 AND volume confirmation AND trend filter
-            long_breakout = close[i] > r1_aligned[i]
-            if vol_confirm and trend_filter and long_breakout:
+            # Long: price breaks above upper band AND 12h EMA uptrend AND volume confirmation
+            long_breakout = close[i] > upper_band[i]
+            uptrend = close[i] > ema_12h_aligned[i]
+            if vol_confirm and uptrend and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND volume confirmation AND trend filter
-            elif vol_confirm and trend_filter and close[i] < s1_aligned[i]:
+            # Short: price breaks below lower band AND 12h EMA downtrend AND volume confirmation
+            elif vol_confirm and (not uptrend) and close[i] < lower_band[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below S1 OR ADX drops below 20 (trend weakening)
-            exit_condition = close[i] < s1_aligned[i] or adx_aligned[i] < 20
+            # Long exit: price falls below lower band OR 12h EMA turns down
+            exit_condition = close[i] < lower_band[i] or close[i] <= ema_12h_aligned[i]
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -150,8 +87,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 OR ADX drops below 20 (trend weakening)
-            exit_condition = close[i] > r1_aligned[i] or adx_aligned[i] < 20
+            # Short exit: price rises above upper band OR 12h EMA turns up
+            exit_condition = close[i] > upper_band[i] or close[i] >= ema_12h_aligned[i]
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
