@@ -1,8 +1,11 @@
-# 12h Camarilla Pivot Breakout with Volume Confirmation and Trend Filter
-# Hypothesis: Camarilla pivot levels act as strong support/resistance in ranging and trending markets.
-# Breakouts above R3 or below S3 with volume confirmation and higher timeframe trend filter
-# capture institutional moves. Works in bull/bear by filtering breakouts with 1w trend.
-# Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+#!/usr/bin/env python3
+"""
+1h RSI Mean Reversion with 4h Trend Filter and Volume Spike
+Hypothesis: In 1h timeframe, RSI mean reversion works best when aligned with 4h trend direction.
+During strong trends, pullbacks to RSI extremes offer high-probability entries. Volume spike
+confirms participation at turning points. This reduces false signals in ranging markets.
+Designed for 15-30 trades/year to minimize fee drag on 1h chart.
+"""
 
 import numpy as np
 import pandas as pd
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,86 +21,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using daily high/low/close from previous day
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
+    # 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
+    rs = gain_ma / loss_ma
+    rsi = 100 - (100 / (1 + rs))
     
-    # First value: use current day's values as fallback
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # 4h EMA(34) for trend
+    df_4h = get_htf_data(prices, '4h')
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Pivot point and Camarilla levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    R3 = pivot + (range_val * 1.1 / 2)
-    R2 = pivot + (range_val * 1.1 / 4)
-    R1 = pivot + (range_val * 1.1 / 6)
-    S1 = pivot - (range_val * 1.1 / 6)
-    S2 = pivot - (range_val * 1.1 / 4)
-    S3 = pivot - (range_val * 1.1 / 2)
-    
-    # Volume filter: 2.0x 30-period average (higher threshold to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
-    
-    # 1-week trend filter (Higher Time Frame)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
-    # EMA 34 on weekly close
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Volume spike: 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for calculations
+    start_idx = 50  # Warmup for RSI and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ok = volume_filter[i]
-        weekly_trend_up = price > ema_34_1w_aligned[i]
-        weekly_trend_down = price < ema_34_1w_aligned[i]
+        rsi_val = rsi[i]
+        ema_trend = ema_4h_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: break above R3 with volume and weekly uptrend
-            if price > R3[i] and vol_ok and weekly_trend_up:
-                signals[i] = 0.25
+            # Long: RSI oversold in uptrend with volume spike
+            if rsi_val < 30 and price > ema_trend and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S3 with volume and weekly downtrend
-            elif price < S3[i] and vol_ok and weekly_trend_down:
-                signals[i] = -0.25
+            # Short: RSI overbought in downtrend with volume spike
+            elif rsi_val > 70 and price < ema_trend and vol_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long if price returns to pivot or weekly trend changes
-            if price < pivot[i] or not weekly_trend_up:
+            # Exit long: RSI overbought or trend reversal
+            if rsi_val > 70 or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short if price returns to pivot or weekly trend changes
-            if price > pivot[i] or not weekly_trend_down:
+            # Exit short: RSI oversold or trend reversal
+            if rsi_val < 30 or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Camarilla_Pivot_Breakout_Volume_Trend_Filter"
-timeframe = "12h"
+name = "1h_RSI_MeanReversion_4hTrend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
