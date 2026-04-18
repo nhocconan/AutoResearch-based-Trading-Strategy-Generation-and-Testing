@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h-based strategy combining Camarilla pivot levels (S1/R1) with 1d EMA(34) trend filter,
-volume confirmation, and ATR(14) stoploss. Uses Camarilla levels as dynamic support/resistance
-for mean-reversion entries in ranging markets and breakout confirmations in trending markets.
-Targets 20-50 trades/year to minimize fee drag while maintaining robustness across market regimes.
+Hypothesis: 1d-based strategy using 1-week RSI momentum and volume confirmation to capture medium-term trends.
+Long when weekly RSI > 50 and price breaks above daily Donchian(20) upper band with volume confirmation.
+Short when weekly RSI < 50 and price breaks below daily Donchian(20) lower band with volume confirmation.
+Uses volatility filter (ATR-based) to avoid choppy markets. Targets 7-25 trades/year to minimize fee drag.
+Works in both bull and bear markets by following weekly momentum while using daily breakouts for entry timing.
 """
 import numpy as np
 import pandas as pd
@@ -19,21 +20,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA(34) trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 1-week data for RSI(14) momentum filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(34) on 1d close
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2/35) + (ema_34_1d[i-1] * 33/35)
+    # Calculate RSI(14) on weekly close
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align 1d EMA to 4h timeframe
-    ema_34_1d_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Wilder's smoothing
+    avg_gain = np.full(len(close_1w), np.nan)
+    avg_loss = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(close_1w)):
+            avg_gain[i] = (gain[i] + 13 * avg_gain[i-1]) / 14
+            avg_loss[i] = (loss[i] + 13 * avg_loss[i-1]) / 14
     
-    # Calculate 4h ATR(14)
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_14_1w = 100 - (100 / (1 + rs))
+    
+    # Align weekly RSI to daily timeframe
+    rsi_14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
+    
+    # Calculate daily ATR(14) for volatility filter and position sizing
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = np.full(n, np.nan)
@@ -43,85 +55,72 @@ def generate_signals(prices):
         else:
             atr[i] = (tr[i] * 1/14) + (atr[i-1] * 13/14)
     
+    # Calculate daily Donchian(20) channels
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
+    
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla: based on previous day's range
-    # S1 = C - (H-L)*1.08/2, R1 = C + (H-L)*1.08/2
-    # Using previous day's data to avoid look-ahead
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = np.roll(close_1d, 1)  # previous day close
-    high_1d_prev = np.roll(high_1d, 1)    # previous day high
-    low_1d_prev = np.roll(low_1d, 1)      # previous day low
-    
-    # Calculate Camarilla S1 and R1 for each day
-    camarilla_s1_1d = np.full(len(close_1d), np.nan)
-    camarilla_r1_1d = np.full(len(close_1d), np.nan)
-    
-    for i in range(1, len(close_1d)):  # start from 1 to avoid look-ahead on day 0
-        if not (np.isnan(high_1d_prev[i]) or np.isnan(low_1d_prev[i]) or np.isnan(close_1d_prev[i])):
-            range_1d = high_1d_prev[i] - low_1d_prev[i]
-            camarilla_s1_1d[i] = close_1d_prev[i] - range_1d * 1.08 / 2
-            camarilla_r1_1d[i] = close_1d_prev[i] + range_1d * 1.08 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
-    camarilla_r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 1)  # need EMA, ATR, volume MA, and Camarilla
+    start_idx = max(20, 14)  # need Donchian, ATR, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1d_4h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(camarilla_s1_4h[i]) or np.isnan(camarilla_r1_4h[i])):
+        if (np.isnan(rsi_14_1w_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: price above/below 1d EMA34
-        trend_up = close[i] > ema_34_1d_4h[i]
-        trend_down = close[i] < ema_34_1d_4h[i]
+        # Volatility filter: avoid extremely low volatility (choppy) markets
+        vol_filter = atr[i] > 0.01 * close[i]  # ATR > 1% of price
+        
+        # Weekly momentum filter
+        bullish_momentum = rsi_14_1w_aligned[i] > 50
+        bearish_momentum = rsi_14_1w_aligned[i] < 50
         
         if position == 0:
-            # Long entry: price near S1 support with bullish bias
-            # Enter when price touches or goes slightly below S1, then reverses up
-            if (close[i] <= camarilla_s1_4h[i] + 0.1 * atr[i] and  # near S1
-                close[i] > camarilla_s1_4h[i] - 0.2 * atr[i] and   # not too far below
+            # Long entry: price above Donchian upper + weekly bullish momentum + volume + vol filter
+            if (close[i] > highest_high[i] and 
+                bullish_momentum and 
                 vol_confirmed and 
-                trend_up):
+                vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price near R1 resistance with bearish bias
-            # Enter when price touches or goes slightly above R1, then reverses down
-            elif (close[i] >= camarilla_r1_4h[i] - 0.1 * atr[i] and  # near R1
-                  close[i] < camarilla_r1_4h[i] + 0.2 * atr[i] and   # not too far above
+            # Short entry: price below Donchian lower + weekly bearish momentum + volume + vol filter
+            elif (close[i] < lowest_low[i] and 
+                  bearish_momentum and 
                   vol_confirmed and 
-                  trend_down):
+                  vol_filter):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price reaches R1 resistance or ATR-based stop
-            if close[i] >= camarilla_r1_4h[i] - 0.1 * atr[i]:
+            # Long exit: price below Donchian lower or weekly momentum turns bearish
+            if (close[i] < lowest_low[i] or 
+                not bullish_momentum):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches S1 support or ATR-based stop
-            if close[i] <= camarilla_s1_4h[i] + 0.1 * atr[i]:
+            # Short exit: price above Donchian upper or weekly momentum turns bullish
+            if (close[i] > highest_high[i] or 
+                not bearish_momentum):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_S1R1_1dEMA34_VolumeFilter"
-timeframe = "4h"
+name = "1d_WeeklyRSI_DonchianBreakout_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
