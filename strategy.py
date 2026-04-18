@@ -1,9 +1,12 @@
-# 4h Camarilla Pivot Breakout with Volume Spike and ADX Trend Filter
-# Strategy: Trade Camarilla pivot level breakouts (R1/S1) with volume confirmation.
-# Use ADX to filter trades in trending markets (ADX > 25) to avoid choppy whipsaws.
-# Targets 30-50 trades per year to minimize fee drag while capturing strong momentum.
-# Works in both bull and bear markets by following established trends.
-# Timeframe: 4h (primary), HTF: 1d for pivots and trend filter.
+#!/usr/bin/env python3
+"""
+1d Bollinger Band Width + RSI Mean Reversion with 1w Trend Filter
+Strategy: In low volatility (BBW < 20th percentile), look for mean reversion:
+          Long when RSI < 30 and price > 1w EMA200
+          Short when RSI > 70 and price < 1w EMA200
+          Uses weekly EMA200 as trend filter to align with higher timeframe direction.
+          Designed for low trade frequency with clear mean reversion edge in ranging markets.
+"""
 
 import numpy as np
 import pandas as pd
@@ -14,131 +17,98 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and ADX (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    # Using previous day's data to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate weekly EMA200 for trend filter
+    weekly_close = df_1w['close'].values
+    ema_200_1w = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Camarilla calculations
-    range_ = prev_high - prev_low
-    camarilla_r1 = prev_close + range_ * 1.1 / 12
-    camarilla_s1 = prev_close - range_ * 1.1 / 12
-    camarilla_r2 = prev_close + range_ * 1.1 / 6
-    camarilla_s2 = prev_close - range_ * 1.1 / 6
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_mult = 2
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=bb_period, min_periods=bb_period).mean()
+    bb_std = close_series.rolling(window=bb_period, min_periods=bb_period).std()
+    bb_upper = bb_middle + (bb_std * bb_mult)
+    bb_lower = bb_middle - (bb_std * bb_mult)
+    bb_width = bb_upper - bb_lower
+    bb_width_values = bb_width.values
     
-    # Calculate ADX for trend filtering
-    # +DI and -DI calculation
-    high_diff = df_1d['high'].diff()
-    low_diff = df_1d['low'].diff().multiply(-1)
+    # Calculate 50-period percentile rank of BBW for volatility regime
+    bb_width_series = pd.Series(bb_width_values)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
-    
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder smoothing
-            for i in range(period, len(data)):
-                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                    result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    atr_1d = wilders_smooth(tr.values, period)
-    plus_di_1d = 100 * wilders_smooth(plus_dm, period) / atr_1d
-    minus_di_1d = 100 * wilders_smooth(minus_dm, period) / atr_1d
-    dx_1d = 100 * abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smooth(dx_1d, period)
-    
-    # Align daily data to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Volume spike detection (2x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # RSI (14)
+    rsi_period = 14
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=rsi_period, min_periods=rsi_period).mean()
+    avg_loss = loss.rolling(window=rsi_period, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values  # fill NaN with 50 for start
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 100  # need enough history for calculations
+    start_idx = 200  # need enough history for weekly EMA200 and other indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(camarilla_r2_aligned[i]) or
-            np.isnan(camarilla_s2_aligned[i]) or
-            np.isnan(adx_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(bb_width_percentile[i]) or
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        r2 = camarilla_r2_aligned[i]
-        s2 = camarilla_s2_aligned[i]
-        adx = adx_1d_aligned[i]
+        bbw_percentile = bb_width_percentile[i]
+        rsi_val = rsi_values[i]
+        ema_200 = ema_200_1w_aligned[i]
         
-        # Only trade in trending markets (ADX > 25)
-        if adx <= 25:
-            # In chop, stay flat or reduce position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if position == 0:
-            # Long: break above R1 with volume spike
-            if price > r1 and volume_spike[i]:
+        # Low volatility regime: BBW < 20th percentile
+        if bbw_percentile < 20:
+            if position == 0:
+                # Long: RSI oversold and price above weekly EMA200
+                if rsi_val < 30 and price > ema_200:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: RSI overbought and price below weekly EMA200
+                elif rsi_val > 70 and price < ema_200:
+                    signals[i] = -0.25
+                    position = -1
+            
+            elif position == 1:
+                # Long position management
                 signals[i] = 0.25
-                position = 1
-            # Short: break below S1 with volume spike
-            elif price < s1 and volume_spike[i]:
+                # Exit: RSI returns to neutral (50) or volatility increases
+                if rsi_val >= 50 or bbw_percentile >= 30:
+                    signals[i] = 0.0
+                    position = 0
+            
+            elif position == -1:
+                # Short position management
                 signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Long position management
-            signals[i] = 0.25
-            # Exit: price breaks below S1 or reverses below R1
-            if price < s1 or price < r1:
-                signals[i] = 0.0
-                position = 0
-        
-        elif position == -1:
-            # Short position management
-            signals[i] = -0.25
-            # Exit: price breaks above R1 or reverses above S1
-            if price > r1 or price > s1:
+                # Exit: RSI returns to neutral (50) or volatility increases
+                if rsi_val <= 50 or bbw_percentile >= 30:
+                    signals[i] = 0.0
+                    position = 0
+        else:
+            # High volatility: stay flat
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_PivotBreakout_VolumeSpike_ADXFilter"
-timeframe = "4h"
+name = "1d_BBW_RSI_MeanReversion_1wEMA200"
+timeframe = "1d"
 leverage = 1.0
