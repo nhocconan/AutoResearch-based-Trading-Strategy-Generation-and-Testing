@@ -1,101 +1,45 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1d volume confirmation and 1w ADX trend filter.
-In trending markets (ADX > 25): Jaw-Teeth-Lips alignment gives directional bias.
-Long: Lips > Teeth > Jaw + volume confirmation. Short: Lips < Teeth < Jaw + volume.
-In ranging markets (ADX < 20): fade extremes at Bollinger Bands (2,2) on 12h.
-Designed for 15-30 trades/year to minimize fee drag on 12h timeframe.
+Hypothesis: 4h Williams %R (14) extreme reversals with 12h EMA(34) trend filter and volume confirmation.
+In oversold conditions (WR < -80) with bullish 12h trend and volume spike → long.
+In overbought conditions (WR > -20) with bearish 12h trend and volume spike → short.
+Weekly volatility filter avoids choppy markets. Designed for 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_ktf_data, align_ktf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_smma(data, period):
-    """Smoothed Moving Average (used in Williams Alligator)."""
-    smma = np.full(len(data), np.nan)
-    if len(data) < period:
-        return smma
-    smma[period-1] = np.mean(data[:period])
-    for i in range(period, len(data)):
-        smma[i] = (smma[i-1] * (period - 1) + data[i]) / period
-    return smma
-
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index."""
-    if len(close) < period + 1:
+def calculate_williams_r(high, low, close, period=14):
+    """Calculate Williams %R."""
+    if len(high) < period:
         return np.full(len(close), np.nan)
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    highest_high = np.full(len(high), np.nan)
+    lowest_low = np.full(len(low), np.nan)
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    for i in range(period-1, len(high)):
+        highest_high[i] = np.max(high[i-period+1:i+1])
+        lowest_low[i] = np.min(low[i-period+1:i+1])
     
-    # Smoothed values
-    atr = np.full(len(tr), np.nan)
-    dm_plus_smooth = np.full(len(dm_plus), np.nan)
-    dm_minus_smooth = np.full(len(dm_minus), np.nan)
-    
-    # First values (simple average)
-    if len(tr) >= period:
-        atr[period] = np.nanmean(tr[1:period+1])
-        dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
-        dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
-        
-        # Wilder smoothing
-        for i in range(period + 1, len(tr)):
-            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
-    
-    # Directional Indicators
-    di_plus = np.full(len(tr), np.nan)
-    di_minus = np.full(len(tr), np.nan)
-    dx = np.full(len(tr), np.nan)
-    
-    for i in range(period, len(tr)):
-        if atr[i] != 0:
-            di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
-            di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
-            if (di_plus[i] + di_minus[i]) != 0:
-                dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
-    
-    # ADX
-    adx = np.full(len(tr), np.nan)
-    for i in range(2*period, len(tr)):
-        if not np.isnan(dx[i-1]):
-            if i == 2*period:
-                adx[i] = np.nanmean(dx[period:2*period+1])
-            else:
-                adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-    
-    return adx
-
-def calculate_bbands(close, period=20, std_dev=2):
-    """Bollinger Bands."""
-    if len(close) < period:
-        return np.full(len(close), np.nan), np.full(len(close), np.nan), np.full(len(close), np.nan)
-    
-    sma = np.full(len(close), np.nan)
-    std = np.full(len(close), np.nan)
-    
+    wr = np.full(len(close), np.nan)
     for i in range(period-1, len(close)):
-        sma[i] = np.mean(close[i-period+1:i+1])
-        std[i] = np.std(close[i-period+1:i+1])
+        if highest_high[i] != lowest_low[i]:
+            wr[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            wr[i] = -50
     
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    return upper, sma, lower
+    return wr
+
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
+    ema = np.full(len(close), np.nan)
+    if len(close) < period:
+        return ema
+    ema[period-1] = np.mean(close[:period])
+    for i in range(period, len(close)):
+        ema[i] = (close[i] * 2 / (period + 1)) + ema[i-1] * (1 - 2 / (period + 1))
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
@@ -107,127 +51,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation
-    df_1d = get_ktf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for EMA(34) trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_ktf_data(prices, '1w')
+    # Get 1w data for volatility filter (ATR-based)
+    df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Williams Alligator on 12h (using SMMA)
-    jaw_period, teeth_period, lips_period = 13, 8, 5
-    jaw_offset, teeth_offset, lips_offset = 8, 5, 3
+    # Calculate EMA(34) on 12h
+    ema_34_12h = calculate_ema(close_12h, 34)
     
-    jaw = calculate_smma(close, jaw_period)
-    teeth = calculate_smma(close, teeth_period)
-    lips = calculate_smma(close, lips_period)
+    # Calculate ATR(14) on 1w for volatility filter
+    tr1 = np.zeros(len(high_1w))
+    tr2 = np.zeros(len(high_1w))
+    tr3 = np.zeros(len(high_1w))
+    tr1[1:] = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2[1:] = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3[1:] = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1w = np.zeros(len(tr))
+    for i in range(14, len(tr)):
+        atr_14_1w[i] = np.mean(tr[i-14:i])
+    atr_ma_1w = np.zeros(len(tr))
+    for i in range(28, len(tr)):  # 2-period MA of ATR
+        atr_ma_1w[i] = np.mean(atr_14_1w[i-2:i])
     
-    # Shift to avoid look-ahead (Alligator uses future values)
-    jaw = np.roll(jaw, jaw_offset)
-    teeth = np.roll(teeth, teeth_offset)
-    lips = np.roll(lips, lips_offset)
-    # Set NaN for rolled values
-    jaw[:jaw_offset] = np.nan
-    teeth[:teeth_offset] = np.nan
-    lips[:lips_offset] = np.nan
+    # Align to 4h timeframe
+    ema_34_12h_4h = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    atr_14_1w_4h = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    atr_ma_1w_4h = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
     
-    # ADX on 1w
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    # Calculate Williams %R on 4h
+    wr_14 = calculate_williams_r(high, low, close, 14)
     
-    # Bollinger Bands on 12h for ranging market signals
-    bb_upper, bb_middle, bb_lower = calculate_bbands(close, 20, 2)
-    
-    # Volume moving average (20-period) on 1d
-    vol_ma_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
-    
-    # Align all to 12h timeframe
-    jaw_12h = align_ktf_to_ltf(prices, df_1d, jaw)  # Using 1d as bridge for alignment
-    teeth_12h = align_ktf_to_ltf(prices, df_1d, teeth)
-    lips_12h = align_ktf_to_ltf(prices, df_1d, lips)
-    adx_12h = align_ktf_to_ltf(prices, df_1w, adx_1w)
-    bb_upper_12h = align_ktf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_12h = align_ktf_to_ltf(prices, df_1d, bb_lower)
-    vol_ma_12h = align_ktf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate volume moving average (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(jaw_period, teeth_period, lips_period, 20) + max(jaw_offset, teeth_offset, lips_offset)
+    start_idx = max(20, 34)  # need Williams %R and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw_12h[i]) or np.isnan(teeth_12h[i]) or np.isnan(lips_12h[i]) or 
-            np.isnan(adx_12h[i]) or np.isnan(bb_upper_12h[i]) or np.isnan(bb_lower_12h[i]) or
-            np.isnan(vol_ma_12h[i])):
+        if (np.isnan(wr_14[i]) or np.isnan(ema_34_12h_4h[i]) or 
+            np.isnan(atr_14_1w_4h[i]) or np.isnan(atr_ma_1w_4h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma_12h[i]
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
+        # Volatility filter: avoid extremely low volatility (chop)
+        vol_filter = atr_14_1w_4h[i] > 0.5 * atr_ma_1w_4h[i]
         
         if position == 0:
-            # Trending market (ADX > 25): Alligator alignment
-            if adx_12h[i] > 25:
-                # Long: Lips > Teeth > Jaw (bullish alignment)
-                if lips_12h[i] > teeth_12h[i] > jaw_12h[i] and vol_confirmed:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Lips < Teeth < Jaw (bearish alignment)
-                elif lips_12h[i] < teeth_12h[i] < jaw_12h[i] and vol_confirmed:
-                    signals[i] = -0.25
-                    position = -1
-            # Ranging market (ADX < 20): Bollinger Band fade
-            elif adx_12h[i] < 20:
-                # Long: price at or below lower BB
-                if close[i] <= bb_lower_12h[i] and vol_confirmed:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price at or above upper BB
-                elif close[i] >= bb_upper_12h[i] and vol_confirmed:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Williams %R oversold (< -80), bullish 12h trend, volume confirmation, not low vol
+            if wr_14[i] < -80 and close[i] > ema_34_12h_4h[i] and vol_confirmed and vol_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short: Williams %R overbought (> -20), bearish 12h trend, volume confirmation, not low vol
+            elif wr_14[i] > -20 and close[i] < ema_34_12h_4h[i] and vol_confirmed and vol_filter:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit conditions
-            if adx_12h[i] > 25:
-                # Exit trend: Alligator alignment breaks
-                if not (lips_12h[i] > teeth_12h[i] > jaw_12h[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: Williams %R crosses above -50 or trend turns bearish
+            if wr_14[i] > -50 or close[i] <= ema_34_12h_4h[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Exit range: price crosses above middle BB
-                if close[i] >= bb_middle[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit conditions
-            if adx_12h[i] > 25:
-                # Exit trend: Alligator alignment breaks
-                if not (lips_12h[i] < teeth_12h[i] < jaw_12h[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: Williams %R crosses below -50 or trend turns bullish
+            if wr_14[i] < -50 or close[i] >= ema_34_12h_4h[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Exit range: price crosses below middle BB
-                if close[i] <= bb_middle[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_WilliamsAlligator_1dVolume_1wADX"
-timeframe = "12h"
+name = "4h_WilliamsR_12hEMA34_Volume_VolFilter"
+timeframe = "4h"
 leverage = 1.0
