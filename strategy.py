@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_SR_Breakout_Volume_SRFilter
-12h strategy using Support/Resistance breakouts with volume confirmation and multi-timeframe trend filter.
-- Long: Close breaks above 1w High + volume > 1.5x avg + 1d EMA50 > EMA200
-- Short: Close breaks below 1w Low + volume > 1.5x avg + 1d EMA50 < EMA200
+4h_Camarilla_R1S1_Breakout_Volume
+4h strategy using Camarilla pivot levels with volume confirmation and 1d trend filter.
+- Long: Close breaks above R1 + volume > 1.5x avg + 1d EMA50 > EMA200
+- Short: Close breaks below S1 + volume > 1.5x avg + 1d EMA50 < EMA200
 - Exit: Opposite breakout or trend reversal
-Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
+Designed for ~25-35 trades/year per symbol (100-140 total over 4 years)
 Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,26 +23,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Support/Resistance levels
-    df_1w = get_htf_data(prices, '1w')
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly High and Low (resistance/support)
-    weekly_high = high_1w
-    weekly_low = low_1w
-    
-    # Align weekly S/R levels to 12h
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    
-    # Get daily data for trend filter and volume average
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    
+    # Calculate Camarilla pivot levels from previous day
+    # R1 = Close + 1.1 * (High - Low) / 12
+    # S1 = Close - 1.1 * (High - Low) / 12
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # Set first day values to avoid look-ahead
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    # Calculate pivot levels
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + 1.1 * camarilla_range / 12
+    s1 = prev_close - 1.1 * camarilla_range / 12
+    
+    # Align daily Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Daily EMA50 and EMA200 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -62,7 +68,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
             np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
@@ -76,21 +82,21 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > weekly_high_aligned[i]
-        breakdown_down = close[i] < weekly_low_aligned[i]
+        breakout_up = close[i] > r1_aligned[i]
+        breakdown_down = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above weekly high
+            # Long: uptrend + volume + breakout above R1
             if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below weekly low
+            # Short: downtrend + volume + breakdown below S1
             elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below weekly low
+            # Long exit: trend change, volume confirmation, or breakdown below S1
             if not uptrend or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
@@ -98,7 +104,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above weekly high
+            # Short exit: trend change, volume confirmation, or breakout above R1
             if not downtrend or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
@@ -107,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_SR_Breakout_Volume_SRFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
