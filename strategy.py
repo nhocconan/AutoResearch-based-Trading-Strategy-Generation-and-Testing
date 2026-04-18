@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band width squeeze breakout with 1d ADX trend filter and volume confirmation.
-# Bollinger Band width (BBW) identifies low volatility periods (squeeze).
-# Breakout occurs when price moves outside Bollinger Bands after a squeeze.
-# 1d ADX > 25 filters for trending markets to avoid false breakouts in ranging conditions.
-# Volume > 1.5x 20-period average confirms breakout strength.
-# Works in both bull and bear markets by trading breakouts in the direction of the 1d trend.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-name = "4h_BBW_Squeeze_Breakout_1dADX_Volume"
-timeframe = "4h"
+# Hypothesis: 12h Donchian breakout (20-period) with 1d ADX trend filter and volume confirmation.
+# Donchian breakouts capture momentum in trending markets; ADX > 25 ensures we only trade strong trends.
+# Volume > 1.5x 20-period average confirms breakout validity.
+# Works in both bull and bear markets by going long on upper breakouts and short on lower breakouts.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+name = "12h_Donchian20_1dADX25_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,20 +25,11 @@ def generate_signals(prices):
     # Get 1d data for ADX filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Bollinger Bands (20, 2)
-    close_s = pd.Series(close)
-    bb_mid = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Calculate Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Bollinger Band width squeeze: BBW < 50th percentile of past 50 bars
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.5).values
-    bb_squeeze = bb_width < bb_width_percentile
-    
-    # Calculate 1d ADX for trend filter
+    # Calculate ADX (14-period) on 1d timeframe
     high_1d = pd.Series(df_1d['high'].values)
     low_1d = pd.Series(df_1d['low'].values)
     close_1d = pd.Series(df_1d['close'].values)
@@ -49,7 +38,7 @@ def generate_signals(prices):
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - close_1d.shift(1))
     tr3 = np.abs(low_1d - close_1d.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
+    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1).values
     
     # Directional Movement
     dm_plus = np.where((high_1d - high_1d.shift(1)) > (low_1d.shift(1) - low_1d), 
@@ -57,24 +46,25 @@ def generate_signals(prices):
     dm_minus = np.where((low_1d.shift(1) - low_1d) > (high_1d - high_1d.shift(1)), 
                         np.maximum(low_1d.shift(1) - low_1d, 0), 0)
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    # Smooth TR, DM+ and DM- (14-period)
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_ma = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_ma = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_ma / tr_ma
+    di_minus = 100 * dm_minus_ma / tr_ma
     
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: current volume > 1.5 * 20-period average volume
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,37 +73,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bb_mid[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Look for breakout after squeeze
-            if bb_squeeze[i-1] and not bb_squeeze[i]:  # Squeeze just ended
-                # Long: price breaks above upper band AND trending up AND volume confirmed
-                if close[i] > bb_upper[i] and trending and volume_confirmed[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below lower band AND trending down AND volume confirmed
-                elif close[i] < bb_lower[i] and trending and volume_confirmed[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price breaks above upper Donchian channel + strong trend + volume confirmation
+            if close[i] > high_max[i] and strong_trend and volume_confirm[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below lower Donchian channel + strong trend + volume confirmation
+            elif close[i] < low_min[i] and strong_trend and volume_confirm[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle band OR squeeze returns
-            if close[i] < bb_mid[i] or bb_squeeze[i]:
+            # Long exit: price breaks below lower Donchian channel OR trend weakens
+            if close[i] < low_min[i] or adx_aligned[i] <= 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle band OR squeeze returns
-            if close[i] > bb_mid[i] or bb_squeeze[i]:
+            # Short exit: price breaks above upper Donchian channel OR trend weakens
+            if close[i] > high_max[i] or adx_aligned[i] <= 25:
                 signals[i] = 0.0
                 position = 0
             else:
