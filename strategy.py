@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-1h_Donchian20_VolumeBreakout_TrendFilter_1h
-1h strategy using Donchian channel breakouts with volume confirmation and 4h/1d trend filters.
-- Long: Price breaks above Donchian(20) high + volume > 1.5x avg + 4h EMA34 > EMA89 + 1d close > SMA50
-- Short: Price breaks below Donchian(20) low + volume > 1.5x avg + 4h EMA34 < EMA89 + 1d close < SMA50
-- Exit: Opposite breakout or trend reversal on 4h
-- Session filter: 08:00-20:00 UTC only
-Designed for 15-30 trades/year per symbol (60-120 total over 4 years)
-Uses 4h/1d for trend direction, 1h for precise entry timing
+6h_OrderBlock_OrderFlow_Imbalance
+6h strategy using order block detection and order flow imbalance from volume delta.
+- Long: Bullish order block + positive volume delta + price above 1w VWAP
+- Short: Bearish order block + negative volume delta + price below 1w VWAP
+- Exit: Opposite signal or price crosses 1w VWAP in opposite direction
+Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
+Works in bull markets (accumulation/demand zones) and bear markets (distribution/supply zones)
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtrf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,92 +23,118 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Get weekly data for VWAP and structure
+    df_1w = get_htf_data(prices, '1w')
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # 4h EMA34 and EMA89 for trend
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89_4h = pd.Series(close_4h).ewm(span=89, adjust=False, min_periods=89).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    ema_89_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_89_4h)
+    # Weekly VWAP (Volume Weighted Average Price)
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    vwap_1w = np.cumsum(typical_price_1w * volume_1w) / np.cumsum(volume_1w)
+    vwap_1w = np.where(np.cumsum(volume_1w) == 0, 0, vwap_1w)
     
-    # Get 1d data for additional trend filter
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    
+    # Daily data for volume delta calculation
     df_1d = get_htf_data(prices, '1d')
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    volume_1d = df_1d['volume'].values
     
-    # 1h Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Approximate volume delta using close position in daily range
+    # In real implementation, this would use tick data, but we approximate:
+    # If close > midpoint of range, buying pressure; if close < midpoint, selling pressure
+    daily_midpoint = (high_1d + low_1d) / 2.0
+    volume_delta_approx = np.where(close_1d > daily_midpoint, volume_1d, -volume_1d)
     
-    # 1h volume average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Smooth the volume delta to get order flow imbalance
+    vol_delta_smooth = pd.Series(volume_delta_approx).ewm(span=21, adjust=False, min_periods=21).mean().values
+    vol_delta_aligned = align_htf_to_ltf(prices, df_1d, vol_delta_smooth)
+    
+    # Detect order blocks (simplified: strong candle opposite to recent trend)
+    # Bullish order block: strong down candle followed by up move
+    # Bearish order block: strong up candle followed by down move
+    body_size = np.abs(close - open_) if 'open_' in locals() else np.abs(close - high)  # fallback
+    if 'open_' not in locals():
+        open_ = prices['open'].values
+    body_size = np.abs(close - open_)
+    candle_range = high - low
+    strong_candle = candle_range > 0  # avoid division by zero
+    body_ratio = np.where(candle_range > 0, body_size / candle_range, 0)
+    
+    # Bullish OB: bearish candle (close < open) with strong body, followed by bullish candle
+    bearish_candle = close < open_
+    bullish_candle = close > open_
+    
+    # Shift to get previous candle
+    bearish_prev = np.roll(bearish_candle, 1)
+    bullish_prev = np.roll(bullish_candle, 1)
+    bearish_prev[0] = False
+    bullish_prev[0] = False
+    
+    bullish_ob = bearish_prev & bullish_candle & (body_ratio > 0.6)
+    bearish_ob = bullish_prev & bearish_candle & (body_ratio > 0.6)
+    
+    bullish_ob_aligned = align_htf_to_ltf(prices, df_1d, bullish_ob.astype(float))
+    bearish_ob_aligned = align_htf_to_ltf(prices, df_1d, bearish_ob.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 89  # need enough for EMA89
+    start_idx = 30  # need enough for EMA smoothing
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is not available
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(ema_89_4h_aligned[i]) or 
-            np.isnan(sma_50_1d_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(vol_delta_aligned[i]) or
+            np.isnan(bullish_ob_aligned[i]) or np.isnan(bearish_ob_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend_4h = ema_34_4h_aligned[i] > ema_89_4h_aligned[i]
-        downtrend_4h = ema_34_4h_aligned[i] < ema_89_4h_aligned[i]
-        uptrend_1d = close[i] > sma_50_1d_aligned[i]
-        downtrend_1d = close[i] < sma_50_1d_aligned[i]
+        # Order flow conditions
+        positive_flow = vol_delta_aligned[i] > 0
+        negative_flow = vol_delta_aligned[i] < 0
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        # Order block signals
+        ob_bullish = bullish_ob_aligned[i] > 0.5
+        ob_bearish = bearish_ob_aligned[i] > 0.5
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > high_20[i]
-        breakdown_down = close[i] < low_20[i]
+        # VWAP position
+        above_vwap = close[i] > vwap_1w_aligned[i]
+        below_vwap = close[i] < vwap_1w_aligned[i]
         
         if position == 0:
-            # Long: 4h/1d uptrend + volume + breakout above Donchian high
-            if uptrend_4h and uptrend_1d and vol_confirm and breakout_up:
-                signals[i] = 0.20
+            # Long: bullish OB + positive flow + above VWAP
+            if ob_bullish and positive_flow and above_vwap:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h/1d downtrend + volume + breakdown below Donchian low
-            elif downtrend_4h and downtrend_1d and vol_confirm and breakdown_down:
-                signals[i] = -0.20
+            # Short: bearish OB + negative flow + below VWAP
+            elif ob_bearish and negative_flow and below_vwap:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal on 4h or Donchian breakdown
-            if not uptrend_4h or breakdown_down:
-                signals[i] = -0.20  # reverse to short
+            # Long exit: bearish OB with negative flow OR price crosses below VWAP
+            if (ob_bearish and negative_flow) or below_vwap:
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal on 4h or Donchian breakout
-            if not downtrend_4h or breakout_up:
-                signals[i] = 0.20  # reverse to long
+            # Short exit: bullish OB with positive flow OR price crosses above VWAP
+            if (ob_bullish and positive_flow) or above_vwap:
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Donchian20_VolumeBreakout_TrendFilter_1h"
-timeframe = "1h"
+name = "6h_OrderBlock_OrderFlow_Imbalance"
+timeframe = "6h"
 leverage = 1.0
