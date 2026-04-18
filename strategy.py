@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R1S1_Breakout_With_12hTrend
-Hypothesis: Weekly pivot R1/S1 levels act as strong support/resistance. Breakouts above R1 or below S1 with 12h EMA34 trend and volume confirmation capture directional moves. Weekly pivots adapt to volatility and work in both bull/bear markets. Volume ensures momentum, 12h EMA34 filters counter-trend trades. Target: 20-40 trades/year.
+4h_Camarilla_R1S1_Volume_Trend_Breakout_With_ATRStop
+Hypothesis: 4h price breaks above/below Camarilla R1/S1 levels with volume spike and trend confirmation.
+In bull markets, captures breakouts above R1; in bear markets, captures breakdowns below S1.
+Trend filter uses 1d EMA34 to avoid counter-trend trades. Volume spike ensures momentum confirmation.
+Designed for 15-25 trades/year to minimize fee drift while capturing strong directional moves.
 """
 
 import numpy as np
@@ -18,86 +21,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly pivot points from weekly high/low/close
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # ATR for ATR stop and Camarilla
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pivot point and support/resistance levels
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
+    # Camarilla levels from previous day (using daily high/low/close)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to 6h timeframe (weekly pivot is fixed for the week)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Calculate Camarilla levels for each 4h bar using previous day's range
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    range_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + range_1d * 1.1 / 12
+    camarilla_s1 = close_1d - range_1d * 1.1 / 12
     
-    # Volume spike: >1.5x 20-period average
+    # Align to 4h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume spike: >1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
-    # Trend filter: 12h EMA34
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Trend filter: 1d EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20)  # Warmup for EMA and indicators
+    start_idx = max(35, 20)  # Warmup for EMA and ATR
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_12h_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema34 = ema_34_12h_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        ema34 = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
+        atr_val = atr[i]
         
         if position == 0:
             # Long: price breaks above R1 with volume spike and uptrend
-            if price > r1_val and vol_spike and price > ema34:
+            if price > r1 and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 with volume spike and downtrend
-            elif price < s1_val and vol_spike and price < ema34:
+            elif price < s1 and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses below pivot OR trend turns down
-            if price < pivot_aligned[i]:
+            # ATR stop or trend reversal
+            if price < r1 - 1.5 * atr_val:  # ATR stop
                 signals[i] = 0.0
                 position = 0
-            elif price < ema34:
+            elif price < ema34:  # trend reversal
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses above pivot OR trend turns up
-            if price > pivot_aligned[i]:
+            # ATR stop or trend reversal
+            if price > s1 + 1.5 * atr_val:  # ATR stop
                 signals[i] = 0.0
                 position = 0
-            elif price > ema34:
+            elif price > ema34:  # trend reversal
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_Breakout_With_12hTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Volume_Trend_Breakout_With_ATRStop"
+timeframe = "4h"
 leverage = 1.0
