@@ -1,140 +1,133 @@
 #!/usr/bin/env python3
 """
-1h RSI Divergence + 4h Trend + Volume Spike
-Hypothesis: RSI divergences signal momentum exhaustion; when combined with 4h trend direction and volume spikes, they capture high-probability reversals. Works in bull/bear markets by following the 4h trend (long in uptrend, short in downtrend). Low trade frequency (~20-40/year) avoids fee drag.
+4h Williams Fractal Breakout with 1d Trend Filter
+Hypothesis: Williams fractals identify key support/resistance levels where price breaks out with momentum. Combined with 1d trend filter (EMA50) to avoid counter-trend trades and volume confirmation to ensure institutional participation, this captures strong breakout moves in both bull and bear markets. Works because fractals are lagging indicators that only form after price has already shown rejection at a level, making breakouts more meaningful.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index"""
-    if len(close) < period + 1:
-        return np.full_like(close, np.nan, dtype=np.float64)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_ema(arr, period):
+    """Calculate Exponential Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    alpha = 2 / (period + 1)
+    ema = np.zeros_like(arr)
+    ema[0] = arr[0]
+    for i in range(1, len(arr)):
+        ema[i] = alpha * arr[i] + (1 - alpha) * ema[i-1]
+    return ema
 
-def find_divergences(prices, rsi, lookback=14):
-    """Find bullish and bearish RSI divergences"""
-    n = len(prices)
-    bull_div = np.zeros(n, dtype=bool)
-    bear_div = np.zeros(n, dtype=bool)
+def calculate_williams_fractals(high, low):
+    """Calculate Williams Fractals: bearish (up) and bullish (down)"""
+    n = len(high)
+    bearish = np.zeros(n, dtype=bool)  # peak fractal
+    bullish = np.zeros(n, dtype=bool)   # trough fractal
     
-    for i in range(lookback, n):
-        # Look for price making lower low while RSI makes higher low (bullish div)
-        if i >= lookback * 2:
-            price_low_idx = np.argmin(prices[i-lookback:i+1]) + i - lookback
-            rsi_low_idx = np.argmin(rsi[i-lookback:i+1]) + i - lookback
-            if (prices[price_low_idx] < prices[i-lookback] and 
-                rsi[rsi_low_idx] > rsi[i-lookback] and
-                rsi[i] < 40):  # Oversold condition
-                bull_div[i] = True
-        
-        # Look for price making higher high while RSI makes lower high (bearish div)
-        if i >= lookback * 2:
-            price_high_idx = np.argmax(prices[i-lookback:i+1]) + i - lookback
-            rsi_high_idx = np.argmax(rsi[i-lookback:i+1]) + i - lookback
-            if (prices[price_high_idx] > prices[i-lookback] and 
-                rsi[rsi_high_idx] < rsi[i-lookback] and
-                rsi[i] > 60):  # Overbought condition
-                bear_div[i] = True
+    for i in range(2, n - 2):
+        # Bearish fractal: high[i] is highest among 5 bars
+        if (high[i] > high[i-2] and high[i] > high[i-1] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            bearish[i] = True
+        # Bullish fractal: low[i] is lowest among 5 bars
+        if (low[i] < low[i-2] and low[i] < low[i-1] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            bullish[i] = True
     
-    return bull_div, bear_div
+    return bearish, bullish
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate RSI on 1h
-    rsi = calculate_rsi(close, 14)
+    # Calculate Williams Fractals on 4h data
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high, low)
     
-    # Find divergences
-    bull_div, bear_div = find_divergences(close, rsi, 14)
+    # Williams fractals need 2 extra bars for confirmation (they form after the fact)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, 
+                                               pd.DataFrame({'high': high, 'low': low}), 
+                                               bearish_fractal.astype(float),
+                                               additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, 
+                                               pd.DataFrame({'high': high, 'low': low}), 
+                                               bullish_fractal.astype(float),
+                                               additional_delay_bars=2)
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = np.zeros_like(close_4h)
-    if len(close_4h) >= 21:
-        alpha = 2 / (21 + 1)
-        ema_4h[0] = close_4h[0]
-        for i in range(1, len(close_4h)):
-            ema_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema_4h[i-1]
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, 50)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
-            start_idx = max(0, i - 19)
-            vol_ma[i] = np.mean(volume[start_idx:i+1]) if i >= start_idx else volume[i]
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter: 1 = uptrend (price > EMA), -1 = downtrend (price < EMA)
-        trend = 1 if close[i] > ema_4h_aligned[i] else -1
+        trend = 1 if close[i] > ema_1d_aligned[i] else -1
         
         if position == 0:
-            # Enter long: bullish divergence + volume spike + uptrend
-            if bull_div[i] and vol_spike[i] and trend == 1:
-                signals[i] = 0.20
+            # Enter long: bullish fractal breakout + volume + uptrend
+            if (bullish_fractal_aligned[i] and 
+                vol_confirm[i] and 
+                trend == 1):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: bearish divergence + volume spike + downtrend
-            elif bear_div[i] and vol_spike[i] and trend == -1:
-                signals[i] = -0.20
+            # Enter short: bearish fractal breakout + volume + downtrend
+            elif (bearish_fractal_aligned[i] and 
+                  vol_confirm[i] and 
+                  trend == -1):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish divergence or trend change
-            if bear_div[i] or trend == -1:
+            # Exit long: price closes below the bullish fractal level or trend changes
+            # We use a simple exit: trend reversal
+            if trend == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish divergence or trend change
-            if bull_div[i] or trend == 1:
+            # Exit short: price closes above the bearish fractal level or trend changes
+            if trend == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSIDivergence_4hTrend_VolumeSpike"
-timeframe = "1h"
+name = "4h_Williams_Fractal_Breakout_1dTrendFilter"
+timeframe = "4h"
 leverage = 1.0
