@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Trix_15_Signal_MeanReversion
-Hypothesis: TRIX (15) mean reversion on 12h timeframe with volume confirmation and weekly trend filter.
-TRIX crossing above zero with volume spike indicates bullish momentum; crossing below zero indicates bearish.
-Weekly EMA34 filter ensures alignment with higher timeframe trend.
-Target: 12-37 trades/year to stay within optimal range for 12h timeframe.
+4h_ThreeLineBreak_Reversal_Confirmation
+Hypothesis: Three Line Break (TLB) reversal signals filtered by 1w EMA trend and volume spike, with ATR-based exit. 
+TLB captures momentum shifts; 1w EMA ensures alignment with higher timeframe trend; volume confirms institutional participation. 
+Works in both bull/bear by following trend direction. Target: 20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -16,21 +15,68 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX (15) calculation: triple EMA of ROC
-    roc = np.diff(np.log(close), prepend=np.log(close[0])) * 100  # ROC as percentage
-    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3  # TRIX is the third EMA of ROC
+    # Calculate Three Line Break (TLB)
+    # TLB: new line when price moves beyond prior 3 lines in opposite direction
+    tblb_direction = np.zeros(n)  # 1=up, -1=down, 0=no change
+    line_high = np.full(n, np.nan)
+    line_low = np.full(n, np.nan)
     
-    # Weekly trend filter: EMA34
+    if n > 0:
+        line_high[0] = high[0]
+        line_low[0] = low[0]
+        tblb_direction[0] = 0
+        
+        reversal_count = 0
+        last_dir = 0
+        
+        for i in range(1, n):
+            if last_dir >= 0:  # in up trend or neutral
+                if low[i] < line_low[i-1]:
+                    reversal_count += 1
+                    if reversal_count >= 3:
+                        tblb_direction[i] = -1
+                        line_high[i] = high[i]
+                        line_low[i] = low[i]
+                        last_dir = -1
+                        reversal_count = 0
+                    else:
+                        tblb_direction[i] = last_dir
+                        line_high[i] = max(line_high[i-1], high[i])
+                        line_low[i] = line_low[i-1]
+                else:
+                    tblb_direction[i] = last_dir
+                    line_high[i] = max(line_high[i-1], high[i])
+                    line_low[i] = min(line_low[i-1], low[i])
+                    reversal_count = 0
+            else:  # in down trend
+                if high[i] > line_high[i-1]:
+                    reversal_count += 1
+                    if reversal_count >= 3:
+                        tblb_direction[i] = 1
+                        line_high[i] = high[i]
+                        line_low[i] = low[i]
+                        last_dir = 1
+                        reversal_count = 0
+                    else:
+                        tblb_direction[i] = last_dir
+                        line_high[i] = line_high[i-1]
+                        line_low[i] = min(line_low[i-1], low[i])
+                else:
+                    tblb_direction[i] = last_dir
+                    line_high[i] = line_high[i-1]
+                    line_low[i] = min(line_low[i-1], low[i])
+                    reversal_count = 0
+    
+    # Multi-timeframe: 1w EMA50 for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume spike: >2.0x 30-period average
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
@@ -39,52 +85,52 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(45, 30)  # Warmup for TRIX and volume MA
+    start_idx = max(50, 30)  # Warmup for EMA and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(trix[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or
+        if (np.isnan(tblb_direction[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        trix_val = trix[i]
-        trix_prev = trix[i-1] if i > 0 else 0
-        ema34 = ema_34_1w_aligned[i]
+        price = close[i]
+        tlb_dir = tblb_direction[i]
+        ema50 = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume spike and weekly uptrend
-            if trix_val > 0 and trix_prev <= 0 and vol_spike and close[i] > ema34:
+            # Long: TLB up + volume spike + above weekly EMA
+            if tlb_dir == 1 and vol_spike and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume spike and weekly downtrend
-            elif trix_val < 0 and trix_prev >= 0 and vol_spike and close[i] < ema34:
+            # Short: TLB down + volume spike + below weekly EMA
+            elif tlb_dir == -1 and vol_spike and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: TRIX crosses below zero OR weekly trend turns down
-            if trix_val < 0 and trix_prev >= 0:
+            # Exit: TLB reversal down OR price crosses below weekly EMA
+            if tlb_dir == -1:
                 signals[i] = 0.0
                 position = 0
-            elif close[i] < ema34:
+            elif price < ema50:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: TRIX crosses above zero OR weekly trend turns up
-            if trix_val > 0 and trix_prev <= 0:
+            # Exit: TLB reversal up OR price crosses above weekly EMA
+            if tlb_dir == 1:
                 signals[i] = 0.0
                 position = 0
-            elif close[i] > ema34:
+            elif price > ema50:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Trix_15_Signal_MeanReversion"
-timeframe = "12h"
+name = "4h_ThreeLineBreak_Reversal_Confirmation"
+timeframe = "4h"
 leverage = 1.0
