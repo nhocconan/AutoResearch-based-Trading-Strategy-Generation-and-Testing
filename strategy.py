@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_And_HTF_EMA34
-Hypothesis: Trade Camarilla pivot (R1/S1) breakouts on 4h with volume confirmation and 12h EMA34 trend filter.
-Long when price breaks above R1 with volume > 1.5x average and 12h EMA34 rising.
-Short when price breaks below S1 with volume > 1.5x average and 12h EMA34 falling.
-Uses Camarilla levels from prior 1d for structure, volume for conviction, and 12h EMA for trend filter.
-Designed for 20-40 trades/year to avoid fee drag. Works in bull/bear by following higher timeframe trend.
+1h_MultiTimeframe_Momentum_v1
+Hypothesis: Use 4h Donchian breakout for trend direction and 1d RSI for momentum confirmation, with 1h price action for entry timing. 
+Go long when price breaks above 4h Donchian upper band AND 1d RSI > 55, short when price breaks below 4h Donchian lower band AND 1d RSI < 45. 
+Requires volume > 1.5x 20-period average for confirmation. Uses session filter (08-20 UTC) to avoid low-liquidity hours. 
+Target: 15-30 trades/year by combining multiple filters to reduce noise. Works in bull markets via trend following and in bear via short signals.
 """
 
 import numpy as np
@@ -22,49 +21,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels (prior day)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate Camarilla levels for each day: based on prior day's H, L, C
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 4h Donchian channels (20-period)
+    donch_len = 20
+    upper_4h = np.full_like(high_4h, np.nan)
+    lower_4h = np.full_like(low_4h, np.nan)
+    
+    if len(high_4h) >= donch_len:
+        for i in range(donch_len, len(high_4h)):
+            upper_4h[i] = np.max(high_4h[i-donch_len:i])
+            lower_4h[i] = np.min(low_4h[i-donch_len:i])
+    
+    # Align Donchian channels to 1h timeframe
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    
+    # Get 1d data for RSI
+    df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    camarilla_R1 = np.full_like(close_1d, np.nan)
-    camarilla_S1 = np.full_like(close_1d, np.nan)
+    # 1d RSI(14)
+    rsi_period = 14
+    rsi_1d = np.full_like(close_1d, np.nan)
     
-    for i in range(len(close_1d)):
-        if i == 0:
-            camarilla_R1[i] = np.nan
-            camarilla_S1[i] = np.nan
-        else:
-            H = high_1d[i-1]
-            L = low_1d[i-1]
-            C = close_1d[i-1]
-            camarilla_R1[i] = C + (H - L) * 1.1 / 12
-            camarilla_S1[i] = C - (H - L) * 1.1 / 12
+    if len(close_1d) >= rsi_period + 1:
+        delta = np.diff(close_1d)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close_1d, np.nan)
+        avg_loss = np.full_like(close_1d, np.nan)
+        
+        # First average
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+        
+        # Wilder smoothing
+        for i in range(rsi_period + 1, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    
-    # Get 12h data for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # EMA34 on 12h
-    ema_period = 34
-    ema_12h = np.full_like(close_12h, np.nan)
-    
-    if len(close_12h) >= ema_period:
-        multiplier = 2 / (ema_period + 1)
-        ema_12h[ema_period-1] = np.mean(close_12h[:ema_period])
-        for i in range(ema_period, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * multiplier) + (ema_12h[i-1] * (1 - multiplier))
-    
-    # Align 12h EMA34 to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align 1d RSI to 1h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -74,53 +79,56 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, vol_period)  # Need enough data for EMA and volume MA
+    start_idx = max(donch_len, rsi_period, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
+        
+        # Session filter
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # EMA trend: rising if current > previous, falling if current < previous
-        ema_rising = i > 0 and not np.isnan(ema_12h_aligned[i-1]) and ema_12h_aligned[i] > ema_12h_aligned[i-1]
-        ema_falling = i > 0 and not np.isnan(ema_12h_aligned[i-1]) and ema_12h_aligned[i] < ema_12h_aligned[i-1]
-        
-        if position == 0:
-            # Long: price breaks above R1 + volume + EMA rising
-            if close[i] > camarilla_R1_aligned[i] and vol_confirm and ema_rising:
-                signals[i] = 0.25
+        if position == 0 and in_session:
+            # Long: price breaks above 4h Donchian upper + RSI > 55 + volume
+            if close[i] > upper_4h_aligned[i] and rsi_1d_aligned[i] > 55 and vol_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 + volume + EMA falling
-            elif close[i] < camarilla_S1_aligned[i] and vol_confirm and ema_falling:
-                signals[i] = -0.25
+            # Short: price breaks below 4h Donchian lower + RSI < 45 + volume
+            elif close[i] < lower_4h_aligned[i] and rsi_1d_aligned[i] < 45 and vol_confirm:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or EMA falls
-            if close[i] < camarilla_S1_aligned[i] or (i > 0 and not np.isnan(ema_12h_aligned[i-1]) and ema_12h_aligned[i] < ema_12h_aligned[i-1]):
-                signals[i] = -0.25  # reverse to short
+            # Long exit: price breaks below 4h Donchian lower OR RSI < 40
+            if close[i] < lower_4h_aligned[i] or rsi_1d_aligned[i] < 40:
+                signals[i] = -0.20  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price breaks above R1 or EMA rises
-            if close[i] > camarilla_R1_aligned[i] or (i > 0 and not np.isnan(ema_12h_aligned[i-1]) and ema_12h_aligned[i] > ema_12h_aligned[i-1]):
-                signals[i] = 0.25  # reverse to long
+            # Short exit: price breaks above 4h Donchian upper OR RSI > 60
+            if close[i] > upper_4h_aligned[i] or rsi_1d_aligned[i] > 60:
+                signals[i] = 0.20  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_And_HTF_EMA34"
-timeframe = "4h"
+name = "1h_MultiTimeframe_Momentum_v1"
+timeframe = "1h"
 leverage = 1.0
