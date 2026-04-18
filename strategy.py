@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Momentum_Breakout
-Hypothesis: Weekly pivot levels act as strong support/resistance. Breakouts above weekly R1 or below weekly S1 with momentum (ROC > 0) and volume confirmation capture institutional flow. Works in bull/bear by only taking breakouts in direction of weekly trend (price > weekly EMA50 for longs, < for shorts). Targets 15-35 trades/year per symbol.
+4h_TRIX_Volume_Spike_Trend_Filter_v1
+Strategy: 4h TRIX momentum with volume spike and 1d EMA200 trend filter.
+Long when TRIX crosses above zero with volume spike and price above daily EMA200.
+Short when TRIX crosses below zero with volume spike and price below daily EMA200.
+Exit on opposite TRIX cross or trend change.
+Designed for 4h timeframe: ~25-40 trades/year per symbol (100-160 total over 4 years).
+Works in bull/bear via trend filter and momentum confirmation.
 """
 
 import numpy as np
@@ -10,86 +15,75 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot and trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Weekly pivot points (standard calculation)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
+    # TRIX calculation (15-period EMA applied 3 times)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = (ema3 / ema3.shift(1) - 1) * 100
+    trix_values = trix.values
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align weekly data to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Rate of change (momentum) - 3 period
-    roc = np.zeros_like(close)
-    roc[3:] = (close[3:] - close[:-3]) / close[:-3] * 100
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ma_values = vol_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for weekly EMA50
+    start_idx = 45  # need enough for TRIX calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(trix_values[i-1]) or 
+            np.isnan(vol_ma_values[i]) or np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions from weekly EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Trend conditions
+        price_above_ema200 = close[i] > ema_200_aligned[i]
+        price_below_ema200 = close[i] < ema_200_aligned[i]
         
-        # Momentum and volume confirmation
-        mom_confirm = roc[i] > 0  # positive momentum
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_values[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakdown_down = close[i] < s1_aligned[i]
+        # TRIX cross signals
+        trix_cross_up = trix_values[i-1] <= 0 and trix_values[i] > 0
+        trix_cross_down = trix_values[i-1] >= 0 and trix_values[i] < 0
         
         if position == 0:
-            # Long: uptrend + momentum + volume + breakout above weekly R1
-            if uptrend and mom_confirm and vol_confirm and breakout_up:
+            # Long: TRIX cross up + volume spike + price above daily EMA200
+            if trix_cross_up and vol_spike and price_above_ema200:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + momentum + volume + breakdown below weekly S1
-            elif downtrend and mom_confirm and vol_confirm and breakdown_down:
+            # Short: TRIX cross down + volume spike + price below daily EMA200
+            elif trix_cross_down and vol_spike and price_below_ema200:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, or breakdown below weekly S1 with volume
-            if not uptrend or (volume[i] > vol_ma[i] and breakdown_down):
+            # Long exit: TRIX cross down or trend change (price below EMA200)
+            if trix_cross_down or not price_above_ema200:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, or breakout above weekly R1 with volume
-            if not downtrend or (volume[i] > vol_ma[i] and breakout_up):
+            # Short exit: TRIX cross up or trend change (price above EMA200)
+            if trix_cross_up or not price_below_ema200:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -97,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Momentum_Breakout"
-timeframe = "6h"
+name = "4h_TRIX_Volume_Spike_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
