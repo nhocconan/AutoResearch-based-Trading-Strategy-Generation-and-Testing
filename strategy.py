@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_DailyTrend
-Hypothesis: Buy when price breaks above daily Camarilla R1 with volume spike and above daily EMA50; short when breaks below S1 with volume spike and below daily EMA50. Daily timeframe provides robust trend filter, reducing false breakouts. Volume confirms institutional participation. Designed for low trade frequency (target: 15-30 trades/year) to minimize fee decay while capturing high-probability breakouts in trending and ranging markets.
+4h_KAMA_Trend_With_RSI_Filter_v3
+Hypothesis: KAMA adapts to market noise, providing a robust trend filter. Combined with RSI(14) for momentum confirmation and volume spike for institutional participation, this strategy aims to capture high-probability trend continuations in both bull and bear markets. The adaptive nature of KAMA reduces whipsaws during sideways markets, while RSI filters out extreme conditions. Designed for low trade frequency to minimize fee drag.
 """
 
 import numpy as np
@@ -13,79 +13,98 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot levels from previous day
-    df_1d = get_htf_data(prices, '1d')
-    phigh = df_1d['high'].values
-    plow = df_1d['low'].values
-    pclose = df_1d['close'].values
+    # KAMA (Adaptive Moving Average) parameters
+    er_len = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    # Calculate Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    rang = phigh - plow
-    r1 = pclose + rang * 1.1 / 12
-    s1 = pclose - rang * 1.1 / 12
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.zeros_like(change)
+    er[:] = np.where(volatility != 0, change / volatility, 0)
+    # Pad to match length
+    er = np.concatenate([np.full(er_len, np.nan), er])
     
-    # Align to 12h timeframe (wait for daily close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate Smoothing Constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Daily EMA50 trend filter
-    ema_1d = pd.Series(pclose).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[er_len] = close[er_len]  # Initialize
+    for i in range(er_len + 1, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Volume spike: >2.0x 20-period average (on 12h timeframe)
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(14, np.nan), rsi])
+    
+    # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # Align indicators to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, prices, kama)  # Already on 4h, but using for consistency
+    rsi_aligned = align_htf_to_ltf(prices, prices, rsi)
+    volume_spike_aligned = align_htf_to_ltf(prices, prices, volume_spike)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Need volume MA and EMA
+    start_idx = max(34, 20)  # Ensure indicators are valid
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        vol_spike = volume_spike[i]
-        ema_1d_val = ema_1d_aligned[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
+        vol_spike = volume_spike_aligned[i]
         
         if position == 0:
-            # Long: price > R1 with volume spike and above daily EMA50
-            if price > r1_val and vol_spike and price > ema_1d_val:
+            # Long: price > KAMA, RSI > 50 (bullish momentum), volume spike
+            if price > kama_val and rsi_val > 50 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < S1 with volume spike and below daily EMA50
-            elif price < s1_val and vol_spike and price < ema_1d_val:
+            # Short: price < KAMA, RSI < 50 (bearish momentum), volume spike
+            elif price < kama_val and rsi_val < 50 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < S1 or below daily EMA50
-            if price < s1_val or price < ema_1d_val:
+            # Exit: price < KAMA or RSI < 40 (loss of momentum)
+            if price < kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > R1 or above daily EMA50
-            if price > r1_val or price > ema_1d_val:
+            # Exit: price > KAMA or RSI > 60 (loss of momentum)
+            if price > kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_DailyTrend"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_RSI_Filter_v3"
+timeframe = "4h"
 leverage = 1.0
