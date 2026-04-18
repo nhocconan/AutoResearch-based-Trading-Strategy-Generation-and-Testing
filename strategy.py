@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot R1/S1 breakout with volume confirmation and 1d ADX trend filter.
-# Long when price breaks above R1 with volume > 1.5x average and ADX > 25.
-# Short when price breaks below S1 with same conditions.
-# Exit when price returns to the 1d pivot point (central pivot).
-# Uses daily pivots for structure, volume for conviction, ADX to avoid ranging markets.
-# Designed for ~15-25 trades/year on 12h timeframe.
-name = "12h_Camarilla_Pivot_R1S1_Breakout_Volume_ADX"
-timeframe = "12h"
+# Hypothesis: 4h/12h momentum with volume surge and ATR volatility filter.
+# Long when price breaks above 12h EMA(34) with volume > 1.8x 48-period average and ATR > 0.
+# Short when price breaks below 12h EMA(34) with same conditions.
+# Exit when price crosses back over 12h EMA(34).
+# Uses 12h EMA for trend filter, volume surge for conviction, ATR for volatility.
+# Designed for ~20-40 trades/year per symbol.
+name = "4h_12hEMA34_VolumeSurge_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,100 +23,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivots and ADX
-    df_1d = get_htf_data(prices, '1d')
+    # 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla pivot levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # EMA(34) on 12h close
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Camarilla calculations
-    range_ = prev_high - prev_low
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
-    
-    # Align pivots to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # ADX calculation on 1d
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # ATR(14) on 12h for volatility filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - close_12h)
+    tr3 = np.abs(low_12h - close_12h)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: current volume > 1.5x 24-period average (24 * 12h = 12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (1.5 * vol_ma_24)
+    # Volume filter: current volume > 1.8 * 48-period average (48 * 4h = 8 days)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    volume_filter = volume > (1.8 * vol_ma_48)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]) or
+            np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        adx_val = adx_aligned[i]
+        ema_val = ema_34_12h_aligned[i]
+        atr_val = atr_12h_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume and trend
-            if close_val > r1_val and vol_filter and adx_val > 25:
+            # Long: price above EMA with volume surge and volatility
+            if close_val > ema_val and vol_filter and atr_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and trend
-            elif close_val < s1_val and vol_filter and adx_val > 25:
+            # Short: price below EMA with volume surge and volatility
+            elif close_val < ema_val and vol_filter and atr_val > 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to pivot point
-            if close_val <= pivot_val:
+            # Long exit: price crosses back below EMA
+            if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to pivot point
-            if close_val >= pivot_val:
+            # Short exit: price crosses back above EMA
+            if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
