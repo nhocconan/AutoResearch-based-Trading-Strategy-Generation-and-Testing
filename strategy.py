@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_RSI_Reversal_VolumeFilter
-12h strategy using RSI mean reversion with volume confirmation and daily trend filter.
-- Long: RSI < 30 + volume > 1.5x daily avg + daily EMA50 > EMA200
-- Short: RSI > 70 + volume > 1.5x daily avg + daily EMA50 < EMA200
-- Exit: RSI crosses back above 50 (long) or below 50 (short)
+4h_Camarilla_Pivot_S1_S4_Breakout
+4h strategy using Camarilla pivot levels from 1d: S1 and S4 levels.
+- Long: Close breaks above S4 (resistance) + volume > 1.5x daily avg
+- Short: Close breaks below S1 (support) + volume > 1.5x daily avg
+- Exit: Opposite breakout or reversal to opposite Camarilla level (S1 for longs, S4 for shorts)
 Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
-Works in bull markets (dips in uptrend) and bear markets (bounces in downtrend)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -23,79 +23,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get daily data for trend filter and volume average
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
+    # Daily OHLC for Camarilla calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Camarilla levels: S1, S2, S3, S4, R1, R2, R3, R4
+    # Range = daily high - daily low
+    # S1 = close - (range * 1.05 / 6)
+    # S2 = close - (range * 1.10 / 6)
+    # S3 = close - (range * 1.15 / 6)
+    # S4 = close - (range * 1.20 / 6)
+    # R4 = close + (range * 1.20 / 6)
+    # R3 = close + (range * 1.15 / 6)
+    # R2 = close + (range * 1.10 / 6)
+    # R1 = close + (range * 1.05 / 6)
+    daily_range = high_1d - low_1d
+    s1 = close_1d - (daily_range * 1.05 / 6)
+    s2 = close_1d - (daily_range * 1.10 / 6)
+    s3 = close_1d - (daily_range * 1.15 / 6)
+    s4 = close_1d - (daily_range * 1.20 / 6)
+    r4 = close_1d + (daily_range * 1.20 / 6)
+    r3 = close_1d + (daily_range * 1.15 / 6)
+    r2 = close_1d + (daily_range * 1.10 / 6)
+    r1 = close_1d + (daily_range * 1.05 / 6)
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Use S1 (support) and S4 (resistance) for breakouts
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200 and RSI
+    start_idx = 40  # need enough for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+        if (np.isnan(s1_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
-        
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        rsi_exit_long = rsi[i] > 50
-        rsi_exit_short = rsi[i] < 50
+        # Breakout conditions
+        breakout_up = close[i] > s4_aligned[i]  # break above S4 resistance
+        breakdown_down = close[i] < s1_aligned[i]  # break below S1 support
         
         if position == 0:
-            # Long: oversold + volume + uptrend
-            if rsi_oversold and vol_confirm and uptrend:
+            # Long: volume + breakout above S4
+            if vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought + volume + downtrend
-            elif rsi_overbought and vol_confirm and downtrend:
+            # Short: volume + breakdown below S1
+            elif vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI crosses above 50 or trend change
-            if rsi_exit_long or not uptrend:
+            # Long exit: breakdown below S1 (opposite support) or reversal signal
+            if breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI crosses below 50 or trend change
-            if rsi_exit_short or not downtrend:
+            # Short exit: breakout above S4 (opposite resistance) or reversal signal
+            if breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -103,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI_Reversal_VolumeFilter"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_S1_S4_Breakout"
+timeframe = "4h"
 leverage = 1.0
