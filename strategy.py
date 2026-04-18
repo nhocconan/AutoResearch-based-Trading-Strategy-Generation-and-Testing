@@ -1,7 +1,12 @@
-# [56806] Hypothesis: 4h Donchian breakout + volume spike + 1d ATR filter + time-of-day filter
-# Targets breakouts with institutional volume in trending markets, avoids low-volatility periods.
-# Works in bull/bear by only taking breaks in direction of higher timeframe trend (via ATR slope).
-# Designed for low trade frequency: <50/year to avoid fee drag.
+#!/usr/bin/env python3
+"""
+6h Weekly Pivot Direction + Volume Confirmation
+Hypothesis: In BTC/ETH, weekly pivot levels act as strong support/resistance.
+When price breaks above weekly R1 with volume confirmation and is above weekly pivot,
+we go long. When price breaks below weekly S1 with volume confirmation and is below
+weekly pivot, we go short. Uses weekly timeframe for directional bias and 6s for entry.
+Designed to work in both bull (breakouts) and bear (rejections at resistance) markets.
+"""
 
 import numpy as np
 import pandas as pd
@@ -9,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,212 +22,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for pivot calculation
+    df_w = get_htf_data(prices, '1w')
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate 1d ATR(14)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, tr2)
-    tr = np.concatenate([[np.nan], tr])  # align length
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Weekly Pivot Points (Standard)
+    # Pivot = (High + Low + Close) / 3
+    pivot_w = (high_w + low_w + close_w) / 3.0
+    # Range = High - Low
+    range_w = high_w - low_w
+    # R1 = (2 * Pivot) - Low
+    r1_w = (2 * pivot_w) - low_w
+    # S1 = (2 * Pivot) - High
+    s1_w = (2 * pivot_w) - high_w
     
-    # Calculate 1d ATR slope for trend filter (rising ATR = trending market)
-    atr_slope = pd.Series(atr_14).diff(3)  # 3-period slope
-    atr_slope_arr = atr_slope.values
+    # Align weekly levels to 6h timeframe
+    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
     
-    # Align ATR and slope to 4h
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_slope_aligned = align_htf_to_ltf(prices, df_1d, atr_slope_arr)
-    
-    # Donchian channel (20-period) on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike (2x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection (2x 4-period average)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     volume_spike = volume > (2.0 * vol_ma)
-    
-    # Time-of-day filter: avoid low-liquidity hours (0-6 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    time_filter = (hours >= 6) & (hours <= 22)  # 6am-10pm UTC
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
-    start_idx = 100  # need enough history
+    start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_slope_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
+            np.isnan(s1_w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_14_aligned[i]
-        atr_slope_val = atr_slope_aligned[i]
-        upper = high_20[i]
-        lower = low_20[i]
+        pivot_level = pivot_w_aligned[i]
+        r1_level = r1_w_aligned[i]
+        s1_level = s1_w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume spike, rising ATR, and good time
-            if (price > upper and 
+            # Long: price breaks above weekly R1 with volume spike and above weekly pivot
+            if (price > r1_level and 
                 volume_spike[i] and 
-                atr_slope_val > 0 and 
-                time_filter[i]):
+                price > pivot_level):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price breaks below lower Donchian with volume spike, rising ATR, and good time
-            elif (price < lower and 
+            # Short: price breaks below weekly S1 with volume spike and below weekly pivot
+            elif (price < s1_level and 
                   volume_spike[i] and 
-                  atr_slope_val > 0 and 
-                  time_filter[i]):
+                  price < pivot_level):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long position: hold until reversal or ATR-based stop
+            # Long position management
             signals[i] = 0.25
-            # Exit: price breaks below lower Donchian (reversal)
-            if price < lower:
-                signals[i] = 0.0
-                position = 0
-            # Optional: time-based exit (close position after 12 bars = 3 days)
-            elif (i - entry_bar) >= 12:  # need to track entry bar
+            # Exit conditions: price falls back below weekly pivot
+            if price < pivot_level:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position: hold until reversal
+            # Short position management
             signals[i] = -0.25
-            # Exit: price breaks above upper Donchian (reversal)
-            if price > upper:
-                signals[i] = 0.0
-                position = 0
-            # Optional: time-based exit
-            elif (i - entry_bar) >= 12:
+            # Exit conditions: price rises back above weekly pivot
+            if price > pivot_level:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-# Fix: track entry bar for time-based exit
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Get 1d data for ATR and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d ATR(14)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, tr2)
-    tr = np.concatenate([[np.nan], tr])  # align length
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d ATR slope for trend filter (rising ATR = trending market)
-    atr_slope = pd.Series(atr_14).diff(3)  # 3-period slope
-    atr_slope_arr = atr_slope.values
-    
-    # Align ATR and slope to 4h
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_slope_aligned = align_htf_to_ltf(prices, df_1d, atr_slope_arr)
-    
-    # Donchian channel (20-period) on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike (2x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Time-of-day filter: avoid low-liquidity hours (0-6 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    time_filter = (hours >= 6) & (hours <= 22)  # 6am-10pm UTC
-    
-    signals = np.zeros(n)
-    position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
-    entry_bar = -1  # track entry bar for time-based exit
-    
-    start_idx = 100  # need enough history
-    
-    for i in range(start_idx, n):
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_slope_aligned[i]) or
-            np.isnan(vol_ma[i])):
-            signals[i] = 0.0
-            continue
-        
-        price = close[i]
-        atr = atr_14_aligned[i]
-        atr_slope_val = atr_slope_aligned[i]
-        upper = high_20[i]
-        lower = low_20[i]
-        
-        if position == 0:
-            # Long: price breaks above upper Donchian with volume spike, rising ATR, and good time
-            if (price > upper and 
-                volume_spike[i] and 
-                atr_slope_val > 0 and 
-                time_filter[i]):
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-                entry_bar = i
-            # Short: price breaks below lower Donchian with volume spike, rising ATR, and good time
-            elif (price < lower and 
-                  volume_spike[i] and 
-                  atr_slope_val > 0 and 
-                  time_filter[i]):
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
-                entry_bar = i
-        
-        elif position == 1:
-            # Long position: hold until reversal or time-based exit
-            signals[i] = 0.25
-            # Exit: price breaks below lower Donchian (reversal)
-            if price < lower:
-                signals[i] = 0.0
-                position = 0
-            # Time-based exit: close after 12 bars (3 days)
-            elif (i - entry_bar) >= 12:
-                signals[i] = 0.0
-                position = 0
-        
-        elif position == -1:
-            # Short position: hold until reversal or time-based exit
-            signals[i] = -0.25
-            # Exit: price breaks above upper Donchian (reversal)
-            if price > upper:
-                signals[i] = 0.0
-                position = 0
-            # Time-based exit: close after 12 bars (3 days)
-            elif (i - entry_bar) >= 12:
-                signals[i] = 0.0
-                position = 0
-    
-    return signals
-
-name = "4h_Donchian_Breakout_Volume_Spike_ATRFilter_Time"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Direction_Volume"
+timeframe = "6h"
 leverage = 1.0
