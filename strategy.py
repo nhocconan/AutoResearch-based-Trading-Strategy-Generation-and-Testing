@@ -1,48 +1,49 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d price action relative to weekly VWAP with daily volume confirmation.
-In bull markets: price above weekly VWAP acts as dynamic support, buy on pullbacks with volume.
-In bear markets: price below weekly VWAP acts as resistance, sell on rallies with volume.
-Weekly VWAP provides institutional reference point, reducing whipsaw.
-Target: 15-25 trades/year to minimize fee drag on daily timeframe.
+Hypothesis: 4h Donchian(20) breakout with 12h EMA(34) trend filter and volume confirmation.
+Long when price breaks above upper Donchian channel with price above 12h EMA(34) and volume spike.
+Short when price breaks below lower Donchian channel with price below 12h EMA(34) and volume spike.
+Exit when price crosses back through the opposite Donchian band or volatility drops.
+Designed for 25-35 trades/year to minimize fee drag while capturing trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_vwap(high, low, close, volume):
-    """Calculate Volume Weighted Average Price."""
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, np.nan)
-    return vwap
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for VWAP
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Get 12h data for EMA(34)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate VWAP on weekly data
-    vwap_1w = calculate_vwap(high_1w, low_1w, close_1w, volume_1w)
+    # Calculate EMA(34) on 12h
+    ema_34_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 34:
+        ema_34_12h[33] = np.mean(close_12h[:34])
+        for i in range(34, len(close_12h)):
+            ema_34_12h[i] = (close_12h[i] * 2 / 35) + ema_34_12h[i-1] * (33 / 35)
     
-    # Align VWAP to daily timeframe
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    # Align EMA to 4h timeframe
+    ema_34_12h_4h = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate daily volume moving average (20-period)
+    # Calculate Donchian channels (20-period)
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper_channel[i] = np.max(high[i-20:i])
+        lower_channel[i] = np.min(low[i-20:i])
+    
+    # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -50,11 +51,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA calculation
+    start_idx = 20  # need Donchian and volume MA calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(vwap_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(ema_34_12h_4h[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -62,26 +64,26 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price above weekly VWAP, volume confirmation
-            if close[i] > vwap_1w_aligned[i] and vol_confirmed:
+            # Long: price breaks above upper Donchian, above 12h EMA, volume confirmation
+            if close[i] > upper_channel[i] and close[i] > ema_34_12h_4h[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly VWAP, volume confirmation
-            elif close[i] < vwap_1w_aligned[i] and vol_confirmed:
+            # Short: price breaks below lower Donchian, below 12h EMA, volume confirmation
+            elif close[i] < lower_channel[i] and close[i] < ema_34_12h_4h[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly VWAP
-            if close[i] <= vwap_1w_aligned[i]:
+            # Long exit: price crosses below lower Donchian channel or volume drops
+            if close[i] < lower_channel[i] or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly VWAP
-            if close[i] >= vwap_1w_aligned[i]:
+            # Short exit: price crosses above upper Donchian channel or volume drops
+            if close[i] > upper_channel[i] or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_VWAP_Volume"
-timeframe = "1d"
+name = "4h_Donchian20_12hEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
