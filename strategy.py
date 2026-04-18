@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyPivot_R1_S1_Breakout_Volume"
-timeframe = "1d"
+name = "6h_1dPivot_R1S1_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,35 +17,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for weekly pivot levels (R1/S1)
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data for Camarilla pivot levels (R1/S1)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot levels (R1, S1) from previous weekly bar
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Calculate Camarilla pivot levels (R1, S1) from previous daily bar
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     R1 = pivot + (range_hl * 1.1 / 12)
     S1 = pivot - (range_hl * 1.1 / 12)
     
-    # Align R1/S1 to daily (wait for weekly close)
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    # Align R1/S1 to 6h (wait for daily close)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (avoid low liquidity periods)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
