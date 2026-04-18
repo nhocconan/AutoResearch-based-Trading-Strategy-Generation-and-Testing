@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Adaptive_Kelly_RSI_Pullback
-Hypothesis: In both bull and bear markets, price often pulls back to key moving averages during trends. 
-This strategy combines RSI momentum with adaptive Kelly position sizing based on recent win rate, 
-using 60-period EMA as dynamic support/resistance. Designed for 6h timeframe to avoid overtrading.
+12h_MultiTimeframe_Trend_Scalper
+Hypothesis: Combines daily trend filter (EMA50) with 12h price action (breakout of prior swing high/low) and volume confirmation. Uses tight risk management to limit trades and avoid overtrading. Works in both bull and bear by following higher timeframe trend.
 """
 
 import numpy as np
@@ -12,110 +10,147 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    for i in range(len(gain)):
-        if i < 14:
-            if i > 0:
-                avg_gain[i] = np.mean(gain[:i+1])
-                avg_loss[i] = np.mean(loss[:i+1])
-            else:
-                avg_gain[i] = gain[i]
-                avg_loss[i] = loss[i]
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Calculate daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = np.zeros_like(close_1d)
+    ema_50_1d[:] = np.nan
+    if len(close_1d) >= 50:
+        k = 2 / (50 + 1)
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = close_1d[i] * k + ema_50_1d[i-1] * (1 - k)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align daily EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # EMA60 as dynamic trend filter
-    ema60 = np.zeros_like(close)
-    if len(close) >= 60:
-        k = 2 / (60 + 1)
-        ema60[59] = np.mean(close[:60])
-        for i in range(60, len(close)):
-            ema60[i] = close[i] * k + ema60[i-1] * (1 - k)
+    # Calculate 12h swing points (pivots) for breakout levels
+    swing_high = np.zeros(n)
+    swing_low = np.zeros(n)
+    swing_high[:] = np.nan
+    swing_low[:] = np.nan
     
-    # Win rate calculation for adaptive Kelly (lookback 50 trades)
-    returns = np.zeros(n)
+    # Find swing highs and lows using 5-bar lookback
+    for i in range(2, n-2):
+        # Swing high: higher than 2 bars on each side
+        if (high[i] > high[i-1] and high[i] > high[i-2] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            swing_high[i] = high[i]
+        # Swing low: lower than 2 bars on each side
+        if (low[i] < low[i-1] and low[i] < low[i-2] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            swing_low[i] = low[i]
+    
+    # Forward fill swing levels to use as breakout triggers
     for i in range(1, n):
-        returns[i] = (close[i] - close[i-1]) / close[i-1]
+        if np.isnan(swing_high[i]):
+            swing_high[i] = swing_high[i-1]
+        if np.isnan(swing_low[i]):
+            swing_low[i] = swing_low[i-1]
     
-    win_rate = np.full(n, 0.5)  # Start with 50%
-    win_count = 0
-    loss_count = 0
-    min_lookback = 50
-    
-    for i in range(min_lookback, n):
-        # Count wins/losses in lookback window
-        window_returns = returns[i-min_lookback:i]
-        wins = np.sum(window_returns > 0)
-        losses = np.sum(window_returns < 0)
-        total = wins + losses
-        if total > 0:
-            win_rate[i] = wins / total
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
         else:
-            win_rate[i] = 0.5
-    
-    # Kelly fraction: f = (bp - q) / b where b=1 (1:1 payoff), p=win_rate, q=1-pwin_rate
-    kelly_fraction = np.maximum(0, win_rate - (1 - win_rate))  # Simplified for b=1
-    kelly_fraction = np.minimum(kelly_fraction, 0.5)  # Cap at 0.5 for safety
-    position_size = kelly_fraction * 0.5  # Quarter Kelly for safety
+            vol_ma[i] = np.mean(volume[i-20+1:i+1])
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = 100  # Warmup
+    start_idx = 50  # Warmup for daily EMA
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(ema60[i]):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(swing_high[i]) or 
+            np.isnan(swing_low[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        if position == 0:
-            # Long: RSI < 40 (pullback) and price above EMA60 (uptrend)
-            if rsi[i] < 40 and close[i] > ema60[i]:
-                signals[i] = position_size[i]
-                position = 1
-            # Short: RSI > 60 (pullback) and price below EMA60 (downtrend)
-            elif rsi[i] > 60 and close[i] < ema60[i]:
-                signals[i] = -position_size[i]
-                position = -1
+        bars_since_entry += 1
         
-        # Exit conditions
+        if position == 0:
+            # Long: price breaks above prior swing high with volume spike and above daily EMA50
+            if (close[i] > swing_high[i] and vol_spike[i] and 
+                close[i] > ema_50_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+                bars_since_entry = 0
+            # Short: price breaks below prior swing low with volume spike and below daily EMA50
+            elif (close[i] < swing_low[i] and vol_spike[i] and 
+                  close[i] < ema_50_aligned[i]):
+                signals[i] = -0.25
+                position = -1
+                bars_since_entry = 0
+        
         elif position == 1:
-            # Exit long: RSI > 60 (overbought) or price below EMA60 (trend change)
-            if rsi[i] > 60 or close[i] < ema60[i]:
+            # Exit: stop loss (2x ATR), or reversal signal
+            # Calculate ATR for stop loss
+            if i >= 14:
+                tr1 = high[i] - low[i]
+                tr2 = abs(high[i] - close[i-1])
+                tr3 = abs(low[i] - close[i-1])
+                tr = max(tr1, tr2, tr3)
+                # Simple ATR approximation using recent TR
+                atr = np.mean([
+                    max(high[i-14] - low[i-14], abs(high[i-14] - close[i-15]), abs(low[i-14] - close[i-15])),
+                    max(high[i-7] - low[i-7], abs(high[i-7] - close[i-8]), abs(low[i-7] - close[i-8]))
+                ]) if i >= 15 else tr
+            else:
+                atr = (high[i] - low[i]) * 0.1  # fallback
+            
+            stop_price = close[i] - 2.0 * atr if i > 0 else close[i]
+            
+            if (bars_since_entry >= 2 and 
+                (close[i] < stop_price or 
+                 close[i] < swing_low[i] or 
+                 close[i] < ema_50_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size[i]
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 40 (oversold) or price above EMA60 (trend change)
-            if rsi[i] < 40 or close[i] > ema60[i]:
+            # Exit: stop loss (2x ATR), or reversal signal
+            if i >= 14:
+                tr1 = high[i] - low[i]
+                tr2 = abs(high[i] - close[i-1])
+                tr3 = abs(low[i] - close[i-1])
+                tr = max(tr1, tr2, tr3)
+                atr = np.mean([
+                    max(high[i-14] - low[i-14], abs(high[i-14] - close[i-15]), abs(low[i-14] - close[i-15])),
+                    max(high[i-7] - low[i-7], abs(high[i-7] - close[i-8]), abs(low[i-7] - close[i-8]))
+                ]) if i >= 15 else tr
+            else:
+                atr = (high[i] - low[i]) * 0.1
+            
+            stop_price = close[i] + 2.0 * atr if i > 0 else close[i]
+            
+            if (bars_since_entry >= 2 and 
+                (close[i] > stop_price or 
+                 close[i] > swing_high[i] or 
+                 close[i] > ema_50_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size[i]
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_Adaptive_Kelly_RSI_Pullback"
-timeframe = "6h"
+name = "12h_MultiTimeframe_Trend_Scalper"
+timeframe = "12h"
 leverage = 1.0
