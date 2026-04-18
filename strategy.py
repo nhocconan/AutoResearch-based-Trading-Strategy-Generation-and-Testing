@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_ThreeLineBreak_Reversal_Detection_v1
-Hypothesis: Detect short-term reversions at key levels using 3-line break reversals combined with volume confirmation and 1d trend filter. Works in both bull/bear markets by capturing mean reversion moves after overextended moves. Target: 20-30 trades/year via strict 3-line break + volume confirmation requirement.
+4h_ThreeLineBreak_Reversal_Detection_v2
+Hypothesis: Use Three Line Break (TLB) reversal patterns on 4h combined with volume confirmation and 1w EMA trend filter to capture medium-term reversals in both bull and bear markets. TLB filters out minor fluctuations and highlights significant trend changes. Volume confirms institutional participation. Weekly EMA ensures alignment with higher timeframe trend. Designed for low trade frequency (<30/year) to minimize fee drag while maintaining edge.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,103 +18,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 3-line break (3LB) reversals
-    # Track the 3-line break direction and detect reversals
-    line_breaks = np.zeros(n)
-    line_breaks[0] = 1  # Start with up
+    # Calculate Three Line Break (TLB) on close prices
+    # TLB: new line up if close > prior high, new line down if close < prior low
+    # We'll track the last three closing prices for simplicity
+    tl_up = np.zeros(n, dtype=bool)
+    tl_down = np.zeros(n, dtype=bool)
     
-    # For 3LB, we need to track the last closing price that made a new line
-    line_break_levels = np.full(n, np.nan)
-    line_break_levels[0] = close[0]
-    
-    current_direction = 1  # 1 for up, -1 for down
-    last_line_close = close[0]
+    # Initialize
+    last_close = close[0]
+    last_high = high[0]
+    last_low = low[0]
     
     for i in range(1, n):
-        if current_direction == 1:  # Currently in up trend
-            if close[i] < last_line_close - 2 * (high[i] - low[i]):  # Reverse down
-                current_direction = -1
-                line_breaks[i] = -1
-                last_line_close = close[i]
-            elif close[i] > last_line_close:  # Continue up, make new line if significant
-                if close[i] > last_line_close + (high[i] - low[i]) * 0.5:  # New line threshold
-                    line_breaks[i] = 1
-                    last_line_close = close[i]
-                else:
-                    line_breaks[i] = 0
-            else:
-                line_breaks[i] = 0
-        else:  # Currently in down trend
-            if close[i] > last_line_close + 2 * (high[i] - low[i]):  # Reverse up
-                current_direction = 1
-                line_breaks[i] = 1
-                last_line_close = close[i]
-            elif close[i] < last_line_close:  # Continue down, make new line if significant
-                if close[i] < last_line_close - (high[i] - low[i]) * 0.5:  # New line threshold
-                    line_breaks[i] = -1
-                    last_line_close = close[i]
-                else:
-                    line_breaks[i] = 0
-            else:
-                line_breaks[i] = 0
+        if close[i] > last_high:
+            tl_up[i] = True
+            last_high = close[i]
+            last_low = close[i]  # reset on new up line
+        elif close[i] < last_low:
+            tl_down[i] = True
+            last_low = close[i]
+            last_high = close[i]  # reset on new down line
+        else:
+            # No new line, carry forward levels
+            last_high = max(last_high, close[i])
+            last_low = min(last_low, close[i])
+        last_close = close[i]
     
-    # Detect 3-line break reversals (when line_breaks changes sign)
-    reversal_signal = np.zeros(n)
-    for i in range(1, n):
-        if line_breaks[i] != 0 and line_breaks[i-1] != 0 and line_breaks[i] != line_breaks[i-1]:
-            reversal_signal[i] = line_breaks[i]  # 1 for bullish reversal, -1 for bearish
+    # 1w EMA trend filter (higher timeframe)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 1d trend filter (EMA 50)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: >1.8x 20-period average
+    # Volume confirmation: >1.8x 20-period average (moderate threshold)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50
+    start_idx = 50  # Need some history for TLB
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_50 = ema_50_1d_aligned[i]
+        ema_1w_val = ema_1w_aligned[i]
         vol_spike = volume_spike[i]
-        rev_signal = reversal_signal[i]
         
         if position == 0:
-            # Long: bullish 3LB reversal with volume and above 1d EMA
-            if rev_signal == 1 and vol_spike and price > ema_50:
+            # Long: TLB up with volume and above weekly EMA
+            if tl_up[i] and vol_spike and price > ema_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish 3LB reversal with volume and below 1d EMA
-            elif rev_signal == -1 and vol_spike and price < ema_50:
+            # Short: TLB down with volume and below weekly EMA
+            elif tl_down[i] and vol_spike and price < ema_1w_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: bearish 3LB reversal or price below 1d EMA
-            if rev_signal == -1 or price < ema_50:
+            # Exit: TLB down reversal or below weekly EMA
+            if tl_down[i] or price < ema_1w_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: bullish 3LB reversal or price above 1d EMA
-            if rev_signal == 1 or price > ema_50:
+            # Exit: TLB up reversal or above weekly EMA
+            if tl_up[i] or price > ema_1w_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_ThreeLineBreak_Reversal_Detection_v1"
+name = "4h_ThreeLineBreak_Reversal_Detection_v2"
 timeframe = "4h"
 leverage = 1.0
