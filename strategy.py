@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_Volume_Trend_Filter
-Hypothesis: Price breaks above/below the Camarilla R1/S1 pivot levels on 1h with volume confirmation and 4h EMA trend filter.
-Uses 4h EMA34 for trend direction and 1h volume > 1.5x average for confirmation.
-Designed to capture volatility expansion moves in both bull and bear markets with tight entry conditions.
-Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend
+Hypothesis: Price breaks above/below Camarilla R1/S1 levels (from prior 1d) with volume confirmation and EMA34 trend filter. Uses 1d OHLC to calculate pivot levels, which are leading support/resistance. Volume > 1.5x 20-period average confirms breakout strength. EMA34 ensures trend alignment. Designed to work in both bull (breakouts above R1) and bear (breakdowns below S1) markets with tight entry conditions to avoid overtrading.
+Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 34:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,81 +19,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h calculations
-    # Camarilla pivot levels (based on previous day's OHLC)
-    # Since we don't have daily data in 1h timeframe, we'll use 4h data for pivots
-    # But for 1h Camarilla, we need 1h OHLC of previous day - approximated via rolling
-    # Use 24-period (1 day of 1h bars) for high/low/close
-    if len(high) >= 24:
-        # Previous day's OHLC (using 24-period rolling, shifted by 1 to avoid lookahead)
-        prev_day_high = pd.Series(high).rolling(window=24, min_periods=24).max().shift(1).values
-        prev_day_low = pd.Series(low).rolling(window=24, min_periods=24).min().shift(1).values
-        prev_day_close = pd.Series(close).rolling(window=24, min_periods=24).mean().shift(1).values
-        
-        # Camarilla calculations
-        rang = prev_day_high - prev_day_low
-        r1 = prev_day_close + rang * 1.1 / 12
-        s1 = prev_day_close - rang * 1.1 / 12
-    else:
-        # Not enough data
-        r1 = np.full(n, np.nan)
-        s1 = np.full(n, np.nan)
+    # Get 1d data for Camarilla pivot calculation (prior day's OHLC)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # Volume filter: >1.5x 24-period average (1 day)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate Camarilla levels from prior 1day OHLC
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
+    
+    # Camarilla R1 and S1
+    r1_1d = c_1d + (h_1d - l_1d) * 1.1 / 12
+    s1_1d = c_1d - (h_1d - l_1d) * 1.1 / 12
+    
+    # Align to 4h timeframe (use prior completed 1day's levels)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Volume filter: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
-    # 4h EMA34 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 34:
-        ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-        ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    else:
-        ema_34_4h_aligned = np.full(n, np.nan)
+    # EMA34 trend filter
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 25  # Need 24 for lookback + 1
+    start_idx = 34  # Warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema_34_4h_aligned[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_34[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_level = r1[i]
-        s1_level = s1[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
         vol_ok = volume_filter[i]
-        ema34 = ema_34_4h_aligned[i]
+        ema34 = ema_34[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume in uptrend (price > 4h EMA34)
-            if price > r1_level and vol_ok and price > ema34:
-                signals[i] = 0.20
+            # Long: price breaks above R1 with volume in uptrend
+            if price > r1 and vol_ok and price > ema34:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume in downtrend (price < 4h EMA34)
-            elif price < s1_level and vol_ok and price < ema34:
-                signals[i] = -0.20
+            # Short: price breaks below S1 with volume in downtrend
+            elif price < s1 and vol_ok and price < ema34:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            signals[i] = 0.20
-            # Exit: price returns to S1 or trend reverses
-            if price < s1_level or price < ema34:
+            signals[i] = 0.25
+            # Exit: price returns to midpoint of R1-S1 or trend reverses
+            midpoint = (r1 + s1) / 2
+            if price < midpoint or price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            signals[i] = -0.20
-            # Exit: price returns to R1 or trend reverses
-            if price > r1_level or price > ema34:
+            signals[i] = -0.25
+            # Exit: price returns to midpoint of R1-S1 or trend reverses
+            midpoint = (r1 + s1) / 2
+            if price > midpoint or price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_Volume_Trend_Filter"
-timeframe = "1h"
+name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
