@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_With_Volume_Trend
-Hypothesis: Price breaks above/below S1/R1 levels with volume confirmation and 4h trend filter.
-Uses 1d Camarilla pivot levels (R1/S1), volume > 1.5x 20-period average, and 4h EMA34 trend filter.
-Designed to work in both bull and bear markets by requiring trend alignment.
-Target: 20-30 trades/year to minimize fee drag while capturing institutional breakout moves.
+4h_KAMA_Trend_with_RSI_Filter_and_ATR_Stop
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets.
+Combined with RSI(2) for oversold/overbought entries and ATR-based stoploss to manage risk.
+Designed for 4h timeframe to capture medium-term moves with minimal trades.
 """
 
 import numpy as np
@@ -16,93 +15,104 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot levels (calculated from previous day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # KAMA trend on 4h
+    def calculate_kama(price, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(price, n=period))
+        volatility = np.sum(np.abs(np.diff(price)), axis=1)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.full_like(price, np.nan, dtype=float)
+        kama[period] = price[period]
+        for i in range(period + 1, len(price)):
+            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
+        return kama
     
-    # Calculate Camarilla levels: R1, S1 based on previous day
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_range = (high_1d - low_1d) * 1.1 / 12
-    r1 = close_1d + camarilla_range
-    s1 = close_1d - camarilla_range
+    kama = calculate_kama(close, period=10, fast=2, slow=30)
     
-    # Align to 1h timeframe (use previous day's levels for current day)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # RSI(2) for entry signals
+    def calculate_rsi(price, period=2):
+        delta = np.diff(price)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full_like(price, np.nan, dtype=float)
+        avg_loss = np.full_like(price, np.nan, dtype=float)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period + 1, len(price)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # 4h EMA34 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    rsi = calculate_rsi(close, period=2)
     
-    # Volume spike: >1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # ATR for stoploss and position sizing
+    def calculate_atr(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr1[0] = 0
+        tr2[0] = 0
+        tr3[0] = 0
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr = np.full_like(tr, np.nan, dtype=float)
+        atr[period] = np.mean(tr[:period])
+        for i in range(period + 1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    # Session filter: 8-20 UTC (active trading hours)
-    hour_index = prices.index.hour
-    session_filter = (hour_index >= 8) & (hour_index <= 20)
+    atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
     position = 0
+    entry_price = 0
     
-    start_idx = max(20, 1)  # Warmup for indicators
+    start_idx = max(30, 14)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
-            signals[i] = 0.0
-            continue
-        
-        if not session_filter[i]:
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        ema34 = ema_34_aligned[i]
-        vol_spike = volume_spike[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above S1 with volume spike in uptrend
-            if (price > s1_level and          # breaks above S1
-                vol_spike and                 # volume confirmation
-                price > ema34):               # uptrend filter
-                signals[i] = 0.20
+            # Long: price above KAMA (uptrend) and RSI oversold
+            if price > kama_val and rsi_val < 15:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R1 with volume spike in downtrend
-            elif (price < r1_level and        # breaks below R1
-                  vol_spike and               # volume confirmation
-                  price < ema34):             # downtrend filter
-                signals[i] = -0.20
+                entry_price = price
+            # Short: price below KAMA (downtrend) and RSI overbought
+            elif price < kama_val and rsi_val > 85:
+                signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            signals[i] = 0.20
-            # Exit: price crosses back below S1 or trend reverses
-            if price < s1_level or price < ema34:
+            signals[i] = 0.25
+            # Exit: RSI overbought or ATR-based stoploss
+            if rsi_val > 70 or price < entry_price - 1.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            signals[i] = -0.20
-            # Exit: price crosses back above R1 or trend reverses
-            if price > r1_level or price > ema34:
+            signals[i] = -0.25
+            # Exit: RSI oversold or ATR-based stoploss
+            if rsi_val < 30 or price > entry_price + 1.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_With_Volume_Trend"
-timeframe = "1h"
+name = "4h_KAMA_Trend_with_RSI_Filter_and_ATR_Stop"
+timeframe = "4h"
 leverage = 1.0
