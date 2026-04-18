@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyTrend_Filter_Refined
-1d strategy using weekly trend filter with daily price action confirmation.
-- Long: Weekly EMA21 trending up + daily price crosses above daily EMA21 with volume confirmation
-- Short: Weekly EMA21 trending down + daily price crosses below daily EMA21 with volume confirmation
-- Exit: Opposite signal
-Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
-Uses weekly trend to avoid whipsaws in ranging markets
+6h_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1
+6h strategy using daily Camarilla pivot levels (R1/S1) with volume spike and ATR filter.
+- Long: Price breaks above R1 + volume > 2x average + ATR > ATR(10) MA
+- Short: Price breaks below S1 + volume > 2x average + ATR > ATR(10) MA
+- Exit: Opposite signal or price crosses daily EMA34
+Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -18,68 +18,99 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla pivot levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA21 for trend direction
-    weekly_close = df_weekly['close'].values
-    ema_21_weekly = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_21_weekly)
+    # Calculate 1d Camarilla levels (R1, S1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily EMA21 for entry signals
-    ema_21_daily = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # first bar uses current
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Volume confirmation (1.5x 20-day average)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
+    
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Daily EMA34 for regime filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # ATR filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
+    atr_filter = atr > atr_ma
+    
+    # Volume spike filter (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need 21 for EMA + buffer
+    start_idx = 40  # need 20 for volume MA + buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_21_weekly_aligned[i]) or 
-            np.isnan(ema_21_daily[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend direction
-        weekly_uptrend = ema_21_weekly_aligned[i] > ema_21_weekly_aligned[i-1]
-        weekly_downtrend = ema_21_weekly_aligned[i] < ema_21_weekly_aligned[i-1]
+        # Regime filter: daily EMA34
+        bull_regime = close[i] > ema_34_1d_aligned[i]
+        bear_regime = close[i] < ema_34_1d_aligned[i]
         
-        # Daily price relative to EMA21
-        price_above_ema = close[i] > ema_21_daily[i]
-        price_below_ema = close[i] < ema_21_daily[i]
+        # Breakout conditions
+        breakout_up = close[i] > r1_aligned[i]
+        breakdown_down = close[i] < s1_aligned[i]
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume spike filter
+        volume_spike = volume[i] > 2.0 * vol_ma[i]
+        
+        # ATR filter
+        atr_ok = atr_filter[i]
         
         if position == 0:
-            # Long: weekly uptrend + price crosses above daily EMA21 + volume
-            if weekly_uptrend and price_above_ema and volume_confirmed and close[i-1] <= ema_21_daily[i-1]:
+            # Long: bull regime + breakout above R1 + volume spike + ATR filter
+            if bull_regime and breakout_up and volume_spike and atr_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + price crosses below daily EMA21 + volume
-            elif weekly_downtrend and price_below_ema and volume_confirmed and close[i-1] >= ema_21_daily[i-1]:
+            # Short: bear regime + breakdown below S1 + volume spike + ATR filter
+            elif bear_regime and breakdown_down and volume_spike and atr_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: weekly trend turns down OR price crosses below daily EMA21
-            if not weekly_uptrend or (price_below_ema and close[i-1] >= ema_21_daily[i-1]):
+            # Long exit: regime change or price breaks below S1
+            if not bull_regime or breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly trend turns up OR price crosses above daily EMA21
-            if not weekly_downtrend or (price_above_ema and close[i-1] <= ema_21_daily[i-1]):
+            # Short exit: regime change or price breaks above R1
+            if not bear_regime or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -87,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_Filter_Refined"
-timeframe = "1d"
+name = "6h_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "6h"
 leverage = 1.0
