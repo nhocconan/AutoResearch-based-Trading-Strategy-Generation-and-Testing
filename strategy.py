@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Channel_Breakout_With_Volume_and_Trend_v1
-Hypothesis: Buy when price breaks above upper Keltner Channel (20, 2*ATR) with volume spike and above 12h EMA34 trend; sell when price breaks below lower Keltner Channel with volume spike and below 12h EMA34. Keltner Channels adapt better than Bollinger Bands to trending markets, capturing volatility expansion with dynamic bands. Volume confirms institutional interest, and 12h EMA34 ensures alignment with medium-term trend. Designed for low trade frequency (<30/year) to minimize fee drift while capturing explosive moves in both bull and bear markets.
+12h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_1dTrend_v2
+Hypothesis: Camarilla pivot levels (R1, S1) from daily timeframe act as significant support/resistance. 
+Price breaking above R1 with volume spike and above daily EMA34 indicates bullish momentum; 
+breaking below S1 with volume spike and below daily EMA34 indicates bearish momentum. 
+Daily EMA34 filter ensures alignment with medium-term trend, reducing false breakouts. 
+Designed for low trade frequency (<30/year) to minimize fee drag while capturing meaningful moves.
 """
 
 import numpy as np
@@ -18,78 +22,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Keltner Channels (20, 2*ATR)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Daily Camarilla pivot levels (R1, S1)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    close_series = pd.Series(close)
-    ma = close_series.rolling(window=20, min_periods=20).mean()
-    upper_keltner = ma + 2 * atr
-    lower_keltner = ma - 2 * atr
-    upper = upper_keltner.values
-    lower = lower_keltner.values
-    middle = ma.values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Volume spike: >2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Daily EMA34 trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume spike: >2.0x 24-period average (2 periods = 1 day)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma)
-    
-    # 12h EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 40  # Need Keltner and volume MA
+    start_idx = 48  # Need EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_12h_aligned[i]) or 
-            np.isnan(volume_spike[i]) or
-            np.isnan(upper[i]) or
-            np.isnan(lower[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_12h_val = ema_12h_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_1d_val = ema_1d_aligned[i]
         vol_spike = volume_spike[i]
-        upper_val = upper[i]
-        lower_val = lower[i]
-        middle_val = middle[i]
         
         if position == 0:
-            # Long: price > upper Keltner with volume spike and above 12h EMA34
-            if price > upper_val and vol_spike and price > ema_12h_val:
+            # Long: price > R1 with volume spike and above daily EMA34
+            if price > r1_val and vol_spike and price > ema_1d_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < lower Keltner with volume spike and below 12h EMA34
-            elif price < lower_val and vol_spike and price < ema_12h_val:
+            # Short: price < S1 with volume spike and below daily EMA34
+            elif price < s1_val and vol_spike and price < ema_1d_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < middle band or below 12h EMA34
-            if price < middle_val or price < ema_12h_val:
+            # Exit: price < S1 or below daily EMA34
+            if price < s1_val or price < ema_1d_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > middle band or above 12h EMA34
-            if price > middle_val or price > ema_12h_val:
+            # Exit: price > R1 or above daily EMA34
+            if price > r1_val or price > ema_1d_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Keltner_Channel_Breakout_With_Volume_and_Trend_v1"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_1dTrend_v2"
+timeframe = "12h"
 leverage = 1.0
