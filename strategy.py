@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_20Day_WeeklyTrend_Breakout
-Hypothesis: Breakouts above/below 20-day high/low with volume confirmation and weekly EMA34 trend filter. This captures strong momentum moves while avoiding counter-trend trades. Weekly EMA ensures alignment with longer-term trend, reducing whipsaws in ranging markets. Designed for low trade frequency (<20/year) to minimize fee drag.
+4h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_12hEMA34
+Hypothesis: Buy when price breaks above Camarilla R1 with volume spike and above 12h EMA34; short when breaks below S1 with volume spike and below 12h EMA34. Camarilla pivots provide precise support/resistance levels based on prior day's range, effective in both trending and ranging markets. Volume confirms institutional participation, and 12h EMA34 ensures alignment with medium-term trend. Designed for low trade frequency to minimize fee drag while capturing high-probability breakouts.
 """
 
 import numpy as np
@@ -10,76 +10,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 20-day high/low for breakout
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    highest_20 = high_series.rolling(window=20, min_periods=20).max().values
-    lowest_20 = low_series.rolling(window=20, min_periods=20).min().values
+    # Camarilla pivot levels from previous day
+    # Need daily high, low, close
+    df_1d = get_htf_data(prices, '1d')
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
     
-    # Volume spike: >1.8x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Calculate Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    rang = phigh - plow
+    r1 = pclose + rang * 1.1 / 12
+    s1 = pclose - rang * 1.1 / 12
     
-    # Weekly EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align to 4h timeframe (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # 12h EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Need 20-period lookback
+    start_idx = 40  # Need volume MA and indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(ema_1w_aligned[i])):
+            np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_1w_val = ema_1w_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         vol_spike = volume_spike[i]
-        high_break = highest_20[i]
-        low_break = lowest_20[i]
+        ema_12h_val = ema_12h_aligned[i]
         
         if position == 0:
-            # Long: break above 20-day high with volume and above weekly EMA
-            if price > high_break and vol_spike and price > ema_1w_val:
+            # Long: price > R1 with volume spike and above 12h EMA34
+            if price > r1_val and vol_spike and price > ema_12h_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-day low with volume and below weekly EMA
-            elif price < low_break and vol_spike and price < ema_1w_val:
+            # Short: price < S1 with volume spike and below 12h EMA34
+            elif price < s1_val and vol_spike and price < ema_12h_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price falls below 20-day low or below weekly EMA
-            if price < low_break or price < ema_1w_val:
+            # Exit: price < S1 or below 12h EMA34
+            if price < s1_val or price < ema_12h_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price rises above 20-day high or above weekly EMA
-            if price > high_break or price > ema_1w_val:
+            # Exit: price > R1 or above 12h EMA34
+            if price > r1_val or price > ema_12h_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_20Day_WeeklyTrend_Breakout"
-timeframe = "1d"
+name = "4h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_12hEMA34"
+timeframe = "4h"
 leverage = 1.0
