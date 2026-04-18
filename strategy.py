@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_R3S3_Fade_R4S4_Breakout
-Hypothesis: Use daily Camarilla R3/S3 for mean-reversion fades and R4/S4 for breakout continuation.
-In ranging markets (identified by Bollinger Bandwidth), fade R3/S3 reversals. In trending markets
-(narrow BBW or ADX > 25), break R4/S4 continuation. This adapts to market regime, reducing false
-signals in chop and capturing momentum in trends. Designed for 6H timeframe with ~15-35 trades/year.
+1d_KAMA_Trend_With_RSI_And_Volume_Filter
+Hypothesis: Daily Kaufman Adaptive Moving Average (KAMA) trend direction combined with RSI momentum filter and volume confirmation.
+Goes long when KAMA slope is positive, RSI > 50 (bullish momentum), and volume > 1.5x 20-day average.
+Goes short when KAMA slope is negative, RSI < 50 (bearish momentum), and volume > 1.5x 20-day average.
+Uses weekly trend filter to avoid counter-trend trades in strong trends.
+Designed for low frequency (~10-20 trades/year) with strong performance in both bull and bear markets by adapting to market conditions.
 """
 
 import numpy as np
@@ -21,125 +22,121 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and Bollinger Bands
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly KAMA trend filter
+    close_1w = df_1w['close'].values
+    kama_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 30:
+        # ER (Efficiency Ratio) for KAMA
+        change = np.abs(np.diff(close_1w, 9))  # 9-period change
+        volatility = np.sum(np.abs(np.diff(close_1w)), axis=1)  # 9-period volatility
+        er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+        # Smoothing constants
+        sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+        # Initialize KAMA
+        kama_1w[9] = close_1w[9]  # start at index 9
+        for i in range(10, len(close_1w)):
+            kama_1w[i] = kama_1w[i-1] + sc[i] * (close_1w[i] - kama_1w[i-1])
+    
+    # Get daily data for KAMA, RSI, and volume
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels (R3/S3 and R4/S4 from prior day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily KAMA
     close_1d = df_1d['close'].values
+    kama_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 30:
+        # ER (Efficiency Ratio) for KAMA
+        change = np.abs(np.diff(close_1d, 9))  # 9-period change
+        volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)  # 9-period volatility
+        er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+        # Smoothing constants
+        sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+        # Initialize KAMA
+        kama_1d[9] = close_1d[9]  # start at index 9
+        for i in range(10, len(close_1d)):
+            kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d[i] - kama_1d[i-1])
     
-    r3 = np.full(len(close_1d), np.nan)  # R3 level
-    s3 = np.full(len(close_1d), np.nan)  # S3 level
-    r4 = np.full(len(close_1d), np.nan)  # R4 level
-    s4 = np.full(len(close_1d), np.nan)  # S4 level
+    # Calculate daily RSI(14)
+    rsi_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 15:
+        delta = np.diff(close_1d)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full(len(close_1d), np.nan)
+        avg_loss = np.full(len(close_1d), np.nan)
+        avg_gain[14] = np.mean(gain[1:15])
+        avg_loss[14] = np.mean(loss[1:15])
+        for i in range(15, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+        rsi_1d = 100 - (100 / (1 + rs))
     
-    for i in range(1, len(close_1d)):
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        diff = ph - pl
-        r3[i] = pc + 1.1 * diff  # R3
-        s3[i] = pc - 1.1 * diff  # S3
-        r4[i] = pc + 1.618 * diff  # R4
-        s4[i] = pc - 1.618 * diff  # S4
+    # Calculate daily volume moving average
+    vol_ma_1d = np.full(len(volume), np.nan)
+    for i in range(20, len(volume)):
+        vol_ma_1d[i] = np.mean(volume[i-20:i])
     
-    # Calculate Bollinger Bandwidth (20,2) for regime detection
-    bb_period = 20
-    bb_std = 2
-    sma = np.full(n, np.nan)
-    bb_up = np.full(n, np.nan)
-    bb_dn = np.full(n, np.nan)
-    bbw = np.full(n, np.nan)
+    # Align weekly KAMA to daily timeframe
+    kama_1w_aligned = align_htf_to_ltf(close_1d, df_1w, kama_1w)
     
-    if n >= bb_period:
-        for i in range(bb_period - 1, n):
-            sma[i] = np.mean(close[i-bb_period+1:i+1])
-            std = np.std(close[i-bb_period+1:i+1])
-            bb_up[i] = sma[i] + bb_std * std
-            bb_dn[i] = sma[i] - bb_std * std
-            bbw[i] = (bb_up[i] - bb_dn[i]) / sma[i] if sma[i] != 0 else np.nan
-    
-    # Align daily levels and BBW to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    bbw_aligned = align_htf_to_ltf(prices, df_1d, bbw)
+    # Align daily indicators to price timeframe (1d to 1d is 1:1, but we still align for consistency)
+    kama_1d_aligned = align_htf_to_ltf(close, df_1d, kama_1d)
+    rsi_1d_aligned = align_htf_to_ltf(close, df_1d, rsi_1d)
+    vol_ma_1d_aligned = align_htf_to_ltf(close, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 1)
+    start_idx = max(30, 20)  # KAMA(30) and volume MA(20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(bbw_aligned[i])):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(kama_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime: narrow BBW = trending, wide BBW = ranging
-        # Using 50th percentile of BBW as threshold (adaptive)
-        if i >= 50:
-            bbw_lookback = bbw_aligned[max(0, i-50):i]
-            bbw_median = np.nanmedian(bbw_lookback)
-            is_trending = bbw_aligned[i] < bbw_median
-        else:
-            is_trending = False  # default to ranging until enough data
+        # Volume spike: current volume > 1.5 x 20-day average
+        vol_spike = volume[i] > (vol_ma_1d_aligned[i] * 1.5)
         
         if position == 0:
-            if is_trending:
-                # Trending: breakout continuation at R4/S4
-                if close[i] > r4_aligned[i]:
+            # Long: KAMA rising (bullish trend), RSI > 50 (bullish momentum), volume spike
+            if (kama_1d_aligned[i] > kama_1d_aligned[i-1] and 
+                rsi_1d_aligned[i] > 50 and vol_spike):
+                # Weekly trend filter: only take longs if weekly KAMA is rising
+                if kama_1w_aligned[i] > kama_1w_aligned[i-1]:
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < s4_aligned[i]:
+            # Short: KAMA falling (bearish trend), RSI < 50 (bearish momentum), volume spike
+            elif (kama_1d_aligned[i] < kama_1d_aligned[i-1] and 
+                  rsi_1d_aligned[i] < 50 and vol_spike):
+                # Weekly trend filter: only take shorts if weekly KAMA is falling
+                if kama_1w_aligned[i] < kama_1w_aligned[i-1]:
                     signals[i] = -0.25
                     position = -1
-            else:
-                # Ranging: fade at R3/S3
-                if close[i] > r3_aligned[i]:
-                    signals[i] = -0.25  # short at R3
-                    position = -1
-                elif close[i] < s3_aligned[i]:
-                    signals[i] = 0.25   # long at S3
-                    position = 1
         
         elif position == 1:
-            # Long exit: in trend - exit on S4 break; in range - exit at midpoint or R3
-            if is_trending:
-                if close[i] < s4_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: KAMA turns down OR RSI < 40 (momentum loss)
+            if (kama_1d_aligned[i] < kama_1d_aligned[i-1] or 
+                rsi_1d_aligned[i] < 40):
+                signals[i] = 0.0
+                position = 0
             else:
-                midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
-                if close[i] > midpoint:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: in trend - exit on R4 break; in range - exit at midpoint or S3
-            if is_trending:
-                if close[i] > r4_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: KAMA turns up OR RSI > 60 (momentum loss)
+            if (kama_1d_aligned[i] > kama_1d_aligned[i-1] or 
+                rsi_1d_aligned[i] > 60):
+                signals[i] = 0.0
+                position = 0
             else:
-                midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
-                if close[i] < midpoint:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_Pivot_R3S3_Fade_R4S4_Breakout"
-timeframe = "6h"
+name = "1d_KAMA_Trend_With_RSI_And_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
