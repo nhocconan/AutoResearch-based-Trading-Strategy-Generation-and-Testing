@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly EMA(21) with volume breakout and volatility filter.
-# Long when price crosses above weekly EMA(21) with volume > 2x 10-day average and ATR > 0.
-# Short when price crosses below weekly EMA(21) with same conditions.
-# Exit when price crosses back over weekly EMA(21).
-# Weekly trend filter reduces whipsaw, volume surge adds conviction, ATR filter avoids low-volatility noise.
-# Designed for ~10-20 trades/year per symbol (~40-80 total over 4 years).
-name = "1d_WeeklyEMA21_VolumeBreakout_ATR_Filter"
-timeframe = "1d"
+# Hypothesis: 6h mean reversion at daily pivot S1/R1 with volume confirmation and ATR volatility filter.
+# Go long when price touches or breaks below S1 with volume > 1.5x 20-period average and ATR > 0.
+# Go short when price touches or breaks above R1 with same conditions.
+# Exit when price crosses back to the daily pivot point.
+# Uses daily pivot levels for mean reversion zones, volume surge for conviction, ATR for volatility filter.
+# Designed for ~15-30 trades/year per symbol, works in both trending and ranging markets.
+name = "6h_Pivot_S1R1_MeanReversion_Volume_ATR"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,28 +23,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # EMA(21) on weekly close
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate daily pivot points: P = (H + L + C)/3, S1 = 2P - H, R1 = 2P - L
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ATR(14) on weekly for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - close_1w)
-    tr3 = np.abs(low_1w - close_1w)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    s1_1d = 2 * pivot_1d - high_1d
+    r1_1d = 2 * pivot_1d - low_1d
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    
+    # ATR(14) on 6h for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))  # |H - Cprev|
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))   # |L - Cprev|
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: current volume > 2.0 * 10-period average (10-day average on daily)
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_filter = volume > (2.0 * vol_ma_10)
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,37 +58,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or
-            np.isnan(vol_ma_10[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_val = ema_21_1w_aligned[i]
-        atr_val = atr_1w_aligned[i]
+        pivot_val = pivot_aligned[i]
+        s1_val = s1_aligned[i]
+        r1_val = r1_aligned[i]
+        atr_val = atr[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price crosses above weekly EMA with volume surge and volatility
-            if close_val > ema_val and vol_filter and atr_val > 0:
+            # Long: price at or below S1 with volume surge and volatility
+            if close_val <= s1_val and vol_filter and atr_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below weekly EMA with volume surge and volatility
-            elif close_val < ema_val and vol_filter and atr_val > 0:
+            # Short: price at or above R1 with volume surge and volatility
+            elif close_val >= r1_val and vol_filter and atr_val > 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below weekly EMA
-            if close_val < ema_val:
+            # Long exit: price crosses back to pivot (mean reversion complete)
+            if close_val >= pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above weekly EMA
-            if close_val > ema_val:
+            # Short exit: price crosses back to pivot (mean reversion complete)
+            if close_val <= pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
