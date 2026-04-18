@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Donchian_Trend_Filter
-Hypothesis: Uses weekly Donchian channel breakouts on daily timeframe with volume confirmation and ADX trend filter.
-Enters long when price breaks above weekly upper band with ADX>25, short when breaks below weekly lower band with ADX>25.
-Designed for low trade frequency (~10-20/year) to capture major trends while avoiding whipsaws in ranging markets.
-Works in both bull (breakouts) and bear (breakdowns) markets by following the weekly trend.
+4h_Pivot_R1S1_Breakout_1dTrend_Volume_Filtered
+Hypothesis: Uses daily pivot point resistance/support levels with 1d EMA34 trend filter and volume confirmation.
+Enters long when price breaks above R1 with EMA34 > EMA50 and volume spike, short when breaks below S1 with EMA34 < EMA50 and volume spike.
+Designed for moderate trade frequency (~20-30/year) with strong trend capture in both bull and bear markets via pivot levels.
 """
 
 import numpy as np
@@ -21,80 +20,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) == 0:
-        return np.zeros(n)
+    # Get 1d data for pivot points and trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Donchian channels (20-period)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    # Calculate daily pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    pivot = typical_price.values
+    r1 = 2 * pivot - df_1d['low'].values
+    s1 = 2 * pivot - df_1d['high'].values
     
-    donchian_high = np.full(len(weekly_high), np.nan)
-    donchian_low = np.full(len(weekly_low), np.nan)
+    # Align pivot levels to 4h timeframe (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    for i in range(20, len(weekly_high)):
-        donchian_high[i] = np.max(weekly_high[i-20:i])
-        donchian_low[i] = np.min(weekly_low[i-20:i])
+    # Calculate 1d EMA34 and EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = np.full(len(close_1d), np.nan)
+    ema50_1d = np.full(len(close_1d), np.nan)
     
-    # Align to daily timeframe (waits for weekly bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
-    
-    # ADX filter on weekly timeframe (trend strength)
-    # Calculate True Range components
-    tr1 = weekly_high[1:] - weekly_low[1:]
-    tr2 = np.abs(weekly_high[1:] - weekly_close[:-1]) if len(weekly_high) > 1 else np.array([])
-    tr3 = np.abs(weekly_low[1:] - weekly_close[:-1]) if len(weekly_high) > 1 else np.array([])
-    
-    weekly_close = df_weekly['close'].values
-    if len(weekly_high) > 1:
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    else:
-        tr = np.array([np.nan])
-    
-    # Calculate ATR (14-period)
-    atr_period = 14
-    atr = np.full(len(tr), np.nan)
-    for i in range(atr_period, len(tr)):
-        if i == atr_period:
-            atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+    # EMA34
+    k34 = 2 / (34 + 1)
+    for i in range(34, len(close_1d)):
+        if i == 34:
+            ema34_1d[i] = np.mean(close_1d[i-34:i+1])
         else:
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+            ema34_1d[i] = close_1d[i] * k34 + ema34_1d[i-1] * (1 - k34)
     
-    # Calculate +DM and -DM
-    up_move = np.diff(weekly_high)
-    down_move = -np.diff(weekly_low)
+    # EMA50
+    k50 = 2 / (50 + 1)
+    for i in range(50, len(close_1d)):
+        if i == 50:
+            ema50_1d[i] = np.mean(close_1d[i-50:i+1])
+        else:
+            ema50_1d[i] = close_1d[i] * k50 + ema50_1d[i-1] * (1 - k50)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Align EMAs to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(arr[:period])
-        # Subsequent values: smoothed = prev * (1-1/period) + current * (1/period)
-        alpha = 1.0 / period
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]):
-                result[i] = result[i-1] * (1 - alpha) + arr[i] * alpha
-        return result
-    
-    plus_di = 100 * wilder_smooth(plus_dm, atr_period) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, atr_period) / atr
-    
-    # Calculate DX and ADX
-    dx = np.full(len(plus_di), np.nan)
-    mask = (plus_di + minus_di) > 0
-    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / (plus_di[mask] + minus_di[mask])
-    
-    adx = wilder_smooth(dx, atr_period)
-    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
-    
-    # Volume confirmation: daily volume > 1.5x 20-day average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -106,32 +73,33 @@ def generate_signals(prices):
     start_idx = 50  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above weekly upper band with strong trend and volume spike
-            if close[i] > donchian_high_aligned[i] and adx_aligned[i] > 25 and vol_spike[i]:
+            # Long: break above R1 with uptrend and volume spike
+            if close[i] > r1_aligned[i] and ema34_1d_aligned[i] > ema50_1d_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly lower band with strong trend and volume spike
-            elif close[i] < donchian_low_aligned[i] and adx_aligned[i] > 25 and vol_spike[i]:
+            # Short: break below S1 with downtrend and volume spike
+            elif close[i] < s1_aligned[i] and ema34_1d_aligned[i] < ema50_1d_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below weekly lower band or trend weakens
-            if close[i] < donchian_low_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price closes below S1 or trend weakens
+            if close[i] < s1_aligned[i] or ema34_1d_aligned[i] <= ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above weekly upper band or trend weakens
-            if close[i] > donchian_high_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price closes above R1 or trend weakens
+            if close[i] > r1_aligned[i] or ema34_1d_aligned[i] >= ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Donchian_Trend_Filter"
-timeframe = "1d"
+name = "4h_Pivot_R1S1_Breakout_1dTrend_Volume_Filtered"
+timeframe = "4h"
 leverage = 1.0
