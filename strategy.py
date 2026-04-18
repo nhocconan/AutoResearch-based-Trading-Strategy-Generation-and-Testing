@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_RangeBreakout_Volume
-Hypothesis: Weekly price ranges (high/low) act as strong support/resistance. Daily breakouts above weekly high or below weekly low with volume confirmation indicate institutional interest. Works in bull (breakouts up) and bear (breakdowns down) by following price action. Weekly timeframe reduces noise, volume confirmation avoids false breakouts, and daily frequency keeps trade count manageable (target: 15-30/year).
+6h_Ichimoku_TKCross_1dTrendFilter
+Hypothesis: Ichimoku Tenkan-Kijun cross on 6h with daily trend filter (price above/below Kumo cloud) provides high-probability entries. Works in bull (TK cross up + price above cloud) and bear (TK cross down + price below cloud). Reduces false signals in ranging markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,66 +18,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for range calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Ichimoku and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate weekly high and low from previous week
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
+    # Ichimoku components on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Shift by 1 to use previous week's completed bar (no look-ahead)
-    weekly_high_prev = np.roll(weekly_high, 1)
-    weekly_low_prev = np.roll(weekly_low, 1)
-    weekly_high_prev[0] = weekly_high[0]  # first value
-    weekly_low_prev[0] = weekly_low[0]
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    max_high_9 = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_9 = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_sen = (max_high_9 + min_low_9) / 2
     
-    # Align weekly levels to daily timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high_prev)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low_prev)
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    max_high_26 = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_26 = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_sen = (max_high_26 + min_low_26) / 2
     
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
-        else:
-            vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_spike = volume > (vol_ma * 1.5)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_52 = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_52 = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((max_high_52 + min_low_52) / 2)
+    
+    # Align Ichimoku components to 6h (with proper look-ahead prevention)
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Kumo cloud boundaries (Senkou Span A and B)
+    # Senkou Span A and B are already shifted ahead in their calculation
+    # For cloud filter, we need current cloud (values from 26 periods ago)
+    # But since we aligned the already-shifted Senkou spans, we use them directly
+    # The cloud at time t is formed by Senkou A and B from 26 periods ago
+    # So we need to shift the aligned Senkou spans BACK by 26 periods to get current cloud
+    # However, align_htf_to_ltf already handles the shift correctly for Ichimoku
+    # The Senkou spans we calculated are already future-shifted, so when aligned,
+    # they represent the cloud that should be visible NOW
+    
+    # Kumo cloud top and bottom
+    kumo_top = np.maximum(senkou_a_6h, senkou_b_6h)
+    kumo_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
+    
+    # TK cross signals
+    tk_cross_up = (tenkan_6h > kijun_6h) & (tenkan_6h <= kijun_6h)  # Crossed up
+    tk_cross_down = (tenkan_6h < kijun_6h) & (tenkan_6h >= kijun_6h)  # Crossed down
+    
+    # Price relative to cloud
+    price_above_kumo = close > kumo_top
+    price_below_kumo = close < kumo_bottom
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup
+    start_idx = 52  # Warmup for Ichimoku
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly high with volume spike
-            if close[i] > weekly_high_aligned[i] and vol_spike[i]:
+            # Long: TK cross up + price above Kumo cloud
+            if tk_cross_up[i] and price_above_kumo[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly low with volume spike
-            elif close[i] < weekly_low_aligned[i] and vol_spike[i]:
+            # Short: TK cross down + price below Kumo cloud
+            elif tk_cross_down[i] and price_below_kumo[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below weekly low (mean reversion) or volume dies
-            if close[i] < weekly_low_aligned[i] or not vol_spike[i]:
+            # Exit long: TK cross down OR price falls below Kumo cloud
+            if tk_cross_down[i] or close[i] < kumo_top[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above weekly high or volume dies
-            if close[i] > weekly_high_aligned[i] or not vol_spike[i]:
+            # Exit short: TK cross up OR price rises above Kumo cloud
+            if tk_cross_up[i] or close[i] > kumo_bottom[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_RangeBreakout_Volume"
-timeframe = "1d"
+name = "6h_Ichimoku_TKCross_1dTrendFilter"
+timeframe = "6h"
 leverage = 1.0
