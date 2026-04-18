@@ -1,15 +1,16 @@
-# 1d_Aggressive10_PostClose_Trend
-# Aggressive10 strategy on 1d: enter long/short on open after close crosses above/below Aggressive10, exit on reverse cross.
-# Works in bull markets (trend following) and bear markets (short signals). Low trade frequency (~10-25/year) minimizes fee drag.
-# Uses 1w EMA50 as trend filter for higher-timeframe context.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Aggressive10_PostClose_Trend"
-timeframe = "1d"
+# Hypothesis: 6h Camarilla pivot breakout with volume confirmation and 12h EMA filter.
+# Camarilla levels (R1/S1, R2/S2) from 12h data provide intraday support/resistance.
+# Breakouts above R1 or below S1 with volume confirmation signal momentum.
+# 12h EMA34 filters trades to align with higher timeframe trend.
+# Works in both bull and breakouts (buying strength) and bear markets (selling weakness).
+# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
+name = "6h_Camarilla_R1_S1_Breakout_Volume_12hEMA34"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,21 +19,44 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    open_price = prices['open'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for Camarilla pivots and EMA
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate EMA50 on 1w data
-    close_1w = pd.Series(df_1w['close'].values)
-    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels on 12h data
+    high_12h = pd.Series(df_12h['high'].values)
+    low_12h = pd.Series(df_12h['low'].values)
+    close_12h = pd.Series(df_12h['close'].values)
     
-    # Align EMA50 to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Previous day's range for Camarilla calculation
+    prev_high = high_12h.shift(1)
+    prev_low = low_12h.shift(1)
+    prev_close = close_12h.shift(1)
     
-    # Calculate Aggressive10 (10-period EMA of close)
-    close_series = pd.Series(close)
-    aggressive10 = close_series.ewm(span=10, adjust=False, min_periods=10).values
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    r1 = prev_close + range_hl * 1.1 / 12
+    s1 = prev_close - range_hl * 1.1 / 12
+    r2 = prev_close + range_hl * 1.1 / 6
+    s2 = prev_close - range_hl * 1.1 / 6
+    
+    # Calculate EMA34 on 12h close
+    ema_34_12h = close_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all 12h indicators to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_12h, r2.values)
+    s2_aligned = align_htf_to_ltf(prices, df_12h, s2.values)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Volume spike: current volume > 1.8 * 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -41,41 +65,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(aggressive10[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        open_val = open_price[i]
-        prev_close = close[i-1]
-        prev_aggressive10 = aggressive10[i-1]
-        prev_ema = ema_50_1w_aligned[i-1]
-        curr_aggressive10 = aggressive10[i]
-        curr_ema = ema_50_1w_aligned[i]
+        close_val = close[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        ema_val = ema_34_12h_aligned[i]
         
         if position == 0:
-            # Long: Previous close below Aggressive10, current open above Aggressive10, and price above weekly EMA50
-            if prev_close <= prev_aggressive10 and open_val > curr_aggressive10 and open_val > curr_ema:
-                signals[i] = 0.30
+            # Long: Break above R1 with volume and above EMA
+            if close_val > r1_val and volume_spike[i] and close_val > ema_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: Previous close above Aggressive10, current open below Aggressive10, and price below weekly EMA50
-            elif prev_close >= prev_aggressive10 and open_val < curr_aggressive10 and open_val < curr_ema:
-                signals[i] = -0.30
+            # Short: Break below S1 with volume and below EMA
+            elif close_val < s1_val and volume_spike[i] and close_val < ema_val:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Current open below Aggressive10
-            if open_val < curr_aggressive10:
+            # Long exit: Close below EMA or reach S2 (support)
+            if close_val < ema_val or close_val < s2_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Current open above Aggressive10
-            if open_val > curr_aggressive10:
+            # Short exit: Close above EMA or reach R2 (resistance)
+            if close_val > ema_val or close_val > r2_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
