@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Combined_Signal_With_Volume_Confirmation
-Combines multiple entry signals (breakout, pullback, momentum) with volume confirmation and 1d trend filter.
-Designed for 12-30 trades per year per symbol (48-120 total over 4 years).
-Works in bull markets (breakout continuation) and bear markets (pullback/reversal entries).
+1h_Donchian20_VolumeBreakout_TrendFilter_1h
+1h strategy using Donchian channel breakouts with volume confirmation and 4h/1d trend filters.
+- Long: Price breaks above Donchian(20) high + volume > 1.5x avg + 4h EMA34 > EMA89 + 1d close > SMA50
+- Short: Price breaks below Donchian(20) low + volume > 1.5x avg + 4h EMA34 < EMA89 + 1d close < SMA50
+- Exit: Opposite breakout or trend reversal on 4h
+- Session filter: 08:00-20:00 UTC only
+Designed for 15-30 trades/year per symbol (60-120 total over 4 years)
+Uses 4h/1d for trend direction, 1h for precise entry timing
 """
 
 import numpy as np
@@ -12,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,92 +24,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for breakout levels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Get daily data for trend filter and volume average
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    # 4h EMA34 and EMA89 for trend
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_89_4h = pd.Series(close_4h).ewm(span=89, adjust=False, min_periods=89).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    ema_89_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_89_4h)
+    
+    # Get 1d data for additional trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # 1h Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    
-    # Daily RSI(14) for pullback signals
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14.fillna(50).values)
+    # 1h volume average (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200 and RSI
+    start_idx = 89  # need enough for EMA89
     
     for i in range(start_idx, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
         # Skip if any required data is not available
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i]) or np.isnan(rsi_14_aligned[i])):
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(ema_89_4h_aligned[i]) or 
+            np.isnan(sma_50_1d_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        uptrend_4h = ema_34_4h_aligned[i] > ema_89_4h_aligned[i]
+        downtrend_4h = ema_34_4h_aligned[i] < ema_89_4h_aligned[i]
+        uptrend_1d = close[i] > sma_50_1d_aligned[i]
+        downtrend_1d = close[i] < sma_50_1d_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Entry signals
-        breakout_up = close[i] > weekly_high_aligned[i]
-        breakdown_down = close[i] < weekly_low_aligned[i]
-        pullback_long = rsi_14_aligned[i] < 30 and close[i] > low[i]  # RSI oversold + price above low
-        pullback_short = rsi_14_aligned[i] > 70 and close[i] < high[i]  # RSI overbought + price below high
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_20[i]
+        breakdown_down = close[i] < low_20[i]
         
         if position == 0:
-            # Long: uptrend + volume + (breakout OR pullback)
-            if uptrend and vol_confirm and (breakout_up or pullback_long):
-                signals[i] = 0.25
+            # Long: 4h/1d uptrend + volume + breakout above Donchian high
+            if uptrend_4h and uptrend_1d and vol_confirm and breakout_up:
+                signals[i] = 0.20
                 position = 1
-            # Short: downtrend + volume + (breakdown OR pullback)
-            elif downtrend and vol_confirm and (breakdown_down or pullback_short):
-                signals[i] = -0.25
+            # Short: 4h/1d downtrend + volume + breakdown below Donchian low
+            elif downtrend_4h and downtrend_1d and vol_confirm and breakdown_down:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, RSI overbought, or breakdown
-            if not uptrend or rsi_14_aligned[i] > 70 or breakdown_down:
-                signals[i] = -0.25  # reverse to short
+            # Long exit: trend reversal on 4h or Donchian breakdown
+            if not uptrend_4h or breakdown_down:
+                signals[i] = -0.20  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: trend change, RSI oversold, or breakout
-            if not downtrend or rsi_14_aligned[i] < 30 or breakout_up:
-                signals[i] = 0.25  # reverse to long
+            # Short exit: trend reversal on 4h or Donchian breakout
+            if not downtrend_4h or breakout_up:
+                signals[i] = 0.20  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Combined_Signal_With_Volume_Confirmation"
-timeframe = "12h"
+name = "1h_Donchian20_VolumeBreakout_TrendFilter_1h"
+timeframe = "1h"
 leverage = 1.0
