@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d weekly pivot point reversal with volume confirmation and ADX trend filter.
-# Weekly pivot levels (R1, S1) provide key support/resistance from higher timeframe.
-# Trade reversals at these levels with volume confirmation to avoid false breaks.
-# ADX filter ensures we only trade in trending markets (ADX > 25) to avoid chop.
-# Designed for low trade frequency (10-30/year) to minimize fee drag in 1d timeframe.
-# Works in bull markets (buy at S1 in uptrend) and bear markets (sell at R1 in downtrend).
-name = "1d_WeeklyPivot_R1S1_Reversal_Volume_ADX"
-timeframe = "1d"
+# Hypothesis: 4h Camarilla pivot breakout with daily volume confirmation and 1h EMA trend filter.
+# Uses Camarilla levels (H3/L3) from prior day for institutional breakout levels.
+# Requires volume > 1.5x 20-period average for conviction.
+# Uses 1h EMA(34) as trend filter to avoid counter-trend trades.
+# Designed for low trade frequency (20-40/year) with clear entry/exit rules.
+# Works in bull markets (long breaks above H3) and bear markets (short breaks below L3).
+name = "4h_Camarilla_H3L3_Volume_EMA34_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,61 +23,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla levels (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points using previous week's data to avoid look-ahead
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    # Calculate Camarilla levels from previous day's OHLC
+    # H3 = close + 1.1*(high-low)/2
+    # L3 = close - 1.1*(high-low)/2
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Calculate pivot point and support/resistance levels
-    pp = (high_w[:-1] + low_w[:-1] + close_w[:-1]) / 3  # previous week's data
-    r1 = 2 * pp - low_w[:-1]
-    s1 = 2 * pp - high_w[:-1]
+    camarilla_width = 1.1 * (high_prev - low_prev) / 2
+    H3 = close_prev + camarilla_width
+    L3 = close_prev - camarilla_width
     
-    # Align weekly pivot levels to daily timeframe (already delayed by using previous week)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align Camarilla levels to 4h timeframe (available after daily bar closes)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Calculate ADX (14-period) on daily data for trend strength
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Get 1h data for EMA trend filter
+    df_1h = get_htf_data(prices, '1h')
+    close_1h = df_1h['close'].values
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    # Calculate EMA(34) on 1h closes
+    ema_34_1h = pd.Series(close_1h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Smooth TR, DM+ and DM- using Wilder's smoothing (EMA with alpha=1/14)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[:period])
-            for i in range(period, len(data)):
-                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                    result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
-                else:
-                    result[i] = np.nan
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # Calculate DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # Calculate DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
+    # Align 1h EMA to 4h timeframe
+    ema_34_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_34_1h)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hour_index = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -86,41 +64,48 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_34_1h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade in trending markets (ADX > 25)
-        trend_filter = adx[i] > 25
+        hour = hour_index[i]
+        in_session = 8 <= hour <= 20
         
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_20[i]
+        if not in_session:
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume above 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        
+        # Trend filter: price above/below 1h EMA34
+        price_vs_ema = close[i] - ema_34_1h_aligned[i]
         
         if position == 0:
-            # Long: price crosses above S1 AND volume confirmation AND trend filter
-            long_signal = close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1]
-            if vol_confirm and trend_filter and long_signal:
+            # Long: price breaks above H3 AND volume confirmation AND uptrend (price > EMA)
+            long_breakout = close[i] > H3_aligned[i]
+            if vol_confirm and (price_vs_ema > 0) and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below R1 AND volume confirmation AND trend filter
-            elif vol_confirm and trend_filter and close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1]:
+            # Short: price breaks below L3 AND volume confirmation AND downtrend (price < EMA)
+            elif vol_confirm and (price_vs_ema < 0) and close[i] < L3_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below PP OR ADX drops below 20 (trend weakening)
-            exit_signal = close[i] < pp_aligned[i] and close[i-1] >= pp_aligned[i-1]
-            if exit_signal or adx[i] < 20:
+            # Long exit: price falls below L3 OR trend turns against (price < EMA)
+            exit_condition = close[i] < L3_aligned[i] or (price_vs_ema < 0)
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above PP OR ADX drops below 20 (trend weakening)
-            exit_signal = close[i] > pp_aligned[i] and close[i-1] <= pp_aligned[i-1]
-            if exit_signal or adx[i] < 20:
+            # Short exit: price rises above H3 OR trend turns against (price > EMA)
+            exit_condition = close[i] > H3_aligned[i] or (price_vs_ema > 0)
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
