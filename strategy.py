@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_R2_S2_Breakout_Volume_Trend_Filter
-Hypothesis: Camarilla pivot levels R2/S2 from daily timeframe act as strong support/resistance.
-Breakouts above R2 or below S2 with volume confirmation and daily EMA trend filter capture
-institutional move initiation. Works in bull/bear by following institutional flow.
-Target: 12-25 trades/year (48-100 total over 4 years) to balance opportunity and fee drag.
+12h_Pivot_R2_S2_Breakout_Volume_Trend
+Hypothesis: On 12-hour candles, price breakouts above daily R2 or below daily S2 with volume confirmation and daily EMA trend filter capture institutional momentum. Works in bull/bear by following institutional flow. Target: 15-30 trades/year (60-120 total) to minimize fee drag.
 """
 
 import numpy as np
@@ -35,9 +32,9 @@ def generate_signals(prices):
     r2 = prev_close + (prev_high - prev_low) * 1.1 / 6
     s2 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align to 6h timeframe (waits for 1-day bar to close)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    # Align to 12h timeframe (waits for 1-day bar to close)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
     
     # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,7 +42,7 @@ def generate_signals(prices):
     
     # 1-day EMA trend filter
     ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_6h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -54,17 +51,17 @@ def generate_signals(prices):
     start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_1d_6h[i])):
+        if (np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
             signals[i] = 0.0
             bars_since_entry = 0
             continue
         
         price = close[i]
-        r2_val = r2_6h[i]
-        s2_val = s2_6h[i]
+        r2_val = r2_12h[i]
+        s2_val = s2_12h[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_1d_6h[i]
+        ema_trend = ema_1d_12h[i]
         
         if position == 0:
             # Long: break above R2 with volume in uptrend
@@ -80,8 +77,8 @@ def generate_signals(prices):
         
         elif position == 1:
             bars_since_entry += 1
-            # Minimum holding period: 4 bars (1 day)
-            if bars_since_entry < 4:
+            # Minimum holding period: 2 bars (1 day)
+            if bars_since_entry < 2:
                 signals[i] = 0.25
             else:
                 signals[i] = 0.25
@@ -93,8 +90,8 @@ def generate_signals(prices):
         
         elif position == -1:
             bars_since_entry += 1
-            # Minimum holding period: 4 bars (1 day)
-            if bars_since_entry < 4:
+            # Minimum holding period: 2 bars (1 day)
+            if bars_since_entry < 2:
                 signals[i] = -0.25
             else:
                 signals[i] = -0.25
@@ -106,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R2_S2_Breakout_Volume_Trend_Filter"
-timeframe = "6h"
+name = "12h_Pivot_R2_S2_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
