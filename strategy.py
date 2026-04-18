@@ -1,12 +1,10 @@
-#!/usr/bin/env python3
-"""
-4h_ThreeStooges_LongOnly_V1
-Long-only strategy for BTC/ETH using daily VWAP trend, hourly VWAP deviation, and volume confirmation.
-- Long when: price > daily VWAP (trend), price < 0.5 std below hourly VWAP (dip), and volume > 1.5x 20-period average
-- Exit when: price crosses above hourly VWAP (mean reversion complete) or trend breaks
-- Designed for ~25-35 trades/year per symbol (100-140 total over 4 years)
-- Works in bull markets (buy dips in uptrend) and bear markets (buy dips in less steep downtrends)
-"""
+# 1d_KAMA_Trend_RSI_Pullback
+# 1d strategy using KAMA trend filter, RSI pullback entries, and volume confirmation
+# Long: KAMA trending up + RSI < 35 + volume > 1.5x 20-day avg
+# Short: KAMA trending down + RSI > 65 + volume > 1.5x 20-day avg
+# Exit: Opposite signal or trend reversal
+# Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
+# Works in bull trends (buy pullbacks) and bear trends (sell rallies)
 
 import numpy as np
 import pandas as pd
@@ -14,82 +12,94 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP trend
+    # Get daily data (same as primary for 1d timeframe)
     df_1d = get_htf_data(prices, '1d')
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d = vwap_1d.values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Get 1h data for VWAP and bands
-    df_1h = get_htf_data(prices, '1h')
-    typical_price_1h = (df_1h['high'] + df_1h['low'] + df_1h['close']) / 3.0
-    vwap_1h = (typical_price_1h * df_1h['volume']).cumsum() / df_1h['volume'].cumsum()
-    vwap_1h = vwap_1h.values
+    # KAMA components
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d, dtype=float)
+    er[1:] = change[1:] / np.where(volatility[1:] == 0, 1, volatility[1:])
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Calculate rolling std of deviation from VWAP (1h)
-    deviation = typical_price_1h - vwap_1h
-    # Use expanding std for first 20 periods, then rolling
-    deviation_std = pd.Series(deviation).expanding().std().values
-    deviation_std_20 = pd.Series(deviation).rolling(window=20, min_periods=20).std().values
-    # Combine: use expanding until we have 20 samples, then rolling
-    vwap_std = np.where(np.arange(len(deviation)) < 20, deviation_std, deviation_std_20)
+    # KAMA trend (slope)
+    kama_slope = np.diff(kama, prepend=0)
     
-    # Align all data to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    vwap_1h_aligned = align_htf_to_ltf(prices, df_1h, vwap_1h)
-    vwap_std_aligned = align_htf_to_ltf(prices, df_1h, vwap_std)
+    # RSI
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume average (20-period) on 1h
-    vol_ma_20_1h = pd.Series(df_1h['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1h, vol_ma_20_1h)
+    # Volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need enough for VWAP std and volume MA
+    start_idx = 34  # need for RSI and KAMA stability
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_1h_aligned[i]) or 
-            np.isnan(vwap_std_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(kama_slope[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend condition: price > daily VWAP
-        uptrend = close[i] > vwap_1d_aligned[i]
-        
-        # Dip condition: price < 0.5 std below 1h VWAP
-        dip_condition = close[i] < (vwap_1h_aligned[i] - 0.5 * vwap_std_aligned[i])
+        # Trend conditions
+        uptrend = kama_slope[i] > 0
+        downtrend = kama_slope[i] < 0
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Exit condition: price crosses above 1h VWAP (mean reversion)
-        exit_condition = close[i] > vwap_1h_aligned[i]
+        # RSI pullback conditions
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
         
         if position == 0:
-            # Long: uptrend + dip + volume
-            if uptrend and dip_condition and vol_confirm:
+            # Long: uptrend + RSI oversold + volume
+            if uptrend and rsi_oversold and vol_confirm:
                 signals[i] = 0.25
                 position = 1
+            # Short: downtrend + RSI overbought + volume
+            elif downtrend and rsi_overbought and vol_confirm:
+                signals[i] = -0.25
+                position = -1
+        
         elif position == 1:
-            # Exit: mean reversion complete or trend break
-            if exit_condition or not uptrend:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: trend change or RSI overbought
+            if not uptrend or rsi[i] > 65:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
                 signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: trend change or RSI oversold
+            if not downtrend or rsi[i] < 35:
+                signals[i] = 0.25  # reverse to long
+                position = 1
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_ThreeStooges_LongOnly_V1"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_Pullback"
+timeframe = "1d"
 leverage = 1.0
