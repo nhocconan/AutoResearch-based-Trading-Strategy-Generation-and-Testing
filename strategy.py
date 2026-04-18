@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_Regime
-Hypothesis: Trade Camarilla pivot breakouts on 12h with volume confirmation and 1d choppiness regime filter.
-The strategy goes long when price breaks above R1 and short when breaks below S1, only when 1d choppiness > 61.8 (ranging market) and volume > 1.5x 24-period average.
-Camarilla levels are derived from the previous 1d OHLC. This works in both bull and bear markets because it targets mean reversion in ranging conditions.
-Uses tight entry conditions to target ~20-30 trades/year, avoiding fee drag.
+6h_MonthlyVWAP_Deviation_Reversion_v1
+Hypothesis: Mean reversion to monthly VWAP with volume confirmation and ATR filter. 
+In both bull and bear markets, price tends to revert to monthly VWAP after extended deviations. 
+Enter long when price deviates >1.5σ below monthly VWAP with volume >1.5x average and ATR contraction.
+Enter short when price deviates >1.5σ above monthly VWAP with volume >1.5x average and ATR contraction.
+Exit when price returns to monthly VWAP or ATR expands indicating trend resumption.
+Uses 1d VWAP calculated from intraday data (approximated via typical price * volume) and resampled to monthly.
+Target: 15-25 trades/year via strict deviation threshold and volume/ATR filters.
 """
 
 import numpy as np
@@ -13,120 +16,138 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    typical = (high + low + close) / 3.0
     
-    # Get 1d data for Camarilla calculation and choppiness filter
+    # Get 1d data for monthly VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels (R1, S1) from previous day's OHLC
-    # R1 = C + (H-L) * 1.1/12
-    # S1 = C - (H-L) * 1.1/12
-    close_1d = df_1d['close'].values
+    # Calculate daily typical price and volume
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    typical_1d = (high_1d + low_1d + close_1d) / 3.0
     
-    camarilla_r1 = np.full_like(close_1d, np.nan)
-    camarilla_s1 = np.full_like(close_1d, np.nan)
+    # Calculate VWAP components: cumulative typical price * volume and cumulative volume
+    tpv = typical_1d * volume_1d
+    cum_tpv = np.cumsum(tpv)
+    cum_vol = np.cumsum(volume_1d)
     
-    for i in range(1, len(close_1d)):
-        # Use previous day's OHLC to calculate today's levels
-        prev_close = close_1d[i-1]
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        range_val = prev_high - prev_low
+    # Calculate daily VWAP (avoid division by zero)
+    vwap_1d = np.where(cum_vol > 0, cum_tpv / cum_vol, typical_1d)
+    
+    # Resample to monthly: take last VWAP of each month
+    # Create date index for 1d data
+    if len(df_1d) > 0:
+        dates_1d = pd.to_datetime(df_1d['open_time'])
+        # Find month ends
+        month_ends = (dates_1d.to_series().dt.to_period('M') != 
+                     dates_1d.to_series().shift(1).dt.to_period('M'))
+        month_ends.iloc[0] = True  # First day is always a month start
         
-        camarilla_r1[i] = prev_close + range_val * 1.1 / 12
-        camarilla_s1[i] = prev_close - range_val * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Calculate 1d choppiness index (using previous day's data)
-    chop_period = 14
-    chop = np.full_like(close_1d, np.nan)
-    
-    if len(close_1d) >= chop_period + 1:
-        # True Range
-        tr = np.zeros_like(close_1d)
-        tr[0] = high_1d[0] - low_1d[0]
-        for i in range(1, len(close_1d)):
-            tr[i] = max(
-                high_1d[i] - low_1d[i],
-                abs(high_1d[i] - close_1d[i-1]),
-                abs(low_1d[i] - close_1d[i-1])
-            )
+        # Get monthly VWAP values (last VWAP of each month)
+        monthly_vwap_raw = vwap_1d[month_ends.values]
+        monthly_dates = dates_1d[month_ends.values]
         
-        # Sum of TR over period
-        tr_sum = np.full_like(close_1d, np.nan)
-        for i in range(chop_period, len(close_1d)):
-            tr_sum[i] = np.sum(tr[i-chop_period+1:i+1])
-        
-        # Chop = 100 * log10(sum(tr) / (n * (max(high) - min(low)))) / log10(n)
-        max_h = np.full_like(close_1d, np.nan)
-        min_l = np.full_like(close_1d, np.nan)
-        for i in range(chop_period, len(close_1d)):
-            max_h[i] = np.max(high_1d[i-chop_period+1:i+1])
-            min_l[i] = np.min(low_1d[i-chop_period+1:i+1])
-            if tr_sum[i] > 0 and (max_h[i] - min_l[i]) > 0:
-                chop[i] = 100 * np.log10(tr_sum[i] / (chop_period * (max_h[i] - min_l[i]))) / np.log10(chop_period)
+        # Create monthly series and forward fill to daily
+        if len(monthly_vwap_raw) > 0:
+            monthly_series = pd.Series(monthly_vwap_raw, index=monthly_dates)
+            # Reindex to daily frequency and forward fill
+            daily_index = pd.date_range(start=dates_1d.iloc[0], 
+                                       end=dates_1d.iloc[-1], 
+                                       freq='D')
+            monthly_vwap_daily = monthly_series.reindex(daily_index, method='ffill')
+            # Align back to original daily index
+            vwap_monthly = np.interp(np.arange(len(dates_1d)), 
+                                   np.arange(len(daily_index)),
+                                   monthly_vwap_daily.values)
+        else:
+            vwap_monthly = vwap_1d.copy()
+    else:
+        vwap_monthly = typical_1d.copy()
     
-    # Align choppiness to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align monthly VWAP to 6h timeframe
+    vwap_monthly_aligned = align_htf_to_ltf(prices, df_1d, vwap_monthly)
+    
+    # Calculate deviation from monthly VWAP in ATR units
+    # First calculate ATR(14) on 6h data
+    atr_period = 14
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], 
+                   abs(high[i] - close[i-1]), 
+                   abs(low[i] - close[i-1]))
+    
+    atr = np.full(n, np.nan)
+    if n >= atr_period:
+        atr[atr_period-1] = np.mean(tr[:atr_period])
+        for i in range(atr_period, n):
+            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    
+    # Calculate price deviation from monthly VWAP
+    deviation = close - vwap_monthly_aligned
+    deviation_atr = np.where(atr > 0, deviation / atr, 0)
     
     # Volume confirmation: volume > 1.5x 24-period average
-    vol_ma = np.full_like(volume, np.nan)
+    vol_ma = np.full(n, np.nan)
     vol_period = 24
+    if n >= vol_period:
+        for i in range(vol_period, n):
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
     
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i-vol_period:i])
+    # ATR contraction filter: current ATR < 0.8 * ATR(50) average
+    atr_ma = np.full(n, np.nan)
+    atr_ma_period = 50
+    if n >= atr_ma_period:
+        for i in range(atr_ma_period, n):
+            atr_ma[i] = np.mean(atr[i - atr_ma_period:i])
+    
+    atr_contraction = (atr < 0.8 * atr_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(vol_period, chop_period) + 1
+    start_idx = max(atr_period, vol_period, atr_ma_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(vwap_monthly_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Regime filter: only trade in ranging markets (chop > 61.8)
-        regime_filter = chop_aligned[i] > 61.8
+        atr_contract = atr_contraction[i]
         
         if position == 0:
-            # Long: price breaks above R1 + volume + regime
-            if close[i] > camarilla_r1_aligned[i] and vol_confirm and regime_filter:
+            # Long: price >1.5σ below monthly VWAP + volume + ATR contraction
+            if deviation_atr[i] < -1.5 and vol_confirm and atr_contract:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume + regime
-            elif close[i] < camarilla_s1_aligned[i] and vol_confirm and regime_filter:
+            # Short: price >1.5σ above monthly VWAP + volume + ATR contraction
+            elif deviation_atr[i] > 1.5 and vol_confirm and atr_contract:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or chop < 38.2 (trending)
-            if close[i] < camarilla_s1_aligned[i] or chop_aligned[i] < 38.2:
+            # Long exit: price returns to VWAP or ATR expansion (trend resumption)
+            if deviation_atr[i] > -0.5 or not atr_contract:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or chop < 38.2 (trending)
-            if close[i] > camarilla_r1_aligned[i] or chop_aligned[i] < 38.2:
+            # Short exit: price returns to VWAP or ATR expansion (trend resumption)
+            if deviation_atr[i] < 0.5 or not atr_contract:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -134,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Regime"
-timeframe = "12h"
+name = "6h_MonthlyVWAP_Deviation_Reversion_v1"
+timeframe = "6h"
 leverage = 1.0
