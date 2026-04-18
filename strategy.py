@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA34 trend filter and volume confirmation.
-# Donchian breakout provides clear entry/exit signals based on price channels.
-# 12h EMA34 filters for trend direction, avoiding counter-trend trades.
-# Volume confirmation ensures breakouts have conviction.
-# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
-# Works in bull markets (breakout above upper band with rising EMA) and bear markets 
-# (breakdown below lower band with falling EMA).
-name = "4h_Donchian20_12hEMA34_Volume"
-timeframe = "4h"
+# Hypothesis: 1h volume-weighted VWAP mean reversion with 4h trend filter and 1d volatility filter.
+# In ranging markets (1d ATR low), price reverts to VWAP with high probability.
+# 4h trend filter ensures we only trade mean reversion in sideways markets, not strong trends.
+# Volume confirmation filters low-conviction moves.
+# Designed for low trade frequency (15-35/year) to minimize fee drag.
+# Works in bull markets (mean reversion during pullbacks) and bear markets (mean reversion during bounces).
+
+name = "1h_VWAP_MeanRev_4hTrend_1dVolFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,23 +24,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA calculation (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for trend filter (ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for volatility filter (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA34 on 12h close (using previous close to avoid look-ahead)
-    close_12h = df_12h['close'].values
-    ema_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_prev = np.concatenate([[np.nan], ema_34[:-1]])  # shift by 1 to use previous value
+    # Calculate VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = np.divide(vwap_numerator, vwap_denominator, 
+                     out=np.full_like(vwap_numerator, np.nan), 
+                     where=vwap_denominator!=0)
     
-    # Align EMA to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_prev)
+    # Calculate 4h EMA34 for trend filter (using previous bar to avoid look-ahead)
+    ema34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_shifted = np.roll(ema34_4h, 1)
+    ema34_4h_shifted[0] = np.nan
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h_shifted)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 1d ATR for volatility filter (using Wilder's smoothing)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period]) / period
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+                else:
+                    result[i] = np.nan
+        return result
+    
+    atr_14 = wilders_smoothing(tr, 14)
+    atr_14_shifted = np.roll(atr_14, 1)
+    atr_14_shifted[0] = np.nan
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_shifted, additional_delay_bars=0)
+    
+    # Calculate 1d ATR percentile (20-period lookback) for volatility regime
+    atr_ratio = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).apply(
+        lambda x: np.percentile(x, 50) if len(x) == 20 else np.nan, raw=True).values
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -52,8 +85,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(vwap[i]) or np.isnan(ema34_4h_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -64,38 +97,36 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_20[i]
+        # Volatility filter: only trade when ATR is below median (low volatility ranging market)
+        low_volatility = atr_14_aligned[i] < atr_ratio[i]
+        
+        # Trend filter: only trade when price is near 4h EMA (sideways relative to trend)
+        near_trend = abs(close[i] - ema34_4h_aligned[i]) / ema34_4h_aligned[i] < 0.02
         
         if position == 0:
-            # Long: breakout above upper Donchian band AND price above 12h EMA34 AND volume
-            breakout_up = high[i] > high_20[i]
-            price_above_ema = close[i] > ema_34_aligned[i]
-            
-            if vol_confirm and breakout_up and price_above_ema:
-                signals[i] = 0.25
+            # Long: price below VWAP in low volatility, sideways market
+            if low_volatility and near_trend and close[i] < vwap[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: breakdown below lower Donchian band AND price below 12h EMA34 AND volume
-            elif (vol_confirm and 
-                  low[i] < low_20[i] and 
-                  close[i] < ema_34_aligned[i]):
-                signals[i] = -0.25
+            # Short: price above VWAP in low volatility, sideways market
+            elif low_volatility and near_trend and close[i] > vwap[i]:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below lower Donchian band
-            if low[i] < low_20[i]:
+            # Long exit: price crosses above VWAP or volatility increases
+            if close[i] > vwap[i] or not low_volatility:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price rises above upper Donchian band
-            if high[i] > high_20[i]:
+            # Short exit: price crosses below VWAP or volatility increases
+            if close[i] < vwap[i] or not low_volatility:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
