@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_ParabolicSAR_Trend_Optimized
-Hypothesis: Use Parabolic SAR from 12h as primary trend filter (proven to reduce whipsaws in 2022 crash), combined with 1d breakout above/below daily high/low and volume confirmation. Parabolic SAR provides clear trend direction with built-in acceleration, making it effective in both trending and ranging markets. Targets 20-30 trades/year by requiring PSAR trend alignment, price breakout beyond daily range, and volume > 1.8x 20-period average. Works in bull markets by following uptrend breaks above daily high, and in bear markets by taking short breaks below daily low only when PSAR confirms downtrend.
-Optimizations: Reduced volume threshold to 1.5x from 1.8x to increase trade frequency slightly while maintaining quality, added minimum hold period of 3 bars to reduce churn, and tightened exit conditions.
+4h_CCI_RSI_Confluence
+Hypothesis: Use CCI(20) and RSI(14) confluence on 4h timeframe with volume confirmation and ADX trend filter. CCI captures cyclical extremes while RSI measures momentum strength. In trending markets (ADX>25), we take signals in the direction of trend when both indicators show oversold/overbought conditions with volume confirmation. This reduces whipsaws in sideways markets and captures momentum in trending periods. Designed for 20-30 trades/year by requiring multiple confirmations.
 """
 
 import numpy as np
@@ -19,122 +18,171 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Parabolic SAR (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # CCI calculation (20-period)
+    typical_price = (high + low + close) / 3.0
+    sma_tp = np.full(n, np.nan)
+    mad = np.full(n, np.nan)
+    for i in range(20, n):
+        sma_tp[i] = np.mean(typical_price[i-20:i+1])
+        mad[i] = np.mean(np.abs(typical_price[i-20:i+1] - sma_tp[i]))
     
-    # Calculate Parabolic SAR
-    # Parameters: start=0.02, increment=0.02, max=0.2
-    psar = np.full_like(close_12h, np.nan)
-    bull = True  # start assuming bullish
-    af = 0.02    # acceleration factor
-    ep = low_12h[0] if bull else high_12h[0]  # extreme point
-    psar[0] = ep
-    
-    for i in range(1, len(close_12h)):
-        if bull:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Reverse if price < SAR
-            if low_12h[i] < psar[i]:
-                bull = False
-                psar[i] = ep  # SAR = prior EP
-                af = 0.02
-                ep = high_12h[i]
-            else:
-                # Continue bullish
-                if high_12h[i] > ep:
-                    ep = high_12h[i]
-                    af = min(af + 0.02, 0.2)
+    cci = np.full(n, np.nan)
+    for i in range(20, n):
+        if mad[i] > 0:
+            cci[i] = (typical_price[i] - sma_tp[i]) / (0.015 * mad[i])
         else:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Reverse if price > SAR
-            if high_12h[i] > psar[i]:
-                bull = True
-                psar[i] = ep  # SAR = prior EP
-                af = 0.02
-                ep = low_12h[i]
-            else:
-                # Continue bearish
-                if low_12h[i] < ep:
-                    ep = low_12h[i]
-                    af = min(af + 0.02, 0.2)
+            cci[i] = 0.0
     
-    # Align PSAR to 4h timeframe (wait for bar close)
-    psar_aligned = align_htf_to_ltf(prices, df_12h, psar)
+    # RSI calculation (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Get 1d data for daily high/low (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[i-13:i+1])
+            avg_loss[i] = np.mean(loss[i-13:i+1])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align daily high/low to 4h timeframe (wait for bar close)
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    rsi = np.full(n, np.nan)
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+        else:
+            rsi[i] = 100
     
-    # Volume confirmation: current volume > 1.5 x 20-period average (reduced from 1.8)
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     vol_confirm = volume > (vol_ma * 1.5)
     
+    # ADX trend filter (14-period) - using daily data for stability
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate True Range and Directional Movement
+    tr = np.full(len(close_1d), np.nan)
+    dm_plus = np.full(len(close_1d), np.nan)
+    dm_minus = np.full(len(close_1d), np.nan)
+    
+    for i in range(1, len(close_1d)):
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - close_1d[i-1]),
+                   abs(low_1d[i] - close_1d[i-1]))
+        
+        up_move = high_1d[i] - high_1d[i-1]
+        down_move = low_1d[i-1] - low_1d[i]
+        
+        if up_move > down_move and up_move > 0:
+            dm_plus[i] = up_move
+        else:
+            dm_plus[i] = 0
+            
+        if down_move > up_move and down_move > 0:
+            dm_minus[i] = down_move
+        else:
+            dm_minus[i] = 0
+    
+    # Smooth TR, DM+ and DM- (14-period)
+    atr = np.full(len(close_1d), np.nan)
+    dm_plus_smooth = np.full(len(close_1d), np.nan)
+    dm_minus_smooth = np.full(len(close_1d), np.nan)
+    
+    for i in range(14, len(close_1d)):
+        if i == 14:
+            atr[i] = np.mean(tr[1:i+1])
+            dm_plus_smooth[i] = np.mean(dm_plus[1:i+1])
+            dm_minus_smooth[i] = np.mean(dm_minus[1:i+1])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
+    
+    # Calculate DI+ and DI-
+    di_plus = np.full(len(close_1d), np.nan)
+    di_minus = np.full(len(close_1d), np.nan)
+    dx = np.full(len(close_1d), np.nan)
+    
+    for i in range(14, len(close_1d)):
+        if atr[i] > 0:
+            di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
+            di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
+            if di_plus[i] + di_minus[i] > 0:
+                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+            else:
+                dx[i] = 0
+        else:
+            di_plus[i] = 0
+            di_minus[i] = 0
+            dx[i] = 0
+    
+    # ADX is smoothed DX (14-period)
+    adx = np.full(len(close_1d), np.nan)
+    for i in range(28, len(close_1d)):
+        if i == 28:
+            adx[i] = np.mean(dx[15:i+1])
+        else:
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = 20  # need volume MA
+    start_idx = max(20, 14)  # need CCI and RSI warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(psar_aligned[i]) or np.isnan(high_1d_aligned[i]) or 
-            np.isnan(low_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(cci[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
-        
-        if position == 0:
-            # Long entry: price breaks above 1d high, with volume, and PSAR bullish (close > PSAR)
-            if (close[i] > high_1d_aligned[i] and vol_confirm[i] and 
-                close[i] > psar_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-                bars_since_entry = 0
-            # Short entry: price breaks below 1d low, with volume, and PSAR bearish (close < PSAR)
-            elif (close[i] < low_1d_aligned[i] and vol_confirm[i] and 
-                  close[i] < psar_aligned[i]):
-                signals[i] = -0.25
-                position = -1
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
-        
-        elif position == 1:
-            # Long exit: price returns below PSAR (trend change) or fails to hold above daily high
-            # Minimum hold: 3 bars
-            if bars_since_entry >= 3 and (close[i] < psar_aligned[i] or 
-                close[i] < high_1d_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: price returns above PSAR (trend change) or fails to hold below daily low
-            # Minimum hold: 3 bars
-            if bars_since_entry >= 3 and (close[i] > psar_aligned[i] or 
-                close[i] > low_1d_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = -0.25
+        # Only trade when ADX indicates trending market (>25)
+        if adx_aligned[i] > 25:
+            if position == 0:
+                # Long entry: CCI oversold (< -100) AND RSI oversold (< 30) with volume confirmation
+                if (cci[i] < -100 and rsi[i] < 30 and vol_confirm[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short entry: CCI overbought (> 100) AND RSI overbought (> 70) with volume confirmation
+                elif (cci[i] > 100 and rsi[i] > 70 and vol_confirm[i]):
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            
+            elif position == 1:
+                # Long exit: CCI becomes overbought OR RSI becomes overbought
+                if (cci[i] > 100 or rsi[i] > 70):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            
+            elif position == -1:
+                # Short exit: CCI becomes oversold OR RSI becomes oversold
+                if (cci[i] < -100 or rsi[i] < 30):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            # In ranging markets (ADX <= 25), stay flat
+            signals[i] = 0.0
+            position = 0
     
     return signals
 
-name = "4h_12h_1d_ParabolicSAR_Trend_Optimized"
+name = "4h_CCI_RSI_Confluence"
 timeframe = "4h"
 leverage = 1.0
