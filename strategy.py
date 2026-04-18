@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Weekly Range Breakout with Volume Spike and Trend Filter
-Hypothesis: Weekly high/low act as key support/resistance. Breakouts with volume confirmation and trend alignment capture momentum.
-Works in bull/bear markets by requiring volume to avoid false breaks and trend filter to align with higher timeframe bias.
-Target: 15-25 trades/year on 1d timeframe.
+12h Daily Range Breakout with Volume Spike and EMA Trend Filter
+Hypothesis: The previous day's high and low act as key support/resistance levels.
+Breakouts beyond these levels with volume confirmation and aligned with 1-day EMA trend
+capture momentum moves. Works in both bull and bear markets by requiring volume confirmation
+to avoid false breakouts and using EMA trend to align with higher timeframe direction.
+Designed for 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,72 +22,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for previous week's high/low (once before loop)
-    df_w = get_htf_data(prices, '1w')
+    # Get daily data for previous day's high/low and EMA (once before loop)
+    df_d = get_htf_data(prices, '1d')
     
-    # Previous week's high and low (shifted by 1 to avoid look-ahead)
-    prev_week_high = df_w['high'].shift(1).values
-    prev_week_low = df_w['low'].shift(1).values
+    # Previous day's high and low (shifted by 1 to avoid look-ahead)
+    prev_high = df_d['high'].shift(1).values
+    prev_low = df_d['low'].shift(1).values
     
-    # Align to 1d timeframe
-    prev_week_high_aligned = align_htf_to_ltf(prices, df_w, prev_week_high)
-    prev_week_low_aligned = align_htf_to_ltf(prices, df_w, prev_week_low)
+    # 1-day EMA34 for trend filter
+    ema_34 = pd.Series(df_d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Weekly trend: 34-period EMA of weekly close
-    weekly_close = df_w['close'].values
-    weekly_ema34 = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_ema34_aligned = align_htf_to_ltf(prices, df_w, weekly_ema34)
+    # Align to 12h timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
+    ema_34_aligned = align_htf_to_ltf(prices, df_d, ema_34)
     
-    # Volume spike: 2x 20-period average
+    # Volume spike: 2x 20-period average on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(prev_week_high_aligned[i]) or 
-            np.isnan(prev_week_low_aligned[i]) or
-            np.isnan(weekly_ema34_aligned[i]) or
+        if (np.isnan(prev_high_aligned[i]) or 
+            np.isnan(prev_low_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        pwh = prev_week_high_aligned[i]
-        pwl = prev_week_low_aligned[i]
-        w_trend = weekly_ema34_aligned[i]
+        ph = prev_high_aligned[i]
+        pl = prev_low_aligned[i]
+        ema_trend = ema_34_aligned[i]
         
         if position == 0:
-            # Long: break above weekly high with volume spike and bullish weekly trend
-            if price > pwh and volume_spike[i] and price > w_trend:
+            # Long: break above previous day's high with volume spike and bullish EMA trend
+            if price > ph and volume_spike[i] and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly low with volume spike and bearish weekly trend
-            elif price < pwl and volume_spike[i] and price < w_trend:
+            # Short: break below previous day's low with volume spike and bearish EMA trend
+            elif price < pl and volume_spike[i] and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: price returns to weekly low or trend turns bearish
-            if price <= pwl or price < w_trend:
+            # Exit: price returns to previous day's low or price breaks below EMA
+            if price <= pl or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: price returns to weekly high or trend turns bullish
-            if price >= pwh or price > w_trend:
+            # Exit: price returns to previous day's high or price breaks above EMA
+            if price >= ph or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WeeklyRange_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "12h_DailyRange_Breakout_Volume_EMA"
+timeframe = "12h"
 leverage = 1.0
