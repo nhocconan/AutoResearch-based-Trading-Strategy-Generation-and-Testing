@@ -1,10 +1,7 @@
-#!/usr/bin/env python3
-"""
-6h_1d_Camarilla_Pivot_R1S1_R2S2_Breakout_Volume
-Hypothesis: Uses 1d R1/S1/R2/S2 levels as a price channel. Trades breakouts of R1/S1 in the 
-direction of the 1d trend (above/below daily pivot) with volume confirmation. Designed for 
-both bull and bear markets by filtering with daily trend. Target: 12-37 trades/year on 6h.
-"""
+# 12h_1d_Camarilla_Pivot_R1S1_R2S2_Breakout_Volume
+# Hypothesis: Uses 1-day R1/S1/R2/S2 levels as a price channel. Trades breakouts of R1/S1 in the direction
+# of the daily trend (above/below daily pivot) with volume confirmation. Designed for both bull and bear
+# markets by filtering with daily trend. Target: 12-37 trades/year on 12h.
 
 import numpy as np
 import pandas as pd
@@ -37,23 +34,23 @@ def generate_signals(prices):
     # Calculate 1d pivot for trend bias
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Align all levels to 6h timeframe (wait for bar close)
+    # Align all levels to 12h timeframe (wait for bar close)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Volume confirmation: current volume > 2.0 x 24-period average (more selective)
+    # Volume confirmation: current volume > 2.5 x 12-period average (more selective for 12h)
     vol_ma = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
-    vol_confirm = volume > (vol_ma * 2.0)
+    for i in range(12, n):
+        vol_ma[i] = np.mean(volume[i-12:i])
+    vol_confirm = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24
+    start_idx = 12
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
@@ -97,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_Pivot_R1S1_R2S2_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Pivot_R1S1_R2S2_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
