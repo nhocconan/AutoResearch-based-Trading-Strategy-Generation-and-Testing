@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Volume Spike + Daily Close Breakout with Trend Filter
-Strategy: Enter long when price breaks above previous day's high with volume spike,
-          short when price breaks below previous day's low with volume spike.
-          Use daily EMA50 as trend filter to avoid counter-trend trades.
-          Designed for low trade frequency with clear breakout edge in both bull and bear markets.
+1d Donchian(20) Breakout + Weekly EMA20 Trend + Volume Spike + ATR Stop
+Hypothesis: Price breaking out of 20-day channel with volume and weekly trend alignment captures breakouts in both bull and bear markets.
+Uses weekly EMA20 as trend filter to avoid counter-trend trades, volume spike for confirmation, and ATR-based stop to manage risk.
+Designed for low trade frequency (target: 10-30 trades/year) with clear edge in trending and ranging markets.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,74 +20,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for breakout levels and trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for EMA20 trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily high, low, close for breakout levels
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate daily EMA50 for trend filter
-    ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align weekly EMA to daily timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Align daily levels to 12h timeframe
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate ATR(14) for stop loss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume spike detection (2x 20-period average)
+    # Donchian channel (20-day high/low)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume spike (2x 20-day average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
+    entry_price = 0.0
     
-    start_idx = 100  # need enough history for calculations
+    start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(daily_high_aligned[i]) or 
-            np.isnan(daily_low_aligned[i]) or 
-            np.isnan(daily_close_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        daily_high_level = daily_high_aligned[i]
-        daily_low_level = daily_low_aligned[i]
-        ema_50 = ema_50_1d_aligned[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long: break above daily high with volume spike and above daily EMA50
-            if (price > daily_high_level and volume_spike[i] and price > ema_50):
+            # Long: break above Donchian high with volume spike and above weekly EMA20
+            if (price > donch_high[i] and volume_spike[i] and price > ema_20_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below daily low with volume spike and below daily EMA50
-            elif (price < daily_low_level and volume_spike[i] and price < ema_50):
+                entry_price = price
+            # Short: break below Donchian low with volume spike and below weekly EMA20
+            elif (price < donch_low[i] and volume_spike[i] and price < ema_20_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long position management
+            # Long position: hold until stop loss or reversal
             signals[i] = 0.25
-            # Exit: price breaks below daily low or below daily EMA50
-            if price < daily_low_level or price < ema_50:
+            # Stop loss: 2 * ATR below entry
+            if price <= entry_price - 2.0 * atr_val:
+                signals[i] = 0.0
+                position = 0
+            # Optional exit: price closes below weekly EMA20 (trend change)
+            elif price < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position management
+            # Short position: hold until stop loss or reversal
             signals[i] = -0.25
-            # Exit: price breaks above daily high or above daily EMA50
-            if price > daily_high_level or price > ema_50:
+            # Stop loss: 2 * ATR above entry
+            if price >= entry_price + 2.0 * atr_val:
+                signals[i] = 0.0
+                position = 0
+            # Optional exit: price closes above weekly EMA20 (trend change)
+            elif price > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_VolumeSpike_DailyBreakout_EMA50"
-timeframe = "12h"
+name = "1d_Donchian20_WeeklyEMA20_VolumeSpike_ATRStop"
+timeframe = "1d"
 leverage = 1.0
