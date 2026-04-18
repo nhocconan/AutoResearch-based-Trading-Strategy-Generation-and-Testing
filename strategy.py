@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Time-Weighted Average Price (TWAP) Reversion with 1d Trend Filter
-Hypothesis: Price reverts to its time-weighted average (TWAP) on the 6h timeframe,
-but only when aligned with the daily trend. In bull markets, we buy dips to TWAP
-in uptrends; in bear markets, we sell rallies to TWAP in downtrends. This
-mean-reversion strategy works in both regimes by following the higher timeframe
-trend, reducing false signals. Uses volume confirmation to avoid low-liquidity
-noise. Targets 15-25 trades/year per symbol to minimize fee drag.
+12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: Breakouts from 20-period Donchian channels on 12h timeframe capture
+significant momentum moves. We use 1d EMA50 as trend filter to avoid counter-trend
+trades and require volume > 1.5x 20-period average for confirmation. This strategy
+targets 15-25 trades/year to minimize fee drag while capturing strong trending moves.
+Works in both bull and bear markets by filtering with higher timeframe trend.
 """
 
 import numpy as np
@@ -25,73 +24,63 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate TWAP (typical price weighted by time, approximated by volume)
-    typical_price = (high + low + close) / 3.0
-    twap_numerator = typical_price * volume
-    twap_denominator = volume
+    # Calculate Donchian channels on 12h (20-period high/low)
+    # We'll use rolling window on 12h data, but need to align to 12h bars
+    # Since we're on 12h timeframe, we can calculate directly
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Rolling TWAP (24 periods = 6h * 24 = 6 days)
-    twap = pd.Series(twap_numerator).rolling(window=24, min_periods=12).sum().values / \
-           pd.Series(twap_denominator).rolling(window=24, min_periods=12).sum().values
-    
-    # TWAP deviation in ATR units
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    twap_dev = (close - twap) / atr  # Deviation in ATR multiples
-    
-    # Volume filter: current volume > 1.3x 20-period volume average
+    # Volume filter: current volume > 1.5x 20-period volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(twap_dev[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        tdev = twap_dev[i]
-        vol_ok = vol_filter[i]
         trend = ema50_1d_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        vol_ok = vol_filter[i]
         
         if position == 0:
-            # Long: price below TWAP with volume, in uptrend (buy the dip)
-            if tdev < -0.6 and vol_ok and price > trend:
+            # Long: price breaks above Donchian high with volume, in uptrend
+            if price > upper and vol_ok and price > trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price above TWAP with volume, in downtrend (sell the rally)
-            elif tdev > 0.6 and vol_ok and price < trend:
+            # Short: price breaks below Donchian low with volume, in downtrend
+            elif price < lower and vol_ok and price < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if price returns to TWAP or trend weakens
-            if tdev > -0.2 or price < trend:
+            # Exit if price returns to Donchian midpoint or trend weakens
+            midpoint = (upper + lower) / 2
+            if price < midpoint or price < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price returns to TWAP or trend weakens
-            if tdev < 0.2 or price > trend:
+            # Exit if price returns to Donchian midpoint or trend weakens
+            midpoint = (upper + lower) / 2
+            if price > midpoint or price > trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_TWAP_Reversion_1dTrend"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
