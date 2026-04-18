@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1W_Camarilla_Trend_Filter
-Hypothesis: Use weekly Camarilla R1/S1 levels for directional bias on 1d timeframe, with trend filter from weekly ADX > 25 and volume > 1.5x 20-period average. Enter only on breakouts during active session (08-20 UTC). Exit on reversal of weekly level or trend filter failure. Position size fixed at 0.25 to limit risk. Designed for 15-25 trades/year to avoid fee drag.
+12h_1d_TurtleChannel_Breakout_VolumeRegime
+Hypothesis: 12h timeframe with 1d context using Turtle-style Donchian breakouts (20-period) combined with 1d trend filter (EMA50) and volume confirmation. Uses choppiness regime filter to avoid ranging markets. Designed for 20-50 trades/year to minimize fee drag. Works in bull (breakouts) and bear (mean-reversion via regime filter).
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,123 +18,108 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend bias and entry levels
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for trend filter and regime
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly calculations for trend bias and levels
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 12h Donchian channels (20-period)
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Previous week's OHLC for Camarilla calculation
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w[0] = close_1w[0]
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Weekly Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    range_1w = prev_high_1w - prev_low_1w
-    r1_1w = prev_close_1w + range_1w * 1.1 / 12
-    s1_1w = prev_close_1w - range_1w * 1.1 / 12
-    
-    # Weekly ADX for trend strength filter (avoid chop)
-    high_1w_arr = df_1w['high'].values
-    low_1w_arr = df_1w['low'].values
-    close_1w_arr = df_1w['close'].values
+    # 1d Choppiness Index (14-period) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # True Range
-    tr1 = np.maximum(high_1w_arr - low_1w_arr, np.abs(high_1w_arr - np.roll(close_1w_arr, 1)))
-    tr2 = np.abs(np.roll(close_1w_arr, 1) - low_1w_arr)
+    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.abs(np.roll(close_1d, 1) - low_1d)
     tr = np.maximum(tr1, tr2)
-    tr[0] = high_1w_arr[0] - low_1w_arr[0]
+    tr[0] = high_1d[0] - low_1d[0]
     
-    # Directional Movement
-    up_move = np.maximum(high_1w_arr - np.roll(high_1w_arr, 1), 0)
-    down_move = np.maximum(np.roll(low_1w_arr, 1) - low_1w_arr, 0)
-    up_move[0] = 0
-    down_move[0] = 0
+    # ATR (14-period)
+    atr_period = 14
+    atr = np.zeros_like(tr)
+    atr[atr_period] = np.nansum(tr[1:atr_period+1]) if not np.isnan(tr).all() else 0
+    for i in range(atr_period + 1, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    # Smoothed values
-    tr_period = 14
-    tr_smooth = np.zeros_like(tr)
-    tr_smooth[tr_period] = np.nansum(tr[1:tr_period+1]) if not np.isnan(tr).all() else 0
-    for i in range(tr_period + 1, len(tr)):
-        tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / tr_period) + tr[i]
+    # Sum of True Range for denominator
+    sum_tr = np.zeros_like(tr)
+    sum_tr[atr_period] = np.nansum(tr[1:atr_period+1]) if not np.isnan(tr).all() else 0
+    for i in range(atr_period + 1, len(tr)):
+        sum_tr[i] = sum_tr[i-1] + tr[i]
     
-    up_smooth = np.zeros_like(up_move)
-    down_smooth = np.zeros_like(down_move)
-    up_smooth[tr_period] = np.nansum(up_move[1:tr_period+1]) if not np.isnan(up_move).all() else 0
-    down_smooth[tr_period] = np.nansum(down_move[1:tr_period+1]) if not np.isnan(down_move).all() else 0
-    for i in range(tr_period + 1, len(up_move)):
-        up_smooth[i] = up_smooth[i-1] - (up_smooth[i-1] / tr_period) + up_move[i]
-        down_smooth[i] = down_smooth[i-1] - (down_smooth[i-1] / tr_period) + down_move[i]
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=atr_period, min_periods=atr_period).max().values
+    ll = pd.Series(low_1d).rolling(window=atr_period, min_periods=atr_period).min().values
     
-    # Directional Indicators
-    plus_di = 100 * up_smooth / tr_smooth
-    minus_di = 100 * down_smooth / tr_smooth
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    # Chop = 100 * log10(sum(tr) / (max(hh) - min(ll))) / log10(atr_period)
+    range_hl = hh - ll
+    # Avoid division by zero
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    chop = 100 * np.log10(sum_tr / range_hl) / np.log10(atr_period)
     
-    # ADX
-    adx_period = 14
-    adx = np.zeros_like(dx)
-    adx[2*adx_period] = np.nanmean(dx[adx_period:2*adx_period+1]) if not np.isnan(dx).all() else 0
-    for i in range(2*adx_period + 1, len(dx)):
-        adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
+    # Align 1d indicators to 12h
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Align all weekly data to 1d
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Precompute session filter (08-20 UTC)
+    # Precompute session filter (08-20 UTC) - optional but helps
     hours = pd.DatetimeIndex(prices['open_time']).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for ADX and averages
+    start_idx = 60  # need enough for Donchian and EMA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume confirmation: current volume > 1.3x 20-period average
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        vol_confirm = volume[i] > 1.3 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
-        # Trend filter: weekly ADX > 25 to avoid chop
-        trend_filter = adx_1w_aligned[i] > 25 if not np.isnan(adx_1w_aligned[i]) else False
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Only trade during active session
+        # Regime filter: chop < 61.8 for trending, chop > 61.8 for ranging
+        chop_val = chop_aligned[i]
+        is_trending = chop_val < 61.8
+        is_ranging = chop_val > 61.8
+        
+        # Only trade during active session (optional)
         in_session = session_mask[i]
         
         if position == 0:
-            # Long: price breaks above weekly R1 with volume and trend filter during session
-            if close[i] > r1_1w_aligned[i] and vol_confirm and trend_filter and in_session:
+            # Long: breakout above Donchian high + above EMA50 + volume + trending regime
+            if close[i] > donchian_high[i] and price_above_ema and vol_confirm and is_trending and in_session:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 with volume and trend filter during session
-            elif close[i] < s1_1w_aligned[i] and vol_confirm and trend_filter and in_session:
+            # Short: breakdown below Donchian low + below EMA50 + volume + trending regime
+            elif close[i] < donchian_low[i] and price_below_ema and vol_confirm and is_trending and in_session:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below weekly R1 or trend filter fails or outside session
-            if close[i] < r1_1w_aligned[i] or not trend_filter or not in_session:
+            # Long exit: breakdown below Donchian low OR trend fails (chop > 61.8) OR outside session
+            if close[i] < donchian_low[i] or not is_trending or not in_session:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above weekly S1 or trend filter fails or outside session
-            if close[i] > s1_1w_aligned[i] or not trend_filter or not in_session:
+            # Short exit: breakout above Donchian high OR trend fails OR outside session
+            if close[i] > donchian_high[i] or not is_trending or not in_session:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -142,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1W_Camarilla_Trend_Filter"
-timeframe = "1d"
+name = "12h_1d_TurtleChannel_Breakout_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
