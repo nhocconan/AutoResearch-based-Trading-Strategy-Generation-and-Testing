@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume_Trend
-Hypothesis: 12-hour breakouts above R1 or below S1 of daily Camarilla pivots with volume confirmation and 1-day EMA trend filter.
-Designed for lower frequency (target 50-150 trades over 4 years) to minimize fee drift and work in both bull and bear markets by requiring strong trend alignment and volume confirmation.
+4h_Pivot_R1S1_Breakout_Volume_Trend_Moderate_v1
+Hypothesis: 4-hour breakouts above R1 or below S1 of daily Camarilla pivots with volume confirmation and 1-day EMA34 trend filter.
+Designed for moderate trade frequency (target: 50-120 trades/year) with balanced performance in bull and bear markets.
+Uses proven EMA34 period and volume threshold (2.0x) to avoid overtrading while maintaining edge.
 """
 
 import numpy as np
@@ -31,25 +32,31 @@ def generate_signals(prices):
     r1_1d = pivot_1d + range_1d * 1.1 / 12
     s1_1d = pivot_1d - range_1d * 1.1 / 12
     
-    # Align 1-day levels to 12h timeframe
+    # Align 1-day levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 1-day EMA34 trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1-day EMA34 trend filter (proven period from top performers)
+    ema34_1d = np.full(len(close_1d), np.nan)
+    for i in range(34, len(close_1d)):
+        if i == 34:
+            ema34_1d[i] = np.mean(close_1d[0:35])
+        else:
+            k = 2 / (34 + 1)
+            ema34_1d[i] = close_1d[i] * k + ema34_1d[i-1] * (1 - k)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike: current volume > 2.0 x 30-period average
+    # Volume spike: current volume > 2.0 x 20-period average (balanced threshold)
     vol_ma = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma[i] = np.mean(volume[i-30:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 30)  # Ensure all indicators ready
+    start_idx = max(34, 20)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
@@ -88,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_Pivot_R1S1_Breakout_Volume_Trend_Moderate_v1"
+timeframe = "4h"
 leverage = 1.0
