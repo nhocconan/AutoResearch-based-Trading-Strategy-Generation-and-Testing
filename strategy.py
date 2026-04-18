@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivotDirection_DonchianBreakout_VolumeFilter
-Hypothesis: Use weekly pivot point direction (from previous week's PP) as trend filter for 6h Donchian(20) breakouts with volume confirmation.
-In bull markets: price above weekly PP, buy Donchian high breakouts with volume spike.
-In bear markets: price below weekly PP, sell Donchian low breakouts with volume spike.
-Weekly pivot provides institutional reference point, Donchian captures breakouts, volume confirms institutional participation.
-Designed for low trade frequency (15-35/year) to minimize fee drag while capturing strong directional moves in both bull and bear markets.
+12h_Williams_Fractal_Breakout_With_Volume_Confirmation
+Hypothesis: Williams fractals on 1d identify key reversal points. Breakouts above bearish fractals or below bullish fractals with volume confirmation capture momentum in both bull and bear markets. Low-frequency signals reduce fee drag while maintaining edge.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,81 +18,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly high, low, close for pivot point calculation (using 1w data)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for Williams fractals and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Weekly Pivot Point (PP) and support/resistance levels
-    # PP = (H + L + C) / 3
-    weekly_pp = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly R1 = 2*PP - L, S1 = 2*PP - H
-    weekly_r1 = 2 * weekly_pp - low_1w
-    weekly_s1 = 2 * weekly_pp - high_1w
+    # Calculate Williams fractals on daily data
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n+1] > high[n+2]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n+1] < low[n+2]
+    n1 = len(high_1d)
+    bearish_fractal = np.full(n1, np.nan)
+    bullish_fractal = np.full(n1, np.nan)
     
-    # Align weekly levels to 6h timeframe
-    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    for i in range(2, n1 - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i-1] > high_1d[i] and 
+            high_1d[i] > high_1d[i+1] and 
+            high_1d[i+1] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i-1] < low_1d[i] and 
+            low_1d[i] < low_1d[i+1] and 
+            low_1d[i+1] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    # Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align fractals to 12h timeframe with 2-bar delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Volume spike: >2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Volume spike: >1.5x 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(30, 20)  # Need Donchian and volume MA
+    start_idx = 50  # Need volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_pp_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or
-            np.isnan(weekly_s1_aligned[i]) or
-            np.isnan(high_20[i]) or
-            np.isnan(low_20[i]) or
+        if (np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        pp = weekly_pp_aligned[i]
-        r1 = weekly_r1_aligned[i]
-        s1 = weekly_s1_aligned[i]
-        upper_channel = high_20[i]
-        lower_channel = low_20[i]
+        bearish_fractal_val = bearish_fractal_aligned[i]
+        bullish_fractal_val = bullish_fractal_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price > weekly PP AND price breaks above Donchian upper with volume spike
-            if price > pp and price > upper_channel and vol_spike:
+            # Long: break above bearish fractal with volume spike
+            if not np.isnan(bearish_fractal_val) and price > bearish_fractal_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < weekly PP AND price breaks below Donchian lower with volume spike
-            elif price < pp and price < lower_channel and vol_spike:
+            # Short: break below bullish fractal with volume spike
+            elif not np.isnan(bullish_fractal_val) and price < bullish_fractal_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price breaks below Donchian lower OR price crosses below weekly PP
-            if price < lower_channel or price < pp:
+            # Exit: price falls below bullish fractal (trend reversal)
+            if not np.isnan(bullish_fractal_val) and price < bullish_fractal_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price breaks above Donchian upper OR price crosses above weekly PP
-            if price > upper_channel or price > pp:
+            # Exit: price rises above bearish fractal (trend reversal)
+            if not np.isnan(bearish_fractal_val) and price > bearish_fractal_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyPivotDirection_DonchianBreakout_VolumeFilter"
-timeframe = "6h"
+name = "12h_Williams_Fractal_Breakout_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
