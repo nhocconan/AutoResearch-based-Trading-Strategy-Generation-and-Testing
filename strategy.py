@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
-Hypothesis: Trade breakouts of Camarilla R1/S1 levels derived from daily pivot points with volume confirmation and ATR-based trend filter. In both bull and bear markets, price tends to respect these institutional levels. Enter long when price breaks above R1 with volume > 1.5x average and ATR(14) rising (indicating momentum). Enter short when price breaks below S1 with volume confirmation and rising ATR. Uses tight conditions to limit trades to 12-37/year. ATR filter ensures we only trade in momentum regimes, reducing whipsaw in sideways markets.
+1d_Pivot_R1_S1_Breakout_Volume_1wTrend
+Hypothesis: Trade Camarilla pivot breakouts on 1-day chart with volume confirmation and weekly trend filter. 
+Long when price breaks above R1 with volume > 1.5x 20-day average and weekly close above weekly open (bullish weekly candle). 
+Short when price breaks below S1 with volume > 1.5x 20-day average and weekly close below weekly open (bearish weekly candle).
+Uses weekly trend to avoid counter-trend trades in strong trends. Targets 15-25 trades/year via strict pivot breakout + volume + trend confluence.
+Works in bull markets by catching breakouts, works in bear markets by avoiding longs in downtrends and taking shorts on breakdowns.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,36 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and ATR
+    # Get 1d data for pivot levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels
+    # Calculate Camarilla pivot levels for previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C, H, L are from previous day
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla levels: R1, S1
-    R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Shift to get previous day's values
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # First day has no previous day
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Calculate ATR(14) on daily
-    atr_period = 14
-    tr = np.maximum(high_1d - low_1d, np.maximum(abs(high_1d - np.roll(close_1d, 1)), abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]  # first TR
-    atr = np.full_like(tr, np.nan)
-    if len(tr) >= atr_period:
-        atr[atr_period-1] = np.mean(tr[:atr_period])
-        for i in range(atr_period, len(tr)):
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    # Calculate pivot levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align Camarilla levels and ATR to 12h timeframe
-    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr)
+    # Align pivot levels to 1d timeframe (no change, but for consistency)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: volume > 1.5x 24-period average
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Weekly trend: bullish if weekly close > weekly open
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
+    weekly_bullish = close_1w > open_1w  # True for bullish weekly candle
+    
+    # Align weekly trend to 1d timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    
+    # Volume confirmation: volume > 1.5x 20-day average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24
+    vol_period = 20
+    
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
@@ -55,42 +71,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(vol_period, atr_period)  # ensure indicators are ready
+    start_idx = max(20, 1)  # Need volume MA and at least 1 day of data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or 
-            np.isnan(atr_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(weekly_bullish_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # ATR rising condition: current ATR > previous ATR
-        atr_rising = i > 0 and not np.isnan(atr_12h[i-1]) and atr_12h[i] > atr_12h[i-1]
-        
         if position == 0:
-            # Long: price breaks above R1 + volume + ATR rising
-            if close[i] > R1_12h[i] and vol_confirm and atr_rising:
+            # Long: price breaks above R1 + volume + weekly bullish
+            if close[i] > R1_aligned[i] and vol_confirm and weekly_bullish_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume + ATR rising
-            elif close[i] < S1_12h[i] and vol_confirm and atr_rising:
+            # Short: price breaks below S1 + volume + weekly bearish
+            elif close[i] < S1_aligned[i] and vol_confirm and weekly_bullish_aligned[i] < 0.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or ATR stops rising
-            if close[i] < S1_12h[i] or (i > 0 and not np.isnan(atr_12h[i-1]) and atr_12h[i] <= atr_12h[i-1]):
+            # Long exit: price breaks below S1 or weekly turns bearish
+            if close[i] < S1_aligned[i] or weekly_bullish_aligned[i] < 0.5:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or ATR stops rising
-            if close[i] > R1_12h[i] or (i > 0 and not np.isnan(atr_12h[i-1]) and atr_12h[i] <= atr_12h[i-1]):
+            # Short exit: price breaks above R1 or weekly turns bullish
+            if close[i] > R1_aligned[i] or weekly_bullish_aligned[i] > 0.5:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -98,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "12h"
+name = "1d_Pivot_R1_S1_Breakout_Volume_1wTrend"
+timeframe = "1d"
 leverage = 1.0
