@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d Pivot Reversal with Volume Spike and Weekly Trend Filter
-Uses daily Camarilla pivot levels with volume spike confirmation and weekly EMA trend filter.
-Designed for low trade frequency (target: 20-30 trades/year) with strong reversal edges at key levels.
-Works in both bull and bear markets by fading extremes in direction of weekly trend.
+6h Bollinger Squeeze Breakout with Volume and 12h Trend Filter
+Uses Bollinger Band width contraction (squeeze) followed by expansion with volume confirmation.
+Breakout direction determined by 12h EMA trend filter. Designed for low trade frequency
+with clear entry/exit rules to minimize whipsaw in both bull and bear markets.
 """
 
 import numpy as np
@@ -15,101 +15,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + (bb_std * std)
+    lower = sma - (bb_std * std)
+    bb_width = (upper - lower) / sma  # Normalized width
     
-    # Calculate Camarilla levels for each day
-    # R3 = C + (H-L)*1.1/2, R4 = C + (H-L)*1.1
-    # S3 = C - (H-L)*1.1/2, S4 = C - (H-L)*1.1
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d + rng * 1.1 / 2
-    camarilla_r4 = close_1d + rng * 1.1
-    camarilla_s3 = close_1d - rng * 1.1 / 2
-    camarilla_s4 = close_1d - rng * 1.1
+    # Bollinger Squeeze detection: width below 20-period average
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
     
-    # Align Camarilla levels to 1d timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Breakout detection: price outside bands after squeeze
+    breakout_up = (close > upper) & squeeze
+    breakout_down = (close < lower) & squeeze
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA20 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume spike detection (2x 4-period average)
+    # Volume confirmation: 1.5x 4-period average
     vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h EMA34 for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
+    entry_price = 0.0
     
     start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(bb_width_ma[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r3 = r3_aligned[i]
-        r4 = r4_aligned[i]
-        s3 = s3_aligned[i]
-        s4 = s4_aligned[i]
-        ema_trend = ema_20_1w_aligned[i]
+        ema_trend = ema_34_12h_aligned[i]
         
         if position == 0:
-            # Long: price rejects S3/S4 with volume spike and above weekly EMA
-            if ((price <= s3 or price <= s4) and 
-                volume_spike[i] and 
+            # Long: bullish breakout above upper BB with volume and above 12h EMA
+            if (breakout_up[i] and 
+                volume_confirmed[i] and 
                 price > ema_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price rejects R3/R4 with volume spike and below weekly EMA
-            elif ((price >= r3 or price >= r4) and 
-                  volume_spike[i] and 
+                entry_price = price
+            # Short: bearish breakout below lower BB with volume and below 12h EMA
+            elif (breakout_down[i] and 
+                  volume_confirmed[i] and 
                   price < ema_trend):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long position management
+            # Long position: hold until reversal below 12h EMA
             signals[i] = 0.25
-            # Exit: price reaches opposite pivot or trend reversal
-            if price >= r3:  # Take profit at R3
-                signals[i] = 0.0
-                position = 0
-            elif price < ema_trend:  # Trend reversal
+            if price < ema_trend:  # Trend reversal
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position management
+            # Short position: hold until reversal above 12h EMA
             signals[i] = -0.25
-            # Exit: price reaches opposite pivot or trend reversal
-            if price <= s3:  # Take profit at S3
-                signals[i] = 0.0
-                position = 0
-            elif price > ema_trend:  # Trend reversal
+            if price > ema_trend:  # Trend reversal
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Pivot_Reversal_Volume_Spike_WeeklyTrend"
-timeframe = "1d"
+name = "6h_Bollinger_Squeeze_Breakout_Volume_12hTrend"
+timeframe = "6h"
 leverage = 1.0
