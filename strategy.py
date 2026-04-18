@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1-week ADX trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions for mean reversion entries.
-# Weekly ADX ensures we only trade in strong trends to avoid whipsaws in ranging markets.
-# Volume confirmation adds conviction to reversal signals.
-# Designed for low trade frequency (12-37/year) to minimize fee drift in 12h timeframe.
-# Works in bull markets (oversold bounces in uptrend) and bear markets (overbought reversals in downtrend).
-name = "12h_WilliamsR_WeeklyADX_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX trend filter.
+# Donchian breakouts capture breakouts from consolidation, which are strong in both bull and bear markets.
+# Volume confirmation ensures breakouts have conviction. Weekly ADX ensures we only trade in strong trends,
+# avoiding whipsaws in ranging markets. Designed for low trade frequency (20-50/year) to minimize fee drag.
+name = "4h_Donchian20_1dVolume_1wADX_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,16 +21,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R calculation (ONCE before loop)
+    # Get daily data for volume confirmation (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     # Get weekly data for ADX filter (ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max().values
-    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Calculate Donchian channels (20-period high/low) on 4h data
+    # Using rolling window with min_periods to avoid look-ahead
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Calculate daily average volume for confirmation
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().shift(1).values
     
     # Calculate weekly ADX for trend strength
     high_w = df_1w['high'].values
@@ -80,10 +81,11 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, atr_period)  # ADX is smoothed DX
     
+    # Align indicators to 4h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high}), high_20)
+    low_20_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low}), low_20)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -91,11 +93,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -106,41 +109,34 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_20[i]
+        # Volume confirmation: current volume above daily average
+        vol_confirm = volume[i] > vol_ma_20_1d_aligned[i]
+        
+        # Donchian breakout levels
+        upper_band = high_20_aligned[i]
+        lower_band = low_20_aligned[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) AND strong uptrend (ADX > 25) AND volume
-            oversold = williams_r[i] < -80
-            strong_uptrend = adx_aligned[i] > 25
-            
-            if vol_confirm and oversold and strong_uptrend:
+            # Long: price breaks above upper band AND volume confirmation AND strong trend (ADX > 25)
+            if (close[i] > upper_band) and vol_confirm and (adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) AND strong downtrend (ADX > 25) AND volume
-            elif (vol_confirm and 
-                  williams_r[i] > -20 and 
-                  adx_aligned[i] > 25):
+            # Short: price breaks below lower band AND volume confirmation AND strong trend (ADX > 25)
+            elif (close[i] < lower_band) and vol_confirm and (adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R returns to neutral (> -50) OR ADX weakens (< 20)
-            return_to_neutral = williams_r[i] > -50
-            weak_trend = adx_aligned[i] < 20
-            
-            if return_to_neutral or weak_trend:
+            # Long exit: price falls below lower band (breakdown) OR ADX weakens (< 20)
+            if (close[i] < lower_band) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R returns to neutral (< -50) OR ADX weakens (< 20)
-            return_to_neutral = williams_r[i] < -50
-            weak_trend = adx_aligned[i] < 20
-            
-            if return_to_neutral or weak_trend:
+            # Short exit: price rises above upper band (breakout) OR ADX weakens (< 20)
+            if (close[i] > upper_band) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
