@@ -13,31 +13,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian(20) and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for Supertrend calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
+        return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period)
-    donchian_high = np.full(len(close_1d), np.nan)
-    donchian_low = np.full(len(close_1d), np.nan)
-    for i in range(20, len(close_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # Calculate Supertrend on weekly data
+    hl2_weekly = (df_weekly['high'].values + df_weekly['low'].values) / 2
+    atr_period = 10
+    atr_mult = 3.0
     
-    # Align daily Donchian to 4h timeframe
-    donchian_high_4h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_4h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Calculate True Range and ATR
+    tr1 = df_weekly['high'].values - df_weekly['low'].values
+    tr2 = np.abs(df_weekly['high'].values - np.roll(df_weekly['close'].values, 1))
+    tr3 = np.abs(df_weekly['low'].values - np.roll(df_weekly['close'].values, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Calculate daily EMA34
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    atr = np.full_like(tr, np.nan, dtype=np.float64)
+    for i in range(atr_period, len(tr)):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
     
-    # Align daily EMA34 to 4h timeframe
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Supertrend upper and lower bands
+    upper_band = hl2_weekly + atr_mult * atr
+    lower_band = hl2_weekly - atr_mult * atr
     
-    # Calculate 4h volume moving average (20-period)
+    # Initialize Supertrend
+    supertrend = np.full_like(close, np.nan, dtype=np.float64)
+    direction = np.ones_like(close, dtype=np.int8)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(atr_period, len(hl2_weekly)):
+        if i == atr_period:
+            supertrend[i] = lower_band[i]
+            direction[i] = 1
+        else:
+            if close[i-1] > supertrend[i-1]:
+                supertrend[i] = max(lower_band[i], supertrend[i-1])
+                direction[i] = 1
+            else:
+                supertrend[i] = min(upper_band[i], supertrend[i-1])
+                direction[i] = -1
+    
+    # Align weekly Supertrend direction to 6h
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_weekly, direction.astype(np.float64))
+    
+    # Calculate 60-period EMA for trend confirmation
+    close_series = pd.Series(close)
+    ema60 = close_series.ewm(span=60, adjust=False, min_periods=60).mean().values
+    
+    # Calculate volume spike detector (volume > 2x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -45,45 +69,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 20)  # need Donchian, EMA34, volume MA
+    start_idx = max(60, 20)  # need EMA60 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or 
-            np.isnan(ema34_1d_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(ema60[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume spike confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above Donchian high, EMA34 trending up, with volume
-            if (close[i] > donchian_high_4h[i] and 
-                ema34_1d_4h[i] > ema34_1d_4h[i-1] and 
-                vol_confirmed):
+            # Long entry: weekly uptrend, price above EMA60, with volume spike
+            if (supertrend_dir_aligned[i] == 1 and 
+                close[i] > ema60[i] and 
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low, EMA34 trending down, with volume
-            elif (close[i] < donchian_low_4h[i] and 
-                  ema34_1d_4h[i] < ema34_1d_4h[i-1] and 
-                  vol_confirmed):
+            # Short entry: weekly downtrend, price below EMA60, with volume spike
+            elif (supertrend_dir_aligned[i] == -1 and 
+                  close[i] < ema60[i] and 
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or EMA34 turns down
-            if close[i] < donchian_low_4h[i] or ema34_1d_4h[i] < ema34_1d_4h[i-1]:
+            # Long exit: weekly trend turns down or price crosses below EMA60
+            if supertrend_dir_aligned[i] == -1 or close[i] < ema60[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or EMA34 turns up
-            if close[i] > donchian_high_4h[i] or ema34_1d_4h[i] > ema34_1d_4h[i-1]:
+            # Short exit: weekly trend turns up or price crosses above EMA60
+            if supertrend_dir_aligned[i] == 1 or close[i] > ema60[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA34_Trend_Volume"
-timeframe = "4h"
+name = "6h_WeeklySupertrend_EMA60_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
