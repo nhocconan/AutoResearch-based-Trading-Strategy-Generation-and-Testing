@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_R1S1_Breakout_Volume_V1
-Hypothesis: Use 1D Camarilla R1/S1 breakouts on 12h timeframe with strict volume confirmation (2x average) to capture strong directional moves while minimizing trades. Works in bull/bear via volatility filter (avoid chop) and session focus (08-20 UTC). Target: 15-30 trades/year per symbol to avoid fee drag.
+4h_1D_Camarilla_R1S1_Breakout_Volume_V3
+Hypothesis: Use daily Camarilla R1/S1 for directional bias with 4H entry, but with stricter volume confirmation, session filtering, and ATR-based volatility filter to reduce trade frequency.
+Long when price breaks above daily R1 with volume > 2.0x average (strict) during active session (08-20 UTC).
+Short when price breaks below daily S1 with volume > 2.0x average during active session.
+Fixed position size 0.25. Added volatility filter (ATR) to avoid chop.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+Works in bull/bear via volatility regime filter and session timing.
 """
 
 import numpy as np
@@ -29,7 +34,7 @@ def generate_signals(prices):
     prev_close = np.roll(close_1d, 1)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]
+    prev_close[0] = close_1d[0]  # first day uses same day
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
     
@@ -42,10 +47,10 @@ def generate_signals(prices):
     tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
     tr2 = np.absolute(np.roll(close_1d, 1) - low_1d)
     tr = np.maximum(tr1, tr2)
-    tr[0] = high_1d[0] - low_1d[0]
+    tr[0] = high_1d[0] - low_1d[0]  # first day
     atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Align all daily data to 12h timeframe
+    # Align all daily data to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
@@ -66,7 +71,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average (strict)
+        # Volume confirmation: current volume > 2.0x 20-period average (much stricter)
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         vol_confirm = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
@@ -105,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1D_Camarilla_R1S1_Breakout_Volume_V1"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1S1_Breakout_Volume_V3"
+timeframe = "4h"
 leverage = 1.0
