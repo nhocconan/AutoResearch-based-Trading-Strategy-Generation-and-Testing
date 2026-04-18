@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
-"""
-12h_Supertrend_TrendFollowing_VolumeFilter
-Hypothesis: Supertrend on 12h timeframe provides strong trend signals. Combined with volume confirmation and daily trend filter (EMA34), this strategy captures major moves while avoiding chop. Volume filter ensures momentum confirmation. Designed for 12h timeframe to target 12-37 trades/year.
-"""
+# 6h_WeeklyPivot_Direction_1dTrend_4hVolume
+# Hypothesis: Weekly pivot direction determines bias (above/below pivot = long/short bias).
+# Daily EMA(50) filters for trend alignment. 4h volume spike confirms momentum.
+# Weekly pivots are strong institutional levels; breakouts with volume and trend alignment
+# capture momentum in both bull and bear markets. Target: 15-25 trades/year on 6h.
 
 import numpy as np
 import pandas as pd
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,99 +18,117 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter (once before loop)
+    # Get weekly data for pivot calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly pivot points using standard formula
+    high_1w = df_1w['high']
+    low_1w = df_1w['low']
+    close_1w = df_1w['close']
+    
+    pivot_w = (high_1w + low_1w + close_1w) / 3
+    r1_w = 2 * pivot_w - low_1w
+    s1_w = 2 * pivot_w - high_1w
+    
+    # Shift by 1 to use previous week's levels only
+    pivot_w_prev = pivot_w.shift(1).values
+    r1_w_prev = r1_w.shift(1).values
+    s1_w_prev = s1_w.shift(1).values
+    
+    # Align to 6h timeframe
+    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w_prev)
+    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w_prev)
+    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w_prev)
+    
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(close_1d := df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate ATR(10) for Supertrend
+    # ATR for volatility filter (14-period on 6h)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Supertrend parameters
-    atr_multiplier = 3.0
-    upper_band = (high + low) / 2 + (atr_multiplier * atr)
-    lower_band = (high + low) / 2 - (atr_multiplier * atr)
+    # Volatility filter: only trade when ATR > 20-period average (avoid chop)
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    volatility_filter = atr > atr_ma
     
-    # Initialize Supertrend
-    supertrend = np.full(n, np.nan)
-    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
-    
-    # Calculate Supertrend
-    for i in range(1, n):
-        # Upper and lower bands
-        upper_band[i] = max(upper_band[i], upper_band[i-1]) if close[i-1] > supertrend[i-1] else upper_band[i]
-        lower_band[i] = min(lower_band[i], lower_band[i-1]) if close[i-1] < supertrend[i-1] else lower_band[i]
-        
-        # Determine trend direction
-        if close[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        # Set Supertrend value
-        supertrend[i] = lower_band[i] if direction[i] == 1 else upper_band[i]
-    
-    # Align daily EMA to 12h timeframe
-    ema_34_aligned = ema_34_1d_aligned  # already aligned
-    
-    # Volume filter: 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    # Volume spike: 2.5x 20-period average on 4h (use 4h volume for confirmation)
+    df_4h = get_htf_data(prices, '4h')
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_spike_4h = volume_4h > (2.5 * vol_ma_4h)
+    # Align 4h volume spike to 6h timeframe
+    volume_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
+    bars_since_entry = 0
     
-    start_idx = 30  # enough for Supertrend calculation
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(supertrend[i]) or 
-            np.isnan(ema_34_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_w_aligned[i]) or 
+            np.isnan(r1_w_aligned[i]) or
+            np.isnan(s1_w_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(volatility_filter[i]) or
+            np.isnan(volume_spike_4h_aligned[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
         price = close[i]
-        st_value = supertrend[i]
-        ema_trend = ema_34_aligned[i]
-        vol_filt = volume_filter[i]
+        pivot_val = pivot_w_aligned[i]
+        r1_val = r1_w_aligned[i]
+        s1_val = s1_w_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
+        vol_filter = volatility_filter[i]
+        vol_spike = volume_spike_4h_aligned[i]
         
         if position == 0:
-            # Long: price above Supertrend (uptrend), price above daily EMA, volume confirmation
-            if price > st_value and price > ema_trend and vol_filt:
+            bars_since_entry = 0
+            # Long: price above weekly pivot AND above weekly R1 with volume spike and above daily EMA
+            if price > pivot_val and price > r1_val and vol_spike and price > ema_trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below Supertrend (downtrend), price below daily EMA, volume confirmation
-            elif price < st_value and price < ema_trend and vol_filt:
+            # Short: price below weekly pivot AND below weekly S1 with volume spike and below daily EMA
+            elif price < pivot_val and price < s1_val and vol_spike and price < ema_trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long: maintain position while uptrend continues and above daily EMA
-            if price > st_value and price > ema_trend:
+            # Minimum holding period: 3 bars (18 hours for 6h)
+            if bars_since_entry < 3:
                 signals[i] = 0.25
+                bars_since_entry += 1
             else:
-                signals[i] = 0.0
-                position = 0
+                signals[i] = 0.25
+                # Exit: price returns to weekly pivot or breaks below daily EMA
+                if price <= pivot_val or price < ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
         
         elif position == -1:
-            # Short: maintain position while downtrend continues and below daily EMA
-            if price < st_value and price < ema_trend:
+            # Minimum holding period: 3 bars (18 hours for 6h)
+            if bars_since_entry < 3:
                 signals[i] = -0.25
+                bars_since_entry += 1
             else:
-                signals[i] = 0.0
-                position = 0
+                signals[i] = -0.25
+                # Exit: price returns to weekly pivot or breaks above daily EMA
+                if price >= pivot_val or price > ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
     
     return signals
 
-name = "12h_Supertrend_TrendFollowing_VolumeFilter"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Direction_1dTrend_4hVolume"
+timeframe = "6h"
 leverage = 1.0
