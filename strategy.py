@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_RSI_Filter_V3
-Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on 12h to determine trend direction, combined with RSI(14) for momentum confirmation and 1d volume spike filter. KAMA adapts to market noise, reducing false signals in choppy markets. RSI filters overextended entries. Volume surge confirms institutional participation. Designed for low trade frequency (<30/year) to minimize fee drag while maintaining edge in both bull and bear markets.
+4h_HTF_Trend_With_Volume_Spike_Entry_v1
+Hypothesis: Use 12h EMA34 as primary trend filter with 4h price action for entry timing. Enter long when 4h close crosses above 12h EMA34 with volume spike (>2x 20-period average), short when crossing below. Exit when price crosses back over 12h EMA34. This captures medium-term trends while minimizing whipsaw through volume confirmation. Designed for 20-40 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -18,84 +18,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA ( Kaufman Adaptive Moving Average ) parameters
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
+    # 12h EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate Efficiency Ratio and Smoothing Constant
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-    # Pad the beginning with zeros to match length
-    change = np.concatenate([np.zeros(10), change])
-    volatility = np.concatenate([np.zeros(10), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI(14) - momentum filter
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 1d volume spike filter (>2.0x 20-period average)
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_ma_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Volume confirmation: >2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Need enough history for indicators
-    
-    for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_spike_1d_aligned[i])):
+    for i in range(1, n):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        vol_spike = vol_spike_1d_aligned[i]
+        prev_price = close[i-1]
+        ema_val = ema_12h_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price above KAMA, RSI not overbought, volume spike
-            if price > kama_val and rsi_val < 70 and vol_spike:
+            # Long: price crosses above EMA with volume spike
+            if prev_price <= ema_val and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI not oversold, volume spike
-            elif price < kama_val and rsi_val > 30 and vol_spike:
+            # Short: price crosses below EMA with volume spike
+            elif prev_price >= ema_val and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price below KAMA or RSI overbought
-            if price < kama_val or rsi_val > 70:
+            # Exit: price crosses back below EMA
+            if price < ema_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price above KAMA or RSI oversold
-            if price > kama_val or rsi_val < 30:
+            # Exit: price crosses back above EMA
+            if price > ema_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_KAMA_Trend_With_RSI_Filter_V3"
-timeframe = "12h"
+name = "4h_HTF_Trend_With_Volume_Spike_Entry_v1"
+timeframe = "4h"
 leverage = 1.0
