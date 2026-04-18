@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-"""
-4h Williams %R(14) + Volume Spike + ADX(14) Trend Filter
-- Williams %R < -80 for long, > -20 for short in trending markets (ADX > 25)
-- Volume > 1.5x 20-period average for confirmation
-- Exit when Williams %R crosses back through -50 (momentum fade)
-- Designed for 20-50 trades/year with disciplined risk control
-"""
+# 4h Williams %R(14) + Volume Spike + ADX(14) Trend Filter
+# Williams %R < -80 for long, > -20 for short in trending markets (ADX > 25)
+# Volume > 1.5x 20-period average for confirmation
+# Exit when Williams %R crosses back through -50 (momentum fade)
+# Designed for 20-50 trades/year with disciplined risk control
 
 import numpy as np
 import pandas as pd
