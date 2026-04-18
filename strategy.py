@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     open_price = prices['open'].values
@@ -14,76 +14,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and SMA
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend and volume
+    df_12h = get_htf_data(prices, '12h')
+    open_12h = df_12h['open'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate ATR(14) on daily data with proper min_periods
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h EMA(34) for trend
+    close_12h_series = pd.Series(close_12h)
+    ema_34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Align daily ATR14 to 12h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate 12h volume moving average (20-period)
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
-    # Calculate SMA(50) on daily close
-    sma_50_1d = np.full(len(close_1d), np.nan)
-    for i in range(50, len(close_1d)):
-        sma_50_1d[i] = np.mean(close_1d[i-50:i])
-    
-    # Align daily SMA50 to 12h timeframe
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
-    
-    # Calculate 12h ATR for stop loss
-    tr_12h_1 = high - low
-    tr_12h_2 = np.abs(high - np.roll(close, 1))
-    tr_12h_3 = np.abs(low - np.roll(close, 1))
-    tr_12h_1[0] = high[0] - low[0]
-    tr_12h_2[0] = np.abs(high[0] - close[0])
-    tr_12h_3[0] = np.abs(low[0] - close[0])
-    tr_12h = np.maximum(tr_12h_1, np.maximum(tr_12h_2, tr_12h_3))
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Calculate 4h ATR(14) for stop loss and position sizing
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # need daily SMA50, volume MA
+    # Start after we have enough data for indicators
+    start_idx = 34  # need EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(sma_50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_12h[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma_12h_aligned[i]) or 
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current 12h volume > 1.5 * 20-period average
+        vol_confirmed = volume_12h_aligned[i] > 1.5 * vol_ma_12h_aligned[i]
         
-        # Trend filter: price above daily SMA50 (uptrend) or below (downtrend)
-        trend_up = close[i] > sma_50_1d_aligned[i]
-        trend_down = close[i] < sma_50_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA34
+        trend_up = close[i] > ema_34_12h_aligned[i]
+        trend_down = close[i] < ema_34_12h_aligned[i]
         
         if position == 0:
-            # Long entry: price above 12h open + 0.3*ATR, with volume and trend filter
-            if (close[i] > open_price[i] + 0.3 * atr_12h[i] and 
+            # Long entry: price above 12h open + 0.25*ATR, with volume and trend filter
+            if (close[i] > open_12h_aligned[i] + 0.25 * atr_4h[i] and 
                 vol_confirmed and 
                 trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below 12h open - 0.3*ATR, with volume and trend filter
-            elif (close[i] < open_price[i] - 0.3 * atr_12h[i] and 
+            # Short entry: price below 12h open - 0.25*ATR, with volume and trend filter
+            elif (close[i] < open_12h_aligned[i] - 0.25 * atr_4h[i] and 
                   vol_confirmed and 
                   trend_down):
                 signals[i] = -0.25
@@ -93,7 +74,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Long exit: price crosses below 12h open or ATR-based stop
-            if close[i] < open_price[i] - 1.5 * atr_12h[i]:
+            if close[i] < open_12h_aligned[i] - 1.5 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,7 +82,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price crosses above 12h open or ATR-based stop
-            if close[i] > open_price[i] + 1.5 * atr_12h[i]:
+            if close[i] > open_12h_aligned[i] + 1.5 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ATR14Daily_SMA50Daily_VolumeFilter"
-timeframe = "12h"
+name = "12h_EMA34_Volume_OpenBreakout"
+timeframe = "4h"
 leverage = 1.0
