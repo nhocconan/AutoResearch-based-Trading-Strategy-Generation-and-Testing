@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_WideBand_Keltner_Breakout_Volume_Trend
-Hypothesis: In volatile crypto markets, wide-band Keltner channels (ATR multiplier 2.5) capture major breakouts better than Bollinger bands. 
-Breakouts above upper band with volume >1.5x average and price above weekly EMA50 capture institutional momentum.
-Exit when price closes below middle line or ATR-based trailing stop triggers. Works in bull/bear by following strong momentum.
-Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag while capturing major moves.
+12h_Camarilla_R1S1_R2S2_Breakout_Volume_Trend_Filter
+Hypothesis: Camarilla pivot levels R1/S1 and R2/S2 from daily timeframe act as strong support/resistance.
+Breakouts above R2 or below S2 with volume confirmation and daily EMA trend filter capture
+institutional move initiation. Works in bull/bear by following institutional flow.
+Target: 12-30 trades/year (48-120 total over 4 years) to balance opportunity and fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,86 +21,98 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for ATR and EMA calculations
+    # 1-day data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # ATR(14) for Keltner bands
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Previous day's OHLC for Camarilla
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Keltner channels with wider bands (ATR multiplier 2.5)
-    ema_center = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_band = ema_center + (2.5 * atr)
-    lower_band = ema_center - (2.5 * atr)
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # R2 = C + (H-L)*1.1/6, S2 = C - (H-L)*1.1/6
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    r2 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    s2 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align Keltner bands to daily timeframe
-    upper_band_d = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_d = align_htf_to_ltf(prices, df_1d, lower_band)
-    ema_center_d = align_htf_to_ltf(prices, df_1d, ema_center)
+    # Align to 12h timeframe (waits for 1-day bar to close)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Weekly EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_d = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume filter: >1.5x 20-day average
+    # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
+    # 1-day EMA trend filter
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
     signals = np.zeros(n)
     position = 0
+    bars_since_entry = 0
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_band_d[i]) or np.isnan(lower_band_d[i]) or
-            np.isnan(ema_center_d[i]) or np.isnan(ema_50_1w_d[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(r2_12h[i]) or
+            np.isnan(s2_12h[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_1d_12h[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
         price = close[i]
-        upper = upper_band_d[i]
-        lower = lower_band_d[i]
-        middle = ema_center_d[i]
-        weekly_ema = ema_50_1w_d[i]
+        r1_val = r1_12h[i]
+        s1_val = s1_12h[i]
+        r2_val = r2_12h[i]
+        s2_val = s2_12h[i]
         vol_ok = volume_filter[i]
+        ema_trend = ema_1d_12h[i]
         
         if position == 0:
-            # Long: break above upper band with volume in uptrend (above weekly EMA)
-            if price > upper and vol_ok and price > weekly_ema:
+            # Long: break above R2 with volume in uptrend
+            if price > r2_val and vol_ok and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume in downtrend (below weekly EMA)
-            elif price < lower and vol_ok and price < weekly_ema:
+                bars_since_entry = 0
+            # Short: break below S2 with volume in downtrend
+            elif price < s2_val and vol_ok and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Exit: price closes below middle line or weekly EMA turns down
-            if price < middle or price < weekly_ema:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding period: 2 bars (1 day)
+            if bars_since_entry < 2:
+                signals[i] = 0.25
             else:
                 signals[i] = 0.25
+                # Exit: price returns to S1 or trend reverses
+                if price < s1_val or price < ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
         
         elif position == -1:
-            # Exit: price closes above middle line or weekly EMA turns up
-            if price > middle or price > weekly_ema:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding period: 2 bars (1 day)
+            if bars_since_entry < 2:
+                signals[i] = -0.25
             else:
                 signals[i] = -0.25
+                # Exit: price returns to R1 or trend reverses
+                if price > r1_val or price > ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
     
     return signals
 
-name = "1d_WideBand_Keltner_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_R2S2_Breakout_Volume_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
