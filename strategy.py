@@ -1,89 +1,120 @@
 #!/usr/bin/env python3
 """
-1d_Momentum_Swing_Signal
-Strategy: Daily momentum swing using 21-period RSI and 50-period SMA crossover for trend direction.
-Enters long when RSI crosses above 50 with price above SMA50, enters short when RSI crosses below 50 with price below SMA50.
-Exits on opposite signal or weekly trend reversal. Designed for low trade frequency (~10-20 trades/year) with strong signal quality.
-Works in bull/bear via SMA50 trend filter and RSI momentum confirmation.
+12h_EhlersFisher_VolumeSpike_Trend_v1
+Strategy: 12h Ehlers Fisher Transform (10-period) with volume spike confirmation and 1D EMA50/EMA200 trend filter.
+Long: Fisher crosses above -1.5 in uptrend + volume spike. Short: Fisher crosses below +1.5 in downtrend + volume spike.
+Exit on trend reversal or opposite signal. Uses Ehlers Fisher for early reversal detection in both bull/bear.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def ehlers_fisher_transform(price, length):
+    """Ehlers Fisher Transform"""
+    price = np.asarray(price)
+    n = len(price)
+    if n < length:
+        return np.full(n, np.nan)
+    
+    # Normalize price to [-1, 1] range
+    highest = np.maximum.accumulate(price)
+    lowest = np.minimum.accumulate(price)
+    range_val = highest - lowest
+    range_val = np.where(range_val == 0, 1, range_val)  # avoid division by zero
+    
+    # Avoid look-ahead: use only past data for normalization
+    value = np.full(n, np.nan)
+    for i in range(length-1, n):
+        # Use only data up to i for highest/lowest calculation
+        segment_high = np.max(price[i-length+1:i+1])
+        segment_low = np.min(price[i-length+1:i+1])
+        segment_range = segment_high - segment_low
+        if segment_range == 0:
+            normalized = 0
+        else:
+            normalized = 2 * (price[i] - segment_low) / segment_range - 1
+        # Clamp to [-0.999, 0.999] to avoid infinity in log
+        normalized = np.clip(normalized, -0.999, 0.999)
+        # Fisher transform
+        value[i] = 0.5 * np.log((1 + normalized) / (1 - normalized))
+    
+    return value
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly SMA50 for trend filter
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    close_1d = df_1d['close'].values
     
-    # Align weekly SMA50 to daily timeframe
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate daily RSI(21)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align daily data to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/21, adjust=False, min_periods=21).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/21, adjust=False, min_periods=21).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate daily SMA50 for entry filter
-    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # Calculate Ehlers Fisher Transform on 12h price (typical price)
+    typical_price = (high + low + close) / 3.0
+    fisher = ehlers_fisher_transform(typical_price, 10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for SMA50
+    start_idx = 50  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(sma_50_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(sma_50[i]):
+        if (np.isnan(fisher[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
-        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
-        # RSI momentum signals
-        rsi_cross_up = (rsi[i-1] < 50) and (rsi[i] >= 50)
-        rsi_cross_down = (rsi[i-1] > 50) and (rsi[i] <= 50)
+        # Volume confirmation (current volume > 1.5x 20-period average)
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            vol_confirm = volume[i] > 1.5 * vol_ma
+        else:
+            vol_confirm = False
+        
+        # Fisher signals
+        fisher_cross_up = (i > 0 and fisher[i-1] <= -1.5 and fisher[i] > -1.5)
+        fisher_cross_down = (i > 0 and fisher[i-1] >= 1.5 and fisher[i] < 1.5)
         
         if position == 0:
-            # Long: weekly uptrend + RSI cross above 50 + price above daily SMA50
-            if weekly_uptrend and rsi_cross_up and close[i] > sma_50[i]:
+            # Long: uptrend + volume + Fisher cross above -1.5
+            if uptrend and vol_confirm and fisher_cross_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + RSI cross below 50 + price below daily SMA50
-            elif weekly_downtrend and rsi_cross_down and close[i] < sma_50[i]:
+            # Short: downtrend + volume + Fisher cross below +1.5
+            elif downtrend and vol_confirm and fisher_cross_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: weekly trend reversal or RSI cross below 50
-            if not weekly_uptrend or rsi_cross_down:
+            # Long exit: trend change or Fisher cross below +1.5
+            if not uptrend or fisher_cross_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly trend reversal or RSI cross above 50
-            if not weekly_downtrend or rsi_cross_up:
+            # Short exit: trend change or Fisher cross above -1.5
+            if not downtrend or fisher_cross_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -91,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Momentum_Swing_Signal"
-timeframe = "1d"
+name = "12h_EhlersFisher_VolumeSpike_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
