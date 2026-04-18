@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Wick_Reversal_AntiTrend
-Hypothesis: Price reversals at daily high/low with long wicks indicate exhaustion in both bull and bear markets. Combines 1d high/low with 4h wick rejection and volume confirmation for high-probability reversals. Low trade frequency via strict wick and volume filters.
+1d_Weekly_Momentum_With_Confirmation
+Hypothesis: Combines weekly momentum (price vs 1-week ago) with volume confirmation and RSI filter on daily timeframe to capture sustained moves while avoiding whipsaws. Designed for low trade frequency (<25/year) and works in both bull and bear markets by following momentum with strict confirmation.
 """
 
 import numpy as np
@@ -10,36 +10,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for momentum
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate 1d high and low
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Align 1d high/low to 4h timeframe (using previous day's close for alignment)
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    # Calculate weekly momentum: current weekly close vs 1 week ago
+    weekly_momentum = np.zeros_like(close_weekly)
+    weekly_momentum[:] = np.nan
+    for i in range(1, len(close_weekly)):
+        weekly_momentum[i] = (close_weekly[i] - close_weekly[i-1]) / close_weekly[i-1]
     
-    # Wick analysis: long upper/lower shadow
-    body_size = np.abs(close - np.minimum(open := prices['open'].values, close))
-    upper_wick = high - np.maximum(open, close)
-    lower_wick = np.minimum(open, close) - low
-    # Long wick condition: wick > 2x body size
-    long_upper_wick = upper_wick > (2 * body_size + 1e-10)
-    long_lower_wick = lower_wick > (2 * body_size + 1e-10)
+    # Align weekly momentum to daily timeframe
+    weekly_momentum_aligned = align_htf_to_ltf(prices, df_weekly, weekly_momentum)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Daily RSI for overbought/oversold filter (14-period)
+    rsi = np.zeros_like(close)
+    rsi[:] = np.nan
+    if len(close) >= 14:
+        # Calculate RSI using Wilder's smoothing
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        
+        for i in range(14, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
@@ -50,58 +64,42 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 20  # Warmup for RSI and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if np.isnan(weekly_momentum_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # Long: rejection at daily low with long lower wick and volume spike
-            if (low[i] <= low_1d_aligned[i] * 1.001 and  # near daily low
-                long_lower_wick[i] and 
-                vol_spike[i]):
+            # Long: positive weekly momentum, RSI not overbought, volume spike
+            if weekly_momentum_aligned[i] > 0.01 and rsi[i] < 70 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: rejection at daily high with long upper wick and volume spike
-            elif (high[i] >= high_1d_aligned[i] * 0.999 and  # near daily high
-                  long_upper_wick[i] and 
-                  vol_spike[i]):
+            # Short: negative weekly momentum, RSI not oversold, volume spike
+            elif weekly_momentum_aligned[i] < -0.01 and rsi[i] > 30 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            # Exit: hold max 8 bars or reverse signal
-            if bars_since_entry >= 8:
-                signals[i] = 0.0
-                position = 0
-            elif long_upper_wick[i] and vol_spike[i]:  # reverse signal
+            # Exit: weekly momentum turns negative OR RSI overbought
+            if weekly_momentum_aligned[i] < 0 or rsi[i] >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # hold
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: hold max 8 bars or reverse signal
-            if bars_since_entry >= 8:
-                signals[i] = 0.0
-                position = 0
-            elif long_lower_wick[i] and vol_spike[i]:  # reverse signal
+            # Exit: weekly momentum turns positive OR RSI oversold
+            if weekly_momentum_aligned[i] > 0 or rsi[i] <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # hold
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Wick_Reversal_AntiTrend"
-timeframe = "4h"
+name = "1d_Weekly_Momentum_With_Confirmation"
+timeframe = "1d"
 leverage = 1.0
