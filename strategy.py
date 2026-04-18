@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_MultiTF_Structure_Breakout_V1
-Hypothesis: Combine daily price structure (higher highs/lows) with 4h breakouts and volume confirmation. 
-Works in bull markets via upward structure breaks and in bear markets via breakdowns of downward structure.
-Uses daily swing points to filter 4h breakouts, reducing false signals and trade frequency.
+4h_Hybrid_Momentum_Reversion_V1
+Hypothesis: Combines momentum breakout (4h Donchian) with mean-reversion (4h RSI) and volume confirmation to work in both bull and bear markets. Uses 1-day EMA for trend filter to avoid counter-trend trades. Designed for low trade frequency (<50/year) to minimize drag.
 """
 
 import numpy as np
@@ -12,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,80 +18,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily swing high/low (pivot points) for structure
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Daily swing points: swing high = higher high, swing low = lower low
-    swing_high = np.full(len(high_1d), np.nan)
-    swing_low = np.full(len(low_1d), np.nan)
-    
-    for i in range(2, len(high_1d)):
-        # Swing high: higher than previous and next bar's high
-        if high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i+1] if i+1 < len(high_1d) else high_1d[i] > high_1d[i-1]:
-            swing_high[i] = high_1d[i]
-        # Swing low: lower than previous and next bar's low
-        if low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i+1] if i+1 < len(low_1d) else low_1d[i] < low_1d[i-1]:
-            swing_low[i] = low_1d[i]
-    
-    # Forward fill swing points to get structure levels
-    swing_high_ff = pd.Series(swing_high).ffill().values
-    swing_low_ff = pd.Series(swing_low).ffill().values
-    
-    # Align daily structure to 4h
-    swing_high_aligned = align_htf_to_ltf(prices, df_1d, swing_high_ff)
-    swing_low_aligned = align_htf_to_ltf(prices, df_1d, swing_low_ff)
-    
-    # 4h 20-period Donchian channel for breakouts
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # 4h Donchian breakout (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
     for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
     
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # 4h RSI (14-period) for mean-reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1-day EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    k = 2 / (50 + 1)
+    for i in range(50, len(close_1d)):
+        if i == 50:
+            ema50_1d[i] = np.mean(close_1d[0:51])
+        else:
+            ema50_1d[i] = close_1d[i] * k + ema50_1d[i-1] * (1 - k)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation: current volume > 1.8 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 2)  # Ensure indicators ready
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(swing_high_aligned[i]) or np.isnan(swing_low_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: 4h breaks above Donchian high with volume and above daily swing low (bullish structure)
-            if (high[i] > donchian_high[i] and vol_confirm[i] and 
-                close[i] > swing_low_aligned[i]):
+            # Long: Donchian breakout + RSI not overbought + volume + uptrend
+            if (close[i] > donch_high[i] and rsi[i] < 70 and 
+                vol_confirm[i] and close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: 4h breaks below Donchian low with volume and below daily swing high (bearish structure)
-            elif (low[i] < donchian_low[i] and vol_confirm[i] and 
-                  close[i] < swing_high_aligned[i]):
+            # Short: Donchian breakdown + RSI not oversold + volume + downtrend
+            elif (close[i] < donch_low[i] and rsi[i] > 30 and 
+                  vol_confirm[i] and close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: break below Donchian low or structure breaks down
-            if (low[i] < donchian_low[i] or close[i] < swing_low_aligned[i]):
+            # Long exit: RSI overbought OR trend reversal
+            if (rsi[i] > 70 or close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above Donchian high or structure breaks up
-            if (high[i] > donchian_high[i] or close[i] > swing_high_aligned[i]):
+            # Short exit: RSI oversold OR trend reversal
+            if (rsi[i] < 30 or close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_MultiTF_Structure_Breakout_V1"
+name = "4h_Hybrid_Momentum_Reversion_V1"
 timeframe = "4h"
 leverage = 1.0
