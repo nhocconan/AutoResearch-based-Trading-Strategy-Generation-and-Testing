@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter.
+Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d ADX trend filter.
 - Long: price breaks above Donchian upper band, ADX > 25 (trending), volume > 1.5x average
 - Short: price breaks below Donchian lower band, ADX > 25, volume > 1.5x average
 - Exit: opposite Donchian band touch or ADX < 20 (trend weakening)
 - Uses 1d Donchian bands for structure, avoiding whipsaws in ranging markets.
-Designed for 20-50 trades/year (80-200 total) to minimize fee drift.
+Designed for 12-37 trades/year (50-150 total) to minimize fee drag.
 """
 
 import numpy as np
@@ -114,10 +114,10 @@ def generate_signals(prices):
     # Calculate ADX (14-period) on 1d
     adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align to 4h timeframe
-    donchian_high_4h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_4h = align_htf_to_ltf(prices, df_1d, donchian_low)
-    adx_14_1d_4h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Align to 12h timeframe
+    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    adx_14_1d_12h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -131,8 +131,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or 
-            np.isnan(adx_14_1d_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
+            np.isnan(adx_14_1d_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -141,17 +141,17 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above Donchian high, ADX > 25, volume confirmation
-            if close[i] > donchian_high_4h[i] and adx_14_1d_4h[i] > 25 and vol_confirmed:
+            if close[i] > donchian_high_12h[i] and adx_14_1d_12h[i] > 25 and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below Donchian low, ADX > 25, volume confirmation
-            elif close[i] < donchian_low_4h[i] and adx_14_1d_4h[i] > 25 and vol_confirmed:
+            elif close[i] < donchian_low_12h[i] and adx_14_1d_12h[i] > 25 and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long exit: price touches Donchian low or ADX < 20 (trend weakening)
-            if close[i] <= donchian_low_4h[i] or adx_14_1d_4h[i] < 20:
+            if close[i] <= donchian_low_12h[i] or adx_14_1d_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -159,7 +159,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price touches Donchian high or ADX < 20 (trend weakening)
-            if close[i] >= donchian_high_4h[i] or adx_14_1d_4h[i] < 20:
+            if close[i] >= donchian_high_12h[i] or adx_14_1d_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -167,6 +167,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_ADX14_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_ADX14_Volume"
+timeframe = "12h"
 leverage = 1.0
