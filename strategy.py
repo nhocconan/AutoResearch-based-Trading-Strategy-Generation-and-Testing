@@ -1,124 +1,90 @@
-#!/usr/bin/env python3
-"""
-6h_Ichimoku_TK_Cross_CloudFilter
-Ichimoku Cloud system with TK cross and cloud filter:
-- Long when TK line crosses above Kijun + price above cloud (from 1d Ichimoku)
-- Short when TK line crosses below Kijun + price below cloud
-- Exit when TK line crosses back opposite direction
-- Uses 1d Ichimoku cloud for trend filter (Senkou Span A/B)
-- Designed for 15-25 trades/year per symbol
-Works in both bull (captures trends) and bear (short breakdowns) markets
-"""
+# 4h_Camarilla_R1S1_Breakout_Volume_Strict
+# Hypothesis: Camarilla pivot levels (R1/S1) act as strong support/resistance in BTC/ETH.
+# In bull markets, price breaks above R1 and continues up; in bear markets, breaks below S1 and continues down.
+# Volume confirmation ensures breakout is genuine, not a false signal.
+# Strict volume threshold (>1.5x 20-period average) reduces false breakouts and controls trade frequency.
+# Target: 20-40 trades/year per symbol to avoid fee drag.
+# Works in both bull (breakout long) and bear (breakout short) markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
-    """Calculate Ichimoku Cloud components."""
-    n = len(high)
-    
-    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 over tenkan period
-    tenkan_sen = np.full(n, np.nan)
-    for i in range(tenkan-1, n):
-        tenkan_sen[i] = (np.max(high[i-tenkan+1:i+1]) + np.min(low[i-tenkan+1:i+1])) / 2
-    
-    # Kijun-sen (Base Line): (highest high + lowest low)/2 over kijun period
-    kijun_sen = np.full(n, np.nan)
-    for i in range(kijun-1, n):
-        kijun_sen[i] = (np.max(high[i-kijun+1:i+1]) + np.min(low[i-kijun+1:i+1])) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted kijun periods ahead
-    senkou_span_a = np.full(n, np.nan)
-    for i in range(kijun-1, n):
-        idx = i + kijun
-        if idx < n:
-            senkou_span_a[idx] = (tenkan_sen[i] + kijun_sen[i]) / 2
-    
-    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 over senkou period shifted kijun
-    senkou_span_b = np.full(n, np.nan)
-    for i in range(senkou-1, n):
-        idx = i + kijun
-        if idx < n:
-            senkou_span_b[idx] = (np.max(high[i-senkou+1:i+1]) + np.min(low[i-senkou+1:i+1])) / 2
-    
-    # Chikou Span (Lagging Span): close shifted -kijun periods (not used for signals)
-    
-    return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku cloud filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Ichimoku
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(high_1d, low_1d, close_1d)
+    # Calculate Camarilla levels for each 1d bar: R1, S1
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    rng = high_1d - low_1d
+    r1_1d = close_1d + 1.1 * rng / 12
+    s1_1d = close_1d - 1.1 * rng / 12
     
-    # Align 1d Ichimoku to 6h timeframe
-    tenkan_1d_6h = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_6h = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_6h = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_6h = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    # Align 1d Camarilla levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 6h Ichimoku for TK cross
-    tenkan_6h, kijun_6h, _, _ = calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = np.zeros(n)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if vol_count > 20:
+            vol_sum -= volume[i-20]
+            vol_count -= 1
+        if vol_count >= 20:
+            vol_ma[i] = vol_sum / 20
+        else:
+            vol_ma[i] = np.nan
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # need sufficient data for Ichimoku calculations
+    start_idx = 20  # need volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(tenkan_1d_6h[i]) or np.isnan(kijun_1d_6h[i]) or
-            np.isnan(senkou_a_1d_6h[i]) or np.isnan(senkou_b_1d_6h[i])):
+        if np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Determine cloud top and bottom (Senkou Span A and B)
-        cloud_top = max(senkou_a_1d_6h[i], senkou_b_1d_6h[i])
-        cloud_bottom = min(senkou_a_1d_6h[i], senkou_b_1d_6h[i])
-        
-        # Check TK cross on 6h chart
-        tk_cross_above = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
-        tk_cross_below = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
-        
-        # Price position relative to cloud
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
         if position == 0:
-            # Long: TK cross above + price above cloud
-            if tk_cross_above and price_above_cloud:
+            # Long: close breaks above R1 with volume confirmation
+            if close[i] > r1_4h[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TK cross below + price below cloud
-            elif tk_cross_below and price_below_cloud:
+            # Short: close breaks below S1 with volume confirmation
+            elif close[i] < s1_4h[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: TK cross below (regardless of cloud)
-            if tk_cross_below:
+            # Long exit: close breaks below S1 (reversal signal)
+            if close[i] < s1_4h[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TK cross above (regardless of cloud)
-            if tk_cross_above:
+            # Short exit: close breaks above R1 (reversal signal)
+            if close[i] > r1_4h[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -126,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_Volume_Strict"
+timeframe = "4h"
 leverage = 1.0
