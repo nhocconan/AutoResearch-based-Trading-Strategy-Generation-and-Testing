@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Keltner_Channel_Breakout_Volume
-12h strategy using Keltner Channel breakout with volume confirmation and 1d trend filter.
-- Long: Close breaks above KC upper + volume > 1.3x avg + 1d EMA50 > EMA200
-- Short: Close breaks below KC lower + volume > 1.3x avg + 1d EMA50 < EMA200
-- Exit: Opposite breakout or trend reversal
-Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+1d_RSI2_Breakout_With_Volume_And_Pullback_Filter
+Daily RSI(2) mean reversion strategy with volume confirmation and pullback filter.
+- Long: RSI(2) < 10 + pullback to 20-day EMA + volume > 1.5x 20-day average + price above 200-day EMA
+- Short: RSI(2) > 90 + pullback to 20-day EMA + volume > 1.5x 20-day average + price below 200-day EMA
+- Exit: RSI(2) crosses above 50 (long) or below 50 (short)
+Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
+Works in trending markets by buying dips in uptrends and selling rallies in downtrends
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,101 +23,95 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR calculation
-    df_1w = get_htf_data(prices, '1w')
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ATR(14) on weekly
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Keltner Channel: EMA(20) ± 2*ATR
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_20 + 2 * atr_14
-    kc_lower = ema_20 - 2 * atr_14
-    
-    # Align KC to 12h
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1w, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1w, kc_lower)
-    
-    # Get daily data for trend filter and volume average
+    # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # RSI(2) calculation
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Wilder's smoothing (alpha = 1/period)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[1] = gain[1]  # Initialize first value
+    avg_loss[1] = loss[1]
     
-    # Daily volume average (20-period)
+    for i in range(2, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2  # 2-period smoothing
+        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 20-day EMA for pullback
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # 200-day EMA for trend filter
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # 20-day volume average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Align daily indicators to 1d timeframe (no alignment needed since we're on 1d)
+    rsi_aligned = rsi
+    ema_20_aligned = ema_20
+    ema_200_aligned = ema_200
+    vol_ma_20_aligned = vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200
+    start_idx = 200  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_20[i]) or np.isnan(ema_200[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Trend filter
+        uptrend = close[i] > ema_200[i]
+        downtrend = close[i] < ema_200[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > kc_upper_aligned[i]
-        breakdown_down = close[i] < kc_lower_aligned[i]
+        # Pullback to 20-day EMA (within 1%)
+        near_ema20 = abs(close[i] - ema_20[i]) / ema_20[i] < 0.01
         
         if position == 0:
-            # Long: uptrend + volume + breakout above KC upper
-            if uptrend and vol_confirm and breakout_up:
+            # Long: oversold RSI + pullback + volume + uptrend
+            if rsi[i] < 10 and near_ema20 and vol_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below KC lower
-            elif downtrend and vol_confirm and breakdown_down:
+            # Short: overbought RSI + pullback + volume + downtrend
+            elif rsi[i] > 90 and near_ema20 and vol_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below KC lower
-            if not uptrend or (vol_confirm and breakdown_down):
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long exit: RSI crosses above 50
+            if rsi[i] > 50:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above KC upper
-            if not downtrend or (vol_confirm and breakout_up):
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short exit: RSI crosses below 50
+            if rsi[i] < 50:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_Keltner_Channel_Breakout_Volume"
-timeframe = "12h"
+name = "1d_RSI2_Breakout_With_Volume_And_Pullback_Filter"
+timeframe = "1d"
 leverage = 1.0
