@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1h EMA Crossover with 4h Trend Filter and Volume Spike
-Hypothesis: During strong 4h trends (EMA50 > EMA200), 1-hour EMA crossovers (9/21) with volume spikes (1.5x average) capture momentum with controlled frequency. Works in bull/bear by following 4h trend direction.
+6h Weekly Pivot Breakout with Volume Confirmation and ADX Filter
+Hypothesis: Price breaking above/below weekly pivot resistance/support levels (R1/S1) with volume confirmation 
+(volume > 1.5x average) and trend strength (ADX > 20) indicates strong momentum. 
+Weekly pivots provide robust support/resistance levels that work across market regimes.
+Target: 15-30 trades/year to minimize fee drain while maintaining edge.
 """
 
 import numpy as np
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,66 +21,109 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h indicators
-    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Get weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
+        return np.zeros(n)
     
-    # Volume average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly pivot points (using previous week's OHLC)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    weekly_open = df_weekly['open'].values
     
-    # 4h trend filter
-    df_4h = get_htf_data(prices, '4h')
-    ema40_4h = pd.Series(df_4h['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema200_4h = pd.Series(df_4h['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema40_4h_aligned = align_htf_to_ltf(prices, df_4h, ema40_4h)
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # Pivot point = (H + L + C) / 3
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    # Support 1 = (2 * P) - H
+    s1 = (2 * pivot) - weekly_high
+    # Resistance 1 = (2 * P) - L
+    r1 = (2 * pivot) - weekly_low
+    
+    # Align weekly pivot levels to 6h timeframe (wait for weekly bar to close)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    
+    # EMA20 for dynamic reference
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # True Range and ATR(20)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # ADX for trend strength (14-period)
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
+    
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: volume > 1.5x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ratio = volume / vol_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Warmup for 4h EMA200
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema9[i]) or np.isnan(ema21[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema40_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(ema20[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # 4h trend direction
-        bullish_trend = ema40_4h_aligned[i] > ema200_4h_aligned[i]
-        bearish_trend = ema40_4h_aligned[i] < ema200_4h_aligned[i]
-        
-        # Volume spike
-        vol_spike = volume[i] > 1.5 * vol_ma[i]
+        price = close[i]
+        s1_level = s1_aligned[i]
+        r1_level = r1_aligned[i]
+        ema_val = ema20[i]
+        adx_val = adx[i]
+        vol_conf = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: bullish 4h trend + EMA9 > EMA21 + volume spike
-            if bullish_trend and ema9[i] > ema21[i] and vol_spike:
-                signals[i] = 0.20
+            # Strong trend and volume confirmation
+            # Price breaks above R1 = long
+            if adx_val > 20 and price > r1_level and vol_conf:
+                signals[i] = 0.25
                 position = 1
-            # Short: bearish 4h trend + EMA9 < EMA21 + volume spike
-            elif bearish_trend and ema9[i] < ema21[i] and vol_spike:
-                signals[i] = -0.20
+            # Price breaks below S1 = short
+            elif adx_val > 20 and price < s1_level and vol_conf:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: EMA9 < EMA21 or trend change
-            if ema9[i] < ema21[i] or not bullish_trend:
+            # Exit if trend weakens or price returns to EMA20 or breaks below S1
+            if adx_val < 15 or price < ema_val or price < s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: EMA9 > EMA21 or trend change
-            if ema9[i] > ema21[i] or not bearish_trend:
+            # Exit if trend weakens or price returns to EMA20 or breaks above R1
+            if adx_val < 15 or price > ema_val or price > r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA_Crossover_4Trend_Volume"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Breakout_Volume_ADX"
+timeframe = "6h"
 leverage = 1.0
