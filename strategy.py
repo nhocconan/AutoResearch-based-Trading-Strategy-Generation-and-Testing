@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Spike and Daily Trend Filter
-Hypothesis: Daily Donchian(20) channels act as strong support/resistance on higher timeframes.
-Breakouts with volume confirmation and daily EMA50 trend filter capture momentum moves.
-Designed for 12-37 trades/year on 12h timeframe. Works in both bull and bear markets
-by filtering trades with the daily trend and requiring volume confirmation to avoid false breakouts.
+4h Daily Range Breakout with Volume Spike and Momentum Filter
+Hypothesis: The previous day's high and low act as key support/resistance levels.
+Breakouts beyond these levels with volume confirmation capture momentum moves.
+Works in both bull and bear markets by requiring volume confirmation to avoid false breakouts
+and using a momentum filter to align with short-term price action.
+Designed for 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -21,36 +22,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and EMA (once before loop)
+    # Get daily data for previous day's high/low (once before loop)
     df_d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels for the day (using previous day's data to avoid look-ahead)
-    # Highest high of previous 20 days
-    donchian_high = pd.Series(df_d['high']).rolling(window=20, min_periods=20).max().shift(1).values
-    # Lowest low of previous 20 days
-    donchian_low = pd.Series(df_d['low']).rolling(window=20, min_periods=20).min().shift(1).values
+    # Previous day's high and low (shifted by 1 to avoid look-ahead)
+    prev_high = df_d['high'].shift(1).values
+    prev_low = df_d['low'].shift(1).values
     
-    # Align Donchian channels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_d, donchian_low)
+    # Align to 4h timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Daily EMA50 for trend filter
-    ema_50 = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_d, ema_50)
-    
-    # Volume spike: 2x 20-period average on 12h
+    # Volume spike: 2x 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # ATR for stop loss (12h ATR)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Momentum filter: 4-period RSI > 50 for long, < 50 for short
+    # Using close prices for RSI calculation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=4, min_periods=4).mean()
+    avg_loss = loss.rolling(window=4, min_periods=4).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -58,48 +54,45 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_aligned[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(prev_high_aligned[i]) or 
+            np.isnan(prev_low_aligned[i]) or
+            np.isnan(vol_ma[i]) or
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ema = ema_aligned[i]
-        atr_val = atr[i]
+        ph = prev_high_aligned[i]
+        pl = prev_low_aligned[i]
         
         if position == 0:
-            # Long: break above upper Donchian with volume spike and price above EMA50 (uptrend)
-            if price > upper and volume_spike[i] and price > ema:
+            # Long: break above previous day's high with volume spike and bullish momentum
+            if price > ph and volume_spike[i] and rsi_values[i] > 50:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian with volume spike and price below EMA50 (downtrend)
-            elif price < lower and volume_spike[i] and price < ema:
+            # Short: break below previous day's low with volume spike and bearish momentum
+            elif price < pl and volume_spike[i] and rsi_values[i] < 50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: price returns to lower Donchian or ATR trailing stop
-            if price <= lower or price < (high[i] - 2.0 * atr_val):
+            # Exit: price returns to previous day's low or momentum turns bearish
+            if price <= pl or rsi_values[i] < 50:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: price returns to upper Donchian or ATR trailing stop
-            if price >= upper or price > (low[i] + 2.0 * atr_val):
+            # Exit: price returns to previous day's high or momentum turns bullish
+            if price >= ph or rsi_values[i] > 50:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Donchian_Breakout_VolumeSpike_EMA50"
-timeframe = "12h"
+name = "4h_DailyRange_Breakout_Volume_Momentum"
+timeframe = "4h"
 leverage = 1.0
