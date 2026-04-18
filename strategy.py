@@ -1,14 +1,7 @@
-#!/usr/bin/env python3
-"""
-4h_Chaikin_Money_Flow_Trend_Filter_V1
-4h strategy using Chaikin Money Flow (CMF) with 200 EMA trend filter and ATR-based volatility filter.
-- Long: CMF > 0.05 + close > EMA200 + ATR ratio (ATR14/ATR50) > 0.8
-- Short: CMF < -0.05 + close < EMA200 + ATR ratio (ATR14/ATR50) > 0.8
-- Exit: Opposite CMF signal or trend reversal
-Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
-CMF captures institutional money flow, EMA200 filters trend direction, ATR ratio ensures sufficient volatility for meaningful moves
-Works in bull markets (strong inflows in uptrend) and bear markets (strong outflows in downtrend)
-"""
+# [Experiment #59790] Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation
+# Designed for low trade frequency (~10-20/year) to minimize fee drag, works in bull/bear via trend filter
+# Uses 1w EMA for trend, 1d Donchian for breakout, volume spike for confirmation
+# Target: 30-100 total trades over 4 years, avoid overtrading
 
 import numpy as np
 import pandas as pd
@@ -16,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,81 +17,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volatility context
+    # Get 1d data for Donchian channels and volume average
     df_1d = get_htf_data(prices, '1d')
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Daily EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # 1d Donchian channels (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR for volatility filter (using 4h data)
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    # Avoid division by zero
-    atr_ratio = np.where(atr_50 > 0, atr_14 / atr_50, 0.0)
+    # 1d volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Chaikin Money Flow (CMF) - 20 period
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = high - low
-    mfm = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
-    # Money Flow Volume = MFM * Volume
-    mfv = mfm * volume
-    # CMF = 20-period sum of MFV / 20-period sum of Volume
-    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0.0)
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align all data to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # need enough for ATR50 and CMF20
+    start_idx = 50  # need enough for EMA and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(atr_ratio[i]) or np.isnan(cmf[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = close[i] > ema_200_aligned[i]
-        downtrend = close[i] < ema_200_aligned[i]
+        # Trend condition from weekly EMA50
+        uptrend = close_1w[i] > ema_50_1w_aligned[i] if not np.isnan(close_1w[i]) else False
+        downtrend = close_1w[i] < ema_50_1w_aligned[i] if not np.isnan(close_1w[i]) else False
         
-        # Volatility filter - require sufficient volatility for meaningful moves
-        vol_filter = atr_ratio[i] > 0.8
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # CMF conditions
-        cmf_long = cmf[i] > 0.05
-        cmf_short = cmf[i] < -0.05
+        # Breakout conditions
+        breakout_up = close[i] > donchian_high_aligned[i]
+        breakdown_down = close[i] < donchian_low_aligned[i]
         
         if position == 0:
-            # Long: positive CMF + uptrend + volatility
-            if cmf_long and uptrend and vol_filter:
+            # Long: uptrend + volume + breakout above Donchian high
+            if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: negative CMF + downtrend + volatility
-            elif cmf_short and downtrend and vol_filter:
+            # Short: downtrend + volume + breakdown below Donchian low
+            elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: negative CMF or trend reversal
-            if cmf_short or not uptrend:
+            # Long exit: trend change, volume confirmation, or breakdown below Donchian low
+            if not uptrend or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: positive CMF or trend reversal
-            if cmf_long or not downtrend:
+            # Short exit: trend change, volume confirmation, or breakout above Donchian high
+            if not downtrend or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -106,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Chaikin_Money_Flow_Trend_Filter_V1"
-timeframe = "4h"
+name = "1d_Donchian_20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
