@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Trend_Filter_V1
-Hypothesis: Uses Vortex indicator (VI+ and VI-) to determine trend direction on 1-day timeframe, 
-combined with 4-hour price action and volume confirmation. Enters long when VI+ > VI- (uptrend) 
-and price breaks above 4-hour high of prior period with volume spike; shorts when VI- > VI+ 
-(downtrend) and price breaks below 4-hour low with volume spike. Uses ATR-based stop via 
-signal=0 when trend reverses. Designed for low frequency (<40 trades/year) with strong 
-performance in trending markets while avoiding whipsaws in ranging conditions.
+1d_WeeklyPivot_R1S1_Breakout_WeeklyTrend_Volume
+Hypothesis: Weekly Pivot R1/S1 breakout with weekly EMA34 trend filter and daily volume confirmation.
+Breakouts from key weekly levels only when aligned with weekly trend and accompanied by daily volume spike.
+Designed for very low frequency (15-30 trades/year) to survive bear markets via tight entry conditions.
+Works in bull via momentum continuation, in bear via mean-reversion from extreme weekly levels.
 """
 
 import numpy as np
@@ -23,101 +21,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Vortex trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for EMA trend filter and pivot calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Vortex indicator (VI+ and VI-) on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA34 trend filter
+    close_1w = df_1w['close'].values
+    ema34_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 34:
+        ema34_1w[33] = np.mean(close_1w[0:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1w)):
+            ema34_1w[i] = close_1w[i] * alpha + ema34_1w[i-1] * (1 - alpha)
     
-    # True Range
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(abs(high_1d[1:] - close_1d[:-1]), 
-                               abs(low_1d[1:] - close_1d[:-1])))
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    # Calculate weekly Pivot points (R1/S1 from prior week)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Vortex movements
-    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])  # |current high - prior low|
-    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])  # |current low - prior high|
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    r1 = np.full(len(close_1w), np.nan)  # R1 level
+    s1 = np.full(len(close_1w), np.nan)  # S1 level
     
-    # Smooth over 14 periods
-    def ema_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value: simple average
-        result[period-1] = np.nanmean(arr[1:period])  # Skip index 0 (nan)
-        alpha = 2 / (period + 1)
-        for i in range(period, len(arr)):
-            if not np.isnan(arr[i]):
-                result[i] = arr[i] * alpha + result[i-1] * (1 - alpha)
-        return result
+    for i in range(1, len(close_1w)):
+        ph = high_1w[i-1]
+        pl = low_1w[i-1]
+        pc = close_1w[i-1]
+        pp = (ph + pl + pc) / 3.0
+        r1[i] = pp + (ph - pl)  # R1
+        s1[i] = pp - (ph - pl)  # S1
     
-    vi_plus = ema_smooth(vm_plus, 14)
-    vi_minus = ema_smooth(vm_minus, 14)
-    tr14 = ema_smooth(tr, 14)
+    # Align weekly EMA and pivot levels to daily timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Normalize to get VI+ and VI-
-    vi_plus_norm = vi_plus / tr14
-    vi_minus_norm = vi_minus / tr14
-    
-    # Get 4h data for price action and volume
-    df_4h = get_htf_data(prices, '4h')  # For reference only, we use prices directly
-    
-    # Calculate 4-period high/low for breakout detection
-    high_4 = np.full(n, np.nan)
-    low_4 = np.full(n, np.nan)
-    for i in range(4, n):
-        high_4[i] = np.max(high[i-4:i])
-        low_4[i] = np.min(low[i-4:i])
-    
-    # Volume spike: current volume > 1.5 x 20-period average
+    # Daily volume spike: current volume > 2.0 x 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
-    
-    # Align 1d Vortex indicators to 4h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus_norm)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus_norm)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure sufficient data for all indicators
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
-            np.isnan(high_4[i]) or np.isnan(low_4[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: VI+ > VI- (uptrend) + break above 4-period high + volume spike
-            if (vi_plus_aligned[i] > vi_minus_aligned[i] and 
-                close[i] > high_4[i] and vol_spike[i]):
+            # Long: break above weekly R1 with volume spike and weekly uptrend
+            if (close[i] > r1_aligned[i] and vol_spike[i] and 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- > VI+ (downtrend) + break below 4-period low + volume spike
-            elif (vi_minus_aligned[i] > vi_plus_aligned[i] and 
-                  close[i] < low_4[i] and vol_spike[i]):
+            # Short: break below weekly S1 with volume spike and weekly downtrend
+            elif (close[i] < s1_aligned[i] and vol_spike[i] and 
+                  close[i] < ema34_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend turns down (VI- > VI+)
-            if vi_minus_aligned[i] > vi_plus_aligned[i]:
+            # Long exit: close below weekly S1 or weekly trend turns down
+            if (close[i] < s1_aligned[i] or close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend turns up (VI+ > VI-)
-            if vi_plus_aligned[i] > vi_minus_aligned[i]:
+            # Short exit: close above weekly R1 or weekly trend turns up
+            if (close[i] > r1_aligned[i] or close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Vortex_Trend_Filter_V1"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1S1_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
