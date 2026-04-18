@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_TRIX_PriceAction_Signal"
-timeframe = "4h"
+name = "6h_DailyEMA_WeeklyTrend_RatioFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,76 +17,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for TRIX and volume analysis
+    # Get daily data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
+    # Calculate EMA50 on daily close
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align to 6h with proper delay (wait for daily close)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate TRIX (15-period EMA of EMA of EMA of close)
-    ema1 = pd.Series(df_1d['close']).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = np.zeros_like(ema3)
-    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100  # Percentage change
+    # Get weekly data for trend direction
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate weekly EMA20 for trend
+    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align weekly to 6h with proper delay
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Price ratio filter: current price vs weekly EMA (normalized distance)
+    # Avoid division by zero
+    ratio = np.where(ema20_1w_aligned != 0, close / ema20_1w_aligned, 1.0)
+    # Smooth the ratio to reduce noise
+    ratio_smooth = pd.Series(ratio).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Volume spike detection (current volume > 2x 20-period average)
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
-    
-    # Price action: close above/below 20-period high/low
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Align TRIX components to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    volume_filter = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(trix_aligned[i]) or np.isnan(trix_signal_aligned[i]) or
-            np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or
+            np.isnan(ratio_smooth[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        trix_val = trix_aligned[i]
-        trix_signal_val = trix_signal_aligned[i]
-        high_20_val = high_20_aligned[i]
-        low_20_val = low_20_aligned[i]
+        ema50_val = ema50_1d_aligned[i]
+        ema20w_val = ema20_1w_aligned[i]
+        ratio_val = ratio_smooth[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: TRIX crosses above signal line with volume spike and price above 20-period high
-            if trix_val > trix_signal_val and volume_spike[i] and close_val > high_20_val:
+            # Long conditions:
+            # 1. Price above daily EMA50 (bullish bias)
+            # 2. Price ratio > 1.005 (0.5% above weekly EMA - weak uptrend)
+            # 3. Volume confirmation
+            if close_val > ema50_val and ratio_val > 1.005 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-            # Short: TRIX crosses below signal line with volume spike and price below 20-period low
-            elif trix_val < trix_signal_val and volume_spike[i] and close_val < low_20_val:
+            # Short conditions:
+            # 1. Price below daily EMA50 (bearish bias)
+            # 2. Price ratio < 0.995 (0.5% below weekly EMA - weak downtrend)
+            # 3. Volume confirmation
+            elif close_val < ema50_val and ratio_val < 0.995 and vol_filter:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
         
         elif position == 1:
-            # Long exit: TRIX crosses below signal line or price drops below 20-period low
-            if trix_val < trix_signal_val or close_val < low_20_val:
+            # Long exit: price drops below daily EMA50 or ratio breaks down
+            if close_val < ema50_val or ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TRIX crosses above signal line or price rises above 20-period high
-            if trix_val > trix_signal_val or close_val > high_20_val:
+            # Short exit: price rises above daily EMA50 or ratio breaks up
+            if close_val > ema50_val or ratio_val > 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
