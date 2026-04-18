@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend_Filtered
-Hypothesis: Donchian(20) breakouts on 4h timeframe with volume confirmation and 12h EMA trend filter.
-In bull markets: buy breakouts above upper band with volume and uptrend.
-In bear markets: sell breakouts below lower band with volume and downtrend.
-Uses volume spike (>1.5x 20-period average) to filter false breakouts.
-Target: 25-40 trades/year on 4h timeframe with strict entry conditions.
+1h_RSI_Extremes_4hTrend_1dVol
+Hypothesis: In 1-hour timeframe, RSI extremes (oversold/overbought) combined with 4-hour trend direction and daily volume spikes provide high-probability mean-reversion entries with trend filtering. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend). Volume spikes confirm institutional interest. Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,72 +18,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # 4-hour trend: EMA50
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # 12h EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema34_12h = np.full(len(close_12h), np.nan)
-    k = 2 / (34 + 1)
-    for i in range(34, len(close_12h)):
-        if i == 34:
-            ema34_12h[i] = np.mean(close_12h[0:35])
-        else:
-            ema34_12h[i] = close_12h[i] * k + ema34_12h[i-1] * (1 - k)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # 1-hour RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike: current volume > 1.5 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
+    # 1-day volume spike: current volume > 2.0 x 20-day average
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (vol_ma_1d * 2.0)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure all indicators ready
+    start_idx = max(50, 14, 20)  # Warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_spike_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above upper Donchian with volume spike and 12h uptrend
-            if (close[i] > donchian_high[i] and vol_spike[i] and 
-                close[i] > ema34_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: RSI oversold (<30) + 4h uptrend (price > EMA50) + volume spike
+            if (rsi[i] < 30 and close[i] > ema50_4h_aligned[i] and vol_spike_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: break below lower Donchian with volume spike and 12h downtrend
-            elif (close[i] < donchian_low[i] and vol_spike[i] and 
-                  close[i] < ema34_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: RSI overbought (>70) + 4h downtrend (price < EMA50) + volume spike
+            elif (rsi[i] > 70 and close[i] < ema50_4h_aligned[i] and vol_spike_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: close below lower Donchian or 12h trend turns down
-            if (close[i] < donchian_low[i] or close[i] < ema34_12h_aligned[i]):
+            # Long exit: RSI returns to neutral (40-60) or 4h trend breaks
+            if (rsi[i] >= 40 or close[i] < ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: close above upper Donchian or 12h trend turns up
-            if (close[i] > donchian_high[i] or close[i] > ema34_12h_aligned[i]):
+            # Short exit: RSI returns to neutral (40-60) or 4h trend breaks
+            if (rsi[i] <= 60 or close[i] > ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Trend_Filtered"
-timeframe = "4h"
+name = "1h_RSI_Extremes_4hTrend_1dVol"
+timeframe = "1h"
 leverage = 1.0
