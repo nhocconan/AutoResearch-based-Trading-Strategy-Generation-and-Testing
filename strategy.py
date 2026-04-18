@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_Price_Channel_Breakout
-Hypothesis: KAMA adapts to market regime - fast in trends, slow in ranges. 
-Breakouts above/below adaptive price channels (KAMA ± ATR) with volume confirmation capture 
-trend moves while avoiding false breakouts in ranging markets. Works in both bull/bear by 
-adapting speed to volatility. Target: 12-37 trades/year (50-150 total over 4 years).
+4h_Pivot_R1S1_R2S2_Breakout_Volume_Trend
+Hypothesis: Price breaks above/below S2/R2 levels with volume confirmation and 4h EMA20 trend filter.
+Uses 1d Camarilla pivot levels (R1,S1,R2,S2), volume > 2x 20-period average, and EMA20 trend filter.
+Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
+Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag while capturing institutional breakout moves.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,100 +21,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA50 on 1d
+    # Daily Camarilla pivot levels (calculated from previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # KAMA (adaptive moving average) on 12h
-    # Efficiency Ratio: |price change| / sum of absolute changes
-    change = np.abs(np.diff(close, prepend=close[0]))
-    abs_change = np.abs(np.diff(close, prepend=close[0]))
+    # Calculate Camarilla levels: R1, S1, R2, S2 based on previous day
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # R2 = close + 1.1*(high-low)/6
+    # S2 = close - 1.1*(high-low)/6
+    camarilla_range = (high_1d - low_1d) * 1.1 / 6
+    r1 = close_1d + camarilla_range / 2
+    s1 = close_1d - camarilla_range / 2
+    r2 = close_1d + camarilla_range
+    s2 = close_1d - camarilla_range
     
-    # ER over 10 periods
-    price_change = np.abs(close - np.roll(close, 10))
-    change_sum = np.convolve(abs_change, np.ones(10), 'same')
-    er = np.where(change_sum != 0, price_change / change_sum, 0)
+    # Align to 4h timeframe (use previous day's levels for current day)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA2
-    slow_sc = 2 / (30 + 1)  # EMA30
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # EMA20 for trend filter on 4h
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # ATR for channel width
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.convolve(tr, np.ones(14), 'valid') / 14
-    atr = np.concatenate([np.full(13, np.nan), atr])  # align
-    
-    # Price channels: KAMA ± 1.5 * ATR
-    upper_channel = kama + 1.5 * atr
-    lower_channel = kama - 1.5 * atr
-    
-    # Volume confirmation: > 1.5x 20-period average
-    vol_ma = np.convolve(volume, np.ones(20), 'same') / 20
-    vol_ma[:10] = np.nan  # insufficient lookback
-    vol_ma[-10:] = np.nan  # insufficient lookahead
-    volume_spike = volume > (1.5 * vol_ma)
+    # Volume spike: >2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 30)  # warmup for indicators
+    start_idx = max(20, 1)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(ema_20[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        upper = upper_channel[i]
-        lower = lower_channel[i]
-        ema50_1d = ema_50_1d_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        r2_level = r2_aligned[i]
+        s2_level = s2_aligned[i]
+        ema20 = ema_20[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above upper channel with volume in uptrend (price > daily EMA50)
-            if (price > upper and 
-                vol_spike and 
-                price > ema50_1d):
+            # Long: price breaks above S2 with volume spike in uptrend
+            if (price > s2_level and          # breaks above S2
+                vol_spike and                 # volume confirmation
+                price > ema20):               # uptrend filter
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower channel with volume in downtrend (price < daily EMA50)
-            elif (price < lower and 
-                  vol_spike and 
-                  price < ema50_1d):
+            # Short: price breaks below R2 with volume spike in downtrend
+            elif (price < r2_level and        # breaks below R2
+                  vol_spike and               # volume confirmation
+                  price < ema20):             # downtrend filter
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses below KAMA or trend reverses
-            if price < kama_val or price < ema50_1d:
+            # Exit: price crosses back below S1 or trend reverses
+            if price < s1_level or price < ema20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses above KAMA or trend reverses
-            if price > kama_val or price > ema50_1d:
+            # Exit: price crosses back above R1 or trend reverses
+            if price > r1_level or price > ema20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_KAMA_Trend_With_Price_Channel_Breakout"
-timeframe = "12h"
+name = "4h_Pivot_R1S1_R2S2_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
