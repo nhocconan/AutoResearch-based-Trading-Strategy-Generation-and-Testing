@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Close_EMA200_RSI14_Pullback
-4h strategy using EMA200 trend filter + RSI(14) pullback to EMA200 with volume confirmation.
-- Long: Close above EMA200 + RSI(14) < 40 + volume > 1.2x average
-- Short: Close below EMA200 + RSI(14) > 60 + volume > 1.2x average
-- Exit: Opposite signal or RSI crossing 50
-Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
-Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend)
+1d_KAMA_Trend_With_Volume_Filter
+1d strategy using Kaufman Adaptive Moving Average (KAMA) for trend detection,
+combined with volume confirmation and RSI filter to reduce whipsaws.
+- Long: KAMA trending up + volume > 1.5x 20-day avg + RSI > 50
+- Short: KAMA trending down + volume > 1.5x 20-day avg + RSI < 50
+- Exit: Opposite KAMA direction signal
+Designed for ~10-20 trades/year per symbol (40-80 total over 4 years)
+KAMA adapts to market noise, reducing false signals in ranging markets
 """
 
 import numpy as np
@@ -15,84 +16,131 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA200 and volume average
+    # Get daily data for KAMA and volume average
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily EMA200
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    # Parameters: ER period=10, Fast EMA=2, Slow EMA=30
+    er_period = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Calculate daily volume average (20-period)
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # This is wrong, need to fix
     
-    # Align daily data to 4h timeframe
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Correct ER calculation
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    # Volatility is sum of absolute changes over er_period
+    volatility = np.zeros_like(close_1d)
+    for i in range(er_period, len(close_1d)):
+        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-er_period:i+1])))
     
-    # Calculate RSI(14) on 4h close
-    delta = np.diff(close, prepend=close[0])
+    # Avoid division by zero
+    er = np.zeros_like(close_1d)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
+    
+    # Calculate smoothing constant
+    fast_sc = 2 / (fast_ema + 1)
+    slow_sc = 2 / (slow_ema + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # RSI calculation (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    
+    # First average gain/loss
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    
+    # Subsequent averages
+    for i in range(15, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.zeros_like(close_1d)
+    rsi = np.zeros_like(close_1d)
+    mask = avg_loss != 0
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    rsi[avg_loss == 0] = 100  # No loss = RSI 100
+    
+    # Daily volume average (20-period)
+    vol_ma_20 = np.zeros_like(volume_1d)
+    for i in range(len(volume_1d)):
+        if i < 20:
+            vol_ma_20[i] = np.nan
+        else:
+            vol_ma_20[i] = np.mean(volume_1d[i-20:i])
+    
+    # Align all daily data to 1d timeframe (identity since same timeframe)
+    kama_aligned = kama  # Same timeframe, no alignment needed
+    rsi_aligned = rsi    # Same timeframe, no alignment needed
+    vol_ma_aligned = vol_ma_20  # Same timeframe, no alignment needed
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need enough for EMA200
+    start_idx = 30  # need enough for KAMA and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = close[i] > ema_200_aligned[i]
-        downtrend = close[i] < ema_200_aligned[i]
+        # KAMA trend direction (comparing current to previous)
+        kama_up = kama_aligned[i] > kama_aligned[i-1]
+        kama_down = kama_aligned[i] < kama_aligned[i-1]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.2 * vol_ma_20_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
-        rsi_neutral_cross = (rsi[i] >= 50 and rsi[i-1] < 50) or (rsi[i] <= 50 and rsi[i-1] > 50)
+        # RSI filter
+        rsi_filter_long = rsi_aligned[i] > 50
+        rsi_filter_short = rsi_aligned[i] < 50
         
         if position == 0:
-            # Long: uptrend + volume + RSI oversold
-            if uptrend and vol_confirm and rsi_oversold:
+            # Long: KAMA up + volume + RSI > 50
+            if kama_up and vol_confirm and rsi_filter_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + RSI overbought
-            elif downtrend and vol_confirm and rsi_overbought:
+            # Short: KAMA down + volume + RSI < 50
+            elif kama_down and vol_confirm and rsi_filter_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change or RSI crosses above 50
-            if not uptrend or rsi_neutral_cross:
+            # Long exit: KAMA turns down
+            if kama_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change or RSI crosses below 50
-            if not downtrend or rsi_neutral_cross:
+            # Short exit: KAMA turns up
+            if kama_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -100,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Close_EMA200_RSI14_Pullback"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
