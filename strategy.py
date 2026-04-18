@@ -1,11 +1,3 @@
-# State your hypothesis: This strategy combines 4-hour Donchian breakouts with 1-day EMA trend filter and volume confirmation.
-# It aims to capture trend continuations during low volatility periods, which historically perform well in both bull and bear markets.
-# The strategy uses a 20-period Donchian channel for breakouts, 1-day EMA34 for trend direction, and volume spikes for confirmation.
-# It targets 20-50 trades per year on 4H timeframe to avoid excessive fee churn, with position sizing of 0.25 to manage drawdown.
-# Entry requires: price breakout of Donchian channel, EMA trend alignment, and volume > 2x 20-period average.
-# Exit occurs when price closes back inside the Donchian channel or crosses the EMA.
-# This approach focuses on high-probability setups with clear trend alignment, reducing false signals and improving robustness.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -28,6 +20,15 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
+    # Calculate daily ATR (14-period) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     # Calculate daily EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
@@ -37,6 +38,7 @@ def generate_signals(prices):
     
     # Align indicators to 4h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
     # Calculate 4h Donchian channels (20-period)
@@ -51,12 +53,21 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or
             np.isnan(donchian_high[i]) or
             np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        trade_allowed = volume_spike_1d_aligned[i]
+        # Volatility filter: only trade when ATR is above its 30-period average
+        if i >= 30:
+            atr_ma_1d = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
+            atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+            vol_filter = atr_1d_aligned[i] > atr_ma_1d_aligned[i] if not np.isnan(atr_ma_1d_aligned[i]) else False
+        else:
+            vol_filter = False
+        
+        trade_allowed = volume_spike_1d_aligned[i] and vol_filter
         
         if position == 0:
             # Long: Donchian breakout above upper band with EMA34 uptrend
@@ -86,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRFilter"
 timeframe = "4h"
 leverage = 1.0
