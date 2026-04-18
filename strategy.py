@@ -1,34 +1,47 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day Donchian(20) breakout with volume confirmation and 1-week ADX trend filter.
-- Long: price breaks above daily Donchian upper band, weekly ADX > 25 (trending), volume > 1.5x average
-- Short: price breaks below daily Donchian lower band, weekly ADX > 25, volume > 1.5x average
-- Exit: opposite daily Donchian band touch or weekly ADX < 20 (trend weakening)
-- Uses weekly ADX for trend regime to avoid whipsaws in ranging markets.
-Designed for 7-25 trades/year (30-100 total) to minimize fee drift.
+Hypothesis: 12h RSI divergence with 1d volume-weighted price action and ADX trend filter.
+- Long: RSI(14) bullish divergence (price makes lower low, RSI makes higher low) + price > VWAP(20) + ADX > 20
+- Short: RSI(14) bearish divergence (price makes higher high, RSI makes lower high) + price < VWAP(20) + ADX > 20
+- Exit: RSI crosses above 70 (long) or below 30 (short) or opposite divergence occurs
+- Uses 1d VWAP and RSI for confluence, designed to work in both trending and ranging markets.
+Target: 15-35 trades/year (60-140 total) to minimize fee drag while capturing meaningful moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range."""
-    if len(high) < period:
-        return np.full(len(high), np.nan)
+def calculate_rsi(close, period):
+    """Calculate Relative Strength Index."""
+    if len(close) < period + 1:
+        return np.full(len(close), np.nan)
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    atr = np.full(len(tr), np.nan)
-    atr[period] = np.nanmean(tr[1:period+1])
+    avg_gain = np.full(len(close), np.nan)
+    avg_loss = np.full(len(close), np.nan)
     
-    for i in range(period + 1, len(tr)):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    if len(gain) >= period:
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
     
-    return atr
+    rs = np.full(len(close), np.nan)
+    for i in range(period, len(close)):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+    
+    rsi = np.full(len(close), np.nan)
+    for i in range(period, len(close)):
+        if not np.isnan(rs[i]):
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+    
+    return rsi
 
 def calculate_adx(high, low, close, period):
     """Calculate Average Directional Index."""
@@ -87,6 +100,48 @@ def calculate_adx(high, low, close, period):
     
     return adx
 
+def calculate_vwap(high, low, close, volume, period):
+    """Calculate Volume Weighted Average Price."""
+    if len(close) < period:
+        return np.full(len(close), np.nan)
+    
+    typical_price = (high + low + close) / 3.0
+    vwap = np.full(len(close), np.nan)
+    
+    for i in range(period-1, len(close)):
+        start_idx = i - period + 1
+        tp_sum = np.sum(typical_price[start_idx:i+1] * volume[start_idx:i+1])
+        vol_sum = np.sum(volume[start_idx:i+1])
+        if vol_sum != 0:
+            vwap[i] = tp_sum / vol_sum
+    
+    return vwap
+
+def find_divergences(price, rsi, lookback=5):
+    """Find bullish and bearish divergences."""
+    n = len(price)
+    bullish_div = np.zeros(n, dtype=bool)
+    bearish_div = np.zeros(n, dtype=bool)
+    
+    for i in range(lookback, n):
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        price_low = np.argmin(price[i-lookback:i+1]) + i - lookback
+        rsi_low = np.argmin(rsi[i-lookback:i+1]) + i - lookback
+        if price_low != rsi_low and price[price_low] < price[i-lookback] and rsi[rsi_low] > rsi[i-lookback]:
+            # Check if current point is a low
+            if i == np.argmin(price[i-lookback:i+1]) + i - lookback:
+                bullish_div[i] = True
+        
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        price_high = np.argmax(price[i-lookback:i+1]) + i - lookback
+        rsi_high = np.argmax(rsi[i-lookback:i+1]) + i - lookback
+        if price_high != rsi_high and price[price_high] > price[i-lookback] and rsi[rsi_high] < rsi[i-lookback]:
+            # Check if current point is a high
+            if i == np.argmax(price[i-lookback:i+1]) + i - lookback:
+                bearish_div[i] = True
+    
+    return bullish_div, bearish_div
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -97,74 +152,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian bands
+    # Get 1d data for VWAP and RSI
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-period) on daily
-    donchian_high = np.full(len(high_1d), np.nan)
-    donchian_low = np.full(len(low_1d), np.nan)
+    # Calculate VWAP (20-period) on 1d
+    vwap_20_1d = calculate_vwap(high_1d, low_1d, close_1d, volume_1d, 20)
     
-    for i in range(19, len(high_1d)):  # 20-period lookback
-        donchian_high[i] = np.max(high_1d[i-19:i+1])
-        donchian_low[i] = np.min(low_1d[i-19:i+1])
+    # Calculate RSI (14-period) on 1d
+    rsi_14_1d = calculate_rsi(close_1d, 14)
     
-    # Get weekly data for ADX
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate ADX (14-period) on 1d
+    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Calculate ADX (14-period) on weekly
-    adx_14_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    # Find divergences on 1d RSI
+    bullish_div_1d, bearish_div_1d = find_divergences(close_1d, rsi_14_1d, 5)
     
-    # Align to daily timeframe
-    donchian_high_daily = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_daily = align_htf_to_ltf(prices, df_1d, donchian_low)
-    adx_14_1w_daily = align_htf_to_ltf(prices, df_1w, adx_14_1w)
-    
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Align to 12h timeframe
+    vwap_20_1d_12h = align_htf_to_ltf(prices, df_1d, vwap_20_1d)
+    rsi_14_1d_12h = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    adx_14_1d_12h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    bullish_div_1d_12h = align_htf_to_ltf(prices, df_1d, bullish_div_1d.astype(float))
+    bearish_div_1d_12h = align_htf_to_ltf(prices, df_1d, bearish_div_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # need Donchian, ADX, and volume MA
+    start_idx = 35  # need VWAP, RSI, ADX, and divergence data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or 
-            np.isnan(adx_14_1w_daily[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(vwap_20_1d_12h[i]) or np.isnan(rsi_14_1d_12h[i]) or 
+            np.isnan(adx_14_1d_12h[i]) or np.isnan(bullish_div_1d_12h[i]) or 
+            np.isnan(bearish_div_1d_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
         if position == 0:
-            # Long: price breaks above Donchian high, weekly ADX > 25, volume confirmation
-            if close[i] > donchian_high_daily[i] and adx_14_1w_daily[i] > 25 and vol_confirmed:
+            # Long: bullish divergence + price > VWAP + ADX > 20
+            if bullish_div_1d_12h[i] and close[i] > vwap_20_1d_12h[i] and adx_14_1d_12h[i] > 20:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low, weekly ADX > 25, volume confirmation
-            elif close[i] < donchian_low_daily[i] and adx_14_1w_daily[i] > 25 and vol_confirmed:
+            # Short: bearish divergence + price < VWAP + ADX > 20
+            elif bearish_div_1d_12h[i] and close[i] < vwap_20_1d_12h[i] and adx_14_1d_12h[i] > 20:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches Donchian low or weekly ADX < 20 (trend weakening)
-            if close[i] <= donchian_low_daily[i] or adx_14_1w_daily[i] < 20:
+            # Long exit: RSI > 70 or bearish divergence
+            if rsi_14_1d_12h[i] > 70 or bearish_div_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price touches Donchian high or weekly ADX < 20 (trend weakening)
-            if close[i] >= donchian_high_daily[i] or adx_14_1w_daily[i] < 20:
+            # Short exit: RSI < 30 or bullish divergence
+            if rsi_14_1d_12h[i] < 30 or bullish_div_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -172,6 +219,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wADX25_Volume"
-timeframe = "1d"
+name = "12h_RSIDivergence_VWAP_ADX"
+timeframe = "12h"
 leverage = 1.0
