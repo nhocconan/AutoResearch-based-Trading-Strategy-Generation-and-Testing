@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_KAMA_Direction_RSI20_Extremes
-Hypothesis: In 4h timeframe, go long when KAMA indicates uptrend and RSI(14) < 20 (oversold), short when KAMA indicates downtrend and RSI > 80 (overbought). Uses 1d ADX(14) > 20 to confirm trending market and avoid ranging conditions. Position size 0.25 targeting ~30 trades/year. Works in bull/bear by fading extremes only when trend and volatility regime align.
+1d_1w_Camarilla_Pivot_R1S1_Breakout_Volume
+Hypothesis: Trade breakouts above/below daily Camarilla R1/S1 levels in direction of weekly EMA(34) trend, confirmed by volume >1.5x 20-period average. Uses weekly trend filter to avoid counter-trend trades. Position size 0.25 targeting ~15 trades/year to minimize fee drift. Works in bull/bear by trading breakouts with trend alignment and volume confirmation.
 """
 
 import numpy as np
@@ -13,147 +13,100 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # KAMA calculation (ER=10, slow=2, fast=30)
-    kama_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, kama_period))
-    abs_change = np.abs(np.diff(close))
-    er_num = change[kama_period-1:]
-    er_den = np.zeros_like(abs_change)
-    for i in range(len(abs_change)):
-        if i + kama_period <= len(abs_change):
-            er_den[i] = np.sum(abs_change[i:i+kama_period])
-    er = np.zeros_like(close)
-    er[kama_period-1:] = np.where(er_den[kama_period-1:] != 0, er_num / er_den[kama_period-1:], 0)
-    
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    
-    # KAMA
-    kama = np.zeros_like(close)
-    kama[kama_period-1] = close[kama_period-1]
-    for i in range(kama_period, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI(14)
-    rsi_period = 14
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    if len(close) >= rsi_period:
-        avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
-        for i in range(rsi_period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i-1]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i-1]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 1d ADX(14) for trend strength
+    # 1d calculations (previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0], low_1d[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Previous 1d bar's OHLC (completed day)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    # Daily Camarilla levels (based on previous day)
+    R1 = np.full_like(high_1d, np.nan)
+    S1 = np.full_like(low_1d, np.nan)
     
-    # Smoothed values
-    atr_period = 14
-    atr = np.zeros_like(tr)
-    if len(tr) >= atr_period:
-        atr[atr_period-1] = np.mean(tr[:atr_period])
-        for i in range(atr_period, len(tr)):
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    for i in range(1, len(high_1d)):
+        range_ = prev_high_1d[i] - prev_low_1d[i]
+        R1[i] = prev_close_1d[i] + range_ * 1.1 / 12
+        S1[i] = prev_close_1d[i] - range_ * 1.1 / 12
     
-    dm_plus_smooth = np.zeros_like(dm_plus)
-    dm_minus_smooth = np.zeros_like(dm_minus)
-    if len(dm_plus) >= atr_period:
-        dm_plus_smooth[atr_period-1] = np.mean(dm_plus[:atr_period])
-        dm_minus_smooth[atr_period-1] = np.mean(dm_minus[:atr_period])
-        for i in range(atr_period, len(dm_plus)):
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (atr_period-1) + dm_plus[i]) / atr_period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (atr_period-1) + dm_minus[i]) / atr_period
+    # 1w EMA trend filter (34-period)
+    close_1w = df_1w['close'].values
+    ema_period = 34
+    ema_1w = np.full_like(close_1w, np.nan)
     
-    # DI and DX
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    if len(close_1w) >= ema_period:
+        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 / (ema_period + 1)) + (ema_1w[i-1] * (ema_period - 1) / (ema_period + 1))
     
-    # ADX
-    adx = np.zeros_like(dx)
-    if len(dx) >= atr_period:
-        adx[atr_period-1] = np.mean(dx[:atr_period])
-        for i in range(atr_period, len(dx)):
-            adx[i] = (adx[i-1] * (atr_period-1) + dx[i]) / atr_period
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    vol_period = 20
     
-    # Align 1d indicators to 4h
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    if len(volume) >= vol_period:
+        for i in range(vol_period, len(volume)):
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    
+    # Align daily Camarilla levels to 1d timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Align weekly EMA to 1d timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, kama_period, rsi_period, atr_period)
+    start_idx = max(50, vol_period)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend and regime filters
-        kama_trend = close[i] > kama_aligned[i]  # Price above KAMA = uptrend
-        rsi_oversold = rsi_aligned[i] < 20
-        rsi_overbought = rsi_aligned[i] > 80
-        strong_trend = adx_aligned[i] > 20  # ADX > 20 indicates trending market
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: uptrend + oversold + trending market
-            if kama_trend and rsi_oversold and strong_trend:
+            # Long: price breaks above R1 with volume and above weekly EMA
+            if close[i] > R1_aligned[i] and vol_confirm and close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + overbought + trending market
-            elif not kama_trend and rsi_overbought and strong_trend:
+            # Short: price breaks below S1 with volume and below weekly EMA
+            elif close[i] < S1_aligned[i] and vol_confirm and close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or overbought
-            if not kama_trend or rsi_aligned[i] > 70:
+            # Long exit: price closes below S1 (reverse signal) or below weekly EMA
+            if close[i] < S1_aligned[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or oversold
-            if kama_trend or rsi_aligned[i] < 30:
+            # Short exit: price closes above R1 (reverse signal) or above weekly EMA
+            if close[i] > R1_aligned[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -161,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_KAMA_Direction_RSI20_Extremes"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Pivot_R1S1_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
