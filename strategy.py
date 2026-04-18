@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Trend
-Hypothesis: Breakout of 1d R1/S1 levels with volume confirmation and 12h trend bias.
-Designed for both bull and bear markets: long only in 12h uptrend, short only in downtrend.
-Targets 12-37 trades per year by using strict daily pivot levels and volume confirmation.
+1d_1w_Multiplier_Momentum_Trend
+Hypothesis: Use weekly momentum to determine trend direction, then trade on daily price pullbacks to EMA with volume confirmation. Works in bull markets (buy dips) and bear markets (sell rallies) by following the weekly trend. Targets 10-25 trades per year with strict entry conditions.
 """
 
 import numpy as np
@@ -20,80 +18,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot levels (HTF)
+    # Get daily data for EMA and volume
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d Camarilla levels
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    rng_1d = high_1d - low_1d
-    r1_1d = close_1d + rng_1d * 1.1 / 12
-    s1_1d = close_1d - rng_1d * 1.1 / 12
+    # Calculate daily EMA(34) for pullback entries
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1d pivot for trend bias
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    # Get weekly data for trend direction
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align all levels to 12h timeframe (wait for bar close)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Calculate weekly momentum: ROC(4) - rate of change over 4 weeks
+    roc_1w = np.full_like(close_1w, np.nan)
+    for i in range(4, len(close_1w)):
+        roc_1w[i] = (close_1w[i] - close_1w[i-4]) / close_1w[i-4] * 100
     
-    # Get 12h trend (EMA34) for directional bias
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align all indicators to daily timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    roc_1w_aligned = align_htf_to_ltf(prices, df_1w, roc_1w)
     
-    # Volume confirmation: current volume > 2.0 x 20-period average
+    # Volume confirmation: current volume > 1.5 x 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 2.0)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34
+    start_idx = 34  # Need EMA(34) and enough data for ROC
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(ema_12h_aligned[i]) or 
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(roc_1w_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above 1d R1, above 1d pivot, with volume, and 12h uptrend
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > pivot_1d_aligned[i] and vol_confirm[i] and 
-                close[i] > ema_12h_aligned[i]):
+            # Long entry: weekly uptrend (positive momentum) + price pulls back to EMA + volume
+            if (roc_1w_aligned[i] > 0 and  # Weekly uptrend
+                close[i] <= ema_1d_aligned[i] * 1.02 and  # Near EMA (within 2%)
+                close[i] >= ema_1d_aligned[i] * 0.98 and
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below 1d S1, below 1d pivot, with volume, and 12h downtrend
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < pivot_1d_aligned[i] and vol_confirm[i] and 
-                  close[i] < ema_12h_aligned[i]):
+            # Short entry: weekly downtrend (negative momentum) + price rallies to EMA + volume
+            elif (roc_1w_aligned[i] < 0 and  # Weekly downtrend
+                  close[i] >= ema_1d_aligned[i] * 0.98 and  # Near EMA (within 2%)
+                  close[i] <= ema_1d_aligned[i] * 1.02 and
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns to 1d S1 or 12h downtrend
-            if (not np.isnan(s1_1d_aligned[i]) and close[i] < s1_1d_aligned[i]) or \
-               (close[i] < ema_12h_aligned[i]):
+            # Long exit: weekly momentum turns negative or price moves significantly above EMA
+            if (roc_1w_aligned[i] < 0 or 
+                close[i] > ema_1d_aligned[i] * 1.05):  # 5% above EMA
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to 1d R1 or 12h uptrend
-            if (not np.isnan(r1_1d_aligned[i]) and close[i] > r1_1d_aligned[i]) or \
-               (close[i] > ema_12h_aligned[i]):
+            # Short exit: weekly momentum turns positive or price moves significantly below EMA
+            if (roc_1w_aligned[i] > 0 or 
+                close[i] < ema_1d_aligned[i] * 0.95):  # 5% below EMA
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "1d_1w_Multiplier_Momentum_Trend"
+timeframe = "1d"
 leverage = 1.0
