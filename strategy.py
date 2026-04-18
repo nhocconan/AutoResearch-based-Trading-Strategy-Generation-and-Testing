@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ChaikinMoneyFlow_Signal_Strategy_v1
-Hypothesis: Use Chaikin Money Flow (CMF) on 6-hour bars with a 1-day trend filter.
-- Long when CMF > +0.1 and 1-day EMA50 is upward (close > EMA50)
-- Short when CMF < -0.1 and 1-day EMA50 is downward (close < EMA50)
-- Exit when CMF crosses back toward zero (|CMF| < 0.05) or trend reverses
-CMF measures institutional money flow, which tends to persist in trends.
-The 1-day EMA50 filter ensures we only trade in the direction of the higher timeframe trend.
-Designed for low turnover (target: 12-30 trades/year) to minimize fee impact on 6h timeframe.
-Works in both bull and bear markets by following the 1-day trend.
+4h_KAMA_Trend_Volume_Regime_v1
+Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) on 4h to capture adaptive trend direction, combined with volume confirmation and a 12h chop regime filter to avoid whipsaws. Designed to work in both bull and bear markets by adapting to market conditions - KAMA reduces lag in trends and avoids false signals in ranges, while volume confirms breakouts and chop filter ensures we only trade in favorable regimes. Target: 20-50 trades/year per symbol.
 """
 
 import numpy as np
@@ -25,76 +18,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate KAMA on 4h close
+    def kama(close, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.full_like(close, np.nan)
+        kama[period] = close[period]
+        for i in range(period+1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # EMA50 with proper initialization
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[0:50])  # Simple average for first value
-        for i in range(50, len(close_1d)):
-            k = 2 / (50 + 1)
-            ema50_1d[i] = close_1d[i] * k + ema50_1d[i-1] * (1 - k)
+    kama_values = kama(close, period=10, fast=2, slow=30)
     
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 12h chop regime filter (Choppiness Index)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Chaikin Money Flow (CMF) on 6h data
-    # CMF = AD (Accumulation Distribution) 21-period sum / Volume 21-period sum
-    # Where AD = [(Close - Low) - (High - Close)] / (High - Low) * Volume
-    # Handle division by zero when high == low
-    hl_range = high - low
-    # Avoid division by zero - when hl_range == 0, use 0 for the CLV component
-    clv = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
-    ad = clv * volume
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    # Calculate 21-period sums for CMF
-    ad_sum = np.full(n, np.nan)
-    vol_sum = np.full(n, np.nan)
+    # ATR(14) sum
+    atr_sum = np.full(len(close_12h), np.nan)
+    for i in range(14, len(close_12h)):
+        atr_sum[i] = np.sum(tr[i-13:i+1])
     
-    for i in range(20, n):  # 21-period: indices i-20 to i inclusive
-        ad_sum[i] = np.sum(ad[i-20:i+1])
-        vol_sum[i] = np.sum(volume[i-20:i+1])
+    # Sum of high-low ranges
+    hl_sum = np.full(len(close_12h), np.nan)
+    for i in range(14, len(close_12h)):
+        hl_sum[i] = np.sum(high_12h[i-13:i+1] - low_12h[i-13:i+1])
     
-    # CMF = AD_sum / Vol_sum, handle division by zero
-    cmf = np.full(n, np.nan)
+    # Choppiness Index
+    chop = np.full(len(close_12h), np.nan)
+    for i in range(14, len(close_12h)):
+        if hl_sum[i] != 0:
+            chop[i] = 100 * np.log10(atr_sum[i] / hl_sum[i]) / np.log10(14)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    
+    # Volume spike: current volume > 1.5 x 20-period average
+    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        if vol_sum[i] != 0:
-            cmf[i] = ad_sum[i] / vol_sum[i]
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after all indicators are ready: need 21 for CMF and 50 for EMA
-    start_idx = max(20, 49)  # 20 for CMF (0-indexed, need 21 bars), 49 for EMA50
+    start_idx = max(30, 20)  # Ensure KAMA and volume MA ready
     
     for i in range(start_idx, n):
-        # Skip if any required data is not ready
-        if (np.isnan(cmf[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(kama_values[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: CMF > +0.1 (buying pressure) and uptrend (close > EMA50)
-            if cmf[i] > 0.10 and close[i] > ema50_1d_aligned[i]:
+            # Long: price > KAMA with volume spike and chop < 61.8 (trending)
+            if (close[i] > kama_values[i] and vol_spike[i] and 
+                chop_aligned[i] < 61.8):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: CMF < -0.1 (selling pressure) and downtrend (close < EMA50)
-            elif cmf[i] < -0.10 and close[i] < ema50_1d_aligned[i]:
+            # Short: price < KAMA with volume spike and chop < 61.8 (trending)
+            elif (close[i] < kama_values[i] and vol_spike[i] and 
+                  chop_aligned[i] < 61.8):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: CMF falls below +0.05 (weakening buying pressure) OR trend turns down
-            if cmf[i] < 0.05 or close[i] < ema50_1d_aligned[i]:
+            # Long exit: price < KAMA or chop > 61.8 (range)
+            if (close[i] < kama_values[i] or chop_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: CMF rises above -0.05 (weakening selling pressure) OR trend turns up
-            if cmf[i] > -0.05 or close[i] > ema50_1d_aligned[i]:
+            # Short exit: price > KAMA or chop > 61.8 (range)
+            if (close[i] > kama_values[i] or chop_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ChaikinMoneyFlow_Signal_Strategy_v1"
-timeframe = "6h"
+name = "4h_KAMA_Trend_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
