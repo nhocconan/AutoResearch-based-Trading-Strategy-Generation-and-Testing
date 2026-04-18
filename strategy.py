@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime
-Hypothesis: Camarilla pivot levels (R1, S1) from 1-day timeframe act as intraday support/resistance.
-Price breaking above R1 with volume confirmation and low chop regime indicates bullish momentum.
-Price breaking below S1 with volume confirmation and low chop regime indicates bearish momentum.
-Chop regime filter avoids whipsaws in sideways markets. Works in both bull and bear markets
-by following institutional price levels. Target: 20-40 trades/year to minimize fee drag.
+1d RSI + Bollinger Bands Reversal
+Hypothesis: In daily timeframe, RSI extremes combined with Bollinger Band touches
+identify exhaustion points. Long when RSI < 30 and price touches lower BB,
+short when RSI > 70 and price touches upper BB. Works in both bull and bear
+markets by capturing mean reversals from overextended conditions. Uses 1w trend
+filter to avoid counter-trend trades. Target: 10-20 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -17,90 +17,69 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla pivot levels for each 1-day bar
-    # R1 = Close + (High - Low) * 1.1/12
-    # S1 = Close - (High - Low) * 1.1/12
-    typical_range = df_1d['high'] - df_1d['low']
-    r1 = df_1d['close'] + typical_range * 1.1 / 12
-    s1 = df_1d['close'] - typical_range * 1.1 / 12
+    # Bollinger Bands (20, 2)
+    sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = sma + 2 * std
+    lower = sma - 2 * std
     
-    # Align to 4h timeframe (wait for 1-day bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # Chop regime filter: Chop <= 61.8 (trending market)
-    # Chop = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range14 = max_high - min_low
-    
-    # Avoid division by zero
-    range14 = np.where(range14 == 0, 1e-10, range14)
-    
-    chop = 100 * (np.log10(sum_atr14) - np.log10(range14)) / np.log10(14)
-    chop = np.where(np.isnan(chop), 50, chop)  # Neutral if undefined
-    chop_filter = chop <= 61.8  # Trending market
+    # 1-week trend filter (SMA 50)
+    df_1w = get_htf_data(prices, '1w')
+    sma_50_1w = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(rsi[i]) or np.isnan(sma[i]) or np.isnan(std[i]) or 
+            np.isnan(sma_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        vol_ok = vol_confirm[i]
-        chop_ok = chop_filter[i]
+        rsi_val = rsi[i]
+        sma_val = sma[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
+        trend_1w = sma_50_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume and trending market
-            if price > r1_val and vol_ok and chop_ok:
+            # Long: oversold RSI + touches lower BB + above weekly trend
+            if rsi_val < 30 and price <= lower_val and price > trend_1w:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and trending market
-            elif price < s1_val and vol_ok and chop_ok:
+            # Short: overbought RSI + touches upper BB + below weekly trend
+            elif rsi_val > 70 and price >= upper_val and price < trend_1w:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price breaks below S1 or volatility/chop increases
-            if price < s1_val or not vol_ok or not chop_ok:
+            # Exit long if RSI returns to neutral or price crosses above SMA
+            if rsi_val > 50 or price > sma_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price breaks above R1 or volatility/chop increases
-            if price > r1_val or not vol_ok or not chop_ok:
+            # Exit short if RSI returns to neutral or price crosses below SMA
+            if rsi_val < 50 or price < sma_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime"
-timeframe = "4h"
+name = "1d_RSI_Bollinger_Reversal"
+timeframe = "1d"
 leverage = 1.0
