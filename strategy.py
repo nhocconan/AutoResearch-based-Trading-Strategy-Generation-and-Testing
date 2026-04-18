@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) on 1d act as strong support/resistance. 
-Price breaking through R1/S1 with volume indicates institutional breakout. 
-Works in both bull (breakouts up) and bear (breakdowns down) by following price action. 
-Uses volume confirmation to avoid false breakouts and limits trades to reduce fee drag.
-Timeframe: 12h, HTF: 1d.
+4h_Camarilla_R1S1_Breakout_Volume
+Hypothesis: Camarilla pivot levels act as strong support/resistance. Price breaking through R1/S1 with volume indicates institutional breakout. Works in both bull (breakouts up) and bear (breakdowns down) by following price action. Uses volume confirmation to avoid false breakouts and limits trades to reduce fee drag.
 """
 
 import numpy as np
@@ -44,7 +40,7 @@ def generate_signals(prices):
             camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
             camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
     
-    # Align to 12h timeframe (use previous day's levels)
+    # Align to 4h timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -96,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
