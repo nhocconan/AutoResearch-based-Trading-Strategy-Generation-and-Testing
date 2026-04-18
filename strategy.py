@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Trend_Follower
-Hypothesis: Uses 1-week SMA trend filter on daily data with daily RSI pullback entries.
-Long when weekly SMA rising and daily RSI < 30; short when weekly SMA falling and daily RSI > 70.
-Targets 10-20 trades/year by combining weekly trend filter with daily oversold/overbought entries.
-Works in bull markets via trend following and in bear markets via mean-reversion within trend.
+6h_ADX_WilliamsAlligator_Trend
+Hypothesis: Combines ADX trend strength with Williams Alligator (three SMAs) to identify strong trends.
+Uses 1d timeframe for ADX and Alligator to filter 6s entries. Works in bull/bear by only taking trades
+when ADX > 25 (strong trend) and price is aligned with Alligator direction (bullish/bearish alignment).
+Targets 15-30 trades/year on 6s timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def _sma(arr, period):
+    """Simple moving average with NaN for insufficient data."""
+    if len(arr) < period:
+        return np.full(len(arr), np.nan)
+    sma = np.full(len(arr), np.nan)
+    for i in range(period - 1, len(arr)):
+        sma[i] = np.mean(arr[i - period + 1:i + 1])
+    return sma
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,79 +29,110 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    weekly_close = df_weekly['close'].values
+    # Get 1d data for ADX and Williams Alligator
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly SMA(10) for trend filter
-    weekly_sma10 = np.full(len(weekly_close), np.nan)
-    if len(weekly_close) >= 10:
-        weekly_sma10[9] = np.mean(weekly_close[0:10])
-        for i in range(10, len(weekly_close)):
-            weekly_sma10[i] = (weekly_sma10[i-1] * 9 + weekly_close[i]) / 10
+    # Calculate ADX (14-period) on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly SMA to daily timeframe
-    weekly_sma10_aligned = align_htf_to_ltf(prices, df_weekly, weekly_sma10)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # Calculate daily RSI(14)
-    rsi = np.full(n, np.nan)
-    if n >= 14:
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full(n, np.nan)
-        avg_loss = np.full(n, np.nan)
-        
-        avg_gain[13] = np.mean(gain[0:14])
-        avg_loss[13] = np.mean(loss[0:14])
-        
-        for i in range(14, n):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
+    # Directional Movement
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    # Smoothed values (period=14)
+    def _smooth(arr, period):
+        if len(arr) < period:
+            return np.full(len(arr), np.nan)
+        smoothed = np.full(len(arr), np.nan)
+        smoothed[period-1] = np.nansum(arr[1:period])  # skip index 0 for DM
+        for i in range(period, len(arr)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
+        return smoothed
+    
+    tr14 = _smooth(tr, 14)
+    plus_dm14 = _smooth(plus_dm, 14)
+    minus_dm14 = _smooth(minus_dm, 14)
+    
+    # DI+ and DI-
+    plus_di = np.where(tr14 != 0, (plus_dm14 / tr14) * 100, 0)
+    minus_di = np.where(tr14 != 0, (minus_dm14 / tr14) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = _smooth(dx, 14)  # ADX is smoothed DX
+    
+    # Williams Alligator (three SMAs: 13, 8, 5 with shifts 8, 5, 3)
+    # Jaw (blue): 13-period SMA, shifted 8 bars
+    ma13 = _sma(close_1d, 13)
+    jaw = np.roll(ma13, 8)  # shift forward 8 bars
+    jaw[:8] = np.nan
+    
+    # Teeth (red): 8-period SMA, shifted 5 bars
+    ma8 = _sma(close_1d, 8)
+    teeth = np.roll(ma8, 5)  # shift forward 5 bars
+    teeth[:5] = np.nan
+    
+    # Lips (green): 5-period SMA, shifted 3 bars
+    ma5 = _sma(close_1d, 5)
+    lips = np.roll(ma5, 3)  # shift forward 3 bars
+    lips[:3] = np.nan
+    
+    # Align 1d indicators to 6s timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 10)
+    start_idx = max(50, 50)  # ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_sma10_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend: rising if current > previous, falling if current < previous
-        if i > 0 and not np.isnan(weekly_sma10_aligned[i-1]):
-            weekly_rising = weekly_sma10_aligned[i] > weekly_sma10_aligned[i-1]
-            weekly_falling = weekly_sma10_aligned[i] < weekly_sma10_aligned[i-1]
-        else:
-            weekly_rising = False
-            weekly_falling = False
+        # Bullish alignment: Lips > Teeth > Jaw (green > red > blue)
+        bullish_aligned = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
+        # Bearish alignment: Lips < Teeth < Jaw (green < red < blue)
+        bearish_aligned = lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]
         
         if position == 0:
-            # Long: weekly uptrend + daily RSI oversold (<30)
-            if weekly_rising and rsi[i] < 30:
+            # Long: ADX > 25 (strong trend) + bullish Alligator alignment
+            if adx_aligned[i] > 25 and bullish_aligned:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + daily RSI overbought (>70)
-            elif weekly_falling and rsi[i] > 70:
+            # Short: ADX > 25 (strong trend) + bearish Alligator alignment
+            elif adx_aligned[i] > 25 and bearish_aligned:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: weekly trend turns down OR RSI overbought (>70)
-            if not weekly_rising or rsi[i] > 70:
+            # Long exit: ADX < 20 (weakening trend) or Alligator alignment breaks
+            if adx_aligned[i] < 20 or not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly trend turns up OR RSI oversold (<30)
-            if not weekly_falling or rsi[i] < 30:
+            # Short exit: ADX < 20 (weakening trend) or Alligator alignment breaks
+            if adx_aligned[i] < 20 or not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Trend_Follower"
-timeframe = "1d"
+name = "6h_ADX_WilliamsAlligator_Trend"
+timeframe = "6h"
 leverage = 1.0
