@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h/1d momentum with volume surge and ATR volatility filter.
-# Long when price breaks above 1d EMA(34) with volume > 1.8x 24-period average and ATR > 0.
-# Short when price breaks below 1d EMA(34) with same conditions.
-# Exit when price crosses back over 1d EMA(34).
-# Uses 1d EMA for trend filter, volume surge for conviction, ATR for volatility.
-# Designed for ~15-30 trades/year per symbol.
-name = "1h_1dEMA34_VolumeSurge_ATR_Filter"
-timeframe = "1h"
+# Hypothesis: 6s Weekly Pivot Breakout with Volume Confirmation
+# Buy when price breaks above weekly pivot point (PP) with volume > 1.5x 48-period average
+# Sell when price breaks below weekly pivot point (PP) with volume > 1.5x 48-period average
+# Weekly pivot calculated from prior week's high/low/close: PP = (H+L+C)/3
+# Volume filter ensures breakout conviction; 48-period MA = 6h * 8 = 2 days
+# Designed for ~20-35 trades/year per symbol (~80-140 total over 4 years)
+# Works in bull (breakouts up) and bear (breakouts down) via symmetric logic
+name = "6s_WeeklyPivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,70 +24,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot calculation
+    df_w = get_htf_data(prices, '1w')
     
-    # EMA(34) on 1d close
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly pivot point: PP = (H + L + C)/3
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
+    pp_w = (high_w + low_w + close_w) / 3.0
     
-    # ATR(14) on 1d for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - close_1d)
-    tr3 = np.abs(low_1d - close_1d)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align weekly pivot to 6h timeframe (wait for weekly bar to close)
+    pp_w_aligned = align_htf_to_ltf(prices, df_w, pp_w)
     
-    # Volume filter: current volume > 1.8 * 24-period average (24 * 1h = 1 day)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (1.8 * vol_ma_24)
+    # Volume filter: current volume > 1.5 * 48-period average (48 * 6h = 12 days)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    volume_filter = volume > (1.5 * vol_ma_48)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(pp_w_aligned[i]) or np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_val = ema_34_1d_aligned[i]
-        atr_val = atr_1d_aligned[i]
+        pp_val = pp_w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price above EMA with volume surge and volatility
-            if close_val > ema_val and vol_filter and atr_val > 0:
-                signals[i] = 0.20
+            # Long: price breaks above weekly pivot with volume confirmation
+            if close_val > pp_val and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below EMA with volume surge and volatility
-            elif close_val < ema_val and vol_filter and atr_val > 0:
-                signals[i] = -0.20
+            # Short: price breaks below weekly pivot with volume confirmation
+            elif close_val < pp_val and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below EMA
-            if close_val < ema_val:
+            # Long exit: price crosses back below weekly pivot
+            if close_val < pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above EMA
-            if close_val > ema_val:
+            # Short exit: price crosses back above weekly pivot
+            if close_val > pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
