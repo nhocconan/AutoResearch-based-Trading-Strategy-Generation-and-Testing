@@ -1,13 +1,10 @@
-# 4h_Pivot_R1_S1_Breakout_Volume
-# Hypothesis: Breakouts above/below daily R1/S1 levels with volume confirmation capture breakouts in trending markets while avoiding false moves during consolidation. The volume filter reduces false breakouts, and the session filter focuses on active trading hours. This strategy works in both bull and bear markets because it captures directional moves regardless of overall trend, relying on price action at key pivot levels.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Pivot_R1_S1_Breakout_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1_S1_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,40 +17,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot levels (R1/S1)
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous daily bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate weekly pivot points (R1, S1) from previous week
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     R1 = pivot + (range_hl * 1.1 / 12)
     S1 = pivot - (range_hl * 1.1 / 12)
     
-    # Align R1/S1 to 4h (wait for daily close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align weekly R1/S1 to daily (wait for weekly close)
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.3 * 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.3 * vol_ma_20)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Trend filter: price above/below 50-day SMA
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicator calculations
+    start_idx = 50  # Wait for SMA calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(sma_50[i])):
             signals[i] = 0.0
             continue
         
@@ -61,29 +57,29 @@ def generate_signals(prices):
         R1_val = R1_aligned[i]
         S1_val = S1_aligned[i]
         vol_filter = volume_filter[i]
-        sess_filter = session_filter[i]
+        sma_val = sma_50[i]
         
         if position == 0:
-            # Long: break above R1 with volume and session
-            if close_val > R1_val and vol_filter and sess_filter:
+            # Long: break above R1 with volume and above 50-day SMA
+            if close_val > R1_val and vol_filter and close_val > sma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume and session
-            elif close_val < S1_val and vol_filter and sess_filter:
+            # Short: break below S1 with volume and below 50-day SMA
+            elif close_val < S1_val and vol_filter and close_val < sma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below S1
-            if close_val < S1_val:
+            # Long exit: price falls back below S1 or below 50-day SMA
+            if close_val < S1_val or close_val < sma_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above R1
-            if close_val > R1_val:
+            # Short exit: price rises back above R1 or above 50-day SMA
+            if close_val > R1_val or close_val > sma_val:
                 signals[i] = 0.0
                 position = 0
             else:
