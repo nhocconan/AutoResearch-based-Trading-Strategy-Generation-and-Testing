@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with volume confirmation and 1d ADX trend filter.
-Trades breakouts of 20-period high/low only when accompanied by volume spike (>2x average)
-and aligned with daily trend (ADX > 25). In ranging markets (ADX < 25), fades at channel
-midpoint to avoid false breakouts. Designed for 20-30 trades/year to minimize fee drag.
-Works in bull markets (buy breakouts, sell breakdowns) and bear markets (sell breakdowns,
-buy bounces at support).
+Hypothesis: 1d Weekly Range Breakout with Volume Confirmation and ADX Filter.
+In trending markets (ADX >= 25 on weekly), price breaks out of the prior weekly range
+with volume confirmation. In ranging markets (ADX < 25), mean reversion at weekly
+support/resistance levels. Designed for 15-25 trades/year to minimize fee drag.
+Works in bull markets (buy breakouts above weekly high) and bear markets (sell
+breakdowns below weekly low).
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def calculate_adx(high, low, close, period=14):
-    """Calculate ADX indicator."""
+    """Calculate ADX using Wilder's smoothing."""
     n = len(high)
     if n < period * 2:
         return np.full(n, np.nan)
@@ -75,29 +75,29 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for range and ADX
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate ADX(14) on 1d data
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate weekly ADX(14)
+    adx_weekly = calculate_adx(high_weekly, low_weekly, close_weekly, 14)
+    adx_weekly_daily = align_htf_to_ltf(prices, df_weekly, adx_weekly)
     
-    # Calculate Donchian channel (20-period) on 4h data
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Calculate weekly range (prior week's high-low)
+    range_high = np.full(n, np.nan)
+    range_low = np.full(n, np.nan)
+    for i in range(1, n):
+        range_high[i] = high_weekly[i-1] if i-1 < len(high_weekly) else np.nan
+        range_low[i] = low_weekly[i-1] if i-1 < len(low_weekly) else np.nan
     
-    # Calculate volume moving average (20-period)
+    # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -105,65 +105,62 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # need Donchian calculation and volume MA
+    start_idx = 50  # need weekly data and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_1d_4h[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_weekly_daily[i]) or np.isnan(range_high[i]) or 
+            np.isnan(range_low[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        vol_confirmed = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         # Trend filter: ADX threshold
-        trending = adx_1d_4h[i] >= 25
-        ranging = adx_1d_4h[i] < 25
+        trending = adx_weekly_daily[i] >= 25
+        ranging = adx_weekly_daily[i] < 25
         
         if position == 0:
-            # Trending market: breakout of Donchian channels
             if trending:
-                # Long breakout above upper channel with volume
-                if close[i] > donchian_high[i] and vol_confirmed:
-                    signals[i] = 0.25
+                # Trending market: breakout of weekly range
+                if close[i] > range_high[i] and vol_confirmed:
+                    signals[i] = 0.30
                     position = 1
-                # Short breakdown below lower channel with volume
-                elif close[i] < donchian_low[i] and vol_confirmed:
-                    signals[i] = -0.25
+                elif close[i] < range_low[i] and vol_confirmed:
+                    signals[i] = -0.30
                     position = -1
-            # Ranging market: fade at midpoint to avoid false breakouts
             else:
-                midpoint = (donchian_high[i] + donchian_low[i]) / 2
-                # Long near support (lower channel) with volume
-                if close[i] <= donchian_low[i] * 1.001 and vol_confirmed:
-                    signals[i] = 0.25
+                # Ranging market: mean reversion at weekly boundaries
+                # Long near weekly low with volume
+                if close[i] <= range_low[i] * 1.002 and vol_confirmed:
+                    signals[i] = 0.30
                     position = 1
-                # Short near resistance (upper channel) with volume
-                elif close[i] >= donchian_high[i] * 0.999 and vol_confirmed:
-                    signals[i] = -0.25
+                # Short near weekly high with volume
+                elif close[i] >= range_high[i] * 0.998 and vol_confirmed:
+                    signals[i] = -0.30
                     position = -1
         
         elif position == 1:
-            # Long exit: reversal at midpoint or opposite channel
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            # Long exit: return to weekly midpoint or opposite boundary
+            midpoint = (range_high[i] + range_low[i]) / 2
             if close[i] >= midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: reversal at midpoint or opposite channel
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            # Short exit: return to weekly midpoint or opposite boundary
+            midpoint = (range_high[i] + range_low[i]) / 2
             if close[i] <= midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_Donchian_Breakout_ADX_Volume"
-timeframe = "4h"
+name = "1d_WeeklyRangeBreakout_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
