@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Turtle_Soup_v1
-Strategy: 12h Turtle Soup pattern with 1D trend filter and volume confirmation.
-Long: Price retests and fails below 20-day low, then closes back above it in uptrend.
-Short: Price retests and fails above 20-day high, then closes back below it in downtrend.
-Designed for 12h timeframe: ~15-25 trades/year per symbol (60-100 total over 4 years).
-Works in bull/bear via trend filter and mean-reversion breakout logic.
+4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Filter
+Strategy: Camarilla pivot breakout with volume confirmation and ATR filter.
+Long: Price breaks above R1 with volume > 1.5x average, in uptrend (EMA34 > EMA89).
+Short: Price breaks below S1 with volume > 1.5x average, in downtrend (EMA34 < EMA89).
+Exit: Trend reversal or opposite breakout.
+Designed for 4h timeframe: ~20-30 trades/year per symbol (80-120 total over 4 years).
+Works in bull/bear via EMA trend filter and volume confirmation.
 """
 
 import numpy as np
@@ -22,79 +23,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for 20-day high/low and trend filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # 20-day high and low (Donchian channels)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Camarilla pivot levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
+    r1 = pivot + (range_ * 1.1 / 12)
+    s1 = pivot - (range_ * 1.1 / 12)
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Trend filters: EMA34 and EMA89 on daily close
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Align all daily data to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Average true range for volatility filter
+    tr1 = np.abs(np.roll(high_1d, 1) - np.roll(low_1d, 1))
+    tr2 = np.abs(np.roll(high_1d, 1) - np.roll(close_1d, 1))
+    tr3 = np.abs(np.roll(low_1d, 1) - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align all daily data to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_89_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200
+    start_idx = 50  # need enough for EMA89 and ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(ema_89_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        uptrend = ema_34_aligned[i] > ema_89_aligned[i]
+        downtrend = ema_34_aligned[i] < ema_89_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Turtle Soup conditions
-        # Long: price tested below 20-day low, then closed back above it
-        soup_long = low[i] < low_20_aligned[i] and close[i] > low_20_aligned[i]
-        # Short: price tested above 20-day high, then closed back below it
-        soup_short = high[i] > high_20_aligned[i] and close[i] < high_20_aligned[i]
+        # Breakout conditions
+        breakout_long = close[i] > r1_aligned[i]
+        breakout_short = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + soup long setup
-            if uptrend and vol_confirm and soup_long:
+            # Long: uptrend + volume + breakout above R1
+            if uptrend and vol_confirm and breakout_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + soup short setup
-            elif downtrend and vol_confirm and soup_short:
+            # Short: downtrend + volume + breakout below S1
+            elif downtrend and vol_confirm and breakout_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or soup short setup
-            if not uptrend or vol_confirm or soup_short:
+            # Long exit: trend reversal or breakdown below S1
+            if not uptrend or breakout_short:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or soup long setup
-            if not downtrend or vol_confirm or soup_long:
+            # Short exit: trend reversal or breakout above R1
+            if not downtrend or breakout_long:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -102,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Turtle_Soup_v1"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
