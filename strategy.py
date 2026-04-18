@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Multi-Timeframe Trend Reversal with Volume Confirmation
-Hypothesis: Price reversals at 1-day high/low levels with volume confirmation and 1-week trend filter work in both bull and bear markets. Uses 1-week EMA for trend direction and 1-day high/low for reversal signals. Volume spike confirms conviction. Designed for 15-30 trades/year.
+4h Daily Pivot R1/S1 Breakout with Volume Spike and 1d EMA34 Trend Filter
+Hypothesis: Daily pivot R1/S1 levels act as strong support/resistance. Breakouts with
+volume confirmation and 1d EMA34 trend filter capture momentum moves in both bull
+and bear markets. Designed for 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -10,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,72 +20,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    # Get daily data for reversal levels (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get daily data for pivot levels (once before loop)
+    df_d = get_htf_data(prices, '1d')
     
-    # Weekly EMA for trend direction (50-period)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily pivot points (standard formula)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot = (df_d['high'] + df_d['low'] + df_d['close']) / 3.0
+    r1 = 2 * pivot - df_d['low']
+    s1 = 2 * pivot - df_d['high']
     
-    # Daily high and low for reversal levels
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    # Shift to get previous day's levels (non-lookahead)
+    r1_prev = r1.shift(1).values
+    s1_prev = s1.shift(1).values
     
-    # Volume spike detection (2x 24-period average on 12h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_d, r1_prev)
+    s1_aligned = align_htf_to_ltf(prices, df_d, s1_prev)
+    
+    # 1d EMA34 for trend filter
+    ema_34 = pd.Series(df_d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_d, ema_34)
+    
+    # Volume spike: 2x 20-period average on 4h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # ATR for stop loss (4h ATR)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 100  # need enough history for weekly EMA
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(high_1d_aligned[i]) or
-            np.isnan(low_1d_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_aligned[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        trend = ema_1w_aligned[i]
-        daily_high_level = high_1d_aligned[i]
-        daily_low_level = low_1d_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        ema = ema_aligned[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Look for reversal signals with volume confirmation
-            # Long setup: price near daily low in uptrend with volume spike
-            if price <= daily_low_level * 1.002 and price > trend and volume_spike[i]:
+            # Long: break above R1 with volume spike and price above EMA34 (uptrend)
+            if price > r1_level and volume_spike[i] and price > ema:
                 signals[i] = 0.25
                 position = 1
-            # Short setup: price near daily high in downtrend with volume spike
-            elif price >= daily_high_level * 0.998 and price < trend and volume_spike[i]:
+            # Short: break below S1 with volume spike and price below EMA34 (downtrend)
+            elif price < s1_level and volume_spike[i] and price < ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long position: hold until reversal or trend change
+            # Long position
             signals[i] = 0.25
-            # Exit: price reaches daily high or trend turns down
-            if price >= daily_high_level or price < trend:
+            # Exit: price returns to S1 or ATR trailing stop
+            if price <= s1_level or price < (high[i] - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position: hold until reversal or trend change
+            # Short position
             signals[i] = -0.25
-            # Exit: price reaches daily low or trend turns up
-            if price <= daily_low_level or price > trend:
+            # Exit: price returns to R1 or ATR trailing stop
+            if price >= r1_level or price > (low[i] + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_MultiTimeframe_TrendReversal_VolumeConfirm"
-timeframe = "12h"
+name = "4h_DailyPivot_R1S1_Breakout_VolumeSpike_EMA34"
+timeframe = "4h"
 leverage = 1.0
