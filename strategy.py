@@ -1,39 +1,28 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Donchian(20) breakout with weekly ATR filter and volume confirmation.
-Buy when price breaks above 20-day high with above-average volume and low weekly volatility.
-Sell when price breaks below 20-day low with above-average volume and low weekly volatility.
-Weekly ATR filter avoids choppy markets. Designed for 10-25 trades/year to minimize fee drag.
+Hypothesis: 12h 144-period SMA trend filter with 1d volume spike and 1d ATR stop.
+Long when price > SMA144 + volume spike; short when price < SMA144 + volume spike.
+Uses 1d timeframe for trend (more stable than 4h/12h) and volume confirmation.
+Designed for 15-25 trades/year to minimize fee drag in ranging 2025 market.
 """
 
 import numpy as np
 import pandas as pd
-from mts_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range."""
-    if len(high) < period + 1:
-        return np.full(len(high), np.nan)
-    
-    tr0 = np.abs(high - low)
-    tr1 = np.abs(high - np.roll(close, 1))
-    tr2 = np.abs(low - np.roll(close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    
-    tr = np.maximum(tr0, np.maximum(tr1, tr2))
-    
-    atr = np.full(len(tr), np.nan)
-    atr[period] = np.nanmean(tr[:period+1])
-    
-    for i in range(period + 1, len(tr)):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-    
-    return atr
+def calculate_sma(arr, period):
+    """Calculate Simple Moving Average."""
+    sma = np.full(len(arr), np.nan)
+    if len(arr) < period:
+        return sma
+    sma[period-1] = np.mean(arr[:period])
+    for i in range(period, len(arr)):
+        sma[i] = sma[i-1] + (arr[i] - arr[i-period]) / period
+    return sma
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -41,81 +30,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels
+    # Get 1d data for trend and volume
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Get weekly data for ATR filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 144-period SMA on 1d close
+    sma_144_1d = calculate_sma(close_1d, 144)
     
-    # Calculate Donchian channels (20-period)
-    high_20 = np.full(len(high_1d), np.nan)
-    low_20 = np.full(len(low_1d), np.nan)
+    # Calculate ATR(14) on 1d
+    tr1 = np.zeros(len(close_1d))
+    tr2 = np.zeros(len(close_1d))
+    tr3 = np.zeros(len(close_1d))
+    tr1[1:] = np.abs(high_1d[1:] - low_1d[1:])
+    tr2[1:] = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3[1:] = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr_14[i] = np.mean(tr[1:15])
+        else:
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    for i in range(20, len(high_1d)):
-        high_20[i] = np.max(high_1d[i-20:i])
-        low_20[i] = np.min(low_1d[i-20:i])
-    
-    # Calculate 20-period ATR on weekly
-    atr_20_1w = calculate_atr(high_1w, low_1w, close_1w, 20)
-    
-    # Calculate 20-period average volume on daily
-    vol_avg_20_1d = np.full(len(volume_1d), np.nan)
+    # Calculate 20-period volume average on 1d
+    vol_ma_20_1d = np.full(len(volume_1d), np.nan)
     for i in range(20, len(volume_1d)):
-        vol_avg_20_1d[i] = np.mean(volume_1d[i-20:i])
+        vol_ma_20_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Align to daily timeframe (already daily, but for consistency)
-    high_20_aligned = high_20  # already aligned to daily
-    low_20_aligned = low_20
-    atr_20_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_20_1w)
-    vol_avg_20_1d_aligned = vol_avg_20_1d  # already aligned to daily
+    # Align to 12h timeframe
+    sma_144_1d_12h = align_htf_to_ltf(prices, df_1d, sma_144_1d)
+    atr_14_1d_12h = align_htf_to_ltf(prices, df_1d, atr_14)
+    vol_ma_20_1d_12h = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need Donchian calculation
+    start_idx = 144  # need SMA calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(atr_20_1w_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(sma_144_1d_12h[i]) or np.isnan(atr_14_1d_12h[i]) or 
+            np.isnan(vol_ma_20_1d_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-day average
-        vol_confirmed = volume[i] > 1.5 * vol_avg_20_1d_aligned[i]
-        
-        # Weekly ATR filter: avoid extremely high volatility (above 80th percentile)
-        # We'll use a simple threshold: ATR < 0.03 * price (3% of price)
-        atr_filter = atr_20_1w_aligned[i] < 0.03 * close[i]
+        # Volume spike: current 12h volume > 2.0 * 20-period 1d volume average
+        # Note: volume here is 12h volume, vol_ma_20_1d_12h is 1d volume MA aligned to 12h
+        vol_spike = volume[i] > 2.0 * vol_ma_20_1d_12h[i]
         
         if position == 0:
-            # Long: price breaks above 20-day high, volume confirmation, low volatility
-            if close[i] > high_20_aligned[i] and vol_confirmed and atr_filter:
+            # Long: price above SMA144 + volume spike
+            if close[i] > sma_144_1d_12h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low, volume confirmation, low volatility
-            elif close[i] < low_20_aligned[i] and vol_confirmed and atr_filter:
+            # Short: price below SMA144 + volume spike
+            elif close[i] < sma_144_1d_12h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 20-day low or volatility spikes
-            if close[i] < low_20_aligned[i] or not atr_filter:
+            # Long exit: price crosses below SMA144 or ATR-based stop
+            if close[i] <= sma_144_1d_12h[i] or close[i] <= sma_144_1d_12h[i] - 1.5 * atr_14_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 20-day high or volatility spikes
-            if close[i] > high_20_aligned[i] or not atr_filter:
+            # Short exit: price crosses above SMA144 or ATR-based stop
+            if close[i] >= sma_144_1d_12h[i] or close[i] >= sma_144_1d_12h[i] + 1.5 * atr_14_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Daily_Donchian20_WeeklyATR_Volume"
-timeframe = "1d"
+name = "12h_SMA144_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
