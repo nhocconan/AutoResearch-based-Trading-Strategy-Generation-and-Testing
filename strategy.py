@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_R1S1_Breakout_Pullback_Volume
-Hypothesis: Combines daily Camarilla pivot levels with 6h price action. 
-Long when price breaks above R1 then pulls back to R1 with volume confirmation in uptrend.
-Short when price breaks below S1 then pulls back to S1 with volume confirmation in downtrend.
-Uses 12h EMA34 for trend filter to avoid counter-trend trades.
-Target: 20-40 trades/year to minimize fee drag while capturing high-probability pullbacks.
-Works in both bull (buying pullbacks in uptrend) and bear (selling pullbacks in downtrend) markets.
+4h_Pivot_R1_S1_Breakout_Volume_Trend
+Hypothesis: Camarilla pivot levels from 1d with volume confirmation and trend filter on 4h timeframe.
+Long when price breaks above S1 with volume spike and 4h price above 20 EMA (uptrend).
+Short when price breaks below R1 with volume spike and 4h price below 20 EMA (downtrend).
+Uses volume spike (>2x 20-period average) and EMA20 trend filter to avoid false breakouts.
+Target: 20-30 trades/year to minimize fee drag while capturing institutional breakout moves.
 """
 
 import numpy as np
@@ -23,102 +22,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots (calculated once)
+    # Daily Camarilla pivot levels (calculated from previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_ = high_1d - low_1d
-    r1 = close_1d + (range_ * 1.1 / 12)
-    s1 = close_1d - (range_ * 1.1 / 12)
-    r4 = close_1d + (range_ * 1.1 / 2)
-    s4 = close_1d - (range_ * 1.1 / 2)
+    # Calculate Camarilla levels: R1, S1 based on previous day
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1 = close_1d + camarilla_range
+    s1 = close_1d - camarilla_range
     
-    # Align daily levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align to 4h timeframe (use previous day's levels for current day)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # 12h EMA34 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # EMA20 for trend filter on 4h
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume spike: >1.5x 20-period average
+    # Volume spike: >2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
-    # Track breakout state: 1 = bullish breakout confirmed, -1 = bearish breakout confirmed
-    breakout_state = 0
     
-    start_idx = max(20, 34)  # Warmup for indicators
+    start_idx = max(20, 1)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_20[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        ema34 = ema_34_12h_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        ema20 = ema_20[i]
         vol_spike = volume_spike[i]
         
-        # Update breakout state based on daily closes (only when 12h bar closes)
-        # We use the 12h close to determine if we should update state
-        if i % 2 == 0:  # Every other 6h bar approximates 12h boundary (simplified)
-            # In practice, we'd check if current 12h bar just closed
-            # For simplicity, we update state when price crosses R1/S4 or S1/R4
-            if price > r4_aligned[i]:
-                breakout_state = 1  # Bullish breakout
-            elif price < s4_aligned[i]:
-                breakout_state = -1  # Bearish breakout
-        
         if position == 0:
-            # Long: price pulls back to R1 after bullish breakout with volume spike
-            if (breakout_state == 1 and
-                low[i] <= r1 <= high[i] and  # price touches R1
-                close[i] > r1 and            # closes above R1 (confirms bounce)
-                vol_spike and
-                price > ema34):              # uptrend filter
+            # Long: price breaks above S1 with volume spike in uptrend
+            if (price > s1_level and          # breaks above S1
+                vol_spike and                 # volume confirmation
+                price > ema20):               # uptrend filter
                 signals[i] = 0.25
                 position = 1
-            # Short: price pulls back to S1 after bearish breakout with volume spike
-            elif (breakout_state == -1 and
-                  low[i] <= s1 <= high[i] and  # price touches S1
-                  close[i] < s1 and            # closes below S1 (confirms bounce)
-                  vol_spike and
-                  price < ema34):              # downtrend filter
+            # Short: price breaks below R1 with volume spike in downtrend
+            elif (price < r1_level and        # breaks below R1
+                  vol_spike and               # volume confirmation
+                  price < ema20):             # downtrend filter
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price breaks below S1 or trend reverses
-            if close[i] < s1 or price < ema34:
+            # Exit: price crosses back below S1 or trend reverses
+            if price < s1_level or price < ema20:
                 signals[i] = 0.0
                 position = 0
-                breakout_state = 0  # Reset breakout state on exit
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price breaks above R1 or trend reverses
-            if close[i] > r1 or price > ema34:
+            # Exit: price crosses back above R1 or trend reverses
+            if price > r1_level or price > ema20:
                 signals[i] = 0.0
                 position = 0
-                breakout_state = 0  # Reset breakout state on exit
     
     return signals
 
-name = "6h_Pivot_R1S1_Breakout_Pullback_Volume"
-timeframe = "6h"
+name = "4h_Pivot_R1_S1_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
