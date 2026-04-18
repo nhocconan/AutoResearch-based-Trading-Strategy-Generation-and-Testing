@@ -13,95 +13,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for price channel and filters
+    # Get daily data for ATR-based volatility filter
     df_1d = get_htf_data(prices, '1d')
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Daily Donchian channels (20-period)
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Daily ATR (14-period) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]  # first period
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate daily ATR(14) for volatility regime filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4-hour ATR(10) for entry filter and position sizing
+    tr1_4h = high[1:] - low[1:]
+    tr2_4h = np.abs(high[1:] - close[:-1])
+    tr3_4h = np.abs(low[1:] - close[:-1])
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
+    atr_10 = pd.Series(tr_4h).rolling(window=10, min_periods=10).mean().values
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily ATR ratio (current ATR / 50-period average) for volatility regime
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_ma_50
     
-    # Align all daily data to 12h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Align daily ATR ratio to 4h timeframe (only use after daily ATR is calculated)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Calculate 4-hour RSI(14) for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA50
+    start_idx = 50  # need enough for ATR calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(atr_10[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        uptrend = ema_50_aligned[i] > ema_50_aligned[i-1]  # rising EMA
-        downtrend = ema_50_aligned[i] < ema_50_aligned[i-1]  # falling EMA
+        # Volatility regime filter: only trade in normal to high volatility (avoid low vol chop)
+        vol_regime = atr_ratio_aligned[i] > 0.8 and atr_ratio_aligned[i] < 3.0
         
-        # Volatility filter: avoid low volatility periods
-        vol_filter = atr_14_aligned[i] > 0.5 * np.mean(atr_14_aligned[max(0, i-20):i+1])
+        # Mean reversion signals with volatility-adjusted thresholds
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma_aligned[i]
-        
-        # Breakout conditions
-        breakout_up = close[i] > upper_20_aligned[i]
-        breakdown_down = close[i] < lower_20_aligned[i]
+        # Dynamic position size based on volatility (inverse volatility scaling)
+        base_size = 0.25
+        vol_scaling = min(1.0, 1.0 / atr_ratio_aligned[i])  # reduce size in high vol
+        position_size = base_size * vol_scaling
+        position_size = max(0.10, min(position_size, 0.35))  # clamp to reasonable range
         
         if position == 0:
-            # Long: uptrend + volume + volatility + breakout above upper channel
-            if uptrend and vol_confirm and vol_filter and breakout_up:
-                signals[i] = 0.25
+            # Long: RSI oversold + volatility regime
+            if rsi_oversold and vol_regime:
+                signals[i] = position_size
                 position = 1
-            # Short: downtrend + volume + volatility + breakdown below lower channel
-            elif downtrend and vol_confirm and vol_filter and breakdown_down:
-                signals[i] = -0.25
+            # Short: RSI overbought + volatility regime
+            elif rsi_overbought and vol_regime:
+                signals[i] = -position_size
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal, volatility drop, or breakdown
-            if not uptrend or not vol_filter or breakdown_down:
-                signals[i] = -0.25  # reverse to short
+            # Long exit: RSI overbought or volatility too low (chop) or too high
+            if rsi_overbought or not vol_regime:
+                signals[i] = -position_size  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.25
+                signals[i] = position_size
         
         elif position == -1:
-            # Short exit: trend reversal, volatility drop, or breakout
-            if not downtrend or not vol_filter or breakout_up:
-                signals[i] = 0.25  # reverse to long
+            # Short exit: RSI oversold or volatility too low (chop) or too high
+            if rsi_oversold or not vol_regime:
+                signals[i] = position_size  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.25
+                signals[i] = -position_size
     
     return signals
 
-name = "12h_Donchian20_EMA50_Volume_Volatility"
-timeframe = "12h"
+name = "4h_RSI_Volatility_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
