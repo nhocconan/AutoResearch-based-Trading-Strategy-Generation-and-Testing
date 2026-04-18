@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_R1S1_Breakout_Volume
-Hypothesis: Use KAMA direction as primary trend filter on 1d to reduce whipsaws, combined with 1w KAMA trend confirmation and volume > 1.5x 20-day average. KAMA adapts to market noise, making it effective in both trending and ranging markets. Targets 15-25 trades/year by requiring alignment of 1d KAMA trend, price breakout beyond weekly KAMA, and volume confirmation. Works in bull markets by following uptrend breaks above weekly KAMA, and in bear markets by taking short breaks below weekly KAMA only when 1d KAMA confirms downtrend. Uses daily timeframe for higher win rate and lower trade frequency.
+12h_1d_Camarilla_R1S1_Breakout_Volume
+Hypothesis: Breakout above/below daily Camarilla R1/S1 levels on 12h timeframe with volume confirmation. 
+Works in bull markets by buying breakouts above R1, and in bear markets by selling breakouts below S1. 
+Uses volume > 1.5x 20-period average for confirmation. Targets 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -10,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,44 +20,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA (primary timeframe)
+    # Get 1d data for Camarilla levels (HTF)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio (ER) over 10 periods for 1d KAMA
-    change = np.abs(np.diff(close_1d, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=1)  # sum of abs changes over 10 periods
-    # Avoid division by zero
-    er = np.zeros_like(close_1d)
-    er[10:] = change[10:] / np.where(volatility[10:] == 0, 1, volatility[10:])
-    # Smoothing constants: fastest SC = 2/(2+1) = 0.67, slowest SC = 2/(30+1) = 0.0645
-    sc = (er * (0.665 - 0.0645) + 0.0645) ** 2
-    # Calculate KAMA
-    kama_1d = np.full_like(close_1d, np.nan)
-    kama_1d[9] = close_1d[9]  # seed
-    for i in range(10, len(close_1d)):
-        kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d[i] - kama_1d[i-1])
+    # Calculate 1d Camarilla R1 and S1
+    rng_1d = high_1d - low_1d
+    r1_1d = close_1d + rng_1d * 1.1 / 12
+    s1_1d = close_1d - rng_1d * 1.1 / 12
     
-    # Align 1d KAMA to 1d timeframe (no alignment needed as we're on 1d)
-    kama_1d_aligned = kama_1d  # already on 1d timeframe
-    
-    # Get 1w data for KAMA trend confirmation (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate Efficiency Ratio (ER) over 10 periods for 1w KAMA
-    change_1w = np.abs(np.diff(close_1w, n=10))
-    volatility_1w = np.sum(np.abs(np.diff(close_1w, n=1)), axis=1)
-    er_1w = np.zeros_like(close_1w)
-    er_1w[10:] = change_1w[10:] / np.where(volatility_1w[10:] == 0, 1, volatility_1w[10:])
-    sc_1w = (er_1w * (0.665 - 0.0645) + 0.0645) ** 2
-    kama_1w = np.full_like(close_1w, np.nan)
-    kama_1w[9] = close_1w[9]
-    for i in range(10, len(close_1w)):
-        kama_1w[i] = kama_1w[i-1] + sc_1w[i] * (close_1w[i] - kama_1w[i-1])
-    
-    # Align 1w KAMA to 1d timeframe (wait for weekly bar close)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Align levels to 12h timeframe (wait for bar close)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -66,44 +44,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA and KAMA seeded
+    start_idx = 20  # need volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(kama_1w_aligned[i]) or 
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price above 1d KAMA (uptrend), 1w KAMA confirms uptrend, and volume confirmation
-            if (close[i] > kama_1d_aligned[i] and 
-                close[i] > kama_1w_aligned[i] and 
-                vol_confirm[i]):
+            # Long entry: price breaks above 1d R1, with volume
+            if (close[i] > r1_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below 1d KAMA (downtrend), 1w KAMA confirms downtrend, and volume confirmation
-            elif (close[i] < kama_1d_aligned[i] and 
-                  close[i] < kama_1w_aligned[i] and 
-                  vol_confirm[i]):
+            # Short entry: price breaks below 1d S1, with volume
+            elif (close[i] < s1_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns below 1d KAMA (trend change) or 1w KAMA turns down
-            if (close[i] < kama_1d_aligned[i] or 
-                close[i] < kama_1w_aligned[i]):
+            # Long exit: price returns below S1 (failed breakout) or reverses below R1
+            if (close[i] < s1_1d_aligned[i] or 
+                (not np.isnan(r1_1d_aligned[i]) and close[i] < r1_1d_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above 1d KAMA (trend change) or 1w KAMA turns up
-            if (close[i] > kama_1d_aligned[i] or 
-                close[i] > kama_1w_aligned[i]):
+            # Short exit: price returns above R1 (failed breakout) or reverses above S1
+            if (close[i] > r1_1d_aligned[i] or 
+                (not np.isnan(s1_1d_aligned[i]) and close[i] > s1_1d_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_KAMA_Trend_R1S1_Breakout_Volume"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
