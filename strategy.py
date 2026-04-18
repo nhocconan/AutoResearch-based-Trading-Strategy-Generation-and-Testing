@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_R1S1_Breakout_Volume_RangeFilter
-Hypothesis: On 1d timeframe, use weekly Camarilla pivot levels (R1, S1) for breakout signals, filtered by weekly RSI and daily volume confirmation. Long when price breaks above R1 with volume > 1.5x 20-day average and weekly RSI > 50; short when price breaks below S1 with volume > 1.5x 20-day average and weekly RSI < 50. Exit on opposite break. This captures momentum while avoiding false breakouts in ranging markets. Targets 10-20 trades/year by requiring multiple confluence factors, with position size 0.25.
+6h_Pivot_R4_S4_Breakout_With_Volume_Filter
+Hypothesis: Use daily pivots (R4/S4) as strong breakout levels. Long when price breaks above R4 with volume > 1.5x average volume; short when price breaks below S4 with volume > 1.5x average volume. Exit on opposite pivot touch (R1/S1) or when volume dries up. R4/S4 represent extreme levels where breakouts indicate strong momentum, reducing false signals. Volume filter ensures breakouts are supported by participation. Targets 12-25 trades/year by requiring rare breakouts with volume confirmation, suitable for 6BTC/ETH in both bull (breakouts continue) and bear (breakdowns continue) markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,94 +18,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-day average volume for filtering
-    vol_ma20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma20[i] = np.mean(volume[i-20:i])
+    # Calculate average volume for filtering (50-period)
+    avg_vol = np.full(n, np.nan)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if i >= 50:
+            vol_sum -= volume[i - 50]
+            vol_count -= 1
+        if vol_count > 0:
+            avg_vol[i] = vol_sum / vol_count
     
-    # Get weekly data for Camarilla pivots and RSI
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 5:
+    # Get 1D data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate daily pivots: R4, S4, R1, S1
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each week
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = np.full(len(weekly_close), np.nan)
-    camarilla_s1 = np.full(len(weekly_close), np.nan)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r4 = pivot + 3 * (high_1d - low_1d)
+    s4 = pivot - 3 * (high_1d - low_1d)
     
-    for i in range(len(weekly_close)):
-        if not (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or np.isnan(weekly_close[i])):
-            rang = weekly_high[i] - weekly_low[i]
-            camarilla_r1[i] = weekly_close[i] + rang * 1.1 / 12
-            camarilla_s1[i] = weekly_close[i] - rang * 1.1 / 12
-    
-    # Calculate weekly RSI(14)
-    delta = np.diff(weekly_close, prepend=weekly_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(weekly_close, np.nan)
-    avg_loss = np.full_like(weekly_close, np.nan)
-    
-    for i in range(14, len(weekly_close)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[0:14])
-            avg_loss[i] = np.mean(loss[0:14])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    weekly_rsi = 100 - (100 / (1 + rs))
-    
-    # Align weekly data to daily timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_weekly, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_weekly, camarilla_s1)
-    weekly_rsi_aligned = align_htf_to_ltf(prices, df_weekly, weekly_rsi)
+    # Align pivot levels to 6h timeframe
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA20
+    start_idx = max(50, 1)  # volume avg + at least one pivot
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vol_ma20[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(weekly_rsi_aligned[i])):
+        if (np.isnan(avg_vol[i]) or np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or 
+            np.isnan(r1_6h[i]) or np.isnan(s1_6h[i])):
             signals[i] = 0.0
             continue
         
+        vol_ratio = volume[i] / avg_vol[i] if avg_vol[i] > 0 else 0
+        
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation and RSI > 50
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i] and 
-                weekly_rsi_aligned[i] > 50):
+            # Long entry: price breaks above R4 with volume confirmation
+            if close[i] > r4_6h[i] and vol_ratio > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation and RSI < 50
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i] and 
-                  weekly_rsi_aligned[i] < 50):
+            # Short entry: price breaks below S4 with volume confirmation
+            elif close[i] < s4_6h[i] and vol_ratio > 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price breaks below S1
-            if close[i] < camarilla_s1_aligned[i]:
+            # Long exit: price touches R1 (take profit) or volume dries up
+            if close[i] <= r1_6h[i] or vol_ratio < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1
-            if close[i] > camarilla_r1_aligned[i]:
+            # Short exit: price touches S1 (take profit) or volume dries up
+            if close[i] >= s1_6h[i] or vol_ratio < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1S1_Breakout_Volume_RangeFilter"
-timeframe = "1d"
+name = "6h_Pivot_R4_S4_Breakout_With_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
