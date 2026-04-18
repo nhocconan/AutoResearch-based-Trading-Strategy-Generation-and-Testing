@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_Volume_Trend_Filter
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets.
-Price crossing above/below KAMA with volume confirmation and 12h trend filter captures sustained moves.
-Designed for 4h timeframe with tight entry conditions to avoid overtrading (target: 20-50 trades/year).
+1h_4D1D_Combined_Breakout_Volume_Trend
+Hypothesis: Combine 4h and 1d timeframe breakouts for institutional momentum. 
+Long when price breaks above 4h high AND 1d high with volume confirmation and 1d uptrend.
+Short when price breaks below 4h low AND 1d low with volume confirmation and 1d downtrend.
+Uses 1h timeframe for precise entry timing, 4h/1d for signal direction to reduce trade frequency.
+Session filter (08-20 UTC) avoids low-liquidity periods. Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -15,90 +17,94 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) parameters
-    fast_sc = 0.666  # 2/(2+1)
-    slow_sc = 0.0645 # 2/(30+1)
-    
-    # Calculate Efficiency Ratio and Smoothing Constant
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-    # Handle first 9 values where we don't have 10-period data
-    change = np.concatenate([np.full(9, np.nan), change])
-    volatility = np.concatenate([np.full(9, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start with first available close
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4h data for structure
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # 12h EMA trend filter
-    ema_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_4h = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 1d data for trend and higher timeframe structure
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume filter: >1.3x 20-period average
+    # 4h structure: recent high/low for breakout
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # 1d structure: daily high/low for breakout confirmation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Align 4h structure to 1h
+    high_4h_aligned = align_htf_to_ltf(prices, df_4h, high_4h)
+    low_4h_aligned = align_htf_to_ltf(prices, df_4h, low_4h)
+    
+    # Align 1d structure to 1h
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    
+    # Volume filter: >1.8x 20-period average to avoid noise
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    volume_filter = volume > (1.8 * vol_ma)
+    
+    # 1d EMA trend filter (34-period)
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Warmup for volume MA and KAMA
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(ema_12h_4h[i]) or 
-            np.isnan(volume_filter[i])):
+        # Skip if any data is not ready
+        if (np.isnan(high_4h_aligned[i]) or np.isnan(low_4h_aligned[i]) or
+            np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
+        high_4h_val = high_4h_aligned[i]
+        low_4h_val = low_4h_aligned[i]
+        high_1d_val = high_1d_aligned[i]
+        low_1d_val = low_1d_aligned[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_12h_4h[i]
+        ema_trend = ema_1d_aligned[i]
         
         if position == 0:
-            # Long: price above KAMA with volume in uptrend
-            if price > kama_val and vol_ok and price > ema_trend:
-                signals[i] = 0.25
+            # Long: break above both 4h high AND 1d high with volume in uptrend
+            if price > high_4h_val and price > high_1d_val and vol_ok and price > ema_trend:
+                signals[i] = 0.20
                 position = 1
-            # Short: price below KAMA with volume in downtrend
-            elif price < kama_val and vol_ok and price < ema_trend:
-                signals[i] = -0.25
+            # Short: break below both 4h low AND 1d low with volume in downtrend
+            elif price < low_4h_val and price < low_1d_val and vol_ok and price < ema_trend:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below KAMA or trend reverses
-            if price < kama_val or price < ema_trend:
+            # Long position: hold until breakdown below 4h low OR trend reversal
+            if price < low_4h_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: price crosses above KAMA or trend reverses
-            if price > kama_val or price > ema_trend:
+            # Short position: hold until breakout above 4h high OR trend reversal
+            if price > high_4h_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_KAMA_Direction_Volume_Trend_Filter"
-timeframe = "4h"
+name = "1h_4D1D_Combined_Breakout_Volume_Trend"
+timeframe = "1h"
 leverage = 1.0
