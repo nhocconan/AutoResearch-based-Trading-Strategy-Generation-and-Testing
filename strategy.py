@@ -36,18 +36,14 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
     
-    # Align indicators to 1d timeframe (daily resolution)
+    # Align indicators to 4h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
-    # Calculate daily Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian channels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,8 +54,8 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(ema34_1d_aligned[i]) or
             np.isnan(atr_1d_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i])):
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
@@ -75,17 +71,17 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Donchian breakout above upper band with EMA34 uptrend
-            if trade_allowed and close[i] > donchian_high_aligned[i] and close[i] > ema34_1d_aligned[i]:
+            if trade_allowed and close[i] > donchian_high[i] and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Donchian breakdown below lower band with EMA34 downtrend
-            elif trade_allowed and close[i] < donchian_low_aligned[i] and close[i] < ema34_1d_aligned[i]:
+            elif trade_allowed and close[i] < donchian_low[i] and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long exit: price closes below EMA34 or Donchian lower band
-            if close[i] < ema34_1d_aligned[i] or close[i] < donchian_low_aligned[i]:
+            if close[i] < ema34_1d_aligned[i] or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,7 +89,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price closes above EMA34 or Donchian upper band
-            if close[i] > ema34_1d_aligned[i] or close[i] > donchian_high_aligned[i]:
+            if close[i] > ema34_1d_aligned[i] or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1dEMA34_VolumeSpike_ATRFilter"
-timeframe = "1d"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
