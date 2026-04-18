@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dVolSpike_ATRFilter
-Hypothesis: Breakout above/below Donchian channel (20-period high/low) on 4h with 1-day volume spike confirmation (volume > 2x 20-day average) and ATR filter (ATR(14) > 0.5 * ATR(50)). Exit on opposite Donchian break or ATR-based trailing stop. Designed to capture strong trending moves while filtering false breakouts in choppy markets. Volume spike ensures institutional participation; ATR filter avoids low-volatility false signals. Works in bull/bear by following breakout direction. Targets ~25-40 trades/year via strict volume and volatility filters.
+12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
+Hypothesis: Trade Camarilla pivot level breaks (R1/S1) on 12h with 1d volume confirmation and ATR volatility filter. Works in bull/bear by trading breakouts from key daily pivot levels, avoiding false breakouts in low volatility. Uses 1d volume > 1.5x average and ATR(12) > 0.5*ATR(24) to filter low-volatility environments. Targets 15-25 trades/year via strict pivot break + volume + volatility confluence.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,100 +18,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and ATR
+    # Get 1d data for Camarilla pivots and volume
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d Volume 20-period average
-    vol_ma = np.full_like(df_1d['volume'].values, np.nan)
-    vol_period = 20
-    vol_arr = df_1d['volume'].values
-    if len(vol_arr) >= vol_period:
-        for i in range(vol_period, len(vol_arr)):
-            vol_ma[i] = np.mean(vol_arr[i - vol_period:i])
-    
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
-    
-    # 1d ATR(14) and ATR(50)
+    # Calculate Camarilla levels for each 1d bar
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    def calc_atr(h, l, c, period):
-        tr = np.full_like(h, np.nan)
-        for i in range(1, len(h)):
-            tr[i] = max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
-        atr = np.full_like(h, np.nan)
-        if len(h) >= period + 1:
-            atr[period] = np.mean(tr[1:period+1])
-            for i in range(period+1, len(h)):
+    camarilla_R1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_S1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    
+    # 1d volume confirmation: volume > 1.5x 24-period average
+    vol_ma = np.full_like(volume, np.nan)
+    vol_period = 24
+    
+    if len(volume) >= vol_period:
+        for i in range(vol_period, len(volume)):
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    
+    # ATR filter: ATR(12) > 0.5 * ATR(24) to avoid low volatility
+    def calculate_atr(high, low, close, period):
+        tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+        tr[0] = high[0] - low[0]  # First TR
+        atr = np.full_like(tr, np.nan)
+        if len(tr) >= period:
+            atr[period-1] = np.mean(tr[:period])
+            for i in range(period, len(tr)):
                 atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
         return atr
     
-    atr14_1d = calc_atr(high_1d, low_1d, close_1d, 14)
-    atr50_1d = calc_atr(high_1d, low_1d, close_1d, 50)
-    
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
-    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50_1d)
-    
-    # Get 4h data for Donchian channel
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Donchian channel (20-period high/low)
-    donch_high = np.full_like(high_4h, np.nan)
-    donch_low = np.full_like(low_4h, np.nan)
-    period = 20
-    if len(high_4h) >= period:
-        for i in range(period-1, len(high_4h)):
-            donch_high[i] = np.max(high_4h[i - period + 1:i + 1])
-            donch_low[i] = np.min(low_4h[i - period + 1:i + 1])
-    
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    atr_12 = calculate_atr(high, low, close, 12)
+    atr_24 = calculate_atr(high, low, close, 24)
+    vol_filter = atr_12 > (0.5 * atr_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need ATR50 and Donchian
+    start_idx = max(24, 24)  # Need volume MA and ATR periods
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i]) or np.isnan(atr14_aligned[i]) or 
-            np.isnan(atr50_aligned[i])):
+        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr_12[i]) or np.isnan(atr_24[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: volume > 2x 20-day average
-        vol_confirm = volume[i] > 2.0 * vol_ma_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # ATR filter: ATR(14) > 0.5 * ATR(50)
-        atr_filter = atr14_aligned[i] > 0.5 * atr50_aligned[i]
+        # Volatility filter
+        vol_filter_ok = vol_filter[i]
         
         if position == 0:
-            # Long: breakout above Donchian high + volume + ATR filter
-            if close[i] > donch_high_aligned[i] and vol_confirm and atr_filter:
+            # Long: price breaks above R1 + volume + volatility
+            if close[i] > camarilla_R1_aligned[i] and vol_confirm and vol_filter_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below Donchian low + volume + ATR filter
-            elif close[i] < donch_low_aligned[i] and vol_confirm and atr_filter:
+            # Short: price breaks below S1 + volume + volatility
+            elif close[i] < camarilla_S1_aligned[i] and vol_confirm and vol_filter_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below Donchian low OR ATR-based stop (2*ATR below entry)
-            # Simplified: exit on opposite Donchian break
-            if close[i] < donch_low_aligned[i]:
+            # Long exit: price breaks below S1 or volatility drops
+            if close[i] < camarilla_S1_aligned[i] or not vol_filter_ok:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above Donchian high OR ATR-based stop
-            # Simplified: exit on opposite Donchian break
-            if close[i] > donch_high_aligned[i]:
+            # Short exit: price breaks above R1 or volatility drops
+            if close[i] > camarilla_R1_aligned[i] or not vol_filter_ok:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -119,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dVolSpike_ATRFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "12h"
 leverage = 1.0
