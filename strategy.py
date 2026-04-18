@@ -1,33 +1,27 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot Breakout with Volume Confirmation and Choppiness Filter
-Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance. 
-Breakouts with volume confirmation indicate institutional participation. 
-Choppiness filter avoids whipsaws in sideways markets. Works in both bull 
-and bear markets by following breakout direction regardless of trend.
+1d Weekly Pivot Reversal with Volume Spike and Trend Filter
+Hypothesis: Weekly pivot levels (S1/S2/R1/R2) act as key support/resistance on daily chart.
+Price reversals from these levels with volume spikes indicate institutional defense.
+Trend filter (weekly EMA) ensures alignment with higher timeframe momentum.
+Works in both bull and bear markets by fading extremes in ranging conditions
+and following trend when strong.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_highest(arr, period):
-    """Calculate rolling highest"""
+def calculate_ema(arr, period):
+    """Calculate Exponential Moving Average"""
     if len(arr) < period:
         return np.full_like(arr, np.nan)
-    result = np.full(len(arr), np.nan)
-    for i in range(period-1, len(arr)):
-        result[i] = np.max(arr[i-period+1:i+1])
-    return result
-
-def calculate_lowest(arr, period):
-    """Calculate rolling lowest"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan)
-    result = np.full(len(arr), np.nan)
-    for i in range(period-1, len(arr)):
-        result[i] = np.min(arr[i-period+1:i+1])
-    return result
+    ema = np.zeros_like(arr)
+    multiplier = 2 / (period + 1)
+    ema[0] = arr[0]
+    for i in range(1, len(arr)):
+        ema[i] = (arr[i] - ema[i-1]) * multiplier + ema[i-1]
+    return ema
 
 def calculate_rsi(close, period=14):
     """Calculate RSI with proper handling"""
@@ -77,97 +71,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot levels (standard floor trader pivots)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Camarilla formulas using previous day's range
-    range_1d = high_1d - low_1d
-    camarilla_h3 = close_1d + (range_1d * 1.1 / 6)
-    camarilla_l3 = close_1d - (range_1d * 1.1 / 6)
-    camarilla_h4 = close_1d + (range_1d * 1.1 / 2)
-    camarilla_l4 = close_1d - (range_1d * 1.1 / 2)
+    pivot = (high_w + low_w + close_w) / 3
+    r1 = 2 * pivot - low_w
+    s1 = 2 * pivot - high_w
+    r2 = pivot + (high_w - low_w)
+    s2 = pivot - (high_w - low_w)
     
-    # Align to 4h timeframe (use previous day's levels)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align weekly levels to daily timeframe (use previous week's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Weekly EMA for trend filter (34-period)
+    ema34_w = calculate_ema(close_w, 34)
+    ema34_w_aligned = align_htf_to_ltf(prices, df_1w, ema34_w)
+    
+    # Daily RSI for overbought/oversold
+    rsi = calculate_rsi(close, 14)
+    
+    # Volume spike: current volume > 2x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
             vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 1.5)
-    
-    # Choppiness filter: avoid trading in choppy markets
-    # Calculate Chop using ATR and true range over 14 periods
-    atr_val = calculate_atr(high, low, close, 14)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    
-    sum_tr = np.zeros_like(atr_val)
-    for i in range(len(sum_tr)):
-        if i < 14:
-            sum_tr[i] = np.sum(tr[max(0, i-13):i+1])
-        else:
-            sum_tr[i] = np.sum(tr[i-13:i+1])
-    
-    # Avoid division by zero
-    max_hh = calculate_highest(high, 14)
-    min_ll = calculate_lowest(low, 14)
-    denominator = max_hh - min_ll
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    
-    chop = np.where(denominator != 0, 100 * np.log10(sum_tr / denominator) / np.log10(14), 50)
-    chop_threshold = 61.8  # Above this is choppy/choppy market
-    trending_market = chop < chop_threshold  # Only trade when NOT choppy
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = 40  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema34_w_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above H3 with volume in trending market
-            if (close[i] > camarilla_h3_aligned[i] and 
-                vol_spike[i] and 
-                trending_market[i]):
+            # Long setup: price near S1/S2 with bullish bias
+            near_support = (abs(close[i] - s1_aligned[i]) < (high[i] - low[i]) * 0.5 or 
+                           abs(close[i] - s2_aligned[i]) < (high[i] - low[i]) * 0.5)
+            bullish_bias = close[i] > ema34_w_aligned[i]  # Above weekly EMA
+            oversold = rsi[i] < 30
+            
+            if near_support and (bullish_bias or oversold) and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below L3 with volume in trending market
-            elif (close[i] < camarilla_l3_aligned[i] and 
-                  vol_spike[i] and 
-                  trending_market[i]):
+            
+            # Short setup: price near R1/R2 with bearish bias
+            near_resistance = (abs(close[i] - r1_aligned[i]) < (high[i] - low[i]) * 0.5 or 
+                              abs(close[i] - r2_aligned[i]) < (high[i] - low[i]) * 0.5)
+            bearish_bias = close[i] < ema34_w_aligned[i]  # Below weekly EMA
+            overbought = rsi[i] > 70
+            
+            if near_resistance and (bearish_bias or overbought) and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below H3 or volatility spike ends
-            if close[i] < camarilla_h3_aligned[i] or not vol_spike[i]:
+            # Exit long: price reaches pivot, RSI overbought, or loses momentum
+            if (close[i] > pivot_aligned[i] or rsi[i] > 70 or 
+                close[i] < ema34_w_aligned[i] * 0.98):  # 2% below weekly EMA
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above L3 or volatility spike ends
-            if close[i] > camarilla_l3_aligned[i] or not vol_spike[i]:
+            # Exit short: price reaches pivot, RSI oversold, or gains momentum
+            if (close[i] < pivot_aligned[i] or rsi[i] < 30 or 
+                close[i] > ema34_w_aligned[i] * 1.02):  # 2% above weekly EMA
                 signals[i] = 0.0
                 position = 0
             else:
@@ -175,6 +163,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_Volume_ChopFilter"
-timeframe = "4h"
+name = "1d_WeeklyPivot_RSI_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
