@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA34 trend filter
-# Donchian breakouts capture strong momentum moves. Volume confirmation filters false breakouts.
-# 1d EMA34 filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-name = "4h_Donchian20_Volume_1dEMA34"
-timeframe = "4h"
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Donchian breakout captures institutional breakout moves. 1w EMA50 filter ensures alignment with higher timeframe trend.
+# Volume confirmation ensures breakout validity. Works in bull (breakouts above upper band) and bear (breakdowns below lower band).
+# Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
+name = "1d_Donchian20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,59 +21,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for EMA50
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Donchian channels (20-period)
+    # Calculate EMA50 on weekly data for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate Donchian channels (20-period) on daily data
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate EMA34 on 1d data for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate volume spike: current volume > 2.0 * 12-period average volume (3 days on 4h chart)
-    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    volume_spike = volume > (2.0 * vol_ma_12)
+    # Calculate volume spike: current volume > 2.0 * 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_12[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper_band = high_20[i]
-        lower_band = low_20[i]
-        ema_val = ema_34_1d_aligned[i]
+        high_20_val = high_20[i]
+        low_20_val = low_20[i]
+        ema_val = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: Close above upper Donchian band AND price above EMA34 AND volume spike
-            if close_val > upper_band and close_val > ema_val and volume_spike[i]:
+            # Long: Close above upper Donchian band AND price above weekly EMA50 AND volume spike
+            if close_val > high_20_val and close_val > ema_val and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below lower Donchian band AND price below EMA34 AND volume spike
-            elif close_val < lower_band and close_val < ema_val and volume_spike[i]:
+            # Short: Close below lower Donchian band AND price below weekly EMA50 AND volume spike
+            elif close_val < low_20_val and close_val < ema_val and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close below EMA34 (trend change) or at lower band (mean reversion)
-            if close_val < ema_val or close_val < lower_band:
+            # Long exit: Close below weekly EMA50 (trend change) or at lower Donchian band (mean reversion)
+            if close_val < ema_val or close_val < low_20_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close above EMA34 (trend change) or at upper band (mean reversion)
-            if close_val > ema_val or close_val > upper_band:
+            # Short exit: Close above weekly EMA50 (trend change) or at upper Donchian band (mean reversion)
+            if close_val > ema_val or close_val > high_20_val:
                 signals[i] = 0.0
                 position = 0
             else:
