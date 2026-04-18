@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot + Volume Spike + ADX Trend Filter
-Hypothesis: Camarilla pivot levels act as strong support/resistance in both bull and bear markets.
-We trade breakouts of R1/S1 levels with volume confirmation and ADX trend filter to avoid false breakouts in choppy markets.
-This approach targets 25-35 trades/year to minimize fee decay while capturing significant momentum moves.
+4h Williams %R Mean Reversion with 1d Trend Filter and Volume Confirmation
+Hypothesis: Williams %R identifies overbought/oversold conditions that reverse with high probability,
+especially when aligned with the daily trend and confirmed by volume spikes. This strategy works in
+both bull and bear markets by fading extreme momentum moves while respecting the higher timeframe
+trend direction. Target: 20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -20,83 +21,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Camarilla formulas
-    r1 = pc + (ph - pl) * 1.1 / 12
-    r2 = pc + (ph - pl) * 1.1 / 6
-    s1 = pc - (ph - pl) * 1.1 / 12
-    s2 = pc - (ph - pl) * 1.1 / 6
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    willr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    willr = np.where((highest_high - lowest_low) == 0, -50, willr)
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # ADX for trend strength (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Volume filter: current volume > 2.0 x 20-period average
+    # Volume filter: current volume > 2.0x 20-period volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(willr[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        wr = willr[i]
         vol_ok = vol_filter[i]
-        trend_strength = adx[i]
+        trend = ema50_1d_aligned[i]
         
         if position == 0:
-            # Long breakout above R1 with volume and trend
-            if price > r1_aligned[i] and vol_ok and trend_strength > 25:
+            # Long: oversold (< -80) with volume, in uptrend (price above daily EMA50)
+            if wr < -80 and vol_ok and price > trend:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown below S1 with volume and trend
-            elif price < s1_aligned[i] and vol_ok and trend_strength > 25:
+            # Short: overbought (> -20) with volume, in downtrend (price below daily EMA50)
+            elif wr > -20 and vol_ok and price < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if price returns to S1 or trend weakens
-            if price < s1_aligned[i] or trend_strength < 20:
+            # Exit when Williams %R returns to neutral range (-50) or trend fails
+            if wr > -50 or price < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price returns to R1 or trend weakens
-            if price > r1_aligned[i] or trend_strength < 20:
+            # Exit when Williams %R returns to neutral range (-50) or trend fails
+            if wr < -50 or price > trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_Volume_ADX"
+name = "4h_WilliamsR_MeanRev_Volume_1dTrend"
 timeframe = "4h"
 leverage = 1.0
