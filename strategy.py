@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1h EMA21 Bounce with 4h Trend and Volume Spike
-Hypothesis: In trending markets, price pulls back to the 21 EMA on 1h before continuing.
-Use 4h EMA50 for trend direction and volume spike for confirmation. Works in both bull
-and bear markets by only trading in the direction of the 4h trend. Designed for 15-30
-trades/year on 1h timeframe with low turnover to minimize fee drag.
+12h Donchian Breakout with Volume Spike and Daily Trend Filter
+Hypothesis: Donchian channel breakouts on 12h timeframe with volume confirmation and daily EMA50 trend filter capture momentum moves in both bull and bear markets. Designed for 12-37 trades/year (50-150 total over 4 years) with strict entry conditions to minimize fee drag.
 """
 
 import numpy as np
@@ -21,21 +18,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
+    # Get daily data for EMA trend filter (once before loop)
+    df_d = get_htf_data(prices, '1d')
     
-    # 4h EMA50 for trend direction
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Donchian channel (20-period) on 12h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1h EMA21 for bounce level
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Daily EMA50 for trend filter
+    ema_50 = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_d, ema_50)
     
-    # Volume spike: 2x 20-period average
+    # Volume spike: 2x 20-period average on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # ATR for stop loss
+    # ATR for stop loss (12h ATR)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -51,46 +49,48 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_21[i]) or
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_50 = ema_50_4h_aligned[i]
-        ema_21_val = ema_21[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        ema = ema_aligned[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price near EMA21, above 4h EMA50, with volume spike
-            if price > ema_50 and abs(price - ema_21_val) < 0.5 * atr_val and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: break above upper Donchian with volume spike and price above EMA50 (uptrend)
+            if price > upper and volume_spike[i] and price > ema:
+                signals[i] = 0.25
                 position = 1
-            # Short: price near EMA21, below 4h EMA50, with volume spike
-            elif price < ema_50 and abs(price - ema_21_val) < 0.5 * atr_val and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: break below lower Donchian with volume spike and price below EMA50 (downtrend)
+            elif price < lower and volume_spike[i] and price < ema:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
-            signals[i] = 0.20
-            # Exit: price moves 1.5*ATR away from EMA21 or trend changes
-            if price < ema_21_val - 1.5 * atr_val or price < ema_50:
+            signals[i] = 0.25
+            # Exit: price returns to lower Donchian or ATR trailing stop
+            if price <= lower or price < (high[i] - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
-            signals[i] = -0.20
-            # Exit: price moves 1.5*ATR away from EMA21 or trend changes
-            if price > ema_21_val + 1.5 * atr_val or price > ema_50:
+            signals[i] = -0.25
+            # Exit: price returns to upper Donchian or ATR trailing stop
+            if price >= upper or price > (low[i] + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_EMA21_Bounce_4hTrend_VolumeSpike"
-timeframe = "1h"
+name = "12h_Donchian_Breakout_VolumeSpike_EMA50"
+timeframe = "12h"
 leverage = 1.0
