@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_WeeklyTrend_Filter
-Hypothesis: Daily KAMA direction + weekly trend filter + volume confirmation.
-KAMA adapts to market noise, reducing whipsaw in sideways markets.
-Weekly trend filter ensures alignment with higher timeframe momentum.
-Volume confirmation filters out low-conviction moves.
-Designed for 1d timeframe to target 15-25 trades/year, minimizing fee drag.
-Works in both bull (follows trend) and bear (avoids counter-trend trades) markets.
+12h_Pivot_R1_S1_Breakout_Volume_Trend
+Hypothesis: Price breaks above/below daily pivot S1/R1 with volume spike and 1d EMA50 trend filter on 12h timeframe.
+Captures breakouts in bull/bear markets using 1d EMA50 for trend confirmation to reduce false signals.
+Target: 15-30 trades/year to minimize fee drift while capturing strong directional moves.
 """
 
 import numpy as np
@@ -18,97 +15,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) parameters
-    er_len = 10
-    fast_ma = 2
-    slow_ma = 30
+    # Daily pivot from previous day
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    er = np.zeros(n)
-    for i in range(er_len, n):
-        price_change = np.abs(close[i] - close[i-er_len])
-        sum_volatility = np.sum(volatility[i-er_len+1:i+1])
-        if sum_volatility > 0:
-            er[i] = price_change / sum_volatility
-        else:
-            er[i] = 0
+    # Pivot levels: P = (H+L+C)/3, R1 = C + (H-L)*1.1/2, S1 = C - (H-L)*1.1/2
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Smoothing constants
-    sc = (er * (2/(fast_ma+1) - 2/(slow_ma+1)) + 2/(slow_ma+1)) ** 2
+    # Align to 12h: previous day's levels available after 1d bar closes
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Weekly trend filter: EMA34 on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume confirmation: >1.5x 20-day average
+    # Volume spike: >1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
+    
+    # Trend filter: 1d EMA50
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20)  # Warmup for indicators
+    start_idx = max(50, 20)  # Warmup for EMA and indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        weekly_ema = ema_34_1w_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema50 = ema_50_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price above KAMA, above weekly EMA, with volume spike
-            if price > kama_val and price > weekly_ema and vol_spike:
+            # Long: price breaks above R1 with volume spike and uptrend
+            if price > r1_val and vol_spike and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, below weekly EMA, with volume spike
-            elif price < kama_val and price < weekly_ema and vol_spike:
+            # Short: price breaks below S1 with volume spike and downtrend
+            elif price < s1_val and vol_spike and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses below KAMA OR weekly trend turns down
-            if price < kama_val:
+            # Exit: price closes below pivot OR trend turns down
+            if price < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif price < weekly_ema:
+            elif price < ema50:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses above KAMA OR weekly trend turns up
-            if price > kama_val:
+            # Exit: price closes above pivot OR trend turns up
+            if price > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif price > weekly_ema:
+            elif price > ema50:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_With_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "12h_Pivot_R1_S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
