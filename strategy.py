@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R4_S4_Breakout_With_Volume_Filter
-Hypothesis: Use daily Camarilla pivot levels to identify breakout points. Go long when price breaks above S4 with volume confirmation, short when breaks below R4. Uses 1D Camarilla levels for structure and 12H volume for confirmation. Designed to work in both bull and bear markets by capturing strong momentum moves. Targets 15-25 trades/year with position size 0.25.
+1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter
+Hypothesis: Use weekly Camarilla pivot levels to identify breakout points on daily chart.
+Go long when price breaks above weekly S4 with volume confirmation, short when breaks below weekly R4.
+Weekly structure provides stronger support/resistance, reducing false breakouts.
+Volume confirms institutional participation. Designed for low-frequency, high-conviction trades.
+Target: 10-20 trades/year with position size 0.25 to minimize fee drag.
+Works in bull/bear markets by capturing strong momentum moves after consolidation.
 """
 
 import numpy as np
@@ -18,23 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for stronger structural levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels for each day
+    # Calculate weekly Camarilla levels
     # R4 = Close + 1.5 * (High - Low)
     # S4 = Close - 1.5 * (High - Low)
-    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    camarilla_r4 = close_1w + 1.5 * (high_1w - low_1w)
+    camarilla_s4 = close_1w - 1.5 * (high_1w - low_1w)
     
-    # Align Camarilla levels to 12h timeframe (wait for daily bar close)
-    r4_12h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_12h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align weekly levels to daily timeframe (wait for weekly bar close)
+    r4_1d = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    s4_1d = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
-    # Calculate volume average (20-period) for confirmation
+    # Volume confirmation: 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -46,37 +51,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or 
+        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
+        # Volume confirmation: current volume > 1.5 * 20-day average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above S4 with volume confirmation
-            if close[i] > s4_12h[i] and vol_confirmed:
+            # Long entry: price breaks above weekly S4 with volume confirmation
+            if close[i] > s4_1d[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below R4 with volume confirmation
-            elif close[i] < r4_12h[i] and vol_confirmed:
+            # Short entry: price breaks below weekly R4 with volume confirmation
+            elif close[i] < r4_1d[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses back below S4
-            if close[i] < s4_12h[i]:
+            # Long exit: price crosses back below weekly S4
+            if close[i] < s4_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above R4
-            if close[i] > r4_12h[i]:
+            # Short exit: price crosses back above weekly R4
+            if close[i] > r4_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R4_S4_Breakout_With_Volume_Filter"
-timeframe = "12h"
+name = "1d_1W_Camarilla_R4_S4_Breakout_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
