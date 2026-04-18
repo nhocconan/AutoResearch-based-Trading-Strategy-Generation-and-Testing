@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1S1_Breakout_WithVolume_1dTrend
-Hypothesis: Camarilla pivot breakouts at R1/S1 levels on 6h with volume confirmation and 1d EMA50 trend filter.
-Long when price breaks above R1 with volume spike and above EMA50; short when breaks below S1 with volume spike and below EMA50.
-Uses daily pivots calculated from previous day's OHLC. Designed for low trade frequency (15-30/year) to avoid fee drag.
-Works in bull/bear markets by aligning with 1d trend - only takes long in uptrend, short in downtrend.
+12h_1w_LowBollingerBand_Bounce_With_Volume_Confirmation
+Hypothesis: Buy when price touches the lower Bollinger Band (20,2) on 12h and weekly Bollinger Band width is at a 3-month low, with volume confirmation. Sell when price reaches the middle band or upper band. Designed for low frequency (15-30 trades/year) to capture mean-reversion bounces in ranging markets while avoiding whipsaws in strong trends via volatility regime filter.
 """
 
 import numpy as np
@@ -13,94 +10,82 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data (same as primary) and 1w data for regime filter
+    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.0 * (high - low)
-    # R2 = close + 0.5 * (high - low)
-    # R1 = close + 0.25 * (high - low)
-    # S1 = close - 0.25 * (high - low)
-    # S2 = close - 0.5 * (high - low)
-    # S3 = close - 1.0 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    high_low_range = prev_high - prev_low
+    # 12h Bollinger Bands (20,2)
+    close_12h = df_12h['close'].values
+    ma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
+    lower_bb = ma_20 - 2 * std_20
+    middle_bb = ma_20
+    upper_bb = ma_20 + 2 * std_20
+    lower_bb_aligned = align_htf_to_ltf(prices, df_12h, lower_bb)
+    middle_bb_aligned = align_htf_to_ltf(prices, df_12h, middle_bb)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_12h, upper_bb)
     
-    r1 = prev_close + 0.25 * high_low_range
-    s1 = prev_close - 0.25 * high_low_range
+    # 1w Bollinger Band Width for regime filter (low volatility = ranging)
+    close_1w = df_1w['close'].values
+    ma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_bb_1w = ma_20_1w + 2 * std_20_1w
+    lower_bb_1w = ma_20_1w - 2 * std_20_1w
+    bb_width_1w = (upper_bb_1w - lower_bb_1w) / ma_20_1w  # normalized width
     
-    # Align daily pivot levels to 6h timeframe
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    # 3-month (approximately 12 weekly bars) lowest bb width
+    bb_width_min_12w = pd.Series(bb_width_1w).rolling(window=12, min_periods=12).min().values
+    low_volatility_regime = bb_width_1w <= bb_width_min_12w * 1.1  # within 10% of minimum
+    low_volatility_aligned = align_htf_to_ltf(prices, df_1w, low_volatility_regime)
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume spike: >1.8x 24-period average (4 days of 6h bars)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume spike: >1.8x 30-period average on 12h
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 25)  # Warmup for EMA and volume
+    start_idx = max(35, 30)  # Warmup for BB and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_6h[i]) or 
-            np.isnan(s1_6h[i]) or
-            np.isnan(ema_50_aligned[i]) or
+        if (np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(middle_bb_aligned[i]) or
+            np.isnan(upper_bb_aligned[i]) or
+            np.isnan(low_volatility_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_level = r1_6h[i]
-        s1_level = s1_6h[i]
-        ema50 = ema_50_aligned[i]
+        lower = lower_bb_aligned[i]
+        middle = middle_bb_aligned[i]
+        upper = upper_bb_aligned[i]
+        low_vol = low_volatility_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: break above R1 with volume spike and uptrend
-            if price > r1_level and vol_spike and price > ema50:
+            # Long: price at or below lower BB, low volatility regime, volume spike
+            if price <= lower and low_vol and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume spike and downtrend
-            elif price < s1_level and vol_spike and price < ema50:
-                signals[i] = -0.25
-                position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns below R1 OR trend turns down
-            if price < r1_level or price < ema50:
-                signals[i] = 0.0
-                position = 0
-        
-        elif position == -1:
-            signals[i] = -0.25
-            # Exit: price returns above S1 OR trend turns up
-            if price > s1_level or price > ema50:
+            # Exit: price touches or crosses middle band, or volatility breaks out
+            if price >= middle or not low_vol:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R1S1_Breakout_WithVolume_1dTrend"
-timeframe = "6h"
+name = "12h_1w_LowBollingerBand_Bounce_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
