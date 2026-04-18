@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kumo_Twist_TK_Cross
-Hypothesis: Ichimoku Kijun/Tenkan cross with cloud twist (Senkou A/B cross) on daily timeframe acts as a robust trend change signal. Enter on 6h Tenkan/Kijun cross when price is above/below daily cloud and cloud is bullish/bearish. Works in bull via trend continuation and bear via counter-trend reversals at cloud twists.
+1h_LiquidityZone_4hTrend_1dVolatilityFilter
+Hypothesis: 1-hour liquidity zones (equal highs/lows) act as support/resistance. 
+Trades are taken in direction of 4-hour trend (EMA20) with 1-day volatility filter to avoid chop.
+Volume confirmation on breakout ensures institutional participation. 
+Designed for 1h timeframe with strict entry to limit trades to 15-35/year.
+Works in bull/bear via trend filter and volatility regime filter.
 """
 
 import numpy as np
@@ -16,96 +20,95 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Ichimoku (once before loop)
+    # Get 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close']
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # Get 1d data for volatility filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d = df_1d['close']
+    atr_period = 14
+    tr1 = np.abs(df_1d['high'] - df_1d['low'])
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr_1d).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    volatility_filter = atr_1d_aligned > atr_ma_1d_aligned  # Only trade when volatility is expanding
     
-    # Ichimoku components (9, 26, 52 periods)
-    def ichimoku_components(high, low, close):
-        # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-        period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-        period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-        tenkan = (period9_high + period9_low) / 2
+    # Precompute 1h equal highs/lows (liquidity zones) - look back 20 bars
+    equal_high = np.zeros(n, dtype=bool)
+    equal_low = np.zeros(n, dtype=bool)
+    lookback = 20
+    tolerance = 0.001  # 0.1% tolerance for equal levels
+    
+    for i in range(lookback, n):
+        # Check for equal highs (within tolerance)
+        high_window = high[i-lookback:i]
+        max_high = np.max(high_window)
+        if high[i] <= max_high * (1 + tolerance) and high[i] >= max_high * (1 - tolerance):
+            equal_high[i] = True
         
-        # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-        period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-        period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-        kijun = (period26_high + period26_low) / 2
-        
-        # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
-        senkou_a = ((tenkan + kijun) / 2)
-        
-        # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods
-        period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-        period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-        senkou_b = ((period52_high + period52_low) / 2)
-        
-        # Chikou Span (Lagging Span): close shifted -22 periods (not used for signals)
-        
-        return tenkan, kijun, senkou_a, senkou_b
+        # Check for equal lows (within tolerance)
+        low_window = low[i-lookback:i]
+        min_low = np.min(low_window)
+        if low[i] <= min_low * (1 + tolerance) and low[i] >= min_low * (1 - tolerance):
+            equal_low[i] = True
     
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = ichimoku_components(high_1d, low_1d, close_1d)
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # Calculate Ichimoku on 6h for entry signals
-    tenkan_6h, kijun_6h, _, _ = ichimoku_components(high, low, close)
-    
-    # Cloud twist detection: Senkou A/B cross (trend change signal)
-    # Bullish twist: Senkou A crosses above Senkou B
-    # Bearish twist: Senkou A crosses below Senkou B
-    senkou_a_prev = np.roll(senkou_a_1d_aligned, 1)
-    senkou_b_prev = np.roll(senkou_b_1d_aligned, 1)
-    senkou_a_prev[0] = np.nan
-    senkou_b_prev[0] = np.nan
-    
-    bullish_twist = (senkou_a_1d_aligned > senkou_b_1d_aligned) & (senkou_a_prev <= senkou_b_prev)
-    bearish_twist = (senkou_a_1d_aligned < senkou_b_1d_aligned) & (senkou_a_prev >= senkou_b_prev)
-    
-    # Tenkan/Kijun cross signals
-    tenkan_6h_prev = np.roll(tenkan_6h, 1)
-    kijun_6h_prev = np.roll(kijun_6h, 1)
-    tenkan_6h_prev[0] = np.nan
-    kijun_6h_prev[0] = np.nan
-    
-    tk_bullish_cross = (tenkan_6h > kijun_6h) & (tenkan_6h_prev <= kijun_6h_prev)
-    tk_bearish_cross = (tenkan_6h < kijun_6h) & (tenkan_6h_prev >= kijun_6h_prev)
-    
-    # Price position relative to cloud
-    price_above_cloud = close > np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
-    price_below_cloud = close < np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    # Volume spike: 2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
+    position = 0  # -1 short, 0 flat, 1 long
     
-    # Start after warmup period for Ichimoku calculations
     start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if any values are NaN
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
-            np.isnan(bullish_twist[i]) or np.isnan(bearish_twist[i])):
+        if (np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(atr_ma_1d_aligned[i]) or
+            np.isnan(vol_ma[i])):
+            signals[i] = 0.0
             continue
-            
-        # Bullish setup: price above cloud AND bullish cloud twist OR TK bullish cross in bullish regime
-        if price_above_cloud[i]:
-            if bullish_twist[i] or tk_bullish_cross[i]:
-                signals[i] = 0.25
         
-        # Bearish setup: price below cloud AND bearish cloud twist OR TK bearish cross in bearish regime
-        elif price_below_cloud[i]:
-            if bearish_twist[i] or tk_bearish_cross[i]:
-                signals[i] = -0.25
+        price = close[i]
+        ema_trend = ema_20_4h_aligned[i]
+        vol_filter = volatility_filter[i]
+        vol_spike = volume_spike[i]
+        
+        if position == 0:
+            # Long: price breaks above equal high liquidity zone, uptrend, volatility expanding, volume spike
+            if equal_high[i] and price > ema_trend and vol_filter and vol_spike:
+                signals[i] = 0.20
+                position = 1
+            # Short: price breaks below equal low liquidity zone, downtrend, volatility expanding, volume spike
+            elif equal_low[i] and price < ema_trend and vol_filter and vol_spike:
+                signals[i] = -0.20
+                position = -1
+        
+        elif position == 1:
+            # Long position: exit on breakdown of equal low or trend reversal
+            signals[i] = 0.20
+            if equal_low[i] or price < ema_trend:
+                signals[i] = 0.0
+                position = 0
+        
+        elif position == -1:
+            # Short position: exit on breakout of equal high or trend reversal
+            signals[i] = -0.20
+            if equal_high[i] or price > ema_trend:
+                signals[i] = 0.0
+                position = 0
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Twist_TK_Cross"
-timeframe = "6h"
+name = "1h_LiquidityZone_4hTrend_1dVolatilityFilter"
+timeframe = "1h"
 leverage = 1.0
