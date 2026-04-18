@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Spike and ATR Stop
-Uses 4h Donchian channel breakouts confirmed by volume spikes and ATR-based stop loss.
-Designed for low trade frequency (target: 20-50 trades/year) with strong edge in trending markets.
-Works in both bull and bear markets by taking breakouts in direction of higher timeframe trend.
+1D Weekly Pivot Reversal with Volume Spike
+Uses weekly pivot levels (R1/S1) as reversal zones confirmed by volume spikes.
+Designed for low trade frequency (target: 7-25 trades/year) with strong reversal edge in range-bound markets.
+Works in both bull and bear markets by fading extremes at weekly pivot levels.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,72 +20,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly pivot points (using previous week's data)
+    pivot = (high_weekly[:-1] + low_weekly[:-1] + close_weekly[:-1]) / 3.0
+    r1 = 2 * pivot - low_weekly[:-1]
+    s1 = 2 * pivot - high_weekly[:-1]
     
-    # Align Donchian channels to 4h timeframe (already aligned by get_htf_data, but ensure proper alignment)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align weekly pivot levels to daily timeframe (with 1-week delay for completed bar)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot, additional_delay_bars=0)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1, additional_delay_bars=0)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1, additional_delay_bars=0)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume spike detection (2x 4-period average)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection (2x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
-    
-    # ATR calculation for stop loss
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     entry_price = 0.0
     
-    start_idx = 50  # need enough history for calculations
+    start_idx = 200  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
-        atr_val = atr[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band with volume spike and above daily EMA
-            if (price > upper and 
-                volume_spike[i] and 
-                price > ema_trend):
+            # Long reversal: price touches S1 with volume spike
+            if abs(price - s1_val) < 0.001 * s1_val and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below lower Donchian band with volume spike and below daily EMA
-            elif (price < lower and 
-                  volume_spike[i] and 
-                  price < ema_trend):
+            # Short reversal: price touches R1 with volume spike
+            elif abs(price - r1_val) < 0.001 * r1_val and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -93,27 +72,21 @@ def generate_signals(prices):
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit conditions: stop loss or reversal signal
-            if price <= entry_price - 2.0 * atr_val:  # Stop loss
-                signals[i] = 0.0
-                position = 0
-            elif price < ema_trend:  # Trend reversal
+            # Exit at pivot or opposite level
+            if price >= pivot_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit conditions: stop loss or reversal signal
-            if price >= entry_price + 2.0 * atr_val:  # Stop loss
-                signals[i] = 0.0
-                position = 0
-            elif price > ema_trend:  # Trend reversal
+            # Exit at pivot or opposite level
+            if price <= pivot_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Spike_ATR_Stop"
-timeframe = "4h"
+name = "1D_Weekly_Pivot_Reversal_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
