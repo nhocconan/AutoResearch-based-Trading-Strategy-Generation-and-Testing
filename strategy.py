@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Channel_Breakout_VolumeTrend
-1d strategy using Keltner Channel breakouts with volume confirmation and weekly trend filter.
-- Long: Close breaks above upper KC(20,2) + volume > 1.5x weekly avg + weekly EMA50 > EMA200
-- Short: Close breaks below lower KC(20,2) + volume > 1.5x weekly avg + weekly EMA50 < EMA200
-- Exit: Opposite breakout or trend reversal
-Designed for ~10-25 trades/year per symbol (40-100 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+6h_Ichimoku_Cloud_TK_Cross_WeeklyTrend
+6h strategy using Ichimoku cloud and TK cross with weekly trend filter.
+- Long: Tenkan-sen crosses above Kijun-sen AND price above cloud AND weekly trend up
+- Short: Tenkan-sen crosses below Kijun-sen AND price below cloud AND weekly trend down
+- Exit: Opposite TK cross or price crosses opposite cloud boundary
+Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
+Works in bull markets (trend following) and bear markets (counter-trend reversals)
 """
 
 import numpy as np
@@ -21,82 +21,105 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for trend filter and volume average
+    # Get daily data for Ichimoku calculation
+    df_1d = get_htf_data(prices, '1d')
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    tenkan_sen = (
+        pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max().values +
+        pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min().values
+    ) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    kijun_sen = (
+        pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max().values +
+        pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min().values
+    ) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    senkou_span_b = (
+        pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max().values +
+        pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min().values
+    ) / 2
+    
+    # Chikou Span (Lagging Span): not used in signals
+    
+    # Align Ichimoku components to 6h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    
     close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
     
-    # Weekly EMA50 and EMA200 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    ema_50_w = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    ema_200_w = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # Weekly volume average (20-period)
-    vol_ma_20w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_w = align_htf_to_ltf(prices, df_1w, vol_ma_20w)
-    
-    # Daily Keltner Channel (20,2)
-    atr_period = 20
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    ma_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ma_20 + 2 * atr
-    kc_lower = ma_20 - 2 * atr
+    # Weekly EMA25 for trend filter
+    ema_25_1w = pd.Series(close_1w).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema_25_aligned = align_htf_to_ltf(prices, df_1w, ema_25_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # need enough for MA20 and weekly EMA200
+    start_idx = 60  # need enough for Ichimoku calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(ema_50_w[i]) or np.isnan(ema_200_w[i]) or
-            np.isnan(vol_ma_w[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(ema_25_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_w[i] > ema_200_w[i]
-        downtrend = ema_50_w[i] < ema_200_w[i]
+        # Ichimoku conditions
+        tk_cross_up = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tk_cross_down = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_w[i]
+        # Cloud boundaries
+        upper_cloud = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        lower_cloud = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        # Breakout conditions
-        breakout_up = close[i] > kc_upper[i]
-        breakdown_down = close[i] < kc_lower[i]
+        price_above_cloud = close[i] > upper_cloud
+        price_below_cloud = close[i] < lower_cloud
+        
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_25_aligned[i]
+        weekly_downtrend = close[i] < ema_25_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above upper KC
-            if uptrend and vol_confirm and breakout_up:
+            # Long: TK cross up + price above cloud + weekly uptrend
+            if tk_cross_up and price_above_cloud and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below lower KC
-            elif downtrend and vol_confirm and breakdown_down:
+            # Short: TK cross down + price below cloud + weekly downtrend
+            elif tk_cross_down and price_below_cloud and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below lower KC
-            if not uptrend or (vol_confirm and breakdown_down):
+            # Long exit: TK cross down OR price crosses below cloud
+            if tk_cross_down or close[i] < lower_cloud:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above upper KC
-            if not downtrend or (vol_confirm and breakout_up):
+            # Short exit: TK cross up OR price crosses above cloud
+            if tk_cross_up or close[i] > upper_cloud:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -104,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_Channel_Breakout_VolumeTrend"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_TK_Cross_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
