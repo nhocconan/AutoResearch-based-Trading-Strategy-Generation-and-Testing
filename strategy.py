@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Pivot S1/R1 Breakout with Volume and Trend Filter - Optimized
-Hypothesis: Daily S1/R1 levels act as strong support/resistance. Breakouts with volume
-confirmation and aligned daily trend capture momentum. Reduced frequency by tightening
-conditions: volume > 2x average, EMA filter stricter (20/50), and added minimum hold.
-Target: 15-25 trades/year per symbol to avoid fee drag.
-Works in bull (breakouts continue) and bear (breakdowns continue) markets.
+6h_WeeklyPivot_Momentum_Breakout
+Hypothesis: Weekly pivot points (R1/S1) act as strong support/resistance. Breakouts with momentum (ROC > 0) and volume confirmation capture institutional flow. Works in bull (breakout continuation) and bear (breakdown continuation) regimes. Target: 20-40 trades/year.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,98 +18,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    if len(df_1w) == 0:
+        return np.zeros(n)
     
-    # Calculate daily S1, R1, EMAs, and volume average
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Use faster EMAs for trend: 20 and 50
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly pivot points
+    # Pivot = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12.0
     
-    # Volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Align weekly data to 6h timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Momentum indicator: Rate of Change over 6 periods (~1.5 days)
+    roc_period = 6
+    roc = np.full_like(close, np.nan, dtype=np.float64)
+    for i in range(roc_period, len(close)):
+        if close[i - roc_period] != 0:
+            roc[i] = (close[i] - close[i - roc_period]) / close[i - roc_period] * 100.0
+    
+    # Volume confirmation: 20-period average
+    vol_ma = np.full_like(volume, np.nan, dtype=np.float64)
+    for i in range(20, len(volume)):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = 50  # need enough for EMA50
+    start_idx = max(50, roc_period)  # ensure enough data
     
     for i in range(start_idx, n):
-        # Skip if any data unavailable
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        # Skip if any required data is not available
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(roc[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
-            bars_since_entry += 1
             continue
         
-        bars_since_entry += 1
+        # Momentum condition
+        mom_up = roc[i] > 0
+        mom_down = roc[i] < 0
         
-        # Trend conditions
-        uptrend = ema_20_aligned[i] > ema_50_aligned[i]
-        downtrend = ema_20_aligned[i] < ema_50_aligned[i]
-        
-        # Volume confirmation: stricter threshold
-        vol_confirm = volume[i] > 2.0 * vol_ma_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakdown_down = close[i] < s1_aligned[i]
+        breakout_up = close[i] > r1_1w_aligned[i]
+        breakdown_down = close[i] < s1_1w_aligned[i]
         
         if position == 0:
-            # Require minimum 10 bars between entries to reduce frequency
-            if bars_since_entry < 10:
-                signals[i] = 0.0
-                continue
-                
-            # Long: uptrend + high volume + breakout above R1
-            if uptrend and vol_confirm and breakout_up:
+            # Long: momentum up + volume + breakout above weekly R1
+            if mom_up and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: downtrend + high volume + breakdown below S1
-            elif downtrend and vol_confirm and breakdown_down:
+            # Short: momentum down + volume + breakdown below weekly S1
+            elif mom_down and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            # Long exit: trend change OR breakdown below S1 (no volume needed for exit)
-            if not uptrend or breakdown_down:
+            # Long exit: momentum reversal or breakdown below weekly S1
+            if not mom_up or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change OR breakout above R1
-            if not downtrend or breakout_up:
+            # Short exit: momentum reversal or breakout above weekly R1
+            if not mom_down or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_Pivot_S1R1_Breakout_Volume_Optimized"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Momentum_Breakout"
+timeframe = "6h"
 leverage = 1.0
