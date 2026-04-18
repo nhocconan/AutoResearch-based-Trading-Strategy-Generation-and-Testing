@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume_v4
-Strategy: 12h Camarilla pivot (R1/S1) breakout with volume confirmation and volatility filter.
-Long: Break above R1 with volume > 1.5x average and volatility in normal range.
-Short: Break below S1 with volume > 1.5x average and volatility in normal range.
-Uses 1d Camarilla levels for structure, avoids overtrading via volatility filter.
-Target: 15-25 trades/year per symbol (60-100 total over 4 years).
-Works in bull/bear via volatility regime filter.
+12h_ThreeLineBreak_Trend_With_Volume
+Strategy: 12h trend using 3-line break chart with volume confirmation.
+Long: 3-line break bullish pattern (3 consecutive closes > prior high) with volume > 1.5x 20-period average.
+Short: 3-line break bearish pattern (3 consecutive closes < prior low) with volume > 1.5x 20-period average.
+Exit: Opposite pattern or volume drop below 0.8x average.
+Uses volume to filter false breakouts and reduce overtrading.
+Target: 20-30 trades/year per symbol (80-120 total over 4 years).
+Works in bull/bear via trend-following + volume confirmation.
 """
 
 import numpy as np
@@ -18,83 +19,79 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
+    # 3-line break calculation
+    # Track the last three closes to determine trend
+    line1 = np.full(n, np.nan)
+    line2 = np.full(n, np.nan)
+    line3 = np.full(n, np.nan)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Initialize first three values
+    if n >= 3:
+        line1[0] = close[0]
+        line2[1] = close[1]
+        line3[2] = close[2]
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]  # first day uses same day
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Calculate 3-line break values
+    for i in range(3, n):
+        # Bullish: three consecutive closes above prior high
+        if close[i] > line3[i-1] and close[i-1] > line2[i-1] and close[i-2] > line1[i-1]:
+            line1[i] = line2[i-1]
+            line2[i] = line3[i-1]
+            line3[i] = close[i]
+        # Bearish: three consecutive closes below prior low
+        elif close[i] < line1[i-1] and close[i-1] < line2[i-1] and close[i-2] < line3[i-1]:
+            line1[i] = close[i]
+            line2[i] = line1[i-1]
+            line3[i] = line2[i-1]
+        # No change - carry forward
+        else:
+            line1[i] = line1[i-1]
+            line2[i] = line2[i-1]
+            line3[i] = line3[i-1]
     
-    # Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    range_1d = prev_high - prev_low
-    r1 = prev_close + range_1d * 1.1 / 12
-    s1 = prev_close - range_1d * 1.1 / 12
-    
-    # Volatility filter: use ATR(20) to avoid choppy markets
-    tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
-    tr2 = np.absolute(np.roll(close_1d, 1) - low_1d)
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high_1d[0] - low_1d[0]  # first day
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all daily data to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > 1.5 * vol_ma
+    vol_exit = volume < 0.8 * vol_ma  # Exit when volume drops significantly
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for ATR
+    start_idx = 20  # need enough for volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(atr_20_aligned[i])):
+        # Skip if required data is not available
+        if np.isnan(line1[i]) or np.isnan(line2[i]) or np.isnan(line3[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
-        
-        # Volatility filter: avoid extreme volatility (stop hunting)
-        vol_filter = atr_20_aligned[i] < pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values[i] * 2
-        
         if position == 0:
-            # Long: price breaks above R1 with volume and volatility filter
-            if close[i] > r1_aligned[i] and vol_confirm and vol_filter:
+            # Long: bullish 3-line break with volume confirmation
+            if (close[i] > line3[i] and close[i-1] > line2[i] and close[i-2] > line1[i] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and volatility filter
-            elif close[i] < s1_aligned[i] and vol_confirm and vol_filter:
+            # Short: bearish 3-line break with volume confirmation
+            elif (close[i] < line1[i] and close[i-1] < line2[i] and close[i-2] < line3[i] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below R1 or volatility spike
-            if close[i] < r1_aligned[i] or not vol_filter:
+            # Long exit: bearish 3-line break or volume drop
+            if (close[i] < line1[i] and close[i-1] < line2[i] and close[i-2] < line3[i]) or vol_exit[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above S1 or volatility spike
-            if close[i] > s1_aligned[i] or not vol_filter:
+            # Short exit: bullish 3-line break or volume drop
+            if (close[i] > line3[i] and close[i-1] > line2[i] and close[i-2] > line1[i]) or vol_exit[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -102,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_Volume_v4"
+name = "12h_ThreeLineBreak_Trend_With_Volume"
 timeframe = "12h"
 leverage = 1.0
