@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeTrend_4HR
-Hypothesis: Donchian(20) breakout on 4h with volume confirmation and 1d EMA trend filter.
-Breakouts above upper band signal long, below lower band signal short when confirmed by volume spike (>2x 20-period average) and aligned with daily trend.
-Designed for low trade frequency (20-50/year) to avoid fee drag while capturing strong trending moves in both bull and bear markets.
+6h_PriceChannel_KeltnerBreakout_With_TrendAndVolume
+Hypothesis: Breakouts from Keltner Channels (KC) on 6h with 1d trend filter and volume spike.
+In bull markets: buy when price > KC upper band + volume spike + 1d uptrend.
+In bear markets: sell when price < KC lower band + volume spike + 1d downtrend.
+Uses ATR-based bands to adapt to volatility, reducing false breakouts in ranging markets.
+Designed for low trade frequency (12-37/year) to minimize fee drag while capturing
+sustained moves in both bull and bear regimes via trend alignment.
 """
 
 import numpy as np
@@ -26,11 +29,17 @@ def generate_signals(prices):
     # 1d EMA(34) for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian channels on 4h (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Keltner Channel on 6h: EMA(20) +/- 2*ATR(10)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    kc_upper = ema_20 + 2 * atr_10
+    kc_lower = ema_20 - 2 * atr_10
     
     # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -39,54 +48,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20)  # Warmup for EMA and Donchian
+    start_idx = max(34, 20)  # Warmup for EMA(34) and EMA(20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(kc_upper[i]) or
+            np.isnan(kc_lower[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema34 = ema_34_aligned[i]
+        ema34_1d = ema_34_1d_aligned[i]
+        kc_up = kc_upper[i]
+        kc_low = kc_lower[i]
         vol_spike = volume_spike[i]
-        upper = high_20[i]
-        lower = low_20[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band with volume spike and uptrend
-            if price > upper and vol_spike and price > ema34:
+            # Long: price breaks above KC upper + volume spike + 1d uptrend
+            if price > kc_up and vol_spike and price > ema34_1d:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band with volume spike and downtrend
-            elif price < lower and vol_spike and price < ema34:
+            # Short: price breaks below KC lower + volume spike + 1d downtrend
+            elif price < kc_low and vol_spike and price < ema34_1d:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price breaks below lower Donchian band OR trend turns down
-            if price < lower:
-                signals[i] = 0.0
-                position = 0
-            elif price < ema34:
+            # Exit: price re-enters KC or trend turns down
+            if price < kc_up or price < ema34_1d:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price breaks above upper Donchian band OR trend turns up
-            if price > upper:
-                signals[i] = 0.0
-                position = 0
-            elif price > ema34:
+            # Exit: price re-enters KC or trend turns up
+            if price > kc_low or price > ema34_1d:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeTrend_4HR"
-timeframe = "4h"
+name = "6h_PriceChannel_KeltnerBreakout_With_TrendAndVolume"
+timeframe = "6h"
 leverage = 1.0
