@@ -1,11 +1,11 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,109 +13,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators (HTF)
+    # Get weekly data for pivot calculation (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Get daily data for volume and trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channels on daily (upper and lower bands)
-    upper_channel = np.full_like(close_1d, np.nan)
-    lower_channel = np.full_like(close_1d, np.nan)
+    # Calculate weekly pivots: PP = (H+L+C)/3, R1 = 2*PP-L, S1 = 2*PP-H, R2 = PP+(H-L), S2 = PP-(H-L)
+    pivot_point = np.full_like(close_1w, np.nan)
+    r1 = np.full_like(close_1w, np.nan)
+    s1 = np.full_like(close_1w, np.nan)
+    r2 = np.full_like(close_1w, np.nan)
+    s2 = np.full_like(close_1w, np.nan)
     
-    for i in range(19, len(close_1d)):
-        upper_channel[i] = np.max(high_1d[i-19:i+1])
-        lower_channel[i] = np.min(low_1d[i-19:i+1])
+    for i in range(len(close_1w)):
+        pivot_point[i] = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
+        r1[i] = 2 * pivot_point[i] - low_1w[i]
+        s1[i] = 2 * pivot_point[i] - high_1w[i]
+        r2[i] = pivot_point[i] + (high_1w[i] - low_1w[i])
+        s2[i] = pivot_point[i] - (high_1w[i] - low_1w[i])
     
-    # Calculate 34-period EMA on daily for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 10-period EMA on daily for trend filter
+    ema_10 = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate 14-day RSI for momentum filter
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 20-period volume average on daily
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all daily data to 1h timeframe (primary)
-    upper_channel_1h = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_1h = align_htf_to_ltf(prices, df_1d, lower_channel)
-    ema_34_1h = align_htf_to_ltf(prices, df_1d, ema_34)
-    rsi_1h = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Get 4h data for volume filter
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate 20-period average volume on 4h
-    avg_volume_4h = np.full_like(volume_4h, np.nan)
-    for i in range(19, len(volume_4h)):
-        avg_volume_4h[i] = np.mean(volume_4h[i-19:i+1])
-    
-    # Align average volume to 1h timeframe
-    avg_volume_4h_1h = align_htf_to_ltf(prices, df_4h, avg_volume_4h)
-    
-    # Calculate session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align all data to 6h timeframe
+    pivot_point_6h = align_htf_to_ltf(prices, df_1w, pivot_point)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
+    ema_10_6h = align_htf_to_ltf(prices, df_1d, ema_10)
+    vol_ma_20_6h = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(19, 34) + 1
+    start_idx = 20  # Need volume MA and weekly data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_channel_1h[i]) or np.isnan(lower_channel_1h[i]) or 
-            np.isnan(ema_34_1h[i]) or np.isnan(rsi_1h[i]) or np.isnan(avg_volume_4h_1h[i])):
+        if (np.isnan(pivot_point_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(ema_10_6h[i]) or
+            np.isnan(vol_ma_20_6h[i])):
             signals[i] = 0.0
             continue
-        
-        # Apply session filter
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Volume filter: current volume > 1.5x average volume
-        volume_filter = volume[i] > 1.5 * avg_volume_4h_1h[i]
         
         # Trend filter: price above/below EMA
-        uptrend = close[i] > ema_34_1h[i]
-        downtrend = close[i] < ema_34_1h[i]
+        uptrend = close[i] > ema_10_6h[i]
+        downtrend = close[i] < ema_10_6h[i]
         
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_not_extreme = (rsi_1h[i] > 30) and (rsi_1h[i] < 70)
+        # Volume filter: current volume above average
+        volume_filter = volume[i] > vol_ma_20_6h[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian channel with uptrend, RSI not extreme, and volume confirmation
-            if close[i] > upper_channel_1h[i] and uptrend and rsi_not_extreme and volume_filter:
-                signals[i] = 0.20
+            # Long: price breaks above S2 with uptrend and volume confirmation
+            if close[i] > s2_6h[i] and uptrend and volume_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian channel with downtrend, RSI not extreme, and volume confirmation
-            elif close[i] < lower_channel_1h[i] and downtrend and rsi_not_extreme and volume_filter:
-                signals[i] = -0.20
+            # Short: price breaks below R2 with downtrend and volume confirmation
+            elif close[i] < r2_6h[i] and downtrend and volume_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below lower Donchian channel OR trend reverses OR RSI overbought
-            if (close[i] < lower_channel_1h[i]) or (not uptrend) or (rsi_1h[i] >= 70):
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price crosses below pivot OR trend reverses
+            if (close[i] < pivot_point_6h[i]) or (not uptrend):
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above upper Donchian channel OR trend reverses OR RSI oversold
-            if (close[i] > upper_channel_1h[i]) or (not downtrend) or (rsi_1h[i] <= 30):
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price crosses above pivot OR trend reverses
+            if (close[i] > pivot_point_6h[i]) or (not downtrend):
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Donchian20_1dEMA34_RSI_VolumeFilter_Session"
-timeframe = "1h"
+name = "6h_WeeklyPivot_S2_S1_Breakout_Volume_EMA10Filter_v1"
+timeframe = "6h"
 leverage = 1.0
