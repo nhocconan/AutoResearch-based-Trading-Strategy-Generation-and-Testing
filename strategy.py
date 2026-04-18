@@ -1,27 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d ADX trend filter.
-Breakouts of the 12h Donchian channel capture momentum, volume confirms institutional participation,
-and the 1d ADX filter avoids false breakouts in ranging markets. Designed for 15-25 trades/year
-to minimize fee drag. Works in bull markets (buy upper band breakouts) and bear markets 
-(sell lower band breakdowns).
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX(25) trend filter.
+Breakouts above 20-period high or below 20-period low capture momentum, volume confirms participation,
+and ADX ensures we only trade in trending markets. Designed for 20-30 trades/year to minimize fee drag.
+Works in bull markets (buy breakouts) and bear markets (sell breakdowns).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian channel: upper and lower bands."""
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period-1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
 
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index)."""
@@ -83,7 +70,7 @@ def calculate_adx(high, low, close, period=14):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -100,11 +87,15 @@ def generate_signals(prices):
     # Calculate ADX(14) on 1d data
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align 1d ADX to 12h timeframe
-    adx_1d_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align 1d ADX to 4h timeframe
+    adx_1d_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 12h Donchian channel (20-period)
-    donch_upper, donch_lower = calculate_donchian(high, low, 20)
+    # Calculate 20-period Donchian channels on 4h data
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -118,8 +109,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or 
-            np.isnan(adx_1d_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx_1d_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -127,33 +118,31 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         # Trend filter: ADX threshold
-        trending = adx_1d_12h[i] >= 25
+        trending = adx_1d_4h[i] >= 25
         
         if position == 0:
             # Only trade in trending markets
             if trending and vol_confirmed:
-                # Long breakout above upper Donchian band
-                if close[i] > donch_upper[i]:
+                # Long breakout above Donchian high
+                if close[i] > donchian_high[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short breakdown below lower Donchian band
-                elif close[i] < donch_lower[i]:
+                # Short breakdown below Donchian low
+                elif close[i] < donchian_low[i]:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle of Donchian channel or opposite breakdown
-            mid_point = (donch_upper[i] + donch_lower[i]) / 2
-            if close[i] <= mid_point:
+            # Long exit: price returns to Donchian low or opposite breakdown
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle of Donchian channel or opposite breakout
-            mid_point = (donch_upper[i] + donch_lower[i]) / 2
-            if close[i] >= mid_point:
+            # Short exit: price returns to Donchian high or opposite breakout
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -161,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dADX25_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_ADX_Volume"
+timeframe = "4h"
 leverage = 1.0
