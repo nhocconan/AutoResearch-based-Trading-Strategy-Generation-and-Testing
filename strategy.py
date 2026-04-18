@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_WeeklyTrend_1wRSI_Pullback
-Hypothesis: Trade KAMA direction on daily timeframe with weekly RSI pullback confirmation. KAMA adapts to market efficiency, reducing whipsaw in sideways markets and capturing trends. Enter long when KAMA turns up and weekly RSI < 40 (pullback in uptrend), short when KAMA turns down and weekly RSI > 60 (pullback in downtrend). Uses volume > 1.5x 24-period average for confirmation. Designed for 1d timeframe to target 7-25 trades/year (30-100 total over 4 years). Uses weekly RSI for pullback to avoid chasing extended moves and align with higher timeframe trend.
+6h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v3
+Hypothesis: Use Camarilla pivot levels from 1d timeframe to identify breakout/breakdown zones.
+Go long when price breaks above R1 with volume > 1.5x 24-period average and ATR(14) > 0.5 * ATR(50) (volatility filter).
+Go short when price breaks below S1 with same conditions.
+Exit when price retests the opposite level (S1 for longs, R1 for shorts) or when volatility drops.
+Uses 1d Camarilla levels for stability and 6f for execution. Designed to work in both bull (breakouts) and bear (breakdowns) markets with volatility filter to avoid chop.
+Targets ~15-25 trades/year via strict breakout conditions + volume + volatility confirmation.
 """
 
 import numpy as np
@@ -10,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,58 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly RSI(14)
-    rsi_period = 14
-    close_1w = df_1w['close'].values
-    rsi_1w = np.full_like(close_1w, np.nan)
+    # Calculate Camarilla levels for previous day (using typical formula)
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), R2 = C + ((H-L) * 1.1/6), R1 = C + ((H-L) * 1.1/12)
+    # S1 = C - ((H-L) * 1.1/12), S2 = C - ((H-L) * 1.1/6), S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+    camarilla_r1 = np.full_like(close_1d, np.nan)
+    camarilla_s1 = np.full_like(close_1d, np.nan)
     
-    if len(close_1w) >= rsi_period + 1:
-        delta = np.diff(close_1w)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(close_1w, np.nan)
-        avg_loss = np.full_like(close_1w, np.nan)
-        
-        # First average
-        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
-        
-        # Wilder smoothing
-        for i in range(rsi_period + 1, len(close_1w)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_1w = 100 - (100 / (1 + rs))
+    for i in range(len(close_1d)):
+        if i >= 1 and not (np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]) or np.isnan(close_1d[i-1])):
+            hl_range = high_1d[i-1] - low_1d[i-1]
+            camarilla_r1[i] = close_1d[i-1] + (hl_range * 1.1 / 12)
+            camarilla_s1[i] = close_1d[i-1] - (hl_range * 1.1 / 12)
+        else:
+            camarilla_r1[i] = np.nan
+            camarilla_s1[i] = np.nan
     
-    # Align weekly RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # KAMA on daily timeframe (using close prices directly)
-    # KAMA parameters
-    fast_sc = 2 / (2 + 1)  # 2-period EMA
-    slow_sc = 2 / (30 + 1) # 30-period EMA
-    
-    kama = np.full_like(close, np.nan)
-    
-    if len(close) >= 2:
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            # Efficiency ratio
-            if i >= 1:
-                change = abs(close[i] - close[i-1])
-                volatility = 0
-                for j in range(1, i+1):
-                    volatility += abs(close[j] - close[j-1])
-                er = change / volatility if volatility != 0 else 0
-                sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-                kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
-            else:
-                kama[i] = close[i]
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume confirmation: volume > 1.5x 24-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -79,42 +56,66 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume)):
             vol_ma[i] = np.mean(volume[i - vol_period:i])
     
+    # Volatility filter: ATR(14) > 0.5 * ATR(50) to avoid low volatility chop
+    def calculate_atr(high, low, close, period):
+        atr = np.full_like(close, np.nan)
+        if len(close) < period:
+            return atr
+        tr = np.zeros_like(close)
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(close)):
+            tr[i] = max(
+                high[i] - low[i],
+                abs(high[i] - close[i-1]),
+                abs(low[i] - close[i-1])
+            )
+        # Wilder smoothing
+        atr[period-1] = np.mean(tr[:period])
+        for i in range(period, len(close)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
+    
+    atr_14 = calculate_atr(high, low, close, 14)
+    atr_50 = calculate_atr(high, low, close, 50)
+    vol_filter = (atr_14 > 0) & (atr_50 > 0) & (atr_14 > 0.5 * atr_50)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, vol_period)  # KAMA needs ~30 periods, vol MA needs 24
+    start_idx = max(vol_period, 50)  # Need enough data for vol MA and ATR50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
+        # Volume and volatility confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_cond = vol_filter[i]
         
         if position == 0:
-            # Long: KAMA turning up + RSI pullback (<40) + volume
-            if i > 0 and not np.isnan(kama[i-1]) and kama[i] > kama[i-1] and rsi_1w_aligned[i] < 40 and vol_confirm:
+            # Long: price breaks above R1 + volume + volatility
+            if close[i] > camarilla_r1_aligned[i] and vol_confirm and vol_cond:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turning down + RSI pullback (>60) + volume
-            elif i > 0 and not np.isnan(kama[i-1]) and kama[i] < kama[i-1] and rsi_1w_aligned[i] > 60 and vol_confirm:
+            # Short: price breaks below S1 + volume + volatility
+            elif close[i] < camarilla_s1_aligned[i] and vol_confirm and vol_cond:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA turns down or RSI > 60 (overbought)
-            if (i > 0 and not np.isnan(kama[i-1]) and kama[i] < kama[i-1]) or rsi_1w_aligned[i] > 60:
+            # Long exit: price retests S1 or volatility drops
+            if close[i] < camarilla_s1_aligned[i] or not vol_cond:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA turns up or RSI < 40 (oversold)
-            if (i > 0 and not np.isnan(kama[i-1]) and kama[i] > kama[i-1]) or rsi_1w_aligned[i] < 40:
+            # Short exit: price retests R1 or volatility drops
+            if close[i] > camarilla_r1_aligned[i] or not vol_cond:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -122,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Direction_WeeklyTrend_1wRSI_Pullback"
-timeframe = "1d"
+name = "6h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v3"
+timeframe = "6h"
 leverage = 1.0
