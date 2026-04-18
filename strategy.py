@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1_S1_Breakout_Volume_ATRFilter
-4h strategy using daily Camarilla pivot levels (R1/S1) for breakout entries with volume confirmation and ATR-based stoploss.
-- Long: Close breaks above daily R1 + volume > 1.5x 20-period average + ATR filter
-- Short: Close breaks below daily S1 + volume > 1.5x 20-period average + ATR filter
-- Exit: Opposite breakout or volatility-based stop
-Designed for ~25-40 trades/year per symbol (100-160 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+1h_4hTrend_1dVolSpike_Entry
+1h strategy using 4h trend filter and 1d volume spike for entry timing.
+- Long: 4h EMA21 > EMA50 (uptrend) + 1h close > 1h VWAP + 1d volume > 1.5x 20d avg volume
+- Short: 4h EMA21 < EMA50 (downtrend) + 1h close < 1h VWAP + 1d volume > 1.5x 20d avg volume
+- Exit: Opposite trend on 4h or volume spike failure
+Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
+Uses 4h for trend direction, 1d for volume regime, 1h for precise entry timing
+Works in bull trends (follow 4h uptrend) and bear trends (follow 4h downtrend)
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,82 +24,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    # 4h EMA21 and EMA50 for trend
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d 20-period volume average
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate daily Camarilla pivot levels
-    # Pivot = (High + Low + Close) / 3
-    # R1 = Pivot + (High - Low) * 1.1 / 12
-    # S1 = Pivot - (High - Low) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = pivot_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = pivot_1d - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # Align daily pivot levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume confirmation: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for stoploss (14-period)
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # First period TR
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1h VWAP (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, 0.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need enough for volume MA
+    start_idx = 50  # need enough for 4h EMA50 and 1d volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(vwap[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        # Trend conditions from 4h
+        uptrend_4h = ema_21_4h_aligned[i] > ema_50_4h_aligned[i]
+        downtrend_4h = ema_21_4h_aligned[i] < ema_50_4h_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakdown_down = close[i] < s1_aligned[i]
+        # Volume spike condition from 1d
+        vol_spike = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        
+        # 1h price relative to VWAP for entry timing
+        above_vwap = close[i] > vwap[i]
+        below_vwap = close[i] < vwap[i]
         
         if position == 0:
-            # Long: volume + breakout above R1
-            if vol_confirm and breakout_up:
-                signals[i] = 0.25
+            # Long: 4h uptrend + volume spike + price above VWAP
+            if uptrend_4h and vol_spike and above_vwap:
+                signals[i] = 0.20
                 position = 1
-            # Short: volume + breakdown below S1
-            elif vol_confirm and breakdown_down:
-                signals[i] = -0.25
+            # Short: 4h downtrend + volume spike + price below VWAP
+            elif downtrend_4h and vol_spike and below_vwap:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: opposite breakdown or volatility stop
-            if breakdown_down or close[i] < prices['high'].max() - 2.0 * atr[i]:
-                signals[i] = -0.25  # reverse to short
+            # Long exit: 4h trend turns down OR volume spike fails
+            if not uptrend_4h or not vol_spike:
+                signals[i] = -0.20  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: opposite breakout or volatility stop
-            if breakout_up or close[i] > prices['low'].min() + 2.0 * atr[i]:
-                signals[i] = 0.25  # reverse to long
+            # Short exit: 4h trend turns up OR volume spike fails
+            if not downtrend_4h or not vol_spike:
+                signals[i] = 0.20  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_ATRFilter"
-timeframe = "4h"
+name = "1h_4hTrend_1dVolSpike_Entry"
+timeframe = "1h"
 leverage = 1.0
