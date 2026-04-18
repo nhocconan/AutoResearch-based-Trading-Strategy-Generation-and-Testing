@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_200EMA_AboveVolumeBreakout"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R3S3_FadeWithVolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,54 +17,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for 200 EMA and ATR
-    df_1d = get_htf_data(prices, '1d')
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
     
-    # Daily 200 EMA for trend filter
-    ema_200_d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_d)
+    # Previous weekly OHLC
+    prev_high_w = df_1w['high'].shift(1).values
+    prev_low_w = df_1w['low'].shift(1).values
+    prev_close_w = df_1w['close'].shift(1).values
     
-    # Daily ATR(14) for volatility filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
+    # Weekly pivot and R3/S3 levels
+    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3
+    range_w = prev_high_w - prev_low_w
+    R3_w = pivot_w + range_w * 1.1
+    S3_w = pivot_w - range_w * 1.1
     
-    # 4h volume filter: current volume > 2.0 * 24-period average (24 * 4h = 4 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma_24)
+    # R4/S4 for breakout confirmation (optional filter)
+    R4_w = pivot_w + range_w * 1.6
+    S4_w = pivot_w - range_w * 1.6
+    
+    # Align weekly levels to 6h
+    R3_w_aligned = align_htf_to_ltf(prices, df_1w, R3_w)
+    S3_w_aligned = align_htf_to_ltf(prices, df_1w, S3_w)
+    R4_w_aligned = align_htf_to_ltf(prices, df_1w, R4_w)
+    S4_w_aligned = align_htf_to_ltf(prices, df_1w, S4_w)
+    
+    # Volume filter: current volume > 1.5 * 48-period average (48 * 6h = 2 weeks)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    volume_filter = volume > (1.5 * vol_ma_48)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for EMA200 calculation
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(atr_d_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(R3_w_aligned[i]) or np.isnan(S3_w_aligned[i]) or
+            np.isnan(R4_w_aligned[i]) or np.isnan(S4_w_aligned[i]) or
+            np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_200_val = ema_200_aligned[i]
-        atr_val = atr_d_aligned[i]
+        R3_val = R3_w_aligned[i]
+        S3_val = S3_w_aligned[i]
+        R4_val = R4_w_aligned[i]
+        S4_val = S4_w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price above 200 EMA with volume and sufficient volatility
-            if close_val > ema_200_val and vol_filter and atr_val > 0:
+            # Fade at R3/S3 with volume confirmation
+            if close_val < R3_val and vol_filter:
+                # Fade short at resistance
+                signals[i] = -0.25
+                position = -1
+            elif close_val > S3_val and vol_filter:
+                # Fade long at support
                 signals[i] = 0.25
                 position = 1
         
         elif position == 1:
-            # Exit: price falls back below 200 EMA
-            if close_val < ema_200_val:
+            # Long exit: price reaches S4 (strong support) or closes back below S3
+            if close_val <= S4_val or close_val < S3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price reaches R4 (strong resistance) or closes back above R3
+            if close_val >= R4_val or close_val > R3_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
