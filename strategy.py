@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: Daily ATR breakout with 1-day trend filter and volume confirmation on 12h timeframe.
+# Uses daily ATR to filter volatility regime and daily SMA50 for trend direction.
+# Enters on 12h breakouts above/below open with volume confirmation.
+# Designed for fewer trades (target 20-50/year) to avoid fee drag in both bull and bear markets.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
