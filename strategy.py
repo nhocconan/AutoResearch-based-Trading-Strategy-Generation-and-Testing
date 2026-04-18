@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian Channel Breakout (20) + Volume Spike + Weekly EMA34 Trend Filter
-# Donchian(20) breakouts capture breakout momentum with clear entry/exit levels.
-# Volume spike confirms institutional participation in the breakout.
-# Weekly EMA34 filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drift.
-name = "1d_Donchian20_WeeklyEMA34_Volume"
-timeframe = "1d"
+# Hypothesis: 6h Williams %R + 12h ADX Trend Filter + Volume Spike
+# Williams %R identifies overbought/oversold conditions for mean reversion in ranging markets.
+# ADX > 25 filters for trending conditions to avoid false signals in chop.
+# Volume spike confirms institutional participation.
+# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend).
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+name = "6h_WilliamsR_ADX25_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,60 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA34 trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 12h data for Williams %R calculation
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Donchian channels (20-period) on daily data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R on 12h data (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA34 on weekly data for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_34_weekly)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
-    # Calculate volume spike: current volume > 2.0 * 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    
+    # Get 12h data for ADX calculation
+    # ADX requires +DI, -DI, and TR
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
+    
+    plus_dm = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # Calculate volume spike: current volume > 2.0 * 24-period average volume (4 days on 6h chart)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for weekly EMA calculation
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(ema_34_weekly_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        upper = high_20[i]
-        lower = low_20[i]
-        ema_val = ema_34_weekly_aligned[i]
+        williams_val = williams_r_aligned[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Long: Break above upper Donchian band AND price above weekly EMA34 AND volume spike
-            if close_val > upper and close_val > ema_val and volume_spike[i]:
+            # Long: Williams %R oversold (< -80) AND ADX > 25 (trending) AND volume spike
+            if williams_val < -80 and adx_val > 25 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower Donchian band AND price below weekly EMA34 AND volume spike
-            elif close_val < lower and close_val < ema_val and volume_spike[i]:
+            # Short: Williams %R overbought (> -20) AND ADX > 25 (trending) AND volume spike
+            elif williams_val > -20 and adx_val > 25 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close below lower Donchian band (reversal) or at upper band (take profit)
-            if close_val < lower or close_val >= upper:
+            # Long exit: Williams %R returns above -50 (mean reversion) or ADX < 20 (trend weakening)
+            if williams_val > -50 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close above upper Donchian band (reversal) or at lower band (take profit)
-            if close_val > upper or close_val <= lower:
+            # Short exit: Williams %R returns below -50 (mean reversion) or ADX < 20 (trend weakening)
+            if williams_val < -50 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
