@@ -1,9 +1,9 @@
-# 12h_Keltner_Channel_Breakout_Volume
-# Hypothesis: 12h Keltner Channel (EMA10 + ATR(10)*2) breakout with volume confirmation and 1d trend filter (EMA50) to filter false breakouts.
-# Works in bull: breakouts above upper band in uptrend; works in bear: breakouts below lower band in downtrend.
-# Targets 15-25 trades/year by requiring EMA trend alignment, KC breakout, and volume > 2x 20-period average.
-
 #!/usr/bin/env python3
+"""
+4h_12h_1d_RSI_CCI_Trend
+Hypothesis: Combine 12h RSI (trend filter) and 1d CCI (momentum filter) with 4h price action to catch trend continuations in both bull and bear markets. RSI > 50 indicates bullish bias, RSI < 50 bearish bias. CCI > 100 signals strong upward momentum, CCI < -100 strong downward momentum. Enter long when 12h RSI > 50 AND 1d CCI > 100 AND price closes above 4h VWAP; short when 12h RSI < 50 AND 1d CCI < -100 AND price closes below 4h VWAP. Exit when RSI crosses back below/above 50. Targets 20-30 trades/year by requiring dual timeframe alignment and momentum confirmation. Uses VWAP for institutional reference point and avoids whipsaws.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,80 +18,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Keltner Channel (primary timeframe)
+    # Calculate 4h VWAP (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = np.divide(vwap_numerator, vwap_denominator, 
+                     out=np.full_like(typical_price, np.nan), 
+                     where=vwap_denominator!=0)
+    
+    # Get 12h data for RSI (HTF)
     df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate EMA10 and ATR(10) for Keltner Channel on 12h
-    ema_12h = pd.Series(close_12h).ewm(span=10, adjust=False).values
-    tr_12h = np.maximum(high_12h - low_12h, 
-                        np.absolute(high_12h - np.roll(close_12h, 1)),
-                        np.absolute(low_12h - np.roll(close_12h, 1)))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False).mean().values
+    # Calculate 12h RSI (14-period)
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Keltner Channel bounds
-    upper_12h = ema_12h + (2 * atr_12h)
-    lower_12h = ema_12h - (2 * atr_12h)
+    # Wilder's smoothing
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    avg_gain[13] = np.mean(gain[1:14])  # first 14 periods
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Align KC bounds to 12h timeframe (already correct timeframe, but align for safety)
-    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Get 1d data for trend filter (EMA50)
+    rs = np.divide(avg_gain, avg_loss, 
+                   out=np.full_like(avg_gain, np.nan), 
+                   where=avg_loss!=0)
+    rsi_12h = 100 - (100 / (1 + rs))
+    
+    # Align RSI to 4h timeframe (wait for bar close)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    
+    # Get 1d data for CCI (HTF)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: current volume > 2 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 2.0)
+    # Calculate 1d CCI (20-period)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    sma_tp = np.full_like(typical_price_1d, np.nan)
+    mad = np.full_like(typical_price_1d, np.nan)
+    
+    for i in range(19, len(typical_price_1d)):
+        sma_tp[i] = np.mean(typical_price_1d[i-19:i+1])
+        mad[i] = np.mean(np.abs(typical_price_1d[i-19:i+1] - sma_tp[i]))
+    
+    cci_1d = np.divide(typical_price_1d - sma_tp, 0.015 * mad, 
+                       out=np.full_like(typical_price_1d, np.nan), 
+                       where=mad!=0)
+    
+    # Align CCI to 4h timeframe (wait for bar close)
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA and EMA warmup
+    start_idx = 20  # need VWAP and CCI warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_12h_aligned[i]) or np.isnan(cci_1d_aligned[i]) or 
+            np.isnan(vwap[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above upper KC, with volume, and 1d EMA50 uptrend (close > EMA50)
-            if (close[i] > upper_12h_aligned[i] and vol_confirm[i] and 
-                close[i] > ema_50_1d_aligned[i]):
+            # Long entry: 12h RSI > 50 (bullish bias), 1d CCI > 100 (strong up momentum), price > VWAP
+            if (rsi_12h_aligned[i] > 50 and cci_1d_aligned[i] > 100 and 
+                close[i] > vwap[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower KC, with volume, and 1d EMA50 downtrend (close < EMA50)
-            elif (close[i] < lower_12h_aligned[i] and vol_confirm[i] and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short entry: 12h RSI < 50 (bearish bias), 1d CCI < -100 (strong down momentum), price < VWAP
+            elif (rsi_12h_aligned[i] < 50 and cci_1d_aligned[i] < -100 and 
+                  close[i] < vwap[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns below EMA10 (middle of KC) or breaks below lower KC (failed breakout)
-            if (close[i] < ema_12h_aligned[i] or 
-                close[i] < lower_12h_aligned[i]):
+            # Long exit: RSI falls below 50 (loss of bullish bias) or price crosses below VWAP
+            if (rsi_12h_aligned[i] < 50 or close[i] < vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above EMA10 or breaks above upper KC (failed breakout)
-            if (close[i] > ema_12h_aligned[i] or 
-                close[i] > upper_12h_aligned[i]):
+            # Short exit: RSI rises above 50 (loss of bearish bias) or price crosses above VWAP
+            if (rsi_12h_aligned[i] > 50 or close[i] > vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Keltner_Channel_Breakout_Volume"
-timeframe = "12h"
+name = "4h_12h_1d_RSI_CCI_Trend"
+timeframe = "4h"
 leverage = 1.0
