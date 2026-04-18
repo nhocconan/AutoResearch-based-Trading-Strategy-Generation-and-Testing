@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_RSI_Momentum_Conservative
-Hypothesis: Uses weekly RSI to capture long-term momentum with conservative entry/exit.
-Long when weekly RSI > 55 and price above 50-day SMA, short when weekly RSI < 45 and price below 50-day SMA.
-Exit when RSI crosses back to neutral zone (45-55). Uses volume confirmation to avoid false signals.
-Target: 10-20 trades/year to minimize fee drag while capturing major trends.
+6h_MarketRegime_Breakout
+Hypothesis: Combines 12h Donchian breakout with regime detection via ADX and volatility regime.
+In trending markets (ADX > 25), trade breakouts in direction of trend. In ranging markets (ADX < 20),
+fade reversions at Bollinger Bands. Uses volume confirmation to filter false signals.
+Designed to work in both bull and bear markets by adapting to regime.
 """
 
 import numpy as np
@@ -17,85 +17,174 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI calculation
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate weekly RSI (14-period)
-    weekly_close = df_weekly['close'].values
-    delta = np.diff(weekly_close, prepend=weekly_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 12h Donchian channels (20-period)
+    upper_channel = np.full(len(high_12h), np.nan)
+    lower_channel = np.full(len(low_12h), np.nan)
     
-    # Wilder's smoothing
-    avg_gain = np.full_like(weekly_close, np.nan)
-    avg_loss = np.full_like(weekly_close, np.nan)
+    for i in range(20, len(high_12h)):
+        upper_channel[i] = np.max(high_12h[i-20:i])
+        lower_channel[i] = np.min(low_12h[i-20:i])
     
-    for i in range(14, len(weekly_close)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
+    # Get 6h data for regime detection
+    # Calculate ADX(14)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            plus_dm[i] = 0
+            
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+        else:
+            minus_dm[i] = 0
+            
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    weekly_rsi = 100 - (100 / (1 + rs))
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    atr = np.zeros(n)
+    if n >= 1:
+        atr[0] = tr[0]
+        for i in range(1, n):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Align weekly RSI to daily timeframe
-    weekly_rsi_aligned = align_htf_to_ltf(prices, df_weekly, weekly_rsi)
+    plus_di = np.full(n, np.nan)
+    minus_di = np.full(n, np.nan)
+    dx = np.full(n, np.nan)
+    adx = np.full(n, np.nan)
     
-    # Daily 50-day SMA for trend filter
-    sma50 = np.full(n, np.nan)
-    for i in range(50, n):
-        sma50[i] = np.mean(close[i-50:i])
+    if n >= 14:
+        # Initial values
+        plus_dm_sum = np.sum(plus_dm[1:14])
+        minus_dm_sum = np.sum(minus_dm[1:14])
+        atr_14 = atr[13]
+        
+        if atr_14 != 0:
+            plus_di[13] = (plus_dm_sum / atr_14) * 100
+            minus_di[13] = (minus_dm_sum / atr_14) * 100
+            if (plus_di[13] + minus_di[13]) != 0:
+                dx[13] = (abs(plus_di[13] - minus_di[13]) / (plus_di[13] + minus_di[13])) * 100
+        
+        # Rolling calculations
+        for i in range(14, n):
+            plus_dm_sum = plus_dm_sum - plus_dm[i-13] + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - minus_dm[i-13] + minus_dm[i]
+            atr_14 = (atr[i-1] * 13 + tr[i]) / 14
+            
+            if atr_14 != 0:
+                plus_di[i] = (plus_dm_sum / atr_14) * 100
+                minus_di[i] = (minus_dm_sum / atr_14) * 100
+                if (plus_di[i] + minus_di[i]) != 0:
+                    dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+        
+        # Calculate ADX
+        if n >= 27:
+            adx[26] = np.mean(dx[14:27])
+            for i in range(27, n):
+                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Volume confirmation: current volume > 1.5 x 20-day average
-    vol_ma20 = np.full(n, np.nan)
+    # Bollinger Bands (20, 2)
+    bb_middle = np.full(n, np.nan)
+    bb_std = np.full(n, np.nan)
+    bb_upper = np.full(n, np.nan)
+    bb_lower = np.full(n, np.nan)
+    
     for i in range(20, n):
-        vol_ma20[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma20 * 1.5)
+        bb_middle[i] = np.mean(close[i-20:i])
+        bb_std[i] = np.std(close[i-20:i])
+        bb_upper[i] = bb_middle[i] + 2 * bb_std[i]
+        bb_lower[i] = bb_middle[i] - 2 * bb_std[i]
+    
+    # Volume spike: current volume > 1.5 x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 1.5)
+    
+    # Align 12h channels to 6h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_channel)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(27, 20)  # ADX needs 27, BB needs 20
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_rsi_aligned[i]) or np.isnan(sma50[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: weekly RSI > 55, price above SMA50, volume confirmation
-            if (weekly_rsi_aligned[i] > 55 and close[i] > sma50[i] and vol_confirm[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: weekly RSI < 45, price below SMA50, volume confirmation
-            elif (weekly_rsi_aligned[i] < 45 and close[i] < sma50[i] and vol_confirm[i]):
-                signals[i] = -0.25
-                position = -1
+            # Regime-based entry
+            if adx[i] > 25:  # Trending regime
+                # Long: break above 12h upper channel with volume spike
+                if close[i] > upper_aligned[i] and vol_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: break below 12h lower channel with volume spike
+                elif close[i] < lower_aligned[i] and vol_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif adx[i] < 20:  # Ranging regime
+                # Long: price touches lower BB with volume spike
+                if close[i] <= bb_lower[i] and vol_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price touches upper BB with volume spike
+                elif close[i] >= bb_upper[i] and vol_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: weekly RSI drops below 45 or price below SMA50
-            if (weekly_rsi_aligned[i] < 45 or close[i] < sma50[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Long exit conditions
+            if adx[i] > 25:  # In trend - exit on breakdown
+                if close[i] < lower_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # In range - exit at middle BB or opposite BB
+                if close[i] >= bb_middle[i] or close[i] >= bb_upper[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly RSI rises above 55 or price above SMA50
-            if (weekly_rsi_aligned[i] > 55 or close[i] > sma50[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Short exit conditions
+            if adx[i] > 25:  # In trend - exit on breakout
+                if close[i] > upper_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # In range - exit at middle BB or opposite BB
+                if close[i] <= bb_middle[i] or close[i] <= bb_lower[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_Weekly_RSI_Momentum_Conservative"
-timeframe = "1d"
+name = "6h_MarketRegime_Breakout"
+timeframe = "6h"
 leverage = 1.0
