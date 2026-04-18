@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_TSIFlow_Confluence
-Hypothesis: Combines 4h trend (EMA21), 1d momentum (RSI14 pullback), and 1h volume breakout.
-Uses 4h for trend direction, 1d for momentum filter, and 1h for precise entry timing.
-Designed to work in both bull and bear markets by requiring alignment across timeframes.
-Target: 15-35 trades/year (~60-140 total over 4 years).
+12h_1D_Camarilla_Pivot_R1S1_Breakout_Volume
+Hypothesis: Uses 1-day Camarilla pivot levels (R1, S1) for entry with volume confirmation.
+Trades on 12h timeframe with 1-day trend filter to avoid counter-trend entries.
+Designed for low trade frequency (15-25/year) to minimize fee drag and work in both bull/bear markets.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,105 +20,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (EMA21)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema21_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 21:
-        ema21_4h[20] = np.mean(close_4h[0:21])
-        alpha = 2 / (21 + 1)
-        for i in range(21, len(close_4h)):
-            ema21_4h[i] = close_4h[i] * alpha + ema21_4h[i-1] * (1 - alpha)
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    
-    # Get 1d data for momentum filter (RSI14)
+    # Get 1-day data for Camarilla pivot levels and trend
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    rsi14_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 14:
-        # Calculate RSI manually to avoid pandas dependency
-        delta = np.diff(close_1d)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full(len(close_1d), np.nan)
-        avg_loss = np.full(len(close_1d), np.nan)
-        
-        # First average (simple mean)
-        if len(gain) >= 14:
-            avg_gain[13] = np.mean(gain[0:14])
-            avg_loss[13] = np.mean(loss[0:14])
-            
-            # Wilder smoothing
-            for i in range(14, len(close_1d)):
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-        
-        # Calculate RSI
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi14_1d = 100 - (100 / (1 + rs))
-    rsi14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi14_1d)
     
-    # 1h volume spike (volume > 1.5x 20-period average)
+    # Calculate 1-day Camarilla levels (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Pivot and support/resistance levels
+    pivot = np.full(len(high_1d), np.nan)
+    r1 = np.full(len(high_1d), np.nan)
+    s1 = np.full(len(high_1d), np.nan)
+    
+    for i in range(1, len(high_1d)):
+        # Use previous day's OHLC to avoid look-ahead
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        pivot[i] = (prev_high + prev_low + prev_close) / 3.0
+        r1[i] = pivot[i] + (prev_high - prev_low) * 1.1 / 12.0
+        s1[i] = pivot[i] - (prev_high - prev_low) * 1.1 / 12.0
+    
+    # 1-day EMA34 for trend filter
+    ema34 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema34[33] = np.mean(close_1d[0:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34[i] = close_1d[i] * alpha + ema34[i-1] * (1 - alpha)
+    
+    # Volume spike: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     vol_spike = volume > (vol_ma * 1.5)
     
-    # 1h price breakout above/below recent high/low (10-period)
-    high_10 = np.full(n, np.nan)
-    low_10 = np.full(n, np.nan)
-    for i in range(10, n):
-        high_10[i] = np.max(high[i-10:i])
-        low_10[i] = np.min(low[i-10:i])
+    # Align 1-day data to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20, 10)  # Ensure all indicators are ready
+    start_idx = max(20, 34)  # Need volume MA and EMA warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(rsi14_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(high_10[i]) or np.isnan(low_10[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: 4h uptrend, 1d momentum not overbought, 1h volume breakout above recent high
-            if (close[i] > ema21_4h_aligned[i] and 
-                rsi14_1d_aligned[i] < 70 and 
-                vol_spike[i] and 
-                close[i] > high_10[i]):
-                signals[i] = 0.20
+            # Long: break above R1 with volume spike and 1-day uptrend
+            if (close[i] > r1_aligned[i] and vol_spike[i] and 
+                close[i] > ema34_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend, 1d momentum not oversold, 1h volume breakout below recent low
-            elif (close[i] < ema21_4h_aligned[i] and 
-                  rsi14_1d_aligned[i] > 30 and 
-                  vol_spike[i] and 
-                  close[i] < low_10[i]):
-                signals[i] = -0.20
+            # Short: break below S1 with volume spike and 1-day downtrend
+            elif (close[i] < s1_aligned[i] and vol_spike[i] and 
+                  close[i] < ema34_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: 4h trend turns down or 1h price breaks below recent low
-            if (close[i] < ema21_4h_aligned[i] or 
-                close[i] < low_10[i]):
+            # Long exit: close below S1 or 1-day trend turns down
+            if (close[i] < s1_aligned[i] or close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: 4h trend turns up or 1h price breaks above recent high
-            if (close[i] > ema21_4h_aligned[i] or 
-                close[i] > high_10[i]):
+            # Short exit: close above R1 or 1-day trend turns up
+            if (close[i] > r1_aligned[i] or close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_TSIFlow_Confluence"
-timeframe = "1h"
+name = "12h_1D_Camarilla_Pivot_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
