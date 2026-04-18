@@ -1,10 +1,14 @@
-# 4h_SR_Trend_Breakout_V1
-# Strategy: 4-hour Support/Resistance Breakout with Trend Filter and Volume Confirmation
-# Long: Price breaks above daily resistance (highest high of last 20 days) in uptrend with volume surge
-# Short: Price breaks below daily support (lowest low of last 20 days) in downtrend with volume surge
-# Exit: Trend reversal (EMA cross) or opposite breakout
-# Designed for 4h timeframe: ~20-50 trades/year per symbol (80-200 total over 4 years)
-# Works in bull/bear via trend filter and breakout logic with volume confirmation
+#!/usr/bin/env python3
+"""
+1d_Weekly_KAMA_Trend_Signal_v1
+Strategy: 1d trend using KAMA (adaptive moving average) with weekly trend filter.
+Long when KAMA slopes upward and weekly close above weekly SMA50.
+Short when KAMA slopes downward and weekly close below weekly SMA50.
+Exit when trend reverses or price crosses opposite KAMA.
+Uses weekly timeframe for trend filter to reduce whipsaw in ranging markets.
+Designed for ~15-25 trades/year per symbol (60-100 total over 4 years).
+Works in bull/bear via weekly trend filter.
+"""
 
 import numpy as np
 import pandas as pd
@@ -12,85 +16,91 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for support/resistance levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Daily support/resistance (20-day high/low)
-    resistance = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    support = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Weekly SMA50 for trend filter
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
     
-    # Daily EMA25 and EMA50 for trend filter (shorter for faster adaptation)
-    ema_25_1d = pd.Series(close_1d).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align weekly SMA50 to daily timeframe
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate KAMA on daily data
+    # Efficiency ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close - close[10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of absolute daily changes
+    # Pad change array to match length
+    change_padded = np.concatenate([np.full(10, np.nan), change])
+    er = np.where(volatility != 0, change_padded / volatility, 0)
     
-    # Align all daily data to 4h timeframe
-    resistance_aligned = align_htf_to_ltf(prices, df_1d, resistance)
-    support_aligned = align_htf_to_ltf(prices, df_1d, support)
-    ema_25_aligned = align_htf_to_ltf(prices, df_1d, ema_25_1d)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # KAMA slope (1-period change)
+    kama_slope = np.diff(kama, prepend=kama[0])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA50
+    start_idx = 60  # need enough for weekly SMA50 and KAMA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(resistance_aligned[i]) or np.isnan(support_aligned[i]) or 
-            np.isnan(ema_25_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama_slope[i]) or 
+            np.isnan(sma_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_25_aligned[i] > ema_50_aligned[i]
-        downtrend = ema_25_aligned[i] < ema_50_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close_1w[i // 7] > sma_50_1w[i // 7] if i >= 7 else False
+        weekly_downtrend = close_1w[i // 7] < sma_50_1w[i // 7] if i >= 7 else False
         
-        # Volume confirmation (at least 1.5x average)
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
-        
-        # Breakout conditions
-        breakout_long = close[i] > resistance_aligned[i]
-        breakout_short = close[i] < support_aligned[i]
+        # KAMA direction
+        kama_up = kama_slope[i] > 0
+        kama_down = kama_slope[i] < 0
         
         if position == 0:
-            # Long: uptrend + volume + breakout above resistance
-            if uptrend and vol_confirm and breakout_long:
+            # Long: weekly uptrend + KAMA rising
+            if weekly_uptrend and kama_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakout below support
-            elif downtrend and vol_confirm and breakout_short:
+            # Short: weekly downtrend + KAMA falling
+            elif weekly_downtrend and kama_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or breakdown below support
-            if not uptrend or breakout_short:
+            # Long exit: weekly downtrend or KAMA falling
+            if weekly_downtrend or kama_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or breakout above resistance
-            if not downtrend or breakout_long:
+            # Short exit: weekly uptrend or KAMA rising
+            if weekly_uptrend or kama_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -98,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_SR_Trend_Breakout_V1"
-timeframe = "4h"
+name = "1d_Weekly_KAMA_Trend_Signal_v1"
+timeframe = "1d"
 leverage = 1.0
