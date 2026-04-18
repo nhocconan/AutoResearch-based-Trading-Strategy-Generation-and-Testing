@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_Spike_Plus
-Hypothesis: Uses 1-day Camarilla R1/S1 breakout with volume spike and 1-day EMA50 trend filter. 
-Enter long when price breaks above R1 with volume spike and above EMA50. 
-Enter short when price breaks below S1 with volume spike and below EMA50.
-Exit when price reverts to midpoint or trend changes. 
-Designed for low trade frequency (<40/year) to minimize fee drag and work in both bull and bear markets.
+1d_1w_Parabolic_SAR_Trend_Follow
+Hypothesis: Uses weekly Parabolic SAR for trend direction and daily price action for entries, with volume confirmation. Designed to work in both bull and bear markets by following the weekly trend and avoiding counter-trend trades.
 """
 
 import numpy as np
@@ -22,96 +18,111 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Parabolic SAR
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1-day Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Parabolic SAR
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    camarilla_r1 = np.zeros_like(close_1d)
-    camarilla_s1 = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            camarilla_r1[i] = close_1d[i]
-            camarilla_s1[i] = close_1d[i]
-        else:
-            rang = high_1d[i-1] - low_1d[i-1]
-            camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
-            camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
+    # Initialize SAR
+    psar = np.zeros_like(close_1w)
+    trend = np.zeros_like(close_1w)  # 1 for uptrend, -1 for downtrend
+    af = 0.02  # acceleration factor
+    max_af = 0.2
     
-    # Calculate 1-day EMA50 for trend filter
-    ema_50_1d = np.zeros_like(close_1d)
-    ema_50_1d[:] = np.nan
-    if len(close_1d) >= 50:
-        k = 2 / (50 + 1)
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = close_1d[i] * k + ema_50_1d[i-1] * (1 - k)
+    # Set initial values
+    if close_1w[1] > close_1w[0]:
+        trend[0] = 1
+        psar[0] = low_1w[0]
+        ep = high_1w[0]  # extreme point
+    else:
+        trend[0] = -1
+        psar[0] = high_1w[0]
+        ep = low_1w[0]
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate SAR for each week
+    for i in range(1, len(close_1w)):
+        if trend[i-1] == 1:  # uptrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR is below low
+            if psar[i] > low_1w[i]:
+                trend[i] = -1
+                psar[i] = ep
+                ep = low_1w[i]
+                af = 0.02
+            else:
+                trend[i] = 1
+                if high_1w[i] > ep:
+                    ep = high_1w[i]
+                    af = min(af + 0.02, max_af)
+        else:  # downtrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR is above high
+            if psar[i] < high_1w[i]:
+                trend[i] = 1
+                psar[i] = ep
+                ep = high_1w[i]
+                af = 0.02
+            else:
+                trend[i] = -1
+                if low_1w[i] < ep:
+                    ep = low_1w[i]
+                    af = min(af + 0.02, max_af)
     
-    # Volume spike: current volume > 2.0 x 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
+    # Align weekly SAR and trend to daily timeframe
+    psar_aligned = align_htf_to_ltf(prices, df_1w, psar)
+    trend_aligned = align_htf_to_ltf(prices, df_1w, trend)
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
+    vol_ma = np.zeros(n)
+    for i in range(n):
         if i < 20:
             vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = 50  # Warmup for EMA
+    # Start after sufficient warmup
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(psar_aligned[i]) or np.isnan(trend_aligned[i]):
             signals[i] = 0.0
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # Long: price breaks above R1 with volume spike and above 1d EMA50
-            if close[i] > camarilla_r1_aligned[i] and vol_spike[i] and close[i] > ema_50_aligned[i]:
-                signals[i] = 0.30
+            # Enter long when weekly trend is up and price above SAR with volume
+            if trend_aligned[i] == 1 and close[i] > psar_aligned[i] and vol_spike[i]:
+                signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: price breaks below S1 with volume spike and below 1d EMA50
-            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i] and close[i] < ema_50_aligned[i]:
-                signals[i] = -0.30
+            # Enter short when weekly trend is down and price below SAR with volume
+            elif trend_aligned[i] == -1 and close[i] < psar_aligned[i] and vol_spike[i]:
+                signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
-        
         elif position == 1:
-            # Exit: price returns to midpoint or trend changes
-            midpoint = (camarilla_r1_aligned[i] + camarilla_s1_aligned[i]) / 2
-            if close[i] < midpoint or close[i] < ema_50_aligned[i]:
+            # Exit long when price crosses below SAR or trend changes
+            if close[i] < psar_aligned[i] or trend_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
-        
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to midpoint or trend changes
-            midpoint = (camarilla_r1_aligned[i] + camarilla_s1_aligned[i]) / 2
-            if close[i] > midpoint or close[i] > ema_50_aligned[i]:
+            # Exit short when price crosses above SAR or trend changes
+            if close[i] > psar_aligned[i] or trend_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Spike_Plus"
-timeframe = "4h"
+name = "1d_1w_Parabolic_SAR_Trend_Follow"
+timeframe = "1d"
 leverage = 1.0
