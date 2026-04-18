@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_R1S1_Breakout_With_Volume_and_12hTrend
-Hypothesis: Breakout above/below daily R1/S1 with volume spike and 12h EMA trend filter. 
-Designed for low trade frequency to avoid fee drag while capturing strong trending moves in both bull and bear markets.
+12h_Williams_Fractal_Breakout_With_Volume_Confirmation
+Hypothesis: Williams Fractal breakouts on 12h chart with volume confirmation and 1d trend filter.
+In bull markets, buy bullish fractal breaks; in bear markets, sell bearish fractal breaks.
+Uses 1d EMA for trend filter to avoid counter-trend trades. Designed for low trade frequency
+(12-37/year) to avoid fee drag while capturing significant momentum moves.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,75 +21,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily high, low, close for Camarilla calculation
+    # Get 1d data for Williams Fractals and trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Calculate Williams Fractals (requires 2-bar confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Add 2 extra bars for confirmation as fractals need 2 future bars to confirm
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Align daily Camarilla levels to 6h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike: >2.0x 20-period average
+    # Volume spike: >1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # 12h EMA(34) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(30, 20, 34)  # Need warmup for indicators
+    start_idx = max(40, 34*2, 20)  # Warmup for fractals, EMA, volume
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
+        bear_fract = bearish_fractal_aligned[i]
+        bull_fract = bullish_fractal_aligned[i]
+        ema34 = ema_34_aligned[i]
         vol_spike = volume_spike[i]
-        ema_trend = ema_12h_aligned[i]
         
         if position == 0:
-            # Long: price > Camarilla R1 with volume spike and price above 12h EMA
-            if price > r1 and vol_spike and price > ema_trend:
+            # Long: bullish fractal break with volume spike and uptrend (price > EMA34)
+            if price > bull_fract and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Camarilla S1 with volume spike and price below 12h EMA
-            elif price < s1 and vol_spike and price < ema_trend:
+            # Short: bearish fractal break with volume spike and downtrend (price < EMA34)
+            elif price < bear_fract and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < Camarilla S1 OR price crosses below 12h EMA
-            if price < s1 or price < ema_trend:
+            # Exit: price < bullish fractal level OR trend turns down
+            if price < bull_fract or price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > Camarilla R1 OR price crosses above 12h EMA
-            if price > s1 or price > ema_trend:
+            # Exit: price > bearish fractal level OR trend turns up
+            if price > bear_fract or price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Pivot_R1S1_Breakout_With_Volume_and_12hTrend"
-timeframe = "6h"
+name = "12h_Williams_Fractal_Breakout_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
