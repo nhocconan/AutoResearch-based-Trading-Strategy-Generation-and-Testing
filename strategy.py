@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Bollinger Band Squeeze Breakout with Volume Spike and 1d Trend Filter
-Hypothesis: Bollinger Band squeeze (low volatility) followed by breakout with volume confirmation
-and alignment with higher timeframe trend (1d EMA50) captures explosive moves in both bull and bear markets.
-Low trade frequency (<30/year) minimizes fee drag while capturing high-momentum moves.
+6h Moving Average Convergence Divergence (MACD) with Volume Confirmation and Volatility Filter
+Hypothesis: MACD line crossing above/below signal line, with volume above 1.5x EMA(20) and 
+price outside Bollinger Bands (20,2) indicates strong momentum with institutional participation.
+Volatility filter (BB width > 0.05) avoids ranging markets. Designed for 6H timeframe to 
+capture multi-day trends while minimizing false signals in both bull and bear markets.
+Target: 15-35 trades/year (~60-140 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -15,78 +17,79 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
+    # MACD components
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
+    
+    # Bollinger Bands for volatility filter and entry confirmation
     sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
-    bb_width = (upper_bb - lower_bb) / sma20
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * bb_std
+    lower_bb = sma20 - 2 * bb_std
+    bb_width = (upper_bb - lower_bb) / sma20  # Normalized bandwidth
     
-    # Bollinger Squeeze: BB width < 20-period percentile 10 (low volatility)
-    bb_width_series = pd.Series(bb_width)
-    bb_percentile = bb_width_series.rolling(window=20, min_periods=20).quantile(0.10).values
-    squeeze = bb_width < bb_percentile
-    
-    # Volume spike: volume > 2.0 x 20-period EMA
+    # Volume confirmation: volume > 1.5x EMA(20)
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ema)
-    
-    # 1d EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_ratio = volume / vol_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for BB, volume EMA
+    start_idx = 35  # Warmup for indicators (max of 26,20,20,9)
     
     for i in range(start_idx, n):
-        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(vol_ema[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or 
+            np.isnan(bb_width[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        bb_squeeze = squeeze[i]
-        vol_spike_bar = vol_spike[i]
-        ema50 = ema50_1d_aligned[i]
+        macd = macd_line[i]
+        signal = signal_line[i]
+        bb_w = bb_width[i]
+        vol_conf = vol_ratio[i] > 1.5
+        
+        # Volatility filter: avoid extremely low volatility ranging markets
+        vol_filter = bb_w > 0.05
         
         if position == 0:
-            # Look for breakout after squeeze with volume spike
-            if bb_squeeze and vol_spike_bar:
-                # Break above upper BB = long (only if above 1d EMA50)
-                if price > upper_bb[i] and price > ema50:
-                    signals[i] = 0.30
-                    position = 1
-                # Break below lower BB = short (only if below 1d EMA50)
-                elif price < lower_bb[i] and price < ema50:
-                    signals[i] = -0.30
-                    position = -1
+            # Long: MACD crosses above signal line, price above upper BB, volume confirmation, adequate volatility
+            if (macd > signal and macd_line[i-1] <= signal_line[i-1] and  # Bullish crossover
+                price > upper_bb[i] and vol_conf and vol_filter):
+                signals[i] = 0.25
+                position = 1
+            # Short: MACD crosses below signal line, price below lower BB, volume confirmation, adequate volatility
+            elif (macd < signal and macd_line[i-1] >= signal_line[i-1] and  # Bearish crossover
+                  price < lower_bb[i] and vol_conf and vol_filter):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit: price returns to middle BB or volatility expands (no longer squeezed)
-            if price < sma20[i] or not squeeze[i]:
+            # Exit: MACD crosses below signal line OR price returns to middle Bollinger Band
+            if (macd < signal and macd_line[i-1] >= signal_line[i-1]) or price < sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to middle BB or volatility expands
-            if price > sma20[i] or not squeeze[i]:
+            # Exit: MACD crosses above signal line OR price returns to middle Bollinger Band
+            if (macd > signal and macd_line[i-1] <= signal_line[i-1]) or price > sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Bollinger_Squeeze_Breakout_Volume_1dTrend"
-timeframe = "4h"
+name = "6h_MACD_Volume_BBFilter"
+timeframe = "6h"
 leverage = 1.0
