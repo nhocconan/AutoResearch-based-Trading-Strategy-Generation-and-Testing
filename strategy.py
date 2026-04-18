@@ -1,10 +1,14 @@
-# 12h_Camarilla_R1_S1_Breakout_Volume_1dEMA50
-# Strategy: 12h timeframe using Camarilla pivot levels (R1, S1) from daily data
-# Breakout above R1 with volume confirmation and price above daily EMA50 triggers long
-# Breakdown below S1 with volume confirmation and price below daily EMA50 triggers short
-# Exit on trend reversal (price crosses EMA50) or at R4/S4 levels
-# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Works in both bull and bear markets by following higher timeframe trend
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
+"""
+12h_Camarilla_R1_S1_Breakout_Volume_1dEMA50
+Strategy: 12h timeframe using Camarilla pivot levels (R1, S1) from daily data
+Breakout above R1 with volume confirmation and price above daily EMA50 triggers long
+Breakdown below S1 with volume confirmation and price below daily EMA50 triggers short
+Exit on trend reversal (price crosses EMA50) or at R4/S4 levels
+Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+Works in both bull and bear markets by following higher timeframe trend
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
