@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Channel_Breakout_1wEMA34_Volume_Filter
-Hypothesis: Keltner Channel breakouts on 1d timeframe with 1-week EMA34 trend filter and volume confirmation. 
-Enters long when price breaks above upper KC with bullish weekly trend and volume spike, short when breaks below lower KC with bearish weekly trend and volume spike.
-Designed for low trade frequency (~10-20/year) with trend-following capability in both bull and bear markets.
-Weekly trend filter reduces whipsaws and improves performance during bear markets like 2022.
+12h_Donchian_20_Breakout_Volume_Confirm
+Hypothesis: Uses Donchian channel (20-period) breakout with volume confirmation and 1d EMA trend filter on 12h timeframe.
+Enters long when price breaks above upper Donchian band with volume spike and 1d EMA50 rising.
+Enters short when price breaks below lower Donchian band with volume spike and 1d EMA50 falling.
+Designed for low-moderate trade frequency (~15-25/year) with trend-following capability in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,79 +21,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Keltner Channel (20, 2.0) on daily
-    atr_period = 20
-    atr = np.full(n, np.nan)
-    tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr])
-    
-    for i in range(atr_period, n):
-        if i == atr_period:
-            atr[i] = np.nanmean(tr[1:i+1])
-        else:
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
-    
-    ma = np.full(n, np.nan)
+    # Donchian channel (20-period)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     for i in range(20, n):
-        if i == 20:
-            ma[i] = np.mean(close[0:20])
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
+    
+    # 1d EMA50 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    k = 2 / (50 + 1)
+    for i in range(50, len(close_1d)):
+        if i == 50:
+            ema50_1d[i] = np.mean(close_1d[0:51])
         else:
-            ma[i] = (ma[i-1] * 19 + close[i]) / 20
+            ema50_1d[i] = close_1d[i] * k + ema50_1d[i-1] * (1 - k)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    kc_upper = ma + (2 * atr)
-    kc_lower = ma - (2 * atr)
+    # 1d EMA50 slope
+    ema50_1d_slope = np.full(n, np.nan)
+    for i in range(1, n):
+        if not np.isnan(ema50_1d_aligned[i]) and not np.isnan(ema50_1d_aligned[i-1]):
+            ema50_1d_slope[i] = ema50_1d_aligned[i] - ema50_1d_aligned[i-1]
     
-    # Weekly EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema34_1w = np.full(len(close_1w), np.nan)
-    k = 2 / (34 + 1)
-    for i in range(34, len(close_1w)):
-        if i == 34:
-            ema34_1w[i] = np.mean(close_1w[0:35])
-        else:
-            ema34_1w[i] = close_1w[i] * k + ema34_1w[i-1] * (1 - k)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.8x 30-period average
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    for i in range(30, n):
+        vol_ma[i] = np.mean(volume[i-30:i])
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup
+    start_idx = 60  # Warmup
     
     for i in range(start_idx, n):
-        if np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_1d_slope[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above upper KC with bullish weekly trend and volume spike
-            if close[i] > kc_upper[i] and ema34_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else False and vol_spike[i]:
+            # Long: break above upper Donchian with volume spike and rising 1d EMA50
+            if close[i] > upper[i] and vol_spike[i] and ema50_1d_slope[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower KC with bearish weekly trend and volume spike
-            elif close[i] < kc_lower[i] and ema34_1w_aligned[i] < close_1w[-1] if len(close_1w) > 0 else False and vol_spike[i]:
+            # Short: break below lower Donchian with volume spike and falling 1d EMA50
+            elif close[i] < lower[i] and vol_spike[i] and ema50_1d_slope[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below lower KC or weekly trend turns bearish
-            if close[i] < kc_lower[i] or ema34_1w_aligned[i] < close_1w[-1] if len(close_1w) > 0 else False:
+            # Exit: break below lower Donchian or 1d EMA50 turns down
+            if close[i] < lower[i] or ema50_1d_slope[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above upper KC or weekly trend turns bullish
-            if close[i] > kc_upper[i] or ema34_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else False:
+            # Exit: break above upper Donchian or 1d EMA50 turns up
+            if close[i] > upper[i] or ema50_1d_slope[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_Channel_Breakout_1wEMA34_Volume_Filter"
-timeframe = "1d"
+name = "12h_Donchian_20_Breakout_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
