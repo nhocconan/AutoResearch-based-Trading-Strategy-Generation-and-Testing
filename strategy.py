@@ -1,10 +1,4 @@
-# 6h_Pivot_R1_S1_Breakout_HTF_Trend_Volume
-# Hypothesis: On 6h timeframe, price respects daily (1d) Camarilla pivot levels R1/S1.
-# In strong 12h trends (price > EMA34), breakouts of R1/S1 with volume confirmation
-# (volume > 1.5x 20-period mean) continue the trend. In weak trends (price < EMA34),
-# reversals at R1/S1 with volume capture mean reversion. This adapts to trend regime
-# using a single HTF filter (12h EMA34) to avoid overtrading. Targets 15-35 trades/year.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,95 +13,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots (based on previous day)
+    # Get daily data for 4h strategy
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels R1 and S1 (based on previous day)
-    R1 = np.full_like(high_1d, np.nan)
-    S1 = np.full_like(low_1d, np.nan)
+    # Calculate ATR(14) on daily for volatility filter
+    def calculate_atr(high, low, close, period=14):
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        atr = np.full_like(tr, np.nan)
+        if len(tr) >= period:
+            atr[period] = np.nanmean(tr[1:period+1])
+            for i in range(period+1, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    for i in range(1, len(close_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_ = prev_high - prev_low
-        
-        if range_ > 0:
-            R1[i] = prev_close + 1.1 * range_ / 12
-            S1[i] = prev_close - 1.1 * range_ / 12
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
     
-    # Get 12h data for trend filter (EMA34)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate Donchian channels (20-period) on daily
+    def calculate_donchian(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    if len(close_12h) >= 34:
-        ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False).mean().values
+    donch_upper_1d, donch_lower_1d = calculate_donchian(high_1d, low_1d, 20)
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA(34) for trend filter
+    if len(close_1w) >= 34:
+        ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     else:
-        ema_12h = np.full_like(close_12h, np.nan)
+        ema_1w = np.full_like(close_1w, np.nan)
     
-    # Align all data to 6h timeframe
-    R1_6h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_6h = align_htf_to_ltf(prices, df_1d, S1)
-    ema_12h_6h = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align all daily data to 4h timeframe
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    donch_upper_4h = align_htf_to_ltf(prices, df_1d, donch_upper_1d)
+    donch_lower_4h = align_htf_to_ltf(prices, df_1d, donch_lower_1d)
+    ema_1w_4h = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average on 4h
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 20
-    
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+            vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(1, 34, 20) + 1  # Ensure we have enough data
+    start_idx = max(20, 34) + 1  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_6h[i]) or np.isnan(S1_6h[i]) or 
-            np.isnan(ema_12h_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_4h[i]) or np.isnan(donch_upper_4h[i]) or 
+            np.isnan(donch_lower_4h[i]) or np.isnan(ema_1w_4h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: price above/below 12h EMA34
-        uptrend = close[i] > ema_12h_6h[i]
-        downtrend = close[i] < ema_12h_6h[i]
+        # Trend filter: price above/below weekly EMA
+        price_above_weekly_ema = close[i] > ema_1w_4h[i]
+        price_below_weekly_ema = close[i] < ema_1w_4h[i]
         
         if position == 0:
-            # In uptrend: breakout above R1 with volume = long
-            # In downtrend: breakdown below S1 with volume = short
-            if uptrend and close[i] > R1_6h[i] and vol_confirm:
+            # Long: break above Donchian upper with volume in bullish bias
+            if close[i] > donch_upper_4h[i] and vol_confirm and price_above_weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            elif downtrend and close[i] < S1_6h[i] and vol_confirm:
+            # Short: break below Donchian lower with volume in bearish bias
+            elif close[i] < donch_lower_4h[i] and vol_confirm and price_below_weekly_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 (reversal signal)
-            if close[i] < S1_6h[i]:
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long exit: close below Donchian lower OR weekly EMA flip
+            if close[i] < donch_lower_4h[i] or not price_above_weekly_ema:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 (reversal signal)
-            if close[i] > R1_6h[i]:
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short exit: close above Donchian upper OR weekly EMA flip
+            if close[i] > donch_upper_4h[i] or not price_below_weekly_ema:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_HTF_Trend_Volume"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
