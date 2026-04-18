@@ -1,16 +1,38 @@
 #!/usr/bin/env python3
 """
-1h Momentum Pullback with 4h Trend Filter
-Hypothesis: In strong trends (identified by 4h EMA alignment and ADX), pullbacks to the 1h EMA offer high-probability entry points. Volume confirms institutional interest. Works in both bull and bear markets by following the 4h trend direction. Low trade frequency due to strict multi-condition entry.
+12h Williams Alligator + Volume Spike + ADX Trend Filter
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies market trends with built-in smoothing.
+Combined with volume spikes (institutional participation) and ADX > 25 (trending market),
+it captures strong trends in both bull and bear markets. The 12h timeframe reduces noise
+and trade frequency, while the Alligator's three lines provide clear trend direction.
+Low trade frequency due to strict multi-condition entry, targeting 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_alligator(close, jaw_period=13, teeth_period=8, lips_period=5):
+    """Calculate Williams Alligator lines (SMMA based)"""
+    def smma(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CURRENT) / PERIOD
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    jaw = smma(close, jaw_period)
+    teeth = smma(close, teeth_period)
+    lips = smma(close, lips_period)
+    return jaw, teeth, lips
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,120 +40,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for Alligator trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA(20) and EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False).values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False).values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate Alligator on 1d
+    close_1d = df_1d['close'].values
+    jaw_1d, teeth_1d, lips_1d = calculate_alligator(close_1d, jaw_period=13, teeth_period=8, lips_period=5)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
-    # Calculate 4h ADX for trend strength
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
+    # Calculate ADX on 1d (trend strength)
     # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    up_move = high_4h - np.roll(high_4h, 1)
-    down_move = np.roll(low_4h, 1) - low_4h
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
     up_move[0] = 0
     down_move[0] = 0
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smoothed values with Wilder smoothing
+    # Smoothed values (Wilder smoothing)
     def wilders_smooth(data, period):
-        result = np.zeros_like(data)
+        result = np.full_like(data, np.nan, dtype=float)
         if len(data) < period:
             return result
+        # First value is simple average
         result[period-1] = np.mean(data[:period])
+        # Subsequent values
         for i in range(period, len(data)):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr_4h = wilders_smooth(tr, 14)
-    plus_di_4h = 100 * wilders_smooth(plus_dm, 14) / np.where(atr_4h != 0, atr_4h, 1)
-    minus_di_4h = 100 * wilders_smooth(minus_dm, 14) / np.where(atr_4h != 0, atr_4h, 1)
-    dx_4h = np.where((plus_di_4h + minus_di_4h) != 0, 100 * np.abs(plus_di_4h - minus_di_4h) / (plus_di_4h + minus_di_4h), 0)
-    adx_4h = wilders_smooth(dx_4h, 14)
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / np.where(atr != 0, atr, 1)
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / np.where(atr != 0, atr, 1)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
     
-    # 1h EMA(34) for pullback entries
-    ema34_1h = pd.Series(close).ewm(span=34, adjust=False).values
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = np.zeros_like(volume)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma = np.full_like(volume, np.nan, dtype=float)
     for i in range(len(volume)):
         if i < 20:
-            vol_ma_20[i] = np.mean(volume[max(0, i-19):i+1])
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    vol_threshold = vol_ma_20 * 1.5
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or np.isnan(adx_4h_aligned[i]) or np.isnan(ema34_1h[i]) or np.isnan(vol_ma_20[i]):
+        # Skip if any required values are NaN
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 4h trend direction
-        uptrend_4h = ema20_4h_aligned[i] > ema50_4h_aligned[i]
-        downtrend_4h = ema20_4h_aligned[i] < ema50_4h_aligned[i]
-        strong_trend = adx_4h_aligned[i] > 25
-        
-        vol_ok = volume[i] > vol_threshold[i]
+        jaw_val = jaw_1d_aligned[i]
+        teeth_val = teeth_1d_aligned[i]
+        lips_val = lips_1d_aligned[i]
+        adx_val = adx[i]
+        vol_ok = vol_spike[i]
         
         if position == 0:
-            # Enter long: 4h uptrend + strong trend + pullback to EMA34 + volume
-            if (uptrend_4h and strong_trend and 
-                close[i] <= ema34_1h[i] * 1.005 and  # Allow small overshoot
-                close[i] >= ema34_1h[i] * 0.995 and
-                vol_ok):
-                signals[i] = 0.20
+            # Enter long: Lips > Teeth > Jaw (bullish alignment) + ADX > 25 + volume spike
+            if (lips_val > teeth_val and teeth_val > jaw_val and 
+                adx_val > 25 and vol_ok):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: 4h downtrend + strong trend + pullback to EMA34 + volume
-            elif (downtrend_4h and strong_trend and 
-                  close[i] >= ema34_1h[i] * 0.995 and  # Allow small overshoot
-                  close[i] <= ema34_1h[i] * 1.005 and
-                  vol_ok):
-                signals[i] = -0.20
+            # Enter short: Lips < Teeth < Jaw (bearish alignment) + ADX > 25 + volume spike
+            elif (lips_val < teeth_val and teeth_val < jaw_val and 
+                  adx_val > 25 and vol_ok):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: 4h trend weakens or price moves too far from EMA
-            if not (uptrend_4h and strong_trend) or close[i] > ema34_1h[i] * 1.02:
+            # Exit long: Alligator alignment breaks (Lips < Teeth or Teeth < Jaw) or ADX weakens
+            if (lips_val < teeth_val or teeth_val < jaw_val or adx_val < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 4h trend weakens or price moves too far from EMA
-            if not (downtrend_4h and strong_trend) or close[i] < ema34_1h[i] * 0.98:
+            # Exit short: Alligator alignment breaks (Lips > Teeth or Teeth > Jaw) or ADX weakens
+            if (lips_val > teeth_val or teeth_val > jaw_val or adx_val < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Momentum_Pullback_4hTrend_Filter"
-timeframe = "1h"
+name = "12h_Williams_Alligator_VolumeSpike_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
