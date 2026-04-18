@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_1dEMA50_VolumeSpike_ATRStop_v1
-Hypothesis: Donchian(20) breakouts on 12h timeframe filtered by 1d EMA50 trend and volume spike capture medium-term momentum. 
-ATR-based trailing stop manages risk. Designed for low trade frequency (12-30/year) to minimize fee drag while capturing trends in both bull and bear markets.
+4h_KAMA_Direction_1dATRBreakout_VolumeSpike_v1
+Hypothesis: KAMA trend direction on 4h combined with 1-day ATR-based breakouts and volume spikes captures momentum while filtering chop. KAMA adapts to market conditions, reducing whipsaw in ranging markets. ATR breakouts ensure volatility expansion accompanies moves. Volume confirms institutional participation. Designed for 20-35 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -19,91 +18,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channel (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high']
-    low_12h = df_12h['low']
-    close_12h = df_12h['close']
+    # KAMA on 4h for trend direction
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change.rolling(window=10, min_periods=10).sum() / volatility.replace(0, np.nan)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Calculate Donchian channel (20-period high/low)
-    high_max_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, high_max_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, low_min_20)
-    
-    # Get 1d data for EMA50 trend filter (once before loop)
+    # 1-day ATR for breakout levels
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close']
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1)))
+    tr1[0] = high_1d[0] - low_1d[0]
+    atr_1d = np.zeros_like(close_1d)
+    atr_1d[0] = tr1[0]
+    for i in range(1, len(tr1)):
+        atr_1d[i] = 0.9 * atr_1d[i-1] + 0.1 * tr1[i]
+    atr_1d_smooth = pd.Series(atr_1d).rolling(window=5, min_periods=5).mean().values
     
-    # ATR for volatility and stop calculation (14-period)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate breakout levels: today's open ± 1.5 * ATR(1d)
+    open_1d = df_1d['open'].values
+    breakout_up = open_1d + 1.5 * atr_1d_smooth
+    breakout_down = open_1d - 1.5 * atr_1d_smooth
+    breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up)
+    breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down)
     
-    # Volume spike detection: volume > 2.0 * 20-period average
+    # Volume spike: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(kama[i]) or 
+            np.isnan(breakout_up_aligned[i]) or
+            np.isnan(breakout_down_aligned[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(atr[i])):
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        kama_val = kama[i]
+        bu = breakout_up_aligned[i]
+        bd = breakout_down_aligned[i]
         vol_spike = volume_spike[i]
-        atr_val = atr[i]
         
         if position == 0:
-            # Long: break above upper Donchian with 1d uptrend and volume spike
-            if price > upper and price > ema_trend and vol_spike:
+            # Long: price breaks above breakout_up with KAMA up and volume spike
+            if price > bu and price > kama_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = price
-            # Short: break below lower Donchian with 1d downtrend and volume spike
-            elif price < lower and price < ema_trend and vol_spike:
+            # Short: price breaks below breakout_down with KAMA down and volume spike
+            elif price < bd and price < kama_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = price
         
         elif position == 1:
             signals[i] = 0.25
-            highest_since_entry = max(highest_since_entry, price)
-            # Exit: ATR trailing stop or price returns to lower Donchian
-            if price < highest_since_entry - 2.5 * atr_val or price < lower:
+            # Exit: price returns to breakout_down or KAMA turns down
+            if price < bd or price < kama_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            lowest_since_entry = min(lowest_since_entry, price)
-            # Exit: ATR trailing stop or price returns to upper Donchian
-            if price > lowest_since_entry + 2.5 * atr_val or price > upper:
+            # Exit: price returns to breakout_up or KAMA turns up
+            if price > bu or price > kama_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Donchian_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_KAMA_Direction_1dATRBreakout_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
