@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot (R1/S1) breakout with daily volume confirmation and 1h EMA34 trend filter.
-# Camarilla pivots provide mathematically derived support/resistance levels based on prior day's range.
-# Breakouts above R1 or below S1 with volume confirmation indicate institutional participation.
-# 1h EMA34 filter ensures we only trade in the direction of short-term trend to avoid counter-trend whipsaws.
-# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
-# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakouts below S1 in downtrend).
-name = "4h_Camarilla_R1S1_Breakout_Volume_EMA34Filter"
-timeframe = "4h"
+# Hypothesis: 12h Camarilla Pivot (R1/S1) breakout with daily volume spike and ADX filter.
+# Camarilla levels provide high-probability reversal/breakout points based on prior day's range.
+# Daily volume spike confirms institutional interest in the breakout.
+# ADX filter ensures we only trade when trend strength is sufficient to avoid chop.
+# Designed for low trade frequency (12-37/year) to minimize fee drag in 12h timeframe.
+# Works in bull markets (breakouts above R1) and bear markets (breakouts below S1).
+name = "12h_Camarilla_R1_S1_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,38 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots (ONCE before loop)
+    # Get daily data for Camarilla pivots and ADX (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels for today using yesterday's OHLC
+    # Calculate Camarilla levels from previous day's OHLC
     # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     high_prev = df_1d['high'].shift(1).values
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
     
-    # Calculate pivot range
-    range_prev = high_prev - low_prev
+    # Avoid look-ahead: use previous day's data only
+    camarilla_width = (high_prev - low_prev) * 1.1 / 12
+    r1 = close_prev + camarilla_width
+    s1 = close_prev - camarilla_width
     
-    # Camarilla levels
-    r1 = close_prev + range_prev * 1.1 / 12
-    s1 = close_prev - range_prev * 1.1 / 12
-    
-    # Align to 4h timeframe (values available after daily candle closes)
+    # Align daily Camarilla levels to 12h timeframe (already closed previous day)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Get 1h data for EMA34 trend filter
-    df_1h = get_htf_data(prices, '1h')
+    # Calculate daily ADX (14-period) for trend strength filter
+    # +DM, -DM, TR calculation
+    high_diff = df_1d['high'].diff()
+    low_diff = -df_1d['low'].diff()
     
-    # Calculate EMA34 on 1h closes
-    close_1h = df_1h['close'].values
-    ema_34_1h = pd.Series(close_1h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
     
-    # Align 1h EMA34 to 4h timeframe
-    ema_34_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_34_1h)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+                else:
+                    result[i] = np.nan
+        return result
+    
+    period = 14
+    atr_1d = wilders_smooth(tr.values, period)
+    plus_di_1d = 100 * wilders_smooth(plus_dm, period) / atr_1d
+    minus_di_1d = 100 * wilders_smooth(minus_dm, period) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilders_smooth(dx_1d, period)
+    
+    # Align daily ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate daily average volume for spike detection
+    vol_ma_20 = df_1d['volume'].rolling(window=20, min_periods=20).mean().shift(1).values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -62,12 +86,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 30  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_1h_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -78,27 +102,26 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_20[i]
+        # Volume spike: current daily volume above 20-day average
+        vol_spike = df_1d['volume'].iloc[i//1] > vol_ma_aligned[i] if i < len(df_1d) else False
         
-        # Trend filter: price above/below EMA34
-        price_above_ema = close[i] > ema_34_1h_aligned[i]
-        price_below_ema = close[i] < ema_34_1h_aligned[i]
+        # ADX filter: trend strength sufficient (ADX > 20)
+        adx_filter = adx_aligned[i] > 20
         
         if position == 0:
-            # Long: price breaks above R1 AND volume confirmation AND price above EMA34
+            # Long: price breaks above R1 AND volume spike AND ADX filter
             long_breakout = close[i] > r1_aligned[i]
-            if vol_confirm and price_above_ema and long_breakout:
+            if vol_spike and adx_filter and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND volume confirmation AND price below EMA34
-            elif vol_confirm and price_below_ema and close[i] < s1_aligned[i]:
+            # Short: price breaks below S1 AND volume spike AND ADX filter
+            elif vol_spike and adx_filter and close[i] < s1_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below S1 OR price drops below EMA34 (trend change)
-            exit_condition = close[i] < s1_aligned[i] or close[i] < ema_34_1h_aligned[i]
+            # Long exit: price falls below S1 OR ADX drops below 15 (trend weakening)
+            exit_condition = close[i] < s1_aligned[i] or adx_aligned[i] < 15
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -106,8 +129,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 OR price rises above EMA34 (trend change)
-            exit_condition = close[i] > r1_aligned[i] or close[i] > ema_34_1h_aligned[i]
+            # Short exit: price rises above R1 OR ADX drops below 15 (trend weakening)
+            exit_condition = close[i] > r1_aligned[i] or adx_aligned[i] < 15
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
