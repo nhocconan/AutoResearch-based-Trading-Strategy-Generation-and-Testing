@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrendFilter
-Hypothesis: Uses 1d Camarilla pivot levels (R1/S1) for breakout signals on 12h timeframe,
-filtered by 1d EMA50 trend direction. Volume confirmation reduces false breakouts.
-Designed for fewer trades (<40/year) to avoid fee drag, works in bull/bear via trend filter.
+6h_Ichimoku_TKCross_1dTrendFilter
+Hypothesis: Uses Ichimoku Tenkan/Kijun cross on 6h as entry signal, filtered by 1d EMA50 trend direction. In uptrend, take TK cross bullish; in downtrend, take TK cross bearish. Includes volume confirmation and minimum holding period to reduce whipsaw. Works in both bull and bear markets by aligning with higher timeframe trend.
 """
 
 import numpy as np
@@ -20,46 +18,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    tenkan_sen = np.full(n, np.nan)
+    for i in range(period_tenkan - 1, n):
+        period_high = high[i - period_tenkan + 1:i + 1].max()
+        period_low = low[i - period_tenkan + 1:i + 1].min()
+        tenkan_sen[i] = (period_high + period_low) / 2
     
-    camarilla_r1 = np.zeros_like(close_1d)
-    camarilla_s1 = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            camarilla_r1[i] = close_1d[i]
-            camarilla_s1[i] = close_1d[i]
-        else:
-            rang = high_1d[i-1] - low_1d[i-1]
-            camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
-            camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    kijun_sen = np.full(n, np.nan)
+    for i in range(period_kijun - 1, n):
+        period_high = high[i - period_kijun + 1:i + 1].max()
+        period_low = low[i - period_kijun + 1:i + 1].min()
+        kijun_sen[i] = (period_high + period_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    senkou_span_b = np.full(n, np.nan)
+    for i in range(period_senkou_b - 1, n):
+        period_high = high[i - period_senkou_b + 1:i + 1].max()
+        period_low = low[i - period_senkou_b + 1:i + 1].min()
+        senkou_span_b[i] = (period_high + period_low) / 2
     
     # Calculate 1d EMA50 for trend filter
-    ema_50_1d = np.zeros_like(close_1d)
-    ema_50_1d[:] = np.nan
+    close_1d = df_1d['close'].values
+    ema_50_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 50:
         k = 2 / (50 + 1)
         ema_50_1d[49] = np.mean(close_1d[:50])
         for i in range(50, len(close_1d)):
             ema_50_1d[i] = close_1d[i] * k + ema_50_1d[i-1] * (1 - k)
     
-    # Align 1d indicators to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1d EMA50 to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
+    vol_ma = np.full(n, np.nan)
+    for i in range(n):
         if i < 20:
-            vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
+            vol_ma[i] = np.mean(volume[0:i+1])
         else:
             vol_ma[i] = np.mean(volume[i-20+1:i+1])
     vol_spike = volume > (vol_ma * 1.5)
@@ -68,32 +76,41 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = 50  # Warmup for EMA
+    start_idx = max(period_kijun, period_senkou_b)  # Wait for Kijun and Senkou B
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if any required values are NaN
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         bars_since_entry += 1
         
+        # Determine trend from 1d EMA50: price above EMA = uptrend, below = downtrend
+        is_uptrend = close[i] > ema_50_1d_aligned[i]
+        
+        # TK cross signals
+        tk_cross_bullish = tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1]
+        tk_cross_bearish = tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1]
+        
         if position == 0:
-            # Long: price breaks above R1 with volume spike and above 1d EMA50 (uptrend)
-            if close[i] > camarilla_r1_aligned[i] and vol_spike[i] and close[i] > ema_50_aligned[i]:
+            # Enter long: TK cross bullish in uptrend with volume confirmation
+            if tk_cross_bullish and is_uptrend and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: price breaks below S1 with volume spike and below 1d EMA50 (downtrend)
-            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i] and close[i] < ema_50_aligned[i]:
+            # Enter short: TK cross bearish in downtrend with volume confirmation
+            elif tk_cross_bearish and not is_uptrend and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         
         elif position == 1:
-            # Exit: minimum 2 bars hold, then exit on mean reversion or trend change
-            if bars_since_entry >= 2:
-                if close[i] < camarilla_s1_aligned[i] or close[i] < ema_50_aligned[i] or not vol_spike[i]:
+            # Exit conditions: minimum 3 bars hold, then exit on TK cross bearish or trend change
+            if bars_since_entry >= 3:
+                if tk_cross_bearish or not is_uptrend or not vol_spike[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -102,9 +119,9 @@ def generate_signals(prices):
                 signals[i] = 0.25  # Hold during minimum period
         
         elif position == -1:
-            # Exit: minimum 2 bars hold, then exit on mean reversion or trend change
-            if bars_since_entry >= 2:
-                if close[i] > camarilla_r1_aligned[i] or close[i] > ema_50_aligned[i] or not vol_spike[i]:
+            # Exit conditions: minimum 3 bars hold, then exit on TK cross bullish or trend change
+            if bars_since_entry >= 3:
+                if tk_cross_bullish or is_uptrend or not vol_spike[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -114,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrendFilter"
-timeframe = "12h"
+name = "6h_Ichimoku_TKCross_1dTrendFilter"
+timeframe = "6h"
 leverage = 1.0
