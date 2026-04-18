@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
+"""
+4h_Donchian20_24hVolumeSurge_TrendFilter
+Hypothesis: Breakouts of 4h Donchian channel (20-period) combined with 24h volume surge
+and 1d EMA trend filter capture strong momentum moves in both bull and bear markets.
+The 24h volume surge ensures institutional participation, while EMA filter avoids
+counter-trend trades. Targets 20-40 trades/year with position size 0.25.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,87 +21,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for daily ATR and Bollinger Bands
+    # 4h Donchian channel (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False).values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily ATR (14-period)
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    atr_1d = np.full(len(close_1d), np.nan)
-    for i in range(14, len(close_1d)):
-        atr_1d[i] = np.mean(tr_1d[i-13:i+1])
+    # 24h volume MA (96 periods of 15m = 24h)
+    vol_ma_24h = np.full(n, np.nan)
+    for i in range(96, n):
+        vol_ma_24h[i] = np.mean(volume[i-96:i])
     
-    # Calculate daily Bollinger Bands (20-period, 2.0 std)
-    sma_20 = np.full(len(close_1d), np.nan)
-    std_20 = np.full(len(close_1d), np.nan)
-    for i in range(20, len(close_1d)):
-        sma_20[i] = np.mean(close_1d[i-20:i])
-        std_20[i] = np.std(close_1d[i-20:i])
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
-    
-    # Align daily indicators to 6h timeframe
-    atr_1d_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    upper_bb_6h = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_6h = align_htf_to_ltf(prices, df_1d, lower_bb)
-    
-    # Calculate 6h Bollinger Bands (20-period, 2.0 std) for mean reversion signals
-    sma_20_6h = np.full(n, np.nan)
-    std_20_6h = np.full(n, np.nan)
-    for i in range(20, n):
-        sma_20_6h[i] = np.mean(close[i-20:i])
-        std_20_6h[i] = np.std(close[i-20:i])
-    upper_bb_6h_local = sma_20_6h + 2.0 * std_20_6h
-    lower_bb_6h_local = sma_20_6h - 2.0 * std_20_6h
-    
-    # Calculate volume average (20-period) for confirmation
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Volume surge: current volume > 2.0 * 24h average
+    volume_surge = np.zeros(n, dtype=bool)
+    for i in range(96, n):
+        if vol_ma_24h[i] > 0:
+            volume_surge[i] = volume[i] > 2.0 * vol_ma_24h[i]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # need Bollinger Bands and ATR
+    start_idx = max(20, 96)
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(atr_1d_6h[i]) or np.isnan(upper_bb_6h[i]) or np.isnan(lower_bb_6h[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(sma_20_6h[i]) or np.isnan(std_20_6h[i])):
+        # Skip if data not ready
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_24h[i]):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when daily ATR > 0.5 * 6h price (avoid extremely low volatility)
-        vol_filter = atr_1d_6h[i] > 0.5 * (high[i] - low[i])
-        
-        # Volume confirmation: current volume > 1.3 * 20-period average
-        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
-        
         if position == 0:
-            # Long entry: price touches lower Bollinger Band with volume confirmation and volatility filter
-            if close[i] <= lower_bb_6h_local[i] and vol_confirmed and vol_filter:
+            # Long: break above Donchian high + volume surge + price above 1d EMA34
+            if close[i] > donchian_high[i] and volume_surge[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price touches upper Bollinger Band with volume confirmation and volatility filter
-            elif close[i] >= upper_bb_6h_local[i] and vol_confirmed and vol_filter:
+            # Short: break below Donchian low + volume surge + price below 1d EMA34
+            elif close[i] < donchian_low[i] and volume_surge[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses above the 20-period SMA (mean reversion target)
-            if close[i] > sma_20_6h[i]:
+            # Exit long: price crosses below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses below the 20-period SMA (mean reversion target)
-            if close[i] < sma_20_6h[i]:
+            # Exit short: price crosses above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Bollinger_MeanReversion_VolumeVolatilityFilter"
-timeframe = "6h"
+name = "4h_Donchian20_24hVolumeSurge_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
