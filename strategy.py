@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d ADX Trend and Volume
-Hypothesis: Breakouts of the 20-period Donchian channel, filtered by 1d ADX > 25 for trend strength and volume > 1.5x 20-period average, capture strong momentum moves in both bull and bear markets. This strategy targets ~25 trades/year to minimize fee drag while capturing significant breakout moves. The ADX filter ensures we only trade in trending conditions, reducing whipsaws during sideways markets.
+12h Ichimoku Cloud Breakout with Weekly Volume Filter
+Hypothesis: Ichimoku cloud acts as dynamic support/resistance. Breaking above/below cloud with volume confirmation captures strong momentum moves. Weekly volume filter ensures institutional participation, working in both bull (breakouts) and bear (breakdowns) markets. Targets 15-25 trades/year on 12h timeframe to minimize fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,84 +18,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for volume filter (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate ADX on 1d
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Weekly average volume
+    weekly_vol_avg = pd.Series(df_weekly['volume'].values).rolling(window=4, min_periods=4).mean().values
+    weekly_vol_avg_aligned = align_htf_to_ltf(prices, df_weekly, weekly_vol_avg)
     
-    # Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2.0
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2.0
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / tr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / tr_14
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2.0
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_14 = adx  # ADX(14)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2.0
     
-    # Align ADX to 4h timeframe
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    # For signal, we use current close vs cloud ahead
     
-    # Calculate Donchian channel on 4h (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
     
-    # Volume filter: current volume > 1.5x 20-period volume average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    # Volume filter: current volume > 1.5x weekly average volume
+    vol_filter = volume > (weekly_vol_avg_aligned * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators
+    start_idx = 60  # Warmup for Ichimoku (52 periods + buffer)
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_14_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(weekly_vol_avg_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_14_aligned[i]
         vol_ok = vol_filter[i]
         
+        # Bullish: price above cloud (both spans)
+        above_cloud = price > cloud_top[i] and price > cloud_bottom[i]
+        # Bearish: price below cloud (both spans)
+        below_cloud = price < cloud_top[i] and price < cloud_bottom[i]
+        
         if position == 0:
-            # Long: breakout above upper Donchian with volume and strong trend
-            if price > highest_high[i] and vol_ok and adx_val > 25:
+            # Long: price breaks above cloud with volume
+            if above_cloud and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower Donchian with volume and strong trend
-            elif price < lowest_low[i] and vol_ok and adx_val > 25:
+            # Short: price breaks below cloud with volume
+            elif below_cloud and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if price returns to the middle of the channel or trend weakens
-            mid_channel = (highest_high[i] + lowest_low[i]) / 2
-            if price < mid_channel or adx_val < 20:
+            # Exit if price re-enters cloud
+            if not above_cloud:  # price <= cloud_top or >= cloud_bottom (inside or below cloud)
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price returns to the middle of the channel or trend weakens
-            mid_channel = (highest_high[i] + lowest_low[i]) / 2
-            if price > mid_channel or adx_val < 20:
+            # Exit if price re-enters cloud
+            if not below_cloud:  # price >= cloud_bottom or <= cloud_top (inside or above cloud)
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_ADX_Volume"
-timeframe = "4h"
+name = "12h_Ichimoku_Cloud_Breakout_WeeklyVolume"
+timeframe = "12h"
 leverage = 1.0
