@@ -3,94 +3,68 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_TrendFilter_1hEntry_V1"
-timeframe = "1h"
+name = "4h_200EMA_AboveVolumeBreakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # HTF: 4h trend filter
-    df_4h = get_htf_data(prices, '4h')
-    # EMA34 on 4h close
-    close_4h = df_4h['close'].values
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    
-    # HTF: 1d trend filter
+    # Daily data for 200 EMA and ATR
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1h indicators for entry timing
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Daily 200 EMA for trend filter
+    ema_200_d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_d)
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Daily ATR(14) for volatility filter
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
+    
+    # 4h volume filter: current volume > 2.0 * 24-period average (24 * 4h = 4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 200  # Wait for EMA200 calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(atr_d_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema34_4h_val = ema34_4h_aligned[i]
-        ema50_1d_val = ema50_1d_aligned[i]
-        rsi_val = rsi[i]
+        ema_200_val = ema_200_aligned[i]
+        atr_val = atr_d_aligned[i]
         vol_filter = volume_filter[i]
         
-        # Trend direction: both 4h and 1d EMA aligned
-        long_trend = close_val > ema34_4h_val and close_val > ema50_1d_val
-        short_trend = close_val < ema34_4h_val and close_val < ema50_1d_val
-        
         if position == 0:
-            # Long entry: uptrend + RSI pullback + volume
-            if long_trend and rsi_val < 40 and vol_filter:
-                signals[i] = 0.20
+            # Long: price above 200 EMA with volume and sufficient volatility
+            if close_val > ema_200_val and vol_filter and atr_val > 0:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + RSI bounce + volume
-            elif short_trend and rsi_val > 60 and vol_filter:
-                signals[i] = -0.20
-                position = -1
         
         elif position == 1:
-            # Long exit: trend breaks or RSI overbought
-            if not long_trend or rsi_val > 70:
+            # Exit: price falls back below 200 EMA
+            if close_val < ema_200_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-        
-        elif position == -1:
-            # Short exit: trend breaks or RSI oversold
-            if not short_trend or rsi_val < 30:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
+                signals[i] = 0.25
     
     return signals
