@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Donchian_Breakout_Volume_Trend_v1
-Strategy: Daily Donchian channel breakout with volume confirmation and weekly trend filter.
-Long: Close breaks above 20-day Donchian upper band + volume > 1.5x average + weekly close > weekly EMA34.
-Short: Close breaks below 20-day Donchian lower band + volume > 1.5x average + weekly close < weekly EMA34.
-Exit: Opposite Donchian band touch.
-Target: 15-25 trades/year per symbol (60-100 total over 4 years).
-Uses volume to filter false breakouts and weekly trend to align with higher timeframe momentum.
+6h_RSI_MeanReversion_BollingerBand_v1
+Strategy: 6h RSI mean reversal with Bollinger Band support/resistance and volume confirmation.
+Long: RSI < 30 and price touches lower BB with volume > 1.3x average.
+Short: RSI > 70 and price touches upper BB with volume > 1.3x average.
+Exit: RSI crosses 50 (mean reversion complete) or volatility expansion.
+Uses 1d trend filter: only trade in direction of daily EMA50 to avoid counter-trend in strong trends.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years).
+Works in ranging markets; trend filter avoids major losses in trends.
 """
 
 import numpy as np
@@ -23,26 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Bollinger Bands(20,2)
+    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std()
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_upper = bb_upper.values
+    bb_lower = bb_lower.values
+    
+    # Daily trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # 20-day Donchian channels
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align all data to daily timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Volume average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,43 +57,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        
+        # Trend filter: only long in uptrend, only short in downtrend
+        uptrend = close[i] > ema_50_aligned[i]
+        downtrend = close[i] < ema_50_aligned[i]
         
         if position == 0:
-            # Long: close above upper Donchian + volume + weekly uptrend
-            if close[i] > upper_20_aligned[i] and vol_confirm and close[i] > ema34_1w_aligned[i]:
+            # Long: RSI oversold + touches lower BB + volume + uptrend
+            if (rsi[i] < 30 and close[i] <= bb_lower[i] and vol_confirm and uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short: close below lower Donchian + volume + weekly downtrend
-            elif close[i] < lower_20_aligned[i] and vol_confirm and close[i] < ema34_1w_aligned[i]:
+            # Short: RSI overbought + touches upper BB + volume + downtrend
+            elif (rsi[i] > 70 and close[i] >= bb_upper[i] and vol_confirm and downtrend):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close touches lower Donchian band
-            if close[i] < lower_20_aligned[i]:
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long exit: RSI crosses 50 or volatility expansion (price touches upper BB)
+            if rsi[i] >= 50 or close[i] >= bb_upper[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close touches upper Donchian band
-            if close[i] > upper_20_aligned[i]:
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short exit: RSI crosses 50 or volatility expansion (price touches lower BB)
+            if rsi[i] <= 50 or close[i] <= bb_lower[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "1d_Donchian_Breakout_Volume_Trend_v1"
-timeframe = "1d"
+name = "6h_RSI_MeanReversion_BollingerBand_v1"
+timeframe = "6h"
 leverage = 1.0
