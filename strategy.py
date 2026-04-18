@@ -1,132 +1,101 @@
 #!/usr/bin/env python3
 """
-1d RSI-40/60 Pullback to 20-day SMA + Volume Confirmation
-Hypothesis: In trending markets, price pulls back to the 20-day SMA before continuing.
-RSI 40-60 range identifies pullbacks in established trends (avoiding overbought/oversold extremes).
-Volume confirmation ensures institutional participation. Works in bull/bear by following trend.
-Low trade frequency: only takes trades in alignment with 200-day trend filter.
+6h Elder Ray Index + Volume Spike + 1d Trend Filter
+Hypothesis: Elder Ray (bull/bear power) identifies institutional buying/selling pressure. Combined with volume spikes (confirming institutional participation) and 1d trend filter (avoiding counter-trend trades), it captures strong momentum moves while avoiding whipsaws. Works in both bull and bear markets by following the 1d trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_ema(arr, period):
+    """Calculate Exponential Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    alpha = 2 / (period + 1)
+    ema = np.zeros_like(arr)
+    ema[0] = arr[0]
+    for i in range(1, len(arr)):
+        ema[i] = alpha * arr[i] + (1 - alpha) * ema[i-1]
+    return ema
+
+def calculate_elder_ray(high, low, close, ema_period=13):
+    """Calculate Elder Ray Index: Bull Power and Bear Power"""
+    ema = calculate_ema(close, ema_period)
+    bull_power = high - ema
+    bear_power = low - ema
+    return bull_power, bear_power
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 200-day SMA for trend filter (using daily data)
-    df_200d = get_htf_data(prices, '1d')
-    if len(df_200d) < 200:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    close_200d = df_200d['close'].values
-    sma_200 = np.zeros_like(close_200d)
-    for i in range(len(close_200d)):
-        if i < 199:
-            sma_200[i] = np.nan
-        else:
-            sma_200[i] = np.mean(close_200d[i-199:i+1])
-    sma_200_aligned = align_htf_to_ltf(prices, df_200d, sma_200)
     
-    # Get 20-day SMA for pullback target (using daily data)
-    df_20d = get_htf_data(prices, '1d')
-    if len(df_20d) < 20:
-        return np.zeros(n)
-    close_20d = df_20d['close'].values
-    sma_20 = np.zeros_like(close_20d)
-    for i in range(len(close_20d)):
-        if i < 19:
-            sma_20[i] = np.nan
-        else:
-            sma_20[i] = np.mean(close_20d[i-19:i+1])
-    sma_20_aligned = align_htf_to_ltf(prices, df_20d, sma_20)
+    # Calculate Elder Ray on 6h data
+    bull_power, bear_power = calculate_elder_ray(high, low, close, ema_period=13)
     
-    # Calculate RSI(14) on daily close
-    delta = np.diff(close_200d, prepend=close_200d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, 21)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Wilder smoothing for RSI
-    def rsi_wilder(gain, loss, period=14):
-        avg_gain = np.zeros_like(gain)
-        avg_loss = np.zeros_like(loss)
-        if len(gain) < period:
-            return np.full_like(gain, 50.0)
-        # Initial average
-        avg_gain[period-1] = np.mean(gain[:period])
-        avg_loss[period-1] = np.mean(loss[:period])
-        # Wilder smoothing
-        for i in range(period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi = rsi_wilder(gain, loss, 14)
-    rsi_aligned = align_htf_to_ltf(prices, df_200d, rsi)
-    
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_ma_20 = np.zeros_like(volume)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i < 19:
-            vol_ma_20[i] = np.mean(volume[max(0, i-18):i+1]) if i >= 0 else volume[i]
+        if i < 20:
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
-            vol_ma_20[i] = np.mean(volume[i-18:i+1])
-    vol_confirm = volume > (vol_ma_20 * 1.5)
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Need 200-day trend
+    start_idx = 25  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(sma_200_aligned[i]) or np.isnan(sma_20_aligned[i]) or np.isnan(rsi_aligned[i]):
+        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        sma200_val = sma_200_aligned[i]
-        sma20_val = sma_20_aligned[i]
-        rsi_val = rsi_aligned[i]
-        vol_ok = vol_confirm[i]
+        # Trend filter: 1 = uptrend (price > EMA), -1 = downtrend (price < EMA)
+        trend = 1 if close[i] > ema_1d_aligned[i] else -1
         
         if position == 0:
-            # Enter long: price above 200-day SMA (uptrend), pulling back to 20-day SMA,
-            # RSI in 40-60 range (not overbought), with volume confirmation
-            if (close[i] > sma200_val and 
-                close[i] <= sma20_val * 1.02 and  # Allow small overshoot above 20-day SMA
-                close[i] >= sma20_val * 0.98 and  # Allow small undershoot below 20-day SMA
-                40 <= rsi_val <= 60 and
-                vol_ok):
+            # Enter long: bull power > 0 (buying pressure) + volume spike + uptrend
+            if (bull_power[i] > 0 and 
+                vol_spike[i] and 
+                trend == 1):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below 200-day SMA (downtrend), pulling back to 20-day SMA,
-            # RSI in 40-60 range (not oversold), with volume confirmation
-            elif (close[i] < sma200_val and 
-                  close[i] <= sma20_val * 1.02 and
-                  close[i] >= sma20_val * 0.98 and
-                  40 <= rsi_val <= 60 and
-                  vol_ok):
+            # Enter short: bear power < 0 (selling pressure) + volume spike + downtrend
+            elif (bear_power[i] < 0 and 
+                  vol_spike[i] and 
+                  trend == -1):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below 20-day SMA or RSI > 70 (overbought)
-            if close[i] < sma20_val * 0.98 or rsi_val > 70:
+            # Exit long: bull power turns negative or trend changes
+            if bull_power[i] <= 0 or trend == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above 20-day SMA or RSI < 30 (oversold)
-            if close[i] > sma20_val * 1.02 or rsi_val < 30:
+            # Exit short: bear power turns positive or trend changes
+            if bear_power[i] >= 0 or trend == 1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -134,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_Pullback_to_SMA20_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_VolumeSpike_1dTrendFilter"
+timeframe = "6h"
 leverage = 1.0
