@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend_1dEMA34
-Hypothesis: Price breaks above/below Donchian channels (20-period high/low) with volume spike and daily EMA34 trend filter. Works in both bull/bear markets by only taking breakouts in the direction of the daily trend, reducing false reversals. Target: 25-40 trades/year to minimize fee drag while capturing strong directional moves.
+6h_Williams_Alligator_Touch_EMA34_Volume
+Hypothesis: Williams Alligator (13,8,5 SMAs) touching price with volume confirmation and 1d EMA34 trend filter on 6h timeframe.
+Long when price touches Alligator's Jaw (13 SMA) from below with volume spike in uptrend.
+Short when price touches Jaw from above with volume spike in downtrend.
+Uses 1d EMA34 to filter trend direction and avoid counter-trend trades.
+Target: 15-25 trades/year to minimize fee drag while capturing strong trend continuations.
 """
 
 import numpy as np
@@ -24,9 +28,10 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian channels: 20-period high/low
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
+    sma_5 = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    sma_8 = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    sma_13 = pd.Series(close).rolling(window=13, min_periods=13).mean().values
     
     # Volume spike: >1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -35,47 +40,52 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20)  # Warmup for indicators
+    start_idx = max(20, 13)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+        if (np.isnan(sma_5[i]) or np.isnan(sma_8[i]) or np.isnan(sma_13[i]) or
             np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
+        jaw = sma_13[i]
         ema34 = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band with volume spike and uptrend (price > daily EMA34)
-            if (price > upper and vol_spike and price > ema34):
+            # Long: price touches Jaw from below with volume spike in uptrend
+            if (low[i] <= jaw <= high[i] and  # price touches Jaw
+                close[i] > jaw and           # closes above Jaw (confirms upward touch)
+                vol_spike and
+                price > ema34):              # uptrend filter
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band with volume spike and downtrend (price < daily EMA34)
-            elif (price < lower and vol_spike and price < ema34):
+            # Short: price touches Jaw from above with volume spike in downtrend
+            elif (low[i] <= jaw <= high[i] and  # price touches Jaw
+                  close[i] < jaw and           # closes below Jaw (confirms downward touch)
+                  vol_spike and
+                  price < ema34):              # downtrend filter
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price closes below daily EMA34 OR breaks below lower band (reversal)
-            if price < ema34 or price < lower:
+            # Exit: price crosses below Teeth (8 SMA) or trend reverses
+            if close[i] < sma_8[i] or price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price closes above daily EMA34 OR breaks above upper band (reversal)
-            if price > ema34 or price > upper:
+            # Exit: price crosses above Teeth (8 SMA) or trend reverses
+            if close[i] > sma_8[i] or price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Trend_1dEMA34"
-timeframe = "4h"
+name = "6h_Williams_Alligator_Touch_EMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
