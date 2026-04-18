@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray with 12h EMA trend filter.
-# Williams Alligator identifies trend phases via smoothed median lines (Jaw, Teeth, Lips).
-# Elder Ray (Bull Power/Bear Power) measures buying/selling pressure relative to EMA.
-# Combined with 12h EMA trend filter to avoid counter-trend trades.
-# Works in bull markets (Bull Power > 0, price above Jaw, above 12h EMA) and bear markets
-# (Bear Power < 0, price below Jaw, below 12h EMA). Low trade frequency expected.
+# Hypothesis: 4h Williams Alligator with 1d EMA filter and volume confirmation.
+# Williams Alligator uses smoothed SMAs (Jaw, Teeth, Lips) to identify trends.
+# When the lines are intertwined (no trend), we stay flat. When they diverge in alignment:
+#   - Bull: Lips > Teeth > Jaw (green alignment) -> long
+#   - Bear: Jaw > Teeth > Lips (red alignment) -> short
+# 1d EMA34 filter ensures we only trade in direction of higher timeframe trend.
+# Volume confirmation adds conviction. Designed for low trade frequency (20-40/year).
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
 
-name = "6h_WilliamsAlligator_ElderRay_12hEMA"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,56 +24,64 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Williams Alligator and Elder Ray (EMA13)
+    # Get 4h data for Williams Alligator (smoothed SMAs)
+    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for EMA filter
     df_1d = get_htf_data(prices, '1d')
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
     
-    # Williams Alligator: SMMA (Smoothed Moving Average) of median price
-    # Median price = (High + Low) / 2
-    median_price = (high + low) / 2
-    
+    # Williams Alligator: 3 smoothed SMAs
     # Jaw: 13-period SMMA, shifted 8 bars
     # Teeth: 8-period SMMA, shifted 5 bars
     # Lips: 5-period SMMA, shifted 3 bars
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
+    # SMMA (Smoothed Moving Average) = EMA with alpha = 1/period
+    
+    def smma(data, period):
+        """Smoothed Moving Average - equivalent to EMA with alpha=1/period"""
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
             # First value is simple average
-            result[period-1] = np.mean(arr[:period])
-            # Subsequent values: smoothed = (prev * (period-1) + current) / period
-            for i in range(period, len(arr)):
-                if not np.isnan(result[i-1]):
-                    result[i] = (result[i-1] * (period-1) + arr[i]) / period
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
                 else:
                     result[i] = np.nan
         return result
     
-    jaw = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
+    # Calculate Alligator lines on 4h close
+    close_4h = df_4h['close'].values
     
-    # Shift as per Alligator definition
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
+    # Lips: 5-period SMMA, shifted 3
+    lips_raw = smma(close_4h, 5)
+    lips = np.roll(lips_raw, 3)  # shift right by 3
+    lips[:3] = np.nan  # first 3 values invalid after shift
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Teeth: 8-period SMMA, shifted 5
+    teeth_raw = smma(close_4h, 8)
+    teeth = np.roll(teeth_raw, 5)  # shift right by 5
+    teeth[:5] = np.nan
     
-    # Align Alligator lines and Elder Ray to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Jaw: 13-period SMMA, shifted 8
+    jaw_raw = smma(close_4h, 13)
+    jaw = np.roll(jaw_raw, 8)  # shift right by 8
+    jaw[:8] = np.nan
     
-    # 12h EMA34 for trend filter
-    ema34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Align to lower timeframe (4h -> 4h is identity but we use align_htf_to_ltf for consistency)
+    # Actually, since we're already on 4h, we can use directly but keep the pattern
+    lips_aligned = align_htf_to_ltf(prices, df_4h, lips)
+    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth)
+    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw)
+    
+    # 1d EMA34 filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 20-period average volume for confirmation (on 4h data)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -79,13 +89,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema34_12h_aligned[i])):
+        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(jaw_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -96,33 +105,44 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator alignment check
+        # Volume confirmation: current volume above average
+        vol_confirm = volume[i] > vol_ma_20[i]
+        
+        # Alligator alignment
+        lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
+        
         # Bullish alignment: Lips > Teeth > Jaw
-        # Bearish alignment: Lips < Teeth < Jaw
-        bullish_align = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        bearish_align = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
+        # Bearish alignment: Jaw > Teeth > Lips
+        bearish_alignment = jaw_val > teeth_val and teeth_val > lips_val
+        
+        # EMA filter: price relative to 1d EMA34
+        price_above_ema = close[i] > ema_34_aligned[i]
+        price_below_ema = close[i] < ema_34_aligned[i]
         
         if position == 0:
-            # Long: Bullish alignment AND Bull Power > 0 AND price above 12h EMA34
-            if bullish_align and bull_power_aligned[i] > 0 and close[i] > ema34_12h_aligned[i]:
+            # Long: Bullish alignment AND price above 1d EMA AND volume
+            if bullish_alignment and price_above_ema and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment AND Bear Power < 0 AND price below 12h EMA34
-            elif bearish_align and bear_power_aligned[i] < 0 and close[i] < ema34_12h_aligned[i]:
+            # Short: Bearish alignment AND price below 1d EMA AND volume
+            elif bearish_alignment and price_below_ema and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bearish alignment OR Bull Power <= 0 OR price below 12h EMA34
-            if (not bullish_align) or (bull_power_aligned[i] <= 0) or (close[i] <= ema34_12h_aligned[i]):
+            # Long exit: Alignment breaks (not bullish) OR price crosses below 1d EMA
+            if not bullish_alignment or price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bullish alignment OR Bear Power >= 0 OR price above 12h EMA34
-            if (not bearish_align) or (bear_power_aligned[i] >= 0) or (close[i] >= ema34_12h_aligned[i]):
+            # Short exit: Alignment breaks (not bearish) OR price crosses above 1d EMA
+            if not bearish_alignment or price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
