@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Channel_Breakout_With_Volume_and_1wTrend_v1
-Hypothesis: Buy when price breaks above upper Keltner Channel (20,2) with volume spike and above 1w EMA40 trend; sell when price breaks below lower channel with volume spike and below 1w EMA40. Keltner Channels adapt to volatility better than Bollinger Bands in trending markets, volume confirms institutional participation, and 1w EMA40 ensures alignment with long-term trend. Designed for low trade frequency (<15/year) to minimize fee drag while capturing sustained moves in both bull and bear markets.
+4h_KAMA_Trend_With_Volume_Filter_v2
+Hypothesis: Use KAMA (14,2,30) for trend direction, volume > 1.5x 20-period average for confirmation, and enter only when price crosses above/below KAMA with volume confirmation. KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing trends. Volume filter ensures institutional participation. Designed for 15-30 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -18,72 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Keltner Channel (20, 2)
-    close_series = pd.Series(close)
-    ma = close_series.rolling(window=20, min_periods=20).mean()
-    atr_series = pd.Series(high - low).rolling(window=20, min_periods=20).mean()
-    upper = ma + 2 * atr_series
-    lower = ma - 2 * atr_series
-    upper_kc = upper.values
-    lower_kc = lower.values
-    middle_kc = ma.values
+    # KAMA: Efficiency Ratio (ER) smoothing
+    def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
+        close_series = pd.Series(close)
+        change = abs(close_series.diff(er_period))
+        volatility = close_series.diff().abs().rolling(window=er_period).sum()
+        er = change / volatility.replace(0, np.nan)
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        kama = np.zeros_like(close, dtype=float)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            if np.isnan(sc.iloc[i]) if hasattr(sc, 'iloc') else np.isnan(sc[i]):
+                kama[i] = kama[i-1]
+            else:
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Volume spike: >2.0x 20-period average
+    kama = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
+    
+    # Volume confirmation: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # 1w EMA40 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need KC and volume MA
+    start_idx = 30  # Need KAMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(volume_spike[i]) or
-            np.isnan(upper_kc[i]) or
-            np.isnan(lower_kc[i])):
+        if np.isnan(kama[i]) or np.isnan(volume_confirm[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_1w_val = ema_1w_aligned[i]
-        vol_spike = volume_spike[i]
-        upper = upper_kc[i]
-        lower = lower_kc[i]
-        middle = middle_kc[i]
+        kama_val = kama[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Long: price > upper KC with volume spike and above 1w EMA40
-            if price > upper and vol_spike and price > ema_1w_val:
+            # Long: price crosses above KAMA with volume confirmation
+            if price > kama_val and close[i-1] <= kama[i-1] and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < lower KC with volume spike and below 1w EMA40
-            elif price < lower and vol_spike and price < ema_1w_val:
+            # Short: price crosses below KAMA with volume confirmation
+            elif price < kama_val and close[i-1] >= kama[i-1] and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < middle KC or below 1w EMA40
-            if price < middle or price < ema_1w_val:
+            # Exit: price crosses below KAMA
+            if price < kama_val and close[i-1] >= kama[i-1]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > middle KC or above 1w EMA40
-            if price > middle or price > ema_1w_val:
+            # Exit: price crosses above KAMA
+            if price > kama_val and close[i-1] <= kama[i-1]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Keltner_Channel_Breakout_With_Volume_and_1wTrend_v1"
-timeframe = "1d"
+name = "4h_KAMA_Trend_With_Volume_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
