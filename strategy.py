@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Momentum with 4h Trend Filter and 1d Regime Filter
-# Uses 1h RSI(14) and momentum for entry timing, 4h EMA(50) for trend direction,
-# and 1d ADX(14) to filter ranging markets. Designed for 15-35 trades/year.
-# Works in bull markets (momentum + trend) and bear markets (mean reversion in range).
-name = "1h_Momentum_4hEMA50_1dADX_Filter"
-timeframe = "1h"
+# Hypothesis: 4h Donchian(20) breakout + Volume Spike + 1d Choppiness Regime Filter
+# Donchian channel breakouts capture trend continuation with high probability.
+# Volume spike confirms institutional participation in the breakout.
+# 1d Choppiness Index > 61.8 indicates ranging market (avoid breakouts in chop).
+# Works in bull markets (upward breakouts) and bear markets (downward breakouts).
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+name = "4h_Donchian20_VolumeSpike_1dChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,117 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Get 1d data for regime filter
+    # Get 1d data for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d Choppiness Index (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA50 for trend
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 1d ADX for regime detection
     # True Range
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(arr, period):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            res[period-1] = np.nansum(arr[:period])
-            for i in range(period, len(arr)):
-                res[i] = res[i-1] - (res[i-1] / period) + arr[i]
-        return res
-    atr_1d = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr_1d
-    di_minus = 100 * dm_minus_smooth / atr_1d
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = wilder_smooth(dx, 14)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # Calculate 1h RSI(14) for momentum
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    # Wilder's smoothing for RSI
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        for i in range(14, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend NaN for first element
-    rsi = np.concatenate([[np.nan], rsi])
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1h price change momentum (4-period ROC)
-    roc = np.full_like(close, np.nan)
-    for i in range(4, len(close)):
-        roc[i] = (close[i] - close[i-4]) / close[i-4] * 100
+    # Sum of TR over 14 periods
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index
+    chop = 100 * np.log10(sum_tr / (hh_14 - ll_14)) / np.log10(14)
+    chop = np.where((hh_14 - ll_14) == 0, 50, chop)  # avoid division by zero
+    
+    # Align Choppiness Index to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate volume spike: current volume > 2.0 * 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(rsi[i]) or np.isnan(roc[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema_val = ema_50_4h_aligned[i]
-        adx_val = adx_aligned[i]
-        rsi_val = rsi[i]
-        roc_val = roc[i]
+        high_20_val = high_20[i]
+        low_20_val = low_20[i]
+        chop_val = chop_aligned[i]
         
         if position == 0:
-            # Long: Uptrend (price > EMA50), strong momentum (ROC > 0), not overbought (RSI < 70), trending market (ADX > 20)
-            if close_val > ema_val and roc_val > 0 and rsi_val < 70 and adx_val > 20:
-                signals[i] = 0.20
+            # Long: Close above Upper Donchian AND chop > 61.8 (trending) AND volume spike
+            if close_val > high_20_val and chop_val > 61.8 and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Downtrend (price < EMA50), weak momentum (ROC < 0), not oversold (RSI > 30), trending market (ADX > 20)
-            elif close_val < ema_val and roc_val < 0 and rsi_val > 30 and adx_val > 20:
-                signals[i] = -0.20
+            # Short: Close below Lower Donchian AND chop > 61.8 (trending) AND volume spike
+            elif close_val < low_20_val and chop_val > 61.8 and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Trend change (price < EMA50) or overbought (RSI > 70) or range market (ADX < 15)
-            if close_val < ema_val or rsi_val > 70 or adx_val < 15:
+            # Long exit: Close below Lower Donchian (reversal) or at Upper Donchian (take profit)
+            if close_val < low_20_val or close_val >= high_20_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Trend change (price > EMA50) or oversold (RSI < 30) or range market (ADX < 15)
-            if close_val > ema_val or rsi_val < 30 or adx_val < 15:
+            # Short exit: Close above Upper Donchian (reversal) or at Lower Donchian (take profit)
+            if close_val > high_20_val or close_val <= low_20_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
