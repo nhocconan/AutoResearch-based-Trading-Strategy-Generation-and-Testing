@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1w_Camarilla_R1_S1_Breakout_Volume_Trend_Filter
-Hypothesis: Uses weekly Camarilla pivot levels (R1/S1) from 1w timeframe. Enters long when price breaks above weekly R1 with 1w EMA34 > EMA89 and volume spike. Enters short when price breaks below weekly S1 with 1w EMA34 < EMA89 and volume spike. Weekly timeframe reduces trade frequency to target 12-37 trades/year. Volume confirmation ensures momentum. Designed to work in both bull and bear markets by using weekly trend filter and breakout logic.
+4h_Parabolic_SAR_Trend_Reverse
+Hypothesis: Uses Parabolic SAR for trend following with a volume filter and EMA trend filter.
+Enters long when SAR flips below price (bullish) with EMA21 > EMA50 and volume > 1.5x average.
+Enters short when SAR flips above price (bearish) with EMA21 < EMA50 and volume > 1.5x average.
+Exits when SAR flips back to the opposite side.
+Designed to capture trends while avoiding whipsaws in sideways markets, with low trade frequency.
 """
 
 import numpy as np
@@ -10,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,77 +22,117 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
+    # Parabolic SAR parameters
+    af_start = 0.02
+    af_increment = 0.02
+    af_max = 0.2
     
-    # Calculate weekly Camarilla pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Initialize SAR arrays
+    sar = np.full(n, np.nan)
+    trend = np.full(n, np.nan)  # 1 for uptrend, -1 for downtrend
+    af = np.full(n, np.nan)
+    ep = np.full(n, np.nan)  # extreme point
     
-    # Typical price for pivot
-    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Initialize first values
+    sar[0] = low[0]
+    trend[0] = 1
+    af[0] = af_start
+    ep[0] = high[0]
     
-    # Calculate Camarilla levels: R1, S1
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    r1_1w = close_1w + 1.1 * (high_1w - low_1w) / 12.0
-    s1_1w = close_1w - 1.1 * (high_1w - low_1w) / 12.0
+    # Calculate SAR for each period
+    for i in range(1, n):
+        if trend[i-1] == 1:  # uptrend
+            sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+            # SAR cannot be above the low of the past two periods
+            sar[i] = min(sar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
+            
+            # Check for trend reversal
+            if sar[i] > low[i]:
+                trend[i] = -1
+                sar[i] = ep[i-1]  # SAR becomes previous EP
+                ep[i] = low[i]
+                af[i] = af_start
+            else:
+                trend[i] = 1
+                if high[i] > ep[i-1]:
+                    ep[i] = high[i]
+                    af[i] = min(af[i-1] + af_increment, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+        else:  # downtrend
+            sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+            # SAR cannot be below the high of the past two periods
+            sar[i] = max(sar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+            
+            # Check for trend reversal
+            if sar[i] < high[i]:
+                trend[i] = 1
+                sar[i] = ep[i-1]  # SAR becomes previous EP
+                ep[i] = high[i]
+                af[i] = af_start
+            else:
+                trend[i] = -1
+                if low[i] < ep[i-1]:
+                    ep[i] = low[i]
+                    af[i] = min(af[i-1] + af_increment, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
     
-    # Align weekly levels to 12h timeframe (wait for weekly close)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # Weekly EMA trend filter: EMA34 and EMA89
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_1w = close_1w_series.ewm(span=89, adjust=False, min_periods=89).mean().values
-    
-    # Align EMAs to 12h timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    ema89_1w_aligned = align_htf_to_ltf(prices, df_1w, ema89_1w)
+    # EMA trend filter (21 and 50)
+    ema21 = np.full(n, np.nan)
+    ema50 = np.full(n, np.nan)
+    k21 = 2 / (21 + 1)
+    k50 = 2 / (50 + 1)
+    for i in range(50, n):
+        if i == 50:
+            ema21[i] = np.mean(close[i-21+1:i+1]) if i >= 21 else np.nan
+            ema50[i] = np.mean(close[i-50+1:i+1])
+        else:
+            if not np.isnan(ema21[i-1]):
+                ema21[i] = close[i] * k21 + ema21[i-1] * (1 - k21)
+            if not np.isnan(ema50[i-1]):
+                ema50[i] = close[i] * k50 + ema50[i-1] * (1 - k50)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Warmup for weekly indicators
+    start_idx = 50  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(ema89_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(sar[i]) or np.isnan(ema21[i]) or 
+            np.isnan(ema50[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above weekly R1 with uptrend and volume spike
-            if close[i] > r1_1w_aligned[i] and ema34_1w_aligned[i] > ema89_1w_aligned[i] and vol_spike[i]:
+            # Long: SAR below price (bullish) with uptrend and volume filter
+            if sar[i] < close[i] and ema21[i] > ema50[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S1 with downtrend and volume spike
-            elif close[i] < s1_1w_aligned[i] and ema34_1w_aligned[i] < ema89_1w_aligned[i] and vol_spike[i]:
+            # Short: SAR above price (bearish) with downtrend and volume filter
+            elif sar[i] > close[i] and ema21[i] < ema50[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below weekly S1 or trend weakens
-            if close[i] < s1_1w_aligned[i] or ema34_1w_aligned[i] <= ema89_1w_aligned[i]:
+            # Exit: SAR flips above price (trend reversal)
+            if sar[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above weekly R1 or trend weakens
-            if close[i] > r1_1w_aligned[i] or ema34_1w_aligned[i] >= ema89_1w_aligned[i]:
+            # Exit: SAR flips below price (trend reversal)
+            if sar[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_Camarilla_R1_S1_Breakout_Volume_Trend_Filter"
-timeframe = "12h"
+name = "4h_Parabolic_SAR_Trend_Reverse"
+timeframe = "4h"
 leverage = 1.0
