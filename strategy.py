@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_SMA_Crossover_Volume_Strategy
-Hypothesis: Use 12h SMA(34) trend as primary filter, with 4h SMA(10) crossover for entry timing, and volume confirmation (>1.8x 20-period average). This avoids whipsaws by requiring alignment between 12h trend and 4h momentum. Works in bull markets via long entries when 12h trend up and 4h SMA crosses above; in bear markets via short entries when 12h trend down and 4h SMA crosses below. Targets 20-30 trades/year with strict conditions.
+6h_1D_Momentum_Confluence
+Hypothesis: Use 1D EMA(34) as primary trend filter, with 6h EMA(13) cross above/below 1D EMA(34) for entry, and volume > 1.5x 20-period average for confirmation. This combines trend-following (EMA34) with momentum (EMA13 cross) and volume confirmation to reduce false signals. Works in bull markets by taking longs when 6h momentum aligns with 1D uptrend, and in bear markets by taking shorts when momentum aligns with 1D downtrend. Targets 15-25 trades/year by requiring EMA cross alignment, volume confirmation, and avoiding entries during low momentum periods.
 """
 
 import numpy as np
@@ -14,79 +14,65 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for SMA trend (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1D data for EMA34 (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h SMA(34)
-    sma_12h = np.full_like(close_12h, np.nan)
-    for i in range(33, len(close_12h)):
-        sma_12h[i] = np.mean(close_12h[i-33:i+1])
+    # Calculate EMA34 on 1D
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h SMA to 4h timeframe
-    sma_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_12h)
+    # Align EMA34 to 6h timeframe (wait for bar close)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 4h SMA(10) and SMA(30) for crossover
-    sma_10 = np.full(n, np.nan)
-    sma_30 = np.full(n, np.nan)
-    for i in range(9, n):
-        sma_10[i] = np.mean(close[i-9:i+1])
-    for i in range(29, n):
-        sma_30[i] = np.mean(close[i-29:i+1])
+    # Calculate EMA13 on 6s (LTF)
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume confirmation: current volume > 1.8 x 20-period average
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.8)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need SMA30
+    start_idx = max(34, 20)  # need EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma_12h_aligned[i]) or np.isnan(sma_10[i]) or 
-            np.isnan(sma_30[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema13[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: 12h uptrend (close > SMA), 4h SMA10 crosses above SMA30, with volume
-            if (close[i] > sma_12h_aligned[i] and 
-                sma_10[i] > sma_30[i] and 
-                sma_10[i-1] <= sma_30[i-1] and 
-                vol_confirm[i]):
+            # Long entry: EMA13 crosses above EMA34_1d, with volume confirmation
+            if (ema13[i] > ema34_1d_aligned[i] and 
+                ema13[i-1] <= ema34_1d_aligned[i-1] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: 12h downtrend (close < SMA), 4h SMA10 crosses below SMA30, with volume
-            elif (close[i] < sma_12h_aligned[i] and 
-                  sma_10[i] < sma_30[i] and 
-                  sma_10[i-1] >= sma_30[i-1] and 
-                  vol_confirm[i]):
+            # Short entry: EMA13 crosses below EMA34_1d, with volume confirmation
+            elif (ema13[i] < ema34_1d_aligned[i] and 
+                  ema13[i-1] >= ema34_1d_aligned[i-1] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: 12h trend turns down OR 4h SMA10 crosses below SMA30
-            if (close[i] < sma_12h_aligned[i] or 
-                (sma_10[i] < sma_30[i] and sma_10[i-1] >= sma_30[i-1])):
+            # Long exit: EMA13 crosses below EMA34_1d (trend change)
+            if ema13[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: 12h trend turns up OR 4h SMA10 crosses above SMA30
-            if (close[i] > sma_12h_aligned[i] or 
-                (sma_10[i] > sma_30[i] and sma_10[i-1] <= sma_30[i-1])):
+            # Short exit: EMA13 crosses above EMA34_1d (trend change)
+            if ema13[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_1d_SMA_Crossover_Volume_Strategy"
-timeframe = "4h"
+name = "6h_1D_Momentum_Confluence"
+timeframe = "6h"
 leverage = 1.0
