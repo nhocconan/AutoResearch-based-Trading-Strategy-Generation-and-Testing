@@ -1,109 +1,92 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Momentum_Trend
-Hypothesis: Uses Keltner Channel (ATR-based) breakouts with EMA trend filter on 4h. 
-Enters long when price breaks above upper band with EMA21 > EMA50, short when breaks below lower band with EMA21 < EMA50.
-Volume confirmation ensures momentum. Designed for fewer trades (~20-40/year) with strong trend capture in both bull and bear markets.
+4h_GapAndGo_Reversal
+Hypothesis: Exploits mean-reversion after overnight gaps on 4h chart. When price gaps significantly above/below prior 4h close and shows exhaustion (via RSI divergence or volume divergence), we expect a reversion to the mean. Works in both bull and bear markets as gaps occur during market open/close reactions and often reverse.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Keltner Channel parameters
-    atr_period = 10
-    ema_period = 20
-    keltner_mult = 2.0
+    # Parameters
+    gap_threshold = 0.015  # 1.5% gap
+    rsi_period = 14
+    rsi_overbought = 70
+    rsi_oversold = 30
+    vol_ma_period = 20
+    vol_div_threshold = 1.5  # volume should be 1.5x average for gap confirmation
     
-    # Calculate ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full(n, np.nan)
-    for i in range(atr_period, n):
-        if i == atr_period:
-            atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+    # Calculate RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(rsi_period, n):
+        if i == rsi_period:
+            avg_gain[i] = np.mean(gain[i-rsi_period+1:i+1])
+            avg_loss[i] = np.mean(loss[i-rsi_period+1:i+1])
         else:
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
     
-    # Calculate EMA for Keltner middle line
-    ema_mid = np.full(n, np.nan)
-    k = 2 / (ema_period + 1)
-    for i in range(ema_period, n):
-        if i == ema_period:
-            ema_mid[i] = np.mean(close[i-ema_period+1:i+1])
-        else:
-            ema_mid[i] = close[i] * k + ema_mid[i-1] * (1 - k)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Upper and lower bands
-    upper = ema_mid + keltner_mult * atr
-    lower = ema_mid - keltner_mult * atr
-    
-    # EMA trend filter (21 and 50)
-    ema21 = np.full(n, np.nan)
-    ema50 = np.full(n, np.nan)
-    k21 = 2 / (21 + 1)
-    k50 = 2 / (50 + 1)
-    for i in range(50, n):
-        if i == 50:
-            ema21[i] = np.mean(close[i-21+1:i+1]) if i >= 21 else np.nan
-            ema50[i] = np.mean(close[i-50+1:i+1])
-        else:
-            if not np.isnan(ema21[i-1]):
-                ema21[i] = close[i] * k21 + ema21[i-1] * (1 - k21)
-            if not np.isnan(ema50[i-1]):
-                ema50[i] = close[i] * k50 + ema50[i-1] * (1 - k50)
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume moving average
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.3)
+    for i in range(vol_ma_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period:i])
+    
+    # Calculate gap: current open vs previous 4h close
+    gap_pct = np.zeros(n)
+    gap_pct[0] = 0
+    for i in range(1, n):
+        gap_pct[i] = (open_price[i] - close[i-1]) / close[i-1]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup
+    start_idx = max(50, rsi_period, vol_ma_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema21[i]) or np.isnan(ema50[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above upper band with uptrend and volume spike
-            if close[i] > upper[i] and ema21[i] > ema50[i] and vol_spike[i]:
+            # Long: gap down (negative gap) with exhaustion signs
+            if gap_pct[i] < -gap_threshold and rsi[i] < rsi_oversold and volume[i] > vol_ma[i] * vol_div_threshold:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with downtrend and volume spike
-            elif close[i] < lower[i] and ema21[i] < ema50[i] and vol_spike[i]:
+            # Short: gap up (positive gap) with exhaustion signs
+            elif gap_pct[i] > gap_threshold and rsi[i] > rsi_overbought and volume[i] > vol_ma[i] * vol_div_threshold:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below EMA21 or trend weakens
-            if close[i] < ema21[i] or ema21[i] <= ema50[i]:
+            # Exit: RSI reverts to neutral or gap fills
+            if rsi[i] > 50 or gap_pct[i] > -gap_threshold/2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above EMA21 or trend weakens
-            if close[i] > ema21[i] or ema21[i] >= ema50[i]:
+            # Exit: RSI reverts to neutral or gap fills
+            if rsi[i] < 50 or gap_pct[i] < gap_threshold/2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Keltner_Momentum_Trend"
+name = "4h_GapAndGo_Reversal"
 timeframe = "4h"
 leverage = 1.0
