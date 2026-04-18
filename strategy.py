@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_with_12hEMA_Filter
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear regimes.
-12h EMA34 acts as a higher-timeframe trend filter to avoid counter-trend trades.
-Enter long when KAMA > 12h EMA34, short when KAMA < 12h EMA34.
-Exit when trend reverses. Low-frequency signals to minimize fee drag.
+12h_KAMA_Trend_Reversal_with_1dKAMA_Confirmation
+Hypothesis: 12h KAMA crossover signals trend changes, confirmed by 1d KAMA direction.
+Only trade when both timeframes agree to avoid whipsaw in choppy markets.
+Designed for low trade frequency (<40/year) to minimize fee drag while capturing major trend reversals.
+Works in both bull and bear markets by following the confirmed trend direction.
 """
 
 import numpy as np
@@ -13,80 +13,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     
-    # KAMA parameters
-    er_length = 10
-    fast_ema = 2
-    slow_ema = 30
-    
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_length))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
-    # Pad change array to match length
-    change = np.concatenate([np.full(er_length, np.nan), change])
-    er = np.where(volatility != 0, change / volatility, 0)
+    # Calculate 12h KAMA (primary signal)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    vol = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    # Pad arrays to match length
+    change = np.concatenate([np.full(10, np.nan), change])
+    vol = np.concatenate([np.full(10, np.nan), vol])
+    er = np.where(vol != 0, change / vol, 0)
     
     # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    # Handle NaN in er
-    sc = np.where(np.isnan(er), 0, sc)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
     
-    # Calculate KAMA
+    # KAMA calculation
     kama = np.full(n, np.nan)
-    kama[er_length] = close[er_length]  # Seed
-    for i in range(er_length + 1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
+    kama[0] = close[0]
+    for i in range(1, n):
+        if np.isnan(sc[i]):
             kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # 12h EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False).values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 1d KAMA for confirmation (higher timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
+    # 1d KAMA
+    change_1d = np.abs(np.diff(close_1d, n=5))  # 5-period change for daily
+    vol_1d = np.sum(np.abs(np.diff(close_1d)), axis=1)  # 5-period volatility
+    change_1d = np.concatenate([np.full(5, np.nan), change_1d])
+    vol_1d = np.concatenate([np.full(5, np.nan), vol_1d])
+    er_1d = np.where(vol_1d != 0, change_1d / vol_1d, 0)
+    sc_1d = (er_1d * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    
+    kama_1d = np.full(len(close_1d), np.nan)
+    kama_1d[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        if np.isnan(sc_1d[i]):
+            kama_1d[i] = kama_1d[i-1]
+        else:
+            kama_1d[i] = kama_1d[i-1] + sc_1d[i] * (close_1d[i] - kama_1d[i-1])
+    
+    # Align 1d KAMA to 12h timeframe
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    
+    # Generate signals
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(er_length + 1, 34)
+    start_idx = 30  # Need enough warmup for KAMA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or 
-            np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama[i-10]) or 
+            np.isnan(kama_1d_aligned[i]) or np.isnan(kama_1d_aligned[i-1])):
             signals[i] = 0.0
             continue
         
+        # 12h KAMA crossover signals
+        kama_cross_up = kama[i] > kama[i-10] and kama[i-1] <= kama[i-10]
+        kama_cross_down = kama[i] < kama[i-10] and kama[i-1] >= kama[i-10]
+        
+        # 1d KAMA direction (trend filter)
+        kama_1d_up = kama_1d_aligned[i] > kama_1d_aligned[i-1]
+        kama_1d_down = kama_1d_aligned[i] < kama_1d_aligned[i-1]
+        
         if position == 0:
-            # Long: KAMA above 12h EMA34
-            if kama[i] > ema_12h_aligned[i]:
+            # Long: 12h KAMA crosses up + 1d KAMA rising
+            if kama_cross_up and kama_1d_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA below 12h EMA34
-            elif kama[i] < ema_12h_aligned[i]:
+            # Short: 12h KAMA crosses down + 1d KAMA falling
+            elif kama_cross_down and kama_1d_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: KAMA crosses below 12h EMA34
-            if kama[i] < ema_12h_aligned[i]:
+            # Exit: 12h KAMA crosses down OR 1d KAMA turns down
+            if kama_cross_down or not kama_1d_up:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: KAMA crosses above 12h EMA34
-            if kama[i] > ema_12h_aligned[i]:
+            # Exit: 12h KAMA crosses up OR 1d KAMA turns up
+            if kama_cross_up or kama_1d_up:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_KAMA_Trend_with_12hEMA_Filter"
-timeframe = "4h"
+name = "12h_KAMA_Trend_Reversal_with_1dKAMA_Confirmation"
+timeframe = "12h"
 leverage = 1.0
