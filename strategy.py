@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v6"
-timeframe = "4h"
+name = "12h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,15 +38,15 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align to 4h
+    # Align to 12h
     R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
     S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
     pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
     atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
     
-    # Volume filter: current volume > 2.0 * 24-period average (24 * 4h = 4 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma_24)
+    # Volume filter: current volume > 2.0 * 2-period average (2 * 12h = 1 day)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    volume_filter = volume > (2.0 * vol_ma_2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,7 +57,7 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
             np.isnan(pivot_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+            np.isnan(vol_ma_2[i])):
             signals[i] = 0.0
             continue
         
