@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Daily_Pivot_Reversal_v1
-Hypothesis: In 6h timeframe, price tends to reverse at daily pivot points (PP) and support/resistance levels (S1, R1).
-Go long when price touches S1 with bullish reversal candle (close > open) and RSI < 40.
-Go short when price touches R1 with bearish reversal candle (close < open) and RSI > 60.
-Use volatility filter (ATR < 1.5x ATR(50)) to avoid whipsaws in high volatility.
-Target: 20-40 trades/year per symbol to minimize fee drag. Works in ranging and trending markets via mean reversion at key levels.
+12h_1D_Camarilla_R1S1_Breakout_Volume_V2
+Hypothesis: Use 1D Camarilla R1/S1 for directional bias, 12H for entry with volume confirmation.
+Long when price breaks above daily R1 with volume > 1.5x average during active session (08-20 UTC).
+Short when price breaks below daily S1 with volume > 1.5x average during active session.
+Fixed position size 0.25. Added volatility filter (ATR) to avoid chop.
+Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
+Works in bull/bear via volatility regime filter and session timing.
+Enhanced version with stricter entry conditions to reduce trade frequency and improve robustness.
 """
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,95 +24,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Previous day's OHLC for pivot calculation
+    # Previous day's OHLC for Camarilla calculation
     prev_close = np.roll(close_1d, 1)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]
+    prev_close[0] = close_1d[0]  # first day uses same day
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
     
-    # Pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    pp = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pp - prev_low
-    s1 = 2 * pp - prev_high
+    # Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    range_1d = prev_high - prev_low
+    r1 = prev_close + range_1d * 1.1 / 12
+    s1 = prev_close - range_1d * 1.1 / 12
     
-    # RSI(14) for overbought/oversold
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    roll_up = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
-    roll_down = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
-    rs = roll_up / roll_down.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # Volatility filter: use ATR(20) to avoid choppy markets
+    tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.absolute(np.roll(close_1d, 1) - low_1d)
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high_1d[0] - low_1d[0]  # first day
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily pivot levels to 6h
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Align all daily data to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
+    
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # need enough for indicators
+    start_idx = 50  # need enough for ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(atr_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extreme volatility
-        vol_filter = atr[i] < 1.5 * atr_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
-        # Price touching S1 or R1 (within 0.1% tolerance)
-        touch_s1 = np.abs(low[i] - s1_aligned[i]) / s1_aligned[i] < 0.001
-        touch_r1 = np.abs(high[i] - r1_aligned[i]) / r1_aligned[i] < 0.001
+        # Volatility filter: avoid extreme volatility (stop hunting)
+        vol_ma_long = pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr_20_aligned[i] < vol_ma_long[i] * 2 if not np.isnan(vol_ma_long[i]) else False
         
-        # Reversal candle: bullish (close > open) or bearish (close < open)
-        bullish_candle = close[i] > prices['open'].iloc[i]
-        bearish_candle = close[i] < prices['open'].iloc[i]
+        # Only trade during active session
+        in_session = session_mask[i]
         
         if position == 0:
-            # Long: price touches S1 with bullish candle and RSI < 40 (oversold)
-            if touch_s1 and bullish_candle and rsi[i] < 40 and vol_filter:
+            # Long: price breaks above R1 with volume and volatility filter during session
+            if close[i] > r1_aligned[i] and vol_confirm and vol_filter and in_session:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches R1 with bearish candle and RSI > 60 (overbought)
-            elif touch_r1 and bearish_candle and rsi[i] > 60 and vol_filter:
+            # Short: price breaks below S1 with volume and volatility filter during session
+            elif close[i] < s1_aligned[i] and vol_confirm and vol_filter and in_session:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches PP or RSI > 60 (overbought) or volatility filter fails
-            if close[i] >= pp_aligned[i] or rsi[i] > 60 or not vol_filter:
+            # Long exit: price returns below R1 or volatility spike or outside session
+            if close[i] < r1_aligned[i] or not vol_filter or not in_session:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches PP or RSI < 40 (oversold) or volatility filter fails
-            if close[i] <= pp_aligned[i] or rsi[i] < 40 or not vol_filter:
+            # Short exit: price returns above S1 or volatility spike or outside session
+            if close[i] > s1_aligned[i] or not vol_filter or not in_session:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -118,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Daily_Pivot_Reversal_v1"
-timeframe = "6h"
+name = "12h_1D_Camarilla_R1S1_Breakout_Volume_V2"
+timeframe = "12h"
 leverage = 1.0
