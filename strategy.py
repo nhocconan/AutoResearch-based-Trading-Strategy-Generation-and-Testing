@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for weekly calculations
+    if n < 60:  # Need enough data for 6h and 1d calculations
         return np.zeros(n)
     
     close = prices['close'].values
