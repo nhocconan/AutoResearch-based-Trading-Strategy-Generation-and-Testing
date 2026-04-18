@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RSI2_Streak_Trend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_S1_S3_Bounce"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,93 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA50
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    h1d = df_1d['high'].values
+    l1d = df_1d['low'].values
+    c1d = df_1d['close'].values
     
-    # RSI(2) on close
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi2 = 100 - (100 / (1 + rs))
-    rsi2_vals = rsi2.values
+    # Calculate Camarilla levels for each day
+    # S1 = C - (H-L)*1.05/4
+    # S3 = C - (H-L)*1.05/2
+    # R1 = C + (H-L)*1.05/4
+    # R3 = C + (H-L)*1.05/2
+    range_1d = h1d - l1d
+    s1_1d = c1d - range_1d * 1.05 / 4
+    s3_1d = c1d - range_1d * 1.05 / 2
+    r1_1d = c1d + range_1d * 1.05 / 4
+    r3_1d = c1d + range_1d * 1.05 / 2
     
-    # RSI(2) streak: consecutive days above/below 50
-    # We'll calculate streak of closes above/below close 2 periods ago
-    close_series = pd.Series(close)
-    up_days = (close_series > close_series.shift(2)).astype(int)
-    down_days = (close_series < close_series.shift(2)).astype(int)
+    # Align pivots to 12h (wait for daily close)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
     
-    # Streak calculation
-    up_streak = pd.Series(0, index=range(n))
-    down_streak = pd.Series(0, index=range(n))
-    
-    for i in range(n):
-        if i < 2:
-            up_streak.iloc[i] = 0
-            down_streak.iloc[i] = 0
-        else:
-            if up_days.iloc[i]:
-                up_streak.iloc[i] = up_streak.iloc[i-1] + 1 if i > 0 else 1
-                down_streak.iloc[i] = 0
-            elif down_days.iloc[i]:
-                down_streak.iloc[i] = down_streak.iloc[i-1] + 1 if i > 0 else 1
-                up_streak.iloc[i] = 0
-            else:
-                up_streak.iloc[i] = 0
-                down_streak.iloc[i] = 0
-    
-    up_streak_vals = up_streak.values
-    down_streak_vals = down_streak.values
-    
-    # Volume filter: volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Volume filter: current volume > 1.5 * 24-period average (2 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 and RSI2
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi2_vals[i]) or
-            np.isnan(up_streak_vals[i]) or np.isnan(down_streak_vals[i]) or
-            np.isnan(vol_ma_20[i])):
+        # Skip if any required data is not available
+        if (np.isnan(s1_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(r1_12h[i]) or 
+            np.isnan(r3_12h[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        ema50_val = ema50_1d_aligned[i]
-        rsi2_val = rsi2_vals[i]
-        up_streak_val = up_streak_vals[i]
-        down_streak_val = down_streak_vals[i]
+        s1_val = s1_12h[i]
+        s3_val = s3_12h[i]
+        r1_val = r1_12h[i]
+        r3_val = r3_12h[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: RSI2 < 10, up streak >= 2, above daily EMA50, volume
-            if rsi2_val < 10 and up_streak_val >= 2 and close_val > ema50_val and vol_filter:
+            # Long conditions:
+            # 1. Price near S1 support (within 0.5%)
+            # 2. Price near S3 support (within 0.5%)
+            # 3. Volume confirmation
+            near_s1 = abs(close_val - s1_val) / s1_val < 0.005
+            near_s3 = abs(close_val - s3_val) / s3_val < 0.005
+            if (near_s1 or near_s3) and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI2 > 90, down streak >= 2, below daily EMA50, volume
-            elif rsi2_val > 90 and down_streak_val >= 2 and close_val < ema50_val and vol_filter:
+            # Short conditions:
+            # 1. Price near R1 resistance (within 0.5%)
+            # 2. Price near R3 resistance (within 0.5%)
+            # 3. Volume confirmation
+            near_r1 = abs(close_val - r1_val) / r1_val < 0.005
+            near_r3 = abs(close_val - r3_val) / r3_val < 0.005
+            if (near_r1 or near_r3) and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI2 > 60 or price below EMA50
-            if rsi2_val > 60 or close_val < ema50_val:
+            # Long exit: price moves to midpoint or hits resistance
+            midpoint = (s1_val + r1_val) / 2
+            if close_val > midpoint or close_val > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI2 < 40 or price above EMA50
-            if rsi2_val < 40 or close_val > ema50_val:
+            # Short exit: price moves to midpoint or hits support
+            midpoint = (s1_val + r1_val) / 2
+            if close_val < midpoint or close_val < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
