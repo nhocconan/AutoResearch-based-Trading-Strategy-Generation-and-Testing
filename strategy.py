@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + Volume Spike + Regime Filter
-Hypothesis: Elder Ray (bull/bear power) identifies institutional buying/selling pressure. Combined with volume spikes and a simple trend regime filter (price vs 50-period EMA), it captures strong momentum moves while avoiding chop. Works in both bull (buy power) and bear (bear power) markets by going long when bulls dominate and short when bears dominate.
+4h Williams Fractal Breakout + Volume Spike + 1d EMA Trend Filter
+Hypothesis: Williams fractals identify potential turning points. A breakout above/below the most recent fractal with volume confirmation and 1d EMA trend filter captures momentum in both bull and bear markets. The 1d EMA ensures we only trade in the direction of the higher timeframe trend, reducing whipsaw.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ema(data, period):
-    """Calculate Exponential Moving Average"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
-    ema = np.zeros_like(data)
-    multiplier = 2 / (period + 1)
-    ema[0] = data[0]
-    for i in range(1, len(data)):
-        ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
-    return ema
-
-def calculate_elder_ray(high, low, close, ema_period=13):
-    """Calculate Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA"""
-    ema = calculate_ema(close, ema_period)
-    bull_power = high - ema
-    bear_power = low - ema
-    return bull_power, bear_power, ema
+def calculate_williams_fractals(high, low):
+    """Calculate Williams fractals: bearish (high) and bullish (low)"""
+    n = len(high)
+    bearish = np.full(n, np.nan)
+    bullish = np.full(n, np.nan)
+    
+    for i in range(2, n - 2):
+        # Bearish fractal: highest high with two lower highs on each side
+        if (high[i] > high[i-1] and high[i] > high[i-2] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            bearish[i] = high[i]
+        
+        # Bullish fractal: lowest low with two higher lows on each side
+        if (low[i] < low[i-1] and low[i] < low[i-2] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            bullish[i] = low[i]
+    
+    return bearish, bullish
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,34 +37,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and trend filter
+    # Get 1d data for EMA trend filter and fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Elder Ray on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    bull_power, bear_power, ema_13 = calculate_elder_ray(high_1d, low_1d, close_1d, ema_period=13)
+    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Align to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
+    # Calculate Williams fractals on 1d
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(
+        df_1d['high'].values, df_1d['low'].values
+    )
+    # Williams fractals need 2 extra bars for confirmation (center bar + 2 confirming bars)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
-    # Calculate 50-period EMA for regime filter (trending market)
-    ema_50 = calculate_ema(close_1d, 50)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # Volume spike: current volume > 1.5x 20-period average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
             vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,48 +74,43 @@ def generate_signals(prices):
     start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema_13_aligned[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
-        ema13_val = ema_13_aligned[i]
-        ema50_val = ema_50_aligned[i]
+        ema_val = ema_1d_aligned[i]
+        bearish_fractal_val = bearish_fractal_aligned[i]
+        bullish_fractal_val = bullish_fractal_aligned[i]
         vol_ok = vol_spike[i]
-        close_val = close[i]
-        
-        # Regime filter: trending market (price vs 50 EMA)
-        # In bull regime: price > EMA50, in bear regime: price < EMA50
-        is_bull_regime = close_val > ema50_val
-        is_bear_regime = close_val < ema50_val
         
         if position == 0:
-            # Enter long: bull power positive (buying pressure) + bull regime + volume spike
-            if (bull_val > 0 and 
-                is_bull_regime and 
+            # Enter long: price breaks above most recent bullish fractal + above 1d EMA + volume spike
+            if (not np.isnan(bullish_fractal_val) and 
+                close[i] > bullish_fractal_val and 
+                close[i] > ema_val and 
                 vol_ok):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bear power negative (selling pressure) + bear regime + volume spike
-            elif (bear_val < 0 and 
-                  is_bear_regime and 
+            # Enter short: price breaks below most recent bearish fractal + below 1d EMA + volume spike
+            elif (not np.isnan(bearish_fractal_val) and 
+                  close[i] < bearish_fractal_val and 
+                  close[i] < ema_val and 
                   vol_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bull power turns negative or regime changes
-            if bull_val <= 0 or not is_bull_regime:
+            # Exit long: price crosses below 1d EMA
+            if close[i] < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bear power turns positive or regime changes
-            if bear_val >= 0 or not is_bear_regime:
+            # Exit short: price crosses above 1d EMA
+            if close[i] > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_VolumeSpike_RegimeFilter"
-timeframe = "6h"
+name = "4h_Williams_Fractal_Breakout_VolumeSpike_1dEMA"
+timeframe = "4h"
 leverage = 1.0
