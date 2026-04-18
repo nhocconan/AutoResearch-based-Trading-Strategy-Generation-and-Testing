@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_1dTrend
-Hypothesis: Buy when price breaks above Camarilla R1 with volume spike and above 1d EMA100; short when breaks below S1 with volume spike and below 1d EMA100. Uses daily EMA for trend filter to reduce whipsaw in sideways markets. Designed for low trade frequency (12-37/year) to minimize fee drag while capturing high-probability breakouts in both bull and bear regimes.
+12h_1w_Volume_Weighted_VWAP_Slope_Trend
+Hypothesis: Buy when VWAP slope on 1w is positive and volume is above average, with price above VWAP; short when slope negative, volume above average, price below VWAP. Uses weekly VWAP slope as trend filter and volume confirmation to avoid false signals. Designed for low trade frequency (<30/year) to minimize fee decay while capturing sustained trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,75 +18,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Camarilla pivot levels from previous day
-    df_1d = get_htf_data(prices, '1d')
-    phigh = df_1d['high'].values
-    plow = df_1d['low'].values
-    pclose = df_1d['close'].values
+    # Get 1-week data (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    rang = phigh - plow
-    r1 = pclose + rang * 1.1 / 12
-    s1 = pclose - rang * 1.1 / 12
+    # Calculate VWAP on 1w: cumulative (price * volume) / cumulative volume
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    vwap = (typical_price * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
+    vwap = vwap.values
     
-    # Align to 12h timeframe (wait for daily close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # VWAP slope: 5-period linear regression slope (approximate with 5-bar difference)
+    vwap_slope = np.zeros_like(vwap)
+    for i in range(5, len(vwap)):
+        vwap_slope[i] = (vwap[i] - vwap[i-5]) / 5
     
-    # Volume spike: >2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Volume average on 1w (20-period)
+    vol_ma_1w = pd.Series(df_1w['volume']).rolling(window=20, min_periods=20).mean().values
     
-    # 1d EMA100 trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align VWAP, slope, and volume MA to 12h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
+    vwap_slope_aligned = align_htf_to_ltf(prices, df_1w, vwap_slope)
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 100  # Need EMA100 warmup
+    start_idx = 50  # Need sufficient history for VWAP and slope
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or 
+            np.isnan(vwap_slope_aligned[i]) or
+            np.isnan(vol_ma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        vol_spike = volume_spike[i]
-        ema_1d_val = ema_1d_aligned[i]
+        vwap_val = vwap_aligned[i]
+        slope = vwap_slope_aligned[i]
+        vol_ma = vol_ma_1w_aligned[i]
+        vol = volume[i]
+        
+        # Volume confirmation: current volume > 1.5x weekly average volume
+        vol_confirm = vol > (1.5 * vol_ma)
         
         if position == 0:
-            # Long: price > R1 with volume spike and above 1d EMA100
-            if price > r1_val and vol_spike and price > ema_1d_val:
+            # Long: price above VWAP, positive slope, volume confirmation
+            if price > vwap_val and slope > 0 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < S1 with volume spike and below 1d EMA100
-            elif price < s1_val and vol_spike and price < ema_1d_val:
+            # Short: price below VWAP, negative slope, volume confirmation
+            elif price < vwap_val and slope < 0 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < S1 or below 1d EMA100
-            if price < s1_val or price < ema_1d_val:
+            # Exit: price crosses below VWAP or slope turns negative
+            if price < vwap_val or slope < 0:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > R1 or above 1d EMA100
-            if price > r1_val or price > ema_1d_val:
+            # Exit: price crosses above VWAP or slope turns positive
+            if price > vwap_val or slope > 0:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_1dTrend"
+name = "12h_1w_Volume_Weighted_VWAP_Slope_Trend"
 timeframe = "12h"
 leverage = 1.0
