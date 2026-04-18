@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_Trend_Filter
-4h strategy using Camarilla pivot levels (R1/S1) with volume confirmation and daily EMA trend filter.
-- Long: Close > R1 + volume > 1.5x daily avg + daily EMA34 > EMA89
-- Short: Close < S1 + volume > 1.5x daily avg + daily EMA34 < EMA89
+1d_WeeklyRange_Breakout_Volume
+1d strategy using weekly range breakout with volume confirmation and weekly trend filter.
+- Long: Close breaks above weekly high + volume > 1.5x weekly avg + weekly EMA21 > EMA50
+- Short: Close breaks below weekly low + volume > 1.5x weekly avg + weekly EMA21 < EMA50
 - Exit: Opposite breakout or trend reversal
-Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
-Uses proven Camarilla + volume + trend framework from top performers
+Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -23,70 +23,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots, trend, and volume average
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for Support/Resistance levels and trend
+    df_1w = get_htf_data(prices, '1w')
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate Camarilla pivot levels (R1, S1)
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + 1.1 * camarilla_range / 12
-    s1 = close_1d - 1.1 * camarilla_range / 12
+    # Weekly High and Low (resistance/support)
+    weekly_high = high_1w
+    weekly_low = low_1w
     
-    # Daily EMA34 and EMA89 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
+    # Align weekly S/R levels to daily
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Weekly EMA21 and EMA50 for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all daily data to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    ema_89_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Weekly volume average (10-period)
+    vol_ma_10 = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 89  # need enough for EMA89
+    start_idx = 50  # need enough for weekly EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(ema_89_aligned[i]) or
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(ema_21_aligned[i]) or np.isnan(ema_50_aligned[i]) or
             np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend conditions
-        uptrend = ema_34_aligned[i] > ema_89_aligned[i]
-        downtrend = ema_34_aligned[i] < ema_89_aligned[i]
+        uptrend = ema_21_aligned[i] > ema_50_aligned[i]
+        downtrend = ema_21_aligned[i] < ema_50_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakdown_down = close[i] < s1_aligned[i]
+        breakout_up = close[i] > weekly_high_aligned[i]
+        breakdown_down = close[i] < weekly_low_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above R1
+            # Long: uptrend + volume + breakout above weekly high
             if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below S1
+            # Short: downtrend + volume + breakdown below weekly low
             elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below S1
+            # Long exit: trend change, volume confirmation, or breakdown below weekly low
             if not uptrend or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
@@ -94,7 +93,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above R1
+            # Short exit: trend change, volume confirmation, or breakout above weekly high
             if not downtrend or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
@@ -103,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "1d_WeeklyRange_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
