@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_v2
-Hypothesis: Trade breakouts above/below daily Camarilla R1/S1 levels with volume >1.5x 24-period average, filtered by weekly EMA(34) trend. Uses strict entry conditions to target 15-25 trades/year (~60-100 total over 4 years) to minimize fee drag. Works in bull/bear by trading breakouts with trend alignment and volume confirmation. Reduced position size to 0.20 to manage drawdown.
+4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_TrendFilter
+Hypothesis: Trade breakouts above/below daily Camarilla R1/S1 levels on 4h timeframe, filtered by daily EMA(34) trend and volume >1.5x 20-period average. Position size 0.25 targeting ~30 trades/year. Works in bull/bear by trading breakouts with trend alignment and volume confirmation, avoiding overtrading via strict entry conditions.
 """
 
 import numpy as np
@@ -18,11 +18,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for calculations
     df_1d = get_htf_data(prices, '1d')
-    
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
     
     # 1d calculations (previous day's OHLC)
     high_1d = df_1d['high'].values
@@ -46,26 +43,23 @@ def generate_signals(prices):
         R1[i] = prev_close_1d[i] + range_ * 1.1 / 12
         S1[i] = prev_close_1d[i] - range_ * 1.1 / 12
     
-    # 1w EMA trend filter (34-period)
-    close_1w = df_1w['close'].values
+    # 1d EMA trend filter (34-period)
     ema_period = 34
-    ema_1w = np.full_like(close_1w, np.nan)
+    ema_1d = np.full_like(close_1d, np.nan)
     
-    if len(close_1w) >= ema_period:
-        ema_1w[ema_period - 1] = np.mean(close_1w[:ema_period])
-        for i in range(ema_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 / (ema_period + 1)) + (ema_1w[i-1] * (ema_period - 1) / (ema_period + 1))
+    if len(close_1d) >= ema_period:
+        ema_1d[ema_period - 1] = np.mean(close_1d[:ema_period])
+        for i in range(ema_period, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (ema_period - 1) / (ema_period + 1))
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily data to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Align weekly EMA to 12h timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation: volume > 1.5x 24-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24
+    vol_period = 20
     
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
@@ -79,7 +73,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -87,33 +81,33 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume and above weekly EMA
-            if close[i] > R1_aligned[i] and vol_confirm and close[i] > ema_1w_aligned[i]:
-                signals[i] = 0.20
+            # Long: price breaks above R1 with volume and above daily EMA
+            if close[i] > R1_aligned[i] and vol_confirm and close[i] > ema_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and below weekly EMA
-            elif close[i] < S1_aligned[i] and vol_confirm and close[i] < ema_1w_aligned[i]:
-                signals[i] = -0.20
+            # Short: price breaks below S1 with volume and below daily EMA
+            elif close[i] < S1_aligned[i] and vol_confirm and close[i] < ema_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below S1 (reverse signal) or below weekly EMA
-            if close[i] < S1_aligned[i] or close[i] < ema_1w_aligned[i]:
-                signals[i] = -0.20  # reverse to short
+            # Long exit: price closes below S1 (reverse signal) or below daily EMA
+            if close[i] < S1_aligned[i] or close[i] < ema_1d_aligned[i]:
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above R1 (reverse signal) or above weekly EMA
-            if close[i] > R1_aligned[i] or close[i] > ema_1w_aligned[i]:
-                signals[i] = 0.20  # reverse to long
+            # Short exit: price closes above R1 (reverse signal) or above daily EMA
+            if close[i] > R1_aligned[i] or close[i] > ema_1d_aligned[i]:
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_v2"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
