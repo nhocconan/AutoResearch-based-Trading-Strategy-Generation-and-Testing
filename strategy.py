@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Trend_Pullback_EMA_RSI
-Hypothesis: On 12h timeframe, buy pullbacks to EMA20 in uptrend (price>EMA50) and sell rallies to EMA20 in downtrend (price<EMA50), using RSI(14) for overbought/oversold confirmation and volume filter to avoid chop. Works in both bull (buy dips) and bear (sell rallies) markets. Target: 20-40 trades/year to minimize fee drag.
+4h_Keltner_Band_Breakout_Volume_Trend
+Hypothesis: Price breaks above/below Keltner bands (ATR-based) with volume spike and EMA trend filter on 4h timeframe.
+Uses 20-period EMA for trend direction and 1.5x ATR for band width to capture breakouts in both bull/bear markets.
+Target: 20-40 trades/year to minimize fee drift while capturing strong directional moves with proper risk control.
 """
 
 import numpy as np
@@ -10,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,76 +20,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily EMA20 and EMA50 for trend and pullback levels
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # EMA20 for trend direction
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # ATR(14) for Keltner bands
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Keltner bands: EMA20 ± 1.5 * ATR
+    upper_band = ema_20 + (1.5 * atr)
+    lower_band = ema_20 - (1.5 * atr)
     
-    # RSI(14) on 1d close
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.fillna(50).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Volume filter: >1.5x 20-period average
+    # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Warmup for EMA and RSI
+    start_idx = max(34, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or
+            np.isnan(ema_20[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema20 = ema20_1d_aligned[i]
-        ema50 = ema50_1d_aligned[i]
-        rsi = rsi_1d_aligned[i]
-        vol_ok = volume_filter[i]
+        upper = upper_band[i]
+        lower = lower_band[i]
+        ema20 = ema_20[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: pullback to EMA20 in uptrend, not overbought
-            if price > ema50 and abs(price - ema20) < ema20 * 0.005 and rsi < 70 and vol_ok:
+            # Long: price breaks above upper band with volume spike and uptrend
+            if price > upper and vol_spike and price > ema20:
                 signals[i] = 0.25
                 position = 1
-            # Short: rally to EMA20 in downtrend, not oversold
-            elif price < ema50 and abs(price - ema20) < ema20 * 0.005 and rsi > 30 and vol_ok:
+            # Short: price breaks below lower band with volume spike and downtrend
+            elif price < lower and vol_spike and price < ema20:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: trend change or overextended
-            if price < ema50 or rsi > 80:
+            # Exit: price closes below EMA20 OR touches opposite band
+            if price < ema20:
+                signals[i] = 0.0
+                position = 0
+            elif price < lower:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: trend change or overextended
-            if price > ema50 or rsi < 20:
+            # Exit: price closes above EMA20 OR touches opposite band
+            if price > ema20:
+                signals[i] = 0.0
+                position = 0
+            elif price > upper:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Trend_Pullback_EMA_RSI"
-timeframe = "12h"
+name = "4h_Keltner_Band_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
