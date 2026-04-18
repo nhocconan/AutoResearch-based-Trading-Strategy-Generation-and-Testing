@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_Supertrend_EMA34_VolumeFilter_V1
-Hypothesis: Use 1d Supertrend (ATR=10, mult=3) for trend direction, 6h EMA34 for entry timing, and volume > 1.5x 20-period average for confirmation. 
-Go long when 6h price crosses above EMA34 AND 1d Supertrend is uptrend, short when price crosses below EMA34 AND 1d Supertrend is downtrend. 
-Supertrend adapts to volatility, reducing whipsaws in sideways markets. Volume filter ensures momentum confirmation. 
-Target: 15-30 trades/year by combining trend-following with volatility-adjusted entry and volume confirmation. 
-Works in bull markets via trend following and in bear via short signals, with reduced false signals during consolidation.
+12h_1d_Pivot_R1_S1_Breakout_Volume
+Hypothesis: Trade 12h breakouts above Camarilla R1 or below S1 levels derived from 1d candles, 
+with volume confirmation and a 1w EMA filter to avoid counter-trend trades. 
+Camarilla levels provide institutional support/resistance; volume ensures momentum; 
+weekly EMA ensures trend alignment. Works in bull via long breakouts and in bear via short breakdowns. 
+Target: 12-37 trades/year by requiring confluence of level break, volume spike, and trend filter.
 """
 
 import numpy as np
 import pandas as pd
+from math import ceil
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
@@ -22,125 +23,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Supertrend
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d Supertrend (ATR=10, mult=3)
-    atr_period = 10
-    multiplier = 3
+    # Calculate Camarilla levels for each 1d bar: R1, S1
+    camarilla_R1 = np.full_like(close_1d, np.nan)
+    camarilla_S1 = np.full_like(close_1d, np.nan)
     
-    # Calculate ATR
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], 0])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    for i in range(len(close_1d)):
+        if i < 1:  # Need previous day
+            continue
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        camarilla_R1[i] = C + (H - L) * 1.1 / 12
+        camarilla_S1[i] = C - (H - L) * 1.1 / 12
     
-    atr = np.full_like(close_1d, np.nan)
-    if len(tr) >= atr_period:
-        atr[atr_period-1] = np.mean(tr[:atr_period])
-        for i in range(atr_period, len(tr)):
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    # Align Camarilla levels to 12h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    # Supertrend calculation
-    hl2 = (high_1d + low_1d) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    supertrend = np.full_like(close_1d, np.nan)
-    uptrend = np.full_like(close_1d, True)
-    
-    if len(close_1d) >= atr_period:
-        supertrend[atr_period-1] = hl2[atr_period-1]
-        uptrend[atr_period-1] = True
-        
-        for i in range(atr_period, len(close_1d)):
-            # Update bands
-            if close_1d[i-1] > upper_band[i-1]:
-                upper_band[i] = hl2[i] + multiplier * atr[i]
-            else:
-                upper_band[i] = min(upper_band[i-1], hl2[i] + multiplier * atr[i])
-            
-            if close_1d[i-1] < lower_band[i-1]:
-                lower_band[i] = hl2[i] - multiplier * atr[i]
-            else:
-                lower_band[i] = max(lower_band[i-1], hl2[i] - multiplier * atr[i])
-            
-            # Determine trend
-            if close_1d[i] > upper_band[i-1]:
-                uptrend[i] = True
-            elif close_1d[i] < lower_band[i-1]:
-                uptrend[i] = False
-            else:
-                uptrend[i] = uptrend[i-1]
-                if uptrend[i]:
-                    lower_band[i] = max(lower_band[i-1], hl2[i] - multiplier * atr[i])
-                else:
-                    upper_band[i] = min(upper_band[i-1], hl2[i] + multiplier * atr[i])
-            
-            supertrend[i] = lower_band[i] if uptrend[i] else upper_band[i]
-    
-    # Align Supertrend uptrend to 6h timeframe
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
-    
-    # 6h EMA34
+    # 1w EMA34
     ema_period = 34
-    ema = np.full_like(close, np.nan)
-    if len(close) >= ema_period:
-        ema_multiplier = 2 / (ema_period + 1)
-        ema[ema_period-1] = np.mean(close[:ema_period])
-        for i in range(ema_period, len(close)):
-            ema[i] = (close[i] - ema[i-1]) * ema_multiplier + ema[i-1]
+    ema_1w = np.full_like(close_1w, np.nan)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_period = 20
+    if len(close_1w) >= ema_period:
+        # Use pandas EMA for efficiency and correctness
+        ema_series = pd.Series(close_1w).ewm(span=ema_period, adjust=False).values
+        ema_1w[:] = ema_series
+    
+    # Align 1w EMA34 to 12h timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation: volume > 2.0x 20-period average (higher threshold to reduce trades)
     vol_ma = np.full_like(volume, np.nan)
+    vol_period = 20
+    
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i-vol_period:i])
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(atr_period, ema_period, vol_period) + 1
+    # Start after all warmup periods
+    start_idx = max(vol_period, 1) + 1  # +1 for Camarilla needing prior day
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(uptrend_1d_aligned[i]) or np.isnan(ema[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price crosses above EMA34 AND 1d Supertrend uptrend AND volume confirmation
-        if (position <= 0 and 
-            close[i] > ema[i] and 
-            close[i-1] <= ema[i-1] and 
-            uptrend_1d_aligned[i] > 0.5 and 
-            volume[i] > 1.5 * vol_ma[i]):
-            signals[i] = 0.25
-            position = 1
-        # Short entry: price crosses below EMA34 AND 1d Supertrend downtrend AND volume confirmation
-        elif (position >= 0 and 
-              close[i] < ema[i] and 
-              close[i-1] >= ema[i-1] and 
-              uptrend_1d_aligned[i] < 0.5 and 
-              volume[i] > 1.5 * vol_ma[i]):
-            signals[i] = -0.25
-            position = -1
-        # Exit conditions: opposite crossover
-        elif position == 1 and close[i] < ema[i] and close[i-1] >= ema[i-1]:
-            signals[i] = -0.25  # reverse to short
-            position = -1
-        elif position == -1 and close[i] > ema[i] and close[i-1] <= ema[i-1]:
-            signals[i] = 0.25   # reverse to long
-            position = 1
-        else:
-            # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        # Volume confirmation: at least 2x average volume
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
+        
+        if position == 0:
+            # Long: price breaks above Camarilla R1, above weekly EMA, with volume
+            if close[i] > camarilla_R1_aligned[i] and close[i] > ema_1w_aligned[i] and vol_confirm:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below Camarilla S1, below weekly EMA, with volume
+            elif close[i] < camarilla_S1_aligned[i] and close[i] < ema_1w_aligned[i] and vol_confirm:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: price breaks below Camarilla S1 or below weekly EMA
+            if close[i] < camarilla_S1_aligned[i] or close[i] < ema_1w_aligned[i]:
+                signals[i] = -0.25  # reverse to short
+                position = -1
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price breaks above Camarilla R1 or above weekly EMA
+            if close[i] > camarilla_R1_aligned[i] or close[i] > ema_1w_aligned[i]:
+                signals[i] = 0.25  # reverse to long
+                position = 1
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_Supertrend_EMA34_VolumeFilter_V1"
-timeframe = "6h"
+name = "12h_1d_Pivot_R1_S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
