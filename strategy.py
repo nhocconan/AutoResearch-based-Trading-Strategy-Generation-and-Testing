@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1d_KAMA_Trend_Channel_Breakout
-Hypothesis: Use 12h KAMA trend + 12h Donchian breakout with 1d volume confirmation.
-KAMA adapts to noise, reducing whipsaws. Breakout beyond 12h Donchian(10) captures momentum.
-Volume filter ensures participation. Works in bull (breakouts above upper band) and bear
-(breakdowns below lower band) by requiring KAMA alignment. Targets 15-25 trades/year.
+12h_1w_Camarilla_R1S1_Breakout_Volume
+Hypothesis: Use weekly Camarilla R1/S1 levels as structural support/resistance on 12h timeframe. 
+Breakouts above R1 or below S1 with volume confirmation (>1.5x 20-period average) capture 
+institutional interest in trending markets. Weekly timeframe reduces noise and false breakouts, 
+while 12h provides timely entries. Works in bull markets via R1 breakouts and bear markets via 
+S1 breakdowns. Targets 15-25 trades/year by requiring alignment of weekly level breakout and 
+volume confirmation.
 """
 
 import numpy as np
@@ -13,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,104 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for KAMA and Donchian
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Get weekly data for Camarilla levels (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h KAMA (adaptive trend)
-    def calculate_kama(close_arr, period=10):
-        change = np.abs(np.diff(close_arr, n=period))
-        # Volatility: sum of absolute changes over 'period' periods
-        volatility = np.zeros_like(close_arr)
-        for i in range(len(close_arr)):
-            if i >= period:
-                volatility[i] = np.sum(np.abs(np.diff(close_arr[i-period+1:i+1], n=1)))
-        er = np.zeros_like(close_arr)
-        mask = volatility != 0
-        er[mask] = change[mask] / volatility[mask]
-        # Smoothing constants
-        sc = (er * (0.665 - 0.0645) + 0.0645) ** 2
-        kama = np.full_like(close_arr, np.nan)
-        if len(close_arr) > period:
-            kama[period-1] = close_arr[period-1]
-            for i in range(period, len(close_arr)):
-                kama[i] = kama[i-1] + sc[i] * (close_arr[i] - kama[i-1])
-        return kama
+    # Calculate weekly Camarilla R1 and S1
+    rng_1w = high_1w - low_1w
+    r1_1w = close_1w + rng_1w * 1.1 / 12
+    s1_1w = close_1w - rng_1w * 1.1 / 12
     
-    kama_12h = calculate_kama(close_12h, 10)
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    # Align levels to 12h timeframe (wait for weekly bar close)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Calculate 12h Donchian channels (10-period)
-    def calculate_donchian(high_arr, low_arr, period=10):
-        upper = np.full_like(high_arr, np.nan)
-        lower = np.full_like(low_arr, np.nan)
-        for i in range(len(high_arr)):
-            if i >= period - 1:
-                upper[i] = np.max(high_arr[i-period+1:i+1])
-                lower[i] = np.min(low_arr[i-period+1:i+1])
-        return upper, lower
-    
-    donch_up_12h, donch_dn_12h = calculate_donchian(high_12h, low_12h, 10)
-    donch_up_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_up_12h)
-    donch_dn_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_dn_12h)
-    
-    # Get 1d volume for confirmation
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    # 1d volume MA (20-period)
-    vol_ma_1d = np.full_like(volume_1d, np.nan)
-    for i in range(len(volume_1d)):
-        if i >= 19:
-            vol_ma_1d[i] = np.mean(volume_1d[i-19:i+1])
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Volume confirmation: current volume > 1.5 x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need sufficient history
+    start_idx = 20  # need volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_12h_aligned[i]) or 
-            np.isnan(donch_up_12h_aligned[i]) or 
-            np.isnan(donch_dn_12h_aligned[i]) or
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]  # current 12h volume > 1d avg volume
-        
         if position == 0:
-            # Long: price breaks above Donchian upper, with volume, and KAMA uptrend
-            if (close[i] > donch_up_12h_aligned[i] and 
-                vol_confirm and 
-                close[i] > kama_12h_aligned[i]):
+            # Long entry: price breaks above weekly R1, with volume
+            if close[i] > r1_1w_aligned[i] and vol_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower, with volume, and KAMA downtrend
-            elif (close[i] < donch_dn_12h_aligned[i] and 
-                  vol_confirm and 
-                  close[i] < kama_12h_aligned[i]):
+            # Short entry: price breaks below weekly S1, with volume
+            elif close[i] < s1_1w_aligned[i] and vol_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns below KAMA or breaks below Donchian lower
-            if (close[i] < kama_12h_aligned[i] or 
-                close[i] < donch_dn_12h_aligned[i]):
+            # Long exit: price returns below weekly S1 (failed breakout/reversal)
+            if close[i] < s1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above KAMA or breaks above Donchian upper
-            if (close[i] > kama_12h_aligned[i] or 
-                close[i] > donch_up_12h_aligned[i]):
+            # Short exit: price returns above weekly R1 (failed breakout/reversal)
+            if close[i] > r1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_KAMA_Trend_Channel_Breakout"
+name = "12h_1w_Camarilla_R1S1_Breakout_Volume"
 timeframe = "12h"
 leverage = 1.0
