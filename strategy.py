@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1h Time-Based Trend Reversal with Volume Filter
-Hypothesis: During low volatility overnight sessions (00-08 UTC), price often reverts to the 
-4-hour VWAP. During active sessions (08-20 UTC), we follow 4-hour momentum with volume confirmation.
-Designed for 15-30 trades/year on 1h timeframe (60-120 total over 4 years).
-Works in bull markets by riding 4h uptrends and in bear markets by fading overnight reversions.
+4h Camarilla Pivot Reversal with Volume Spike and Trend Filter
+Hypothesis: Price often reverses from key intraday support/resistance levels (Camarilla levels)
+calculated from the previous day's range. Entries are taken at S3/R3 levels with volume
+confirmation and trend alignment (using 1-day EMA) to avoid counter-trend trades.
+Designed for 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -21,27 +21,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute hour filter for efficiency
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Get daily data for Camarilla pivot calculation (once before loop)
+    df_d = get_htf_data(prices, '1d')
     
-    # Get 4H data once
-    df_4h = get_htf_data(prices, '4h')
+    # Previous day's high, low, close
+    prev_high = df_d['high'].shift(1).values
+    prev_low = df_d['low'].shift(1).values
+    prev_close = df_d['close'].shift(1).values
     
-    # 4H VWAP (volume weighted average price)
-    typical_price_4h = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
-    vwap_4h = (typical_price_4h * df_4h['volume']).cumsum() / df_4h['volume'].cumsum()
-    vwap_4h_values = vwap_4h.values
+    # Calculate Camarilla levels: S3, S2, S1, R1, R2, R3
+    # Range = previous day's high - low
+    range_val = prev_high - prev_low
     
-    # 4H EMA34 for trend filter
-    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Camarilla formulas
+    s3 = prev_close - (range_val * 1.1 / 6)
+    s2 = prev_close - (range_val * 1.1 / 4)
+    s1 = prev_close - (range_val * 1.1 / 2)
+    r1 = prev_close + (range_val * 1.1 / 2)
+    r2 = prev_close + (range_val * 1.1 / 4)
+    r3 = prev_close + (range_val * 1.1 / 6)
     
-    # Align 4H indicators to 1H timeframe
-    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h_values)
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Align Camarilla levels to 4h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_d, s3)
+    s2_aligned = align_htf_to_ltf(prices, df_d, s2)
+    s1_aligned = align_htf_to_ltf(prices, df_d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_d, r3)
     
-    # 1H volume spike: 1.5x 24-period average
-    vol_ma_1h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.5 * vol_ma_1h)
+    # Volume spike: 2x 20-period average on 4h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Trend filter: 1-day EMA (34) aligned to 4h
+    ema_34_d = pd.Series(df_d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_d, ema_34_d)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -49,70 +63,43 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_4h_aligned[i]) or 
-            np.isnan(ema34_4h_aligned[i]) or
-            np.isnan(vol_ma_1h[i])):
+        if (np.isnan(s3_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(ema_34_aligned[i])):
             signals[i] = 0.0
             continue
         
-        hour = hours[i]
         price = close[i]
-        vwap = vwap_4h_aligned[i]
-        ema34 = ema34_4h_aligned[i]
-        
-        # Session filter: 08-20 UTC active, 00-08 UTC overnight
-        is_active_session = 8 <= hour <= 20
+        ema = ema_34_aligned[i]
         
         if position == 0:
-            if is_active_session:
-                # Active session: follow 4H trend with volume confirmation
-                if price > ema34 and volume_spike[i]:
-                    signals[i] = 0.20
-                    position = 1
-                elif price < ema34 and volume_spike[i]:
-                    signals[i] = -0.20
-                    position = -1
-            else:
-                # Overnight session: mean revert to 4H VWAP
-                if price < vwap * 0.995:  # Oversold threshold
-                    signals[i] = 0.20
-                    position = 1
-                elif price > vwap * 1.005:  # Overbought threshold
-                    signals[i] = -0.20
-                    position = -1
+            # Long: price at or below S3 with volume spike and uptrend (price > EMA)
+            if price <= s3_aligned[i] and volume_spike[i] and price > ema:
+                signals[i] = 0.25
+                position = 1
+            # Short: price at or above R3 with volume spike and downtrend (price < EMA)
+            elif price >= r3_aligned[i] and volume_spike[i] and price < ema:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
             # Long position
-            signals[i] = 0.20
-            # Exit conditions
-            if is_active_session:
-                # In active session: exit on trend reversal
-                if price < ema34:
-                    signals[i] = 0.0
-                    position = 0
-            else:
-                # In overnight: exit when price returns to VWAP
-                if price >= vwap:
-                    signals[i] = 0.0
-                    position = 0
+            signals[i] = 0.25
+            # Exit: price reaches S1 or trend turns bearish
+            if price >= s1_aligned[i] or price < ema:
+                signals[i] = 0.0
+                position = 0
         
         elif position == -1:
             # Short position
-            signals[i] = -0.20
-            # Exit conditions
-            if is_active_session:
-                # In active session: exit on trend reversal
-                if price > ema34:
-                    signals[i] = 0.0
-                    position = 0
-            else:
-                # In overnight: exit when price returns to VWAP
-                if price <= vwap:
-                    signals[i] = 0.0
-                    position = 0
+            signals[i] = -0.25
+            # Exit: price reaches R1 or trend turns bullish
+            if price <= r1_aligned[i] or price > ema:
+                signals[i] = 0.0
+                position = 0
     
     return signals
 
-name = "1h_TimeBased_Trend_Reversion_Volume"
-timeframe = "1h"
+name = "4h_Camarilla_Pivot_Reversal_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
