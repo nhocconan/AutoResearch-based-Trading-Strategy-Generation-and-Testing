@@ -1,61 +1,17 @@
-# 1d_Pivot_R1_S1_Breakout_Volume_RangeFilter_Strict
-# Strategy: Camarilla pivot breakout with volume confirmation and range filter
-# Long: Price breaks above R1 with volume > 2x average, in trending market (ADX > 25)
-# Short: Price breaks below S1 with volume > 2x average, in trending market (ADX > 25)
-# Uses 1d timeframe with 1h trend filter via ADX
-# Expected: 5-15 trades/year per symbol, works in bull/bear via trend filter
+#!/usr/bin/env python3
+"""
+6h_ADX_GoldenCross_Volume_V1
+Strategy: 6h ADX trend strength combined with EMA golden cross and volume confirmation.
+Long: ADX > 25 (strong trend) + EMA12 crosses above EMA26 + volume > 1.5x average
+Short: ADX > 25 + EMA12 crosses below EMA26 + volume > 1.5x average
+Exit: ADX < 20 (weak trend) or opposite crossover
+Designed for 6h timeframe: ~15-25 trades/year per symbol (60-100 total over 4 years).
+Works in bull/bear via ADX trend filter - only trades when trend is strong.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    plus_dm = np.zeros_like(high)
-    minus_dm = np.zeros_like(high)
-    tr = np.zeros_like(high)
-    
-    for i in range(1, len(high)):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
-        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
-        
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    # Smooth using Wilder's smoothing (alpha = 1/period)
-    atr = np.zeros_like(tr)
-    atr[period] = np.mean(tr[1:period+1])
-    for i in range(period+1, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    plus_di = np.zeros_like(high)
-    minus_di = np.zeros_like(high)
-    if period < len(high):
-        plus_sm = np.zeros_like(high)
-        minus_sm = np.zeros_like(high)
-        plus_sm[period] = np.sum(plus_dm[1:period+1])
-        minus_sm[period] = np.sum(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(high)):
-            plus_sm[i] = (plus_sm[i-1] * (period-1) + plus_dm[i]) / period
-            minus_sm[i] = (minus_sm[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_sm / atr
-        minus_di = 100 * minus_sm / atr
-    
-    dx = np.zeros_like(high)
-    mask = (plus_di + minus_di) != 0
-    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / (plus_di[mask] + minus_di[mask])
-    
-    adx = np.zeros_like(high)
-    if 2*period < len(dx):
-        adx[2*period] = np.mean(dx[period:2*period+1])
-        for i in range(2*period+1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -67,92 +23,98 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for weekly context
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from previous day
-    # R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA12 and EMA26 on 6h data
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
     
-    # Previous day's values (shift by 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    # First day has no previous data
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate ADX (14-period) on 6h data
+    # TR = max(high-low, abs(high-previous close), abs(low-previous close))
+    high_low = high - low
+    high_prev_close = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    low_prev_close = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(high_low, np.maximum(high_prev_close, low_prev_close))
     
-    # Calculate Camarilla levels
-    camarilla_range = prev_high - prev_low
-    R1 = prev_close + camarilla_range * 1.1 / 12
-    S1 = prev_close - camarilla_range * 1.1 / 12
+    # Directional movement
+    up_move = np.concatenate([[0], high[1:] - high[:-1]])
+    down_move = np.concatenate([[0], low[:-1] - low[1:]])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align to 1d timeframe (no shift needed as we use previous day's data)
-    R1_aligned = R1  # Already aligned to daily bars
-    S1_aligned = S1
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Get 1h data for ADX trend filter
-    df_1h = get_htf_data(prices, '1h')
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate ADX on 1h data
-    adx_1h = calculate_adx(high_1h, low_1h, close_1h, 14)
+    # Volume average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align ADX to 1d timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
-    
-    # Volume confirmation - 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly EMA to 6h
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough for ADX and volume MA
+    start_idx = 50  # need enough for calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema12[i]) or np.isnan(ema26[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
+        # Trend conditions
+        strong_trend = adx[i] > 25
+        weak_trend = adx[i] < 20
+        above_weekly_ema = close[i] > ema50_1w_aligned[i]
+        below_weekly_ema = close[i] < ema50_1w_aligned[i]
         
-        # Volume confirmation: volume > 2x average
-        vol_confirm = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Breakout conditions
-        breakout_long = close[i] > R1_aligned[i]
-        breakout_short = close[i] < S1_aligned[i]
+        # EMA crossover
+        ema12_above = ema12[i] > ema26[i]
+        ema12_below = ema12[i] < ema26[i]
+        ema12_prev_above = ema12[i-1] > ema26[i-1] if i > 0 else False
+        ema12_prev_below = ema12[i-1] < ema26[i-1] if i > 0 else False
+        
+        # Golden cross and death cross
+        golden_cross = ema12_above and ema12_prev_below
+        death_cross = ema12_below and ema12_prev_above
         
         if position == 0:
-            # Long: breakout above R1 + volume + trending
-            if breakout_long and vol_confirm and trending:
+            # Long: strong trend + golden cross + volume + above weekly EMA
+            if strong_trend and golden_cross and vol_confirm and above_weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume + trending
-            elif breakout_short and vol_confirm and trending:
+            # Short: strong trend + death cross + volume + below weekly EMA
+            elif strong_trend and death_cross and vol_confirm and below_weekly_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below R1 or trend weakens
-            if close[i] < R1_aligned[i] or adx_1d_aligned[i] < 20:
+            # Long exit: weak trend or death cross or below weekly EMA
+            if weak_trend or death_cross or below_weekly_ema:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above S1 or trend weakens
-            if close[i] > S1_aligned[i] or adx_1d_aligned[i] < 20:
+            # Short exit: weak trend or golden cross or above weekly EMA
+            if weak_trend or golden_cross or above_weekly_ema:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -160,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pivot_R1_S1_Breakout_Volume_RangeFilter_Strict"
-timeframe = "1d"
+name = "6h_ADX_GoldenCross_Volume_V1"
+timeframe = "6h"
 leverage = 1.0
