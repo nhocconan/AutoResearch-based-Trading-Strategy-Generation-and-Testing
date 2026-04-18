@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Divergence_12hTrend_Filter
-Hypothesis: RSI(14) bearish/bullish divergences on 4h chart with 12h EMA34 trend filter capture reversals in both bull and bear markets. 
-Divergence occurs when price makes new high/low but RSI does not, signaling weakening momentum. 
-Combined with 12h trend filter to avoid counter-trend trades and volume confirmation to ensure strength. 
-Designed for low trade frequency (<50/year) to minimize fee drag while capturing high-probability reversals.
+12h_Pivot_R1S1_Breakout_VolumeSpike_1dEMA34
+Hypothesis: Daily pivot levels (R1, S1) act as strong support/resistance on the 12h chart.
+Breakouts beyond these levels with volume confirmation and 1d EMA34 trend filter capture momentum.
+Designed for 12-37 trades/year on 12h timeframe with low trade frequency to minimize fee fade.
+Works in bull/bear markets by requiring volume spike and 1d EMA34 trend filter.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,90 +21,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI(14) calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Get 1d data for pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Get 12h data for trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close']
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 1d pivot points using standard formula
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # Using previous 1d bar's data to avoid look-ahead
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
     
-    # Volume spike: 1.5x 20-period average
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    
+    # Shift by 1 to use previous 1d bar's levels only
+    r1_prev = r1.shift(1).values
+    s1_prev = s1.shift(1).values
+    
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
+    
+    # Get 1d data for EMA trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: 2x 20-period average on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # Detect RSI divergence: bearish (price high, RSI lower high) and bullish (price low, RSI higher low)
-    lookback = 10  # lookback for swing high/low
-    bearish_div = np.zeros(n, dtype=bool)
-    bullish_div = np.zeros(n, dtype=bool)
-    
-    for i in range(lookback, n):
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        if high[i] == np.max(high[i-lookback:i+1]):
-            # Find previous swing high
-            prev_high_idx = i - lookback + np.argmax(high[i-lookback:i])
-            if prev_high_idx < i - lookback:  # ensure we look back far enough
-                if high[i] > high[prev_high_idx] and rsi_values[i] < rsi_values[prev_high_idx]:
-                    bearish_div[i] = True
-        
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        if low[i] == np.min(low[i-lookback:i+1]):
-            # Find previous swing low
-            prev_low_idx = i - lookback + np.argmin(low[i-lookback:i])
-            if prev_low_idx < i - lookback:
-                if low[i] < low[prev_low_idx] and rsi_values[i] > rsi_values[prev_low_idx]:
-                    bullish_div[i] = True
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(50, lookback)
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_12h_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend = ema_34_12h_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: bullish divergence with volume spike and price above 12h EMA (uptrend context)
-            if bullish_div[i] and volume_spike[i] and price > ema_trend:
+            # Long: break above R1 with volume spike and price above 1d EMA (uptrend)
+            if price > r1_val and volume_spike[i] and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish divergence with volume spike and price below 12h EMA (downtrend context)
-            elif bearish_div[i] and volume_spike[i] and price < ema_trend:
+            # Short: break below S1 with volume spike and price below 1d EMA (downtrend)
+            elif price < s1_val and volume_spike[i] and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: bearish divergence or price breaks below 12h EMA
-            if bearish_div[i] or price < ema_trend:
+            # Exit: price returns to S1 or breaks below 1d EMA
+            if price <= s1_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: bullish divergence or price breaks above 12h EMA
-            if bullish_div[i] or price > ema_trend:
+            # Exit: price returns to R1 or breaks above 1d EMA
+            if price >= r1_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_RSI_Divergence_12hTrend_Filter"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_Breakout_VolumeSpike_1dEMA34"
+timeframe = "12h"
 leverage = 1.0
