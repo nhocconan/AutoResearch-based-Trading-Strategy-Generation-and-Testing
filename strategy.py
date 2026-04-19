@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_R1S1_Breakout_Volume_Session_v1"
-timeframe = "1h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,8 +31,6 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate Camarilla levels using previous day's data
-    # Camarilla: H4 = C + 1.1/2 * (H-L), L4 = C - 1.1/2 * (H-L)
-    # We use shifted values to avoid look-ahead
     prev_close = np.concatenate([[np.nan], close_1d[:-1]])
     prev_high = np.concatenate([[np.nan], high_1d[:-1]])
     prev_low = np.concatenate([[np.nan], low_1d[:-1]])
@@ -40,37 +38,27 @@ def generate_signals(prices):
     camarilla_H4 = prev_close + 1.1/2 * (prev_high - prev_low)
     camarilla_L4 = prev_close - 1.1/2 * (prev_high - prev_low)
     
-    # Align Camarilla levels to 1h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
     camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
-    # 4h trend filter: EMA(34) slope
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_slope = ema_34_4h - np.roll(ema_34_4h, 1)
-    ema_34_4h_slope[0] = 0
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h_slope)
+    # 12h trend filter: EMA(34) slope
+    close_s = pd.Series(close)
+    ema_34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_slope = ema_34 - np.roll(ema_34, 1)
+    ema_34_slope[0] = 0
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC (precomputed)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_ok = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34)
+    start_idx = max(50, 34)
     
     for i in range(start_idx, n):
-        if not session_ok[i]:
-            signals[i] = 0.0
-            continue
-        
         if np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or \
-           np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma_20[i]):
+           np.isnan(ema_34_slope[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -82,17 +70,17 @@ def generate_signals(prices):
         volume_ok = vol > 1.5 * vol_ma
         
         # Trend filter: bullish when EMA slope > 0
-        bullish_trend = ema_34_4h_aligned[i] > 0
-        bearish_trend = ema_34_4h_aligned[i] < 0
+        bullish_trend = ema_34_slope[i] > 0
+        bearish_trend = ema_34_slope[i] < 0
         
         if position == 0:
             # Long: price breaks above H4 with volume and bullish trend
             if price > camarilla_H4_aligned[i] and volume_ok and bullish_trend:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below L4 with volume and bearish trend
             elif price < camarilla_L4_aligned[i] and volume_ok and bearish_trend:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -101,7 +89,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit: price returns above L4 or trend turns bullish
@@ -109,6 +97,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
