@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and 1w ADX trend filter.
-# Long when price breaks above R1 with volume > 1.3x daily average and weekly ADX > 25 (trending market)
-# Short when price breaks below S1 with volume > 1.3x daily average and weekly ADX > 25
-# Exit when price returns to the pivot point (PP)
-# Uses Camarilla for precise intraday levels, volume for conviction, ADX to avoid ranging markets.
-# Target: 20-30 trades/year per symbol.
-
-name = "4h_Camarilla_Volume_ADXTrend"
-timeframe = "4h"
+# Hypothesis: 1d weekly Donchian breakout with weekly volume confirmation and weekly ATR filter.
+# Long when price breaks above 10-week Donchian high AND weekly volume > 1.5x 20-week average volume AND ATR(4) < ATR(10) (low volatility regime)
+# Short when price breaks below 10-week Donchian low AND weekly volume > 1.5x 20-week average volume AND ATR(4) < ATR(10)
+# Exit when price crosses back through the Donchian midpoint
+# Uses weekly Donchian for trend following structure, weekly volume for confirmation, weekly ATR regime filter to avoid chop.
+# Target: 15-25 trades/year per symbol.
+name = "1d_WeeklyDonchian_Volume_ATRRegime"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,108 +23,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and volume average
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla levels from previous day
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1/12
-    # S1 = C - (H - L) * 1.1/12
-    # Using previous day's values (already closed)
-    PP = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    R1 = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.1 / 12
-    S1 = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP.values)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
-    
-    # Get 1d average volume for confirmation (20-period)
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Get 1w ADX for trend filter
+    # Get weekly data for indicators
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate True Range and Directional Movement
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    close_1w = df_1w['close']
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - close_1w.shift(1))
-    tr3 = np.abs(low_1w - close_1w.shift(1))
+    # Calculate weekly ATR (4 and 10 periods) for regime filter
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
+    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr4 = pd.Series(tr).rolling(window=4, min_periods=4).mean().values
+    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr4_aligned = align_htf_to_ltf(prices, df_1w, atr4)
+    atr10_aligned = align_htf_to_ltf(prices, df_1w, atr10)
     
-    # Directional Movement
-    up_move = high_1w - high_1w.shift(1)
-    down_move = low_1w.shift(1) - low_1w
+    # Get weekly average volume for confirmation (20-period)
+    vol_ma_1w = pd.Series(df_1w['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values (14-period)
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    # DI and DX
-    plus_di = 100 * plus_dm14 / tr14
-    minus_di = 100 * minus_dm14 / tr14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    
-    # ADX (smoothed DX)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Calculate weekly Donchian channels (10-period)
+    high_roll = pd.Series(df_1w['high']).rolling(window=10, min_periods=10).max().values
+    low_roll = pd.Series(df_1w['low']).rolling(window=10, min_periods=10).min().values
+    donchian_mid = (high_roll + low_roll) / 2
+    high_roll_aligned = align_htf_to_ltf(prices, df_1w, high_roll)
+    low_roll_aligned = align_htf_to_ltf(prices, df_1w, low_roll)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Ensure indicators are ready
+    start_idx = max(20, 10)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(PP_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(atr4_aligned[i]) or np.isnan(atr10_aligned[i]) or 
+            np.isnan(vol_ma_1w_aligned[i]) or np.isnan(high_roll_aligned[i]) or 
+            np.isnan(low_roll_aligned[i]) or np.isnan(donchian_mid_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ma = vol_ma_1d_aligned[i]
+        atr4_val = atr4_aligned[i]
+        atr10_val = atr10_aligned[i]
+        vol_ma = vol_ma_1w_aligned[i]
         vol = volume[i]
-        pp = PP_aligned[i]
-        r1 = R1_aligned[i]
-        s1 = S1_aligned[i]
-        adx_val = adx_aligned[i]
+        upper = high_roll_aligned[i]
+        lower = low_roll_aligned[i]
+        mid = donchian_mid_aligned[i]
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        trending = adx_val > 25
+        # Regime filter: only trade in low volatility (ATR4 < ATR10)
+        vol_regime = atr4_val < atr10_val
         
         if position == 0:
-            # Long entry: break above R1 + volume spike + trending market
-            if price > r1 and vol > 1.3 * vol_ma and trending:
+            # Long entry: break above upper band + volume spike + low vol regime
+            if price > upper and vol > 1.5 * vol_ma and vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below S1 + volume spike + trending market
-            elif price < s1 and vol > 1.3 * vol_ma and trending:
+            # Short entry: break below lower band + volume spike + low vol regime
+            elif price < lower and vol > 1.5 * vol_ma and vol_regime:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to pivot point
-            if price < pp:
+            # Long exit: price crosses below midpoint
+            if price < mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to pivot point
-            if price > pp:
+            # Short exit: price crosses above midpoint
+            if price > mid:
                 signals[i] = 0.0
                 position = 0
             else:
