@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA50 trend filter.
-# Breakouts are filtered by strong trend (price > EMA50 for longs, < EMA50 for shorts).
-# Volume confirmation ensures breakout validity. EMA50 filter avoids counter-trend trades.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years).
-name = "4h_Donchian20_EMA50_Volume_Filter"
-timeframe = "4h"
+# Hypothesis: 6h Bollinger Bands squeeze breakout with volume confirmation.
+# Bollinger Band width contraction (squeeze) precedes explosive moves.
+# Enter long/short on breakout from Bollinger Bands with volume confirmation.
+# Exit when price reverts to mean (BB middle band) or volatility expands.
+# Works in both bull and bear markets by capturing volatility breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year).
+name = "6h_BB_Squeeze_Volume_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,63 +23,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Bollinger Bands (20-period, 2 standard deviations)
+    bb_period = 20
+    bb_std = 2
     
-    # Calculate EMA50 on daily
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate BB middle (SMA), upper, lower
+    bb_middle = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_middle + (bb_std * bb_std_dev)
+    bb_lower = bb_middle - (bb_std * bb_std_dev)
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Band Width (normalized by middle band)
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    
+    # Squeeze detection: BB width below its 50-period mean (low volatility)
+    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    squeeze_condition = bb_width < bb_width_ma
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for Donchian channels
+    start_idx = max(bb_period, 50, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_1d[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(bb_width[i]) or np.isnan(bb_width_ma[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_50_val = ema_50_1d[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
+        bb_m = bb_middle[i]
+        bb_u = bb_upper[i]
+        bb_l = bb_lower[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
-        
-        # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        squeeze = squeeze_condition[i]
+        vol_conf = volume_confirmed[i]
         
         if position == 0:
-            # Enter long if price breaks above upper channel, above EMA50, and volume confirmation
-            if price > upper_channel and price > ema_50_val and volume_confirmed:
+            # Enter long on bullish breakout: price above upper BB with squeeze and volume
+            if price > bb_u and squeeze and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price breaks below lower channel, below EMA50, and volume confirmation
-            elif price < lower_channel and price < ema_50_val and volume_confirmed:
+            # Enter short on bearish breakout: price below lower BB with squeeze and volume
+            elif price < bb_l and squeeze and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below lower channel or below EMA50
-            if price < lower_channel or price < ema_50_val:
+            # Exit long when price returns to middle BB or volatility expands (squeeze ends)
+            if price < bb_m or not squeeze:  # Mean reversion or volatility expansion
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above upper channel or above EMA50
-            if price > upper_channel or price > ema_50_val:
+            # Exit short when price returns to middle BB or volatility expands
+            if price > bb_m or not squeeze:  # Mean reversion or volatility expansion
                 signals[i] = 0.0
                 position = 0
             else:
