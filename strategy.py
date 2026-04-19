@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_WeeklyPivot_R1S1_Breakout_VolumeTrend"
-timeframe = "4h"
+name = "12h_Donchian_20_Volume_ADX_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,24 +17,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for Donchian channels (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly pivot levels
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    r1_1w = close_1w + range_1w * 1.1 / 12.0
-    s1_1w = close_1w - range_1w * 1.1 / 12.0
+    # Calculate 20-period Donchian channels on 1d
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly pivot levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_4h = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_4h = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Align Donchian channels to 12h timeframe
+    high_20_12h = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_12h = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # 4h ADX for trend strength (14-period)
+    # 12h ADX for trend strength (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -57,16 +53,16 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
+        if np.isnan(high_20_12h[i]) or np.isnan(low_20_12h[i]) or \
            np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
@@ -75,37 +71,38 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         adx_val = adx[i]
-        pivot = pivot_4h[i]
-        r1 = r1_4h[i]
-        s1 = s1_4h[i]
+        upper = high_20_12h[i]
+        lower = low_20_12h[i]
         
-        volume_confirmed = vol > 2.0 * vol_ma
-        trending = adx_val > 25  # Strong trend filter
+        volume_confirmed = vol > 1.8 * vol_ma
+        trending = adx_val > 20  # Moderate trend filter
         
         if position == 0:
-            # Long: Price breaks above weekly R1 + volume + trending
-            if price > r1 and volume_confirmed and trending:
-                signals[i] = 0.30
+            # Long: Price breaks above upper Donchian + volume + trending
+            if price > upper and volume_confirmed and trending:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly S1 + volume + trending
-            elif price < s1 and volume_confirmed and trending:
-                signals[i] = -0.30
+            # Short: Price breaks below lower Donchian + volume + trending
+            elif price < lower and volume_confirmed and trending:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below weekly pivot
-            if price < pivot:
+            # Exit: Price returns below midpoint
+            midpoint = (upper + lower) / 2
+            if price < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above weekly pivot
-            if price > pivot:
+            # Exit: Price returns above midpoint
+            midpoint = (upper + lower) / 2
+            if price > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
