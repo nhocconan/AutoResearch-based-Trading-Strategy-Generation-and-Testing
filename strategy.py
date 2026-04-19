@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Pivot_R1S1_Breakout_VolumeATR_v4"
-timeframe = "1d"
+name = "4h_KC_Breakout_Volume_Kelly_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,87 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Keltner Channel calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly high, low, close for pivot calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily high, low, close for ATR calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot point
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Calculate R1 and S1 using Camarilla formula
-    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12
-    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12
-    
-    # Align weekly pivot levels to daily timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # Weekly ATR for volatility filter (14-period)
-    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.absolute(high_1w[1:] - close_1w[:-1]))
-    tr1 = np.maximum(tr1, np.absolute(low_1w[1:] - close_1w[:-1]))
+    # Calculate daily True Range and ATR (20-period)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
     tr1 = np.concatenate([[np.nan], tr1])
-    atr_14_1w = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    atr_20_1d = pd.Series(tr1).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: current volume > 2.0x 20-period average (daily)
+    # Calculate daily EMA (20-period) for Keltner Channel middle
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    
+    # Calculate Keltner Channel bands (2 * ATR multiplier)
+    upper_1d = ema_20_1d + 2 * atr_20_1d
+    lower_1d = ema_20_1d - 2 * atr_20_1d
+    
+    # Align daily Keltner Channel levels to 4h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Additional filter: only trade when price is away from extremes (avoid chop)
-    price_ma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # Kelly criterion approximation: use volatility-adjusted position sizing
+    # Base size scaled by inverse volatility (lower volatility = larger position)
+    vol_normalized = atr_20_1d_aligned / np.nanmedian(atr_20_1d_aligned)
+    kelly_scale = np.clip(1.0 / vol_normalized, 0.5, 2.0)  # Scale between 0.5x and 2x
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(atr_14_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(price_ma_50[i])):
+        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        pivot = pivot_1w_aligned[i]
-        r1 = r1_1w_aligned[i]
-        s1 = s1_1w_aligned[i]
-        atr = atr_14_1w_aligned[i]
-        price_ma = price_ma_50[i]
+        upper = upper_1d_aligned[i]
+        lower = lower_1d_aligned[i]
+        ema_mid = ema_20_1d_aligned[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
-        # Only trade when price is not too far from MA (avoid extreme moves)
-        price_not_extreme = abs(price - price_ma) < 3 * atr
         
         if position == 0:
-            # Long: break above R1 with volume and not extreme
-            if price > r1 and volume_confirmed and price_not_extreme:
-                signals[i] = 0.25
+            # Long: break above upper KC band with volume
+            if price > upper and volume_confirmed:
+                base_size = 0.25
+                adjusted_size = base_size * kelly_scale[i]
+                signals[i] = np.clip(adjusted_size, 0.15, 0.35)  # Keep within reasonable bounds
                 position = 1
-            # Short: break below S1 with volume and not extreme
-            elif price < s1 and volume_confirmed and price_not_extreme:
-                signals[i] = -0.25
+            # Short: break below lower KC band with volume
+            elif price < lower and volume_confirmed:
+                base_size = -0.25
+                adjusted_size = base_size * kelly_scale[i]
+                signals[i] = np.clip(adjusted_size, -0.35, -0.15)  # Keep within reasonable bounds
                 position = -1
         
         elif position == 1:
-            # Exit: price below pivot or ATR-based stop
-            if price < pivot or price < close[i-1] - 2.0 * atr:
+            # Exit: price below EMA middle or volatility expansion
+            if price < ema_mid or vol > 3.0 * vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = np.clip(0.25 * kelly_scale[i], 0.15, 0.35)
         
         elif position == -1:
-            # Exit: price above pivot or ATR-based stop
-            if price > pivot or price > close[i-1] + 2.0 * atr:
+            # Exit: price above EMA middle or volatility expansion
+            if price > ema_mid or vol > 3.0 * vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = np.clip(-0.25 * kelly_scale[i], -0.35, -0.15)
     
     return signals
