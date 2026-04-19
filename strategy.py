@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_RSI_2_45_Stochastic_Bullish_Cross_With_Volume
-# Hypothesis: 4-hour RSI(2) crossing above 45 (reversal from oversold) combined with
-# bullish Stochastic crossover (%K > %D) and volume confirmation. RSI(2) captures
-# short-term momentum reversals effectively. Volume ensures institutional participation.
-# Works in bull markets via momentum continuations and in bear markets via oversold
-# bounces. Target: 20-40 trades/year to avoid fee drag.
+# 6h_Ichimoku_Cloud_Breakout_Daily_Trend
+# Hypothesis: 6h Ichimoku cloud breakout with daily trend filter (price above/below 200 EMA).
+# In bull markets, price tends to stay above 200 EMA and break above Ichimoku cloud for longs.
+# In bear markets, price tends to stay below 200 EMA and break below Ichimoku cloud for shorts.
+# The daily EMA200 filter ensures we only trade in the direction of the higher timeframe trend,
+# reducing whipsaws during ranging periods. Ichimoku provides dynamic support/resistance.
+# Target: 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
 
-name = "4h_RSI_2_45_Stochastic_Bullish_Cross_With_Volume"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout_Daily_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,101 +17,97 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # RSI(2) - fast RSI for early reversal signals
-    def calculate_rsi(close_prices, period=2):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        # Wilder's smoothing
-        avg_gain = np.zeros_like(close_prices)
-        avg_loss = np.zeros_like(close_prices)
-        
-        # First average
-        if len(close_prices) >= period:
-            avg_gain[period-1] = np.mean(gain[:period])
-            avg_loss[period-1] = np.mean(loss[:period])
-            
-            for i in range(period, len(close_prices)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate Ichimoku components on 6h data
+    # Conversion Line (Tenkan-sen): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Stochastic Oscillator
-    def calculate_stochastic(high_prices, low_prices, close_prices, k_period=14, d_period=3):
-        # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
-        lowest_low = np.zeros_like(low_prices)
-        highest_high = np.zeros_like(high_prices)
-        
-        for i in range(len(close_prices)):
-            start_idx = max(0, i - k_period + 1)
-            lowest_low[i] = np.min(low_prices[start_idx:i+1])
-            highest_high[i] = np.max(high_prices[start_idx:i+1])
-        
-        # Avoid division by zero
-        denominator = highest_high - lowest_low
-        k_percent = np.where(denominator != 0, 
-                            (close_prices - lowest_low) / denominator * 100, 0)
-        
-        # %D = SMA of %K
-        d_percent = np.zeros_like(k_percent)
-        for i in range(len(k_percent)):
-            start_idx = max(0, i - d_period + 1)
-            if i >= d_period - 1:
-                d_percent[i] = np.mean(k_percent[start_idx:i+1])
-            else:
-                d_percent[i] = k_percent[i]  # Not enough data yet
-        
-        return k_percent, d_percent
+    # Base Line (Kijun-sen): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Calculate indicators
-    rsi_2 = calculate_rsi(close, 2)
-    stoch_k, stoch_d = calculate_stochastic(high, low, close, 14, 3)
+    # Leading Span A (Senkou Span A): (Conversion Line + Base Line) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Volume confirmation: volume > 1.3 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    # Leading Span B (Senkou Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Get daily data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate EMA200 on daily close
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), senkou_span_b)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure enough data
+    start_idx = max(52, 200)  # Ensure enough data for Ichomoku (52) and EMA200
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(rsi_2[i]) or np.isnan(stoch_k[i]) or np.isnan(stoch_d[i]) or 
-            np.isnan(volume_ma[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
+            np.isnan(ema200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: RSI(2) > 45 AND bullish Stochastic cross AND volume
-        rsi_condition = rsi_2[i] > 45
-        stoch_cross = stoch_k[i] > stoch_d[i] and stoch_k[i-1] <= stoch_d[i-1]
+        # Determine cloud boundaries (Senkou Span A and B)
+        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
+        # Check if price is above or below cloud
+        price_above_cloud = close[i] > upper_cloud
+        price_below_cloud = close[i] < lower_cloud
+        
+        # Daily trend filter: price relative to EMA200
+        price_above_ema200 = close[i] > ema200_1d_aligned[i]
+        price_below_ema200 = close[i] < ema200_1d_aligned[i]
         
         if position == 0:
-            if rsi_condition and stoch_cross and volume_confirm[i]:
+            # Long: price breaks above cloud AND price above daily EMA200 (bullish alignment)
+            if price_above_cloud and price_above_ema200:
                 signals[i] = 0.25
                 position = 1
+            # Short: price breaks below cloud AND price below daily EMA200 (bearish alignment)
+            elif price_below_cloud and price_below_ema200:
+                signals[i] = -0.25
+                position = -1
+                
         elif position == 1:
-            # Exit: RSI(2) < 55 (overbought) OR bearish Stochastic cross
-            rsi_exit = rsi_2[i] < 55
-            stoch_cross_down = stoch_k[i] < stoch_d[i] and stoch_k[i-1] >= stoch_d[i-1]
-            
-            if rsi_exit or stoch_cross_down:
+            # Long: exit if price breaks below cloud OR price drops below daily EMA200
+            if (price_below_cloud) or (not price_above_ema200):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+                
+        elif position == -1:
+            # Short: exit if price breaks above cloud OR price rises above daily EMA200
+            if (price_above_cloud) or (not price_below_ema200):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
