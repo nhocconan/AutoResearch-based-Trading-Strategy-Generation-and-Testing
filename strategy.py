@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band squeeze breakout with 1-day ATR-based volatility filter and volume confirmation.
-# Long when: BB width at 20-day low + price breaks above upper BB(20,2) + volume > 1.5x 20-period average
-# Short when: BB width at 20-day low + price breaks below lower BB(20,2) + volume > 1.5x 20-period average
-# Exit when price crosses back inside Bollinger Bands (mean reversion of squeeze breakout).
-# Bollinger squeeze captures low volatility periods before explosive moves, effective in both bull and bear markets.
-# Target: 15-25 trades/year per symbol. Uses Bollinger Bands with standard deviation for volatility measurement.
-name = "12h_BollingerSqueeze_Volume_Breakout"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1-day volume confirmation and 1-week trend filter.
+# Long when: price breaks above Donchian(20) high, volume > 1.5x 20-period average, 1w EMA(50) rising
+# Short when: price breaks below Donchian(20) low, volume > 1.5x 20-period average, 1w EMA(50) falling
+# Exit when price crosses back through Donchian(20) midline (10-period average).
+# Donchian channels provide clear breakout levels; volume confirms conviction; 1w EMA filters counter-trend moves.
+# Target: 20-40 trades/year per symbol.
+name = "4h_Donchian20_Volume_1wEMA"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,80 +23,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for Bollinger Bands and volatility filter
+    # 1-day data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Bollinger Bands on daily data (20,2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma + bb_std * std
-    lower_bb = sma - bb_std * std
-    bb_width = upper_bb - lower_bb
+    # Donchian(20) on 4h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2
     
-    # BB width percentile rank (252-day lookback for 1-year context)
-    bb_width_rank = np.full_like(bb_width, np.nan)
-    lookback = 252
-    for i in range(lookback, len(bb_width)):
-        window = bb_width[i-lookback:i]
-        if not np.all(np.isnan(window)):
-            bb_width_rank[i] = np.percentile(window, 100 * (bb_width[i] - np.nanmin(window)) / (np.nanmax(window) - np.nanmin(window) + 1e-10))
-    
-    # Identify squeeze: BB width at or below 10th percentile (low volatility)
-    squeeze = bb_width_rank <= 10
-    
-    # Align squeeze signal and Bollinger Bands to 12h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    
-    # 20-period volume average for confirmation
+    # 20-period volume average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # 1-week EMA(50) for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Rising/falling EMA: current > previous
+    ema_rising = np.where(ema_50_1w_aligned > np.roll(ema_50_1w_aligned, 1), 1, -1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period + lookback, 20)  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        is_squeeze = squeeze_aligned[i]
-        upper_band = upper_bb_aligned[i]
-        lower_band = lower_bb_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        ema_dir = ema_rising[i]
         
         if position == 0:
-            # Long entry: squeeze condition + price breaks above upper BB + volume confirmation
-            if is_squeeze and price > upper_band and vol > 1.5 * vol_ma:
+            # Long entry: breakout above Donchian high, volume confirmation, 1w EMA rising
+            if price > high_20[i] and vol > 1.5 * vol_ma and ema_dir == 1:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: squeeze condition + price breaks below lower BB + volume confirmation
-            elif is_squeeze and price < lower_band and vol > 1.5 * vol_ma:
+            # Short entry: breakdown below Donchian low, volume confirmation, 1w EMA falling
+            elif price < low_20[i] and vol > 1.5 * vol_ma and ema_dir == -1:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back inside Bollinger Bands (mean reversion)
-            if price < upper_band and price > lower_band:
+            # Long exit: price crosses below Donchian midline
+            if price < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back inside Bollinger Bands (mean reversion)
-            if price < upper_band and price > lower_band:
+            # Short exit: price crosses above Donchian midline
+            if price > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
