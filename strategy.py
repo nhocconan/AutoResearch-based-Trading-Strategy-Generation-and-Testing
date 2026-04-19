@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d VWAP trend filter and volume confirmation
-# Camarilla pivot levels identify key support/resistance from prior day's range
-# 1d VWAP provides institutional trend bias to avoid counter-trend trades
-# Volume confirmation ensures breakouts have institutional participation
-# Target: 75-200 total trades over 4 years (19-50/year) with disciplined entries
-name = "4h_Camarilla_1dVWAP_Volume"
-timeframe = "4h"
+# Hypothesis: 12h Donchian breakout with 1d EMA20 trend filter and volume confirmation
+# Donchian captures breakouts in trending markets
+# 1d EMA20 provides higher timeframe bias to avoid counter-trend trades
+# Volume confirmation filters weak breakouts and confirms strength
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
+name = "12h_Donchian20_1dEMA20_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,58 +22,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d VWAP for trend filter
+    # 1d EMA20 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily VWAP: cumulative(price * volume) / cumulative(volume)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_numerator = (typical_price * df_1d['volume']).cumsum()
-    vwap_denominator = df_1d['volume'].cumsum()
-    vwap_1d = (vwap_numerator / vwap_denominator).values
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Camarilla pivot levels from previous day
-    # Calculate for each 4h bar using previous day's OHLC
-    camarilla_r4 = np.full(n, np.nan)
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_r2 = np.full(n, np.nan)
-    camarilla_r1 = np.full(n, np.nan)
-    camarilla_s1 = np.full(n, np.nan)
-    camarilla_s2 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
-    camarilla_s4 = np.full(n, np.nan)
+    # Donchian channel on 12h
+    period = 20
     
-    # We need previous day's data for each point
-    # Since we have daily data, we'll use the prior completed day's values
-    prev_day_high = np.roll(df_1d['high'].values, 1)
-    prev_day_low = np.roll(df_1d['low'].values, 1)
-    prev_day_close = np.roll(df_1d['close'].values, 1)
+    # Highest high and lowest low over period
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Handle first day
-    prev_day_high[0] = prev_day_low[0] = prev_day_close[0] = df_1d['close'].iloc[0]
-    
-    # Calculate Camarilla levels
-    range_ = prev_day_high - prev_day_low
-    camarilla_r4 = prev_day_close + range_ * 1.1 / 2
-    camarilla_r3 = prev_day_close + range_ * 1.1 / 4
-    camarilla_r2 = prev_day_close + range_ * 1.1 / 6
-    camarilla_r1 = prev_day_close + range_ * 1.1 / 12
-    camarilla_s1 = prev_day_close - range_ * 1.1 / 12
-    camarilla_s2 = prev_day_close - range_ * 1.1 / 6
-    camarilla_s3 = prev_day_close - range_ * 1.1 / 4
-    camarilla_s4 = prev_day_close - range_ * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    for i in range(period-1, n):
+        highest_high[i] = np.max(high[i-(period-1):i+1])
+        lowest_low[i] = np.min(low[i-(period-1):i+1])
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -82,40 +48,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume MA
+    start_idx = max(period-1, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation and above 1d VWAP
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume_confirm[i] and 
-                close[i] > vwap_1d_aligned[i]):
+            # Long: Close breaks above upper Donchian + above 1d EMA20 + volume confirmation
+            if (close[i] > highest_high[i-1] and 
+                close[i] > ema_20_1d_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation and below 1d VWAP
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume_confirm[i] and 
-                  close[i] < vwap_1d_aligned[i]):
+            # Short: Close breaks below lower Donchian + below 1d EMA20 + volume confirmation
+            elif (close[i] < lowest_low[i-1] and 
+                  close[i] < ema_20_1d_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 or goes below VWAP
-            if (close[i] < camarilla_s1_aligned[i]) or (close[i] < vwap_1d_aligned[i]):
+            # Long: exit if close breaks below lower Donchian or below 1d EMA20
+            if (close[i] < lowest_low[i-1]) or (close[i] < ema_20_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 or goes above VWAP
-            if (close[i] > camarilla_r1_aligned[i]) or (close[i] > vwap_1d_aligned[i]):
+            # Short: exit if close breaks above upper Donchian or above 1d EMA20
+            if (close[i] > highest_high[i-1]) or (close[i] > ema_20_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
