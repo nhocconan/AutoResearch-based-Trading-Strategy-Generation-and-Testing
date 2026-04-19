@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1S1_Breakout_Volume_ADX_Filter
-Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
-Camarilla levels provide statistically significant intraday support/resistance
-ADX > 25 filters for trending markets to avoid false breakouts in chop
-Volume confirmation ensures institutional participation
-Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year)
-Works in bull/bear via ADX trend filter and volatility-adjusted breakouts
+1d_1w_Pivot_R1S1_Breakout_Volume_ADX_Filter
+Hypothesis: Daily chart with weekly ADX filter and Pivot point breakouts for multi-year trends
+Uses weekly ADX > 25 to filter for trending markets, avoiding false breakouts in chop
+Daily Pivot R1/S1 breakouts with volume confirmation capture institutional moves
+Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year)
+Works in bull/bear via weekly ADX trend filter and volatility-adjusted breakouts
 """
 
-name = "4h_Pivot_R1S1_Breakout_Volume_ADX_Filter"
-timeframe = "4h"
+name = "1d_1w_Pivot_R1S1_Breakout_Volume_ADX_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -27,7 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX(14) for trend strength filter - calculated on 4h data
+    # Weekly ADX for trend strength filter - calculated on weekly data
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high - low
@@ -65,46 +64,46 @@ def generate_signals(prices):
         # Avoid division by zero
         dx = np.full_like(close, np.nan)
         mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
-        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_suffix[mask])
         
         adx = WilderSmooth(dx, period)
         return adx
     
-    # 4h data for ADX and other indicators
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:  # Need enough for ADX calculation
+    # Weekly data for ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate ADX on 4h data
-    adx_4h = calculate_adx(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 14)
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    # Calculate ADX on weekly data
+    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Previous day's Camarilla levels (using 1d data)
+    # Previous day's Pivot levels (using 1d data)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
+    # Calculate Pivot points from previous day
     ph = df_1d['high'].shift(1).values  # Previous day high
     pl = df_1d['low'].shift(1).values   # Previous day low
     pc = df_1d['close'].shift(1).values # Previous day close
     
-    # Camarilla calculations
-    rang = ph - pl
-    r1 = pc + (rang * 1.1 / 12)
-    s1 = pc - (rang * 1.1 / 12)
-    r4 = pc + (rang * 1.1 / 2)
-    s4 = pc - (rang * 1.1 / 2)
+    # Standard Pivot calculations
+    pp = (ph + pl + pc) / 3
+    r1 = 2 * pp - pl
+    s1 = 2 * pp - ph
+    r2 = pp + (ph - pl)
+    s2 = pp - (ph - pl)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Pivot levels to daily timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volume confirmation: volume > 1.3 * 20-period average (slightly relaxed for fewer trades)
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -113,14 +112,14 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_4h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_4h_aligned[i] > 25
+        # Weekly ADX filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_1w_aligned[i] > 25
         
         if position == 0:
             # Long: price breaks above R1 with volume and strong trend
@@ -138,7 +137,7 @@ def generate_signals(prices):
                 
         elif position == 1:
             # Long: exit if price breaks below S1 or trend weakens (ADX < 20)
-            if (close[i] < s1_aligned[i]) or (adx_4h_aligned[i] < 20):
+            if (close[i] < s1_aligned[i]) or (adx_1w_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -146,7 +145,7 @@ def generate_signals(prices):
                 
         elif position == -1:
             # Short: exit if price breaks above R1 or trend weakens (ADX < 20)
-            if (close[i] > r1_aligned[i]) or (adx_4h_aligned[i] < 20):
+            if (close[i] > r1_aligned[i]) or (adx_1w_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
