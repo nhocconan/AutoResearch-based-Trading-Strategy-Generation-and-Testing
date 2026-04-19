@@ -3,134 +3,115 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Choppiness Index regime filter + 1-day Camarilla pivot breakout with volume confirmation.
-# Choppiness Index (CHOP) > 61.8 indicates ranging market (mean reversion), < 38.2 indicates trending.
-# In ranging markets (CHOP > 61.8): Buy near S1/S2, Sell near R1/R2 pivots from daily timeframe.
-# In trending markets (CHOP < 38.2): Breakout trades - Buy on break above R1, Sell on break below S1.
-# Volume confirmation requires current volume > 1.5x 20-period average.
-# This adapts to market regimes, reducing whipsaws in trends and capturing mean reversion in ranges.
-# Target: 20-40 trades/year per symbol with controlled risk.
-name = "4h_Choppiness_Camarilla_Pivot_Volume"
-timeframe = "4h"
+# Hypothesis: 1-day KAMA direction combined with RSI momentum and weekly volatility regime filter.
+# KAMA adapts to market noise - trends when efficiency ratio high, ranges when low.
+# Long when: KAMA rising, RSI > 50, weekly ATR ratio < 1.0 (low volatility regime)
+# Short when: KAMA falling, RSI < 50, weekly ATR ratio < 1.0
+# Uses weekly ATR ratio to filter trades to low volatility periods where mean reversion works better.
+# Weekly ATR ratio = current ATR(14) / average ATR(14) over past 52 weeks.
+# Stable, low-trade-frequency strategy targeting 10-20 trades/year.
+name = "1d_KAMA_RSI_VolatilityFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 14-period Choppiness Index
-    # TR = max(high-low, abs(high-previous close), abs(low-previous close))
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
+    # Calculate KAMA (adaptive moving average)
+    # Efficiency ratio = abs(net change) / sum of absolute changes
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = pd.Series(change).rolling(window=10, min_periods=10).sum().values
+    net_change = np.abs(np.subtract(close, np.roll(close, 10)))
+    net_change[:10] = 0  # first 10 values invalid
+    er = np.divide(net_change, volatility, out=np.zeros_like(volatility), where=volatility!=0)
+    # Smoothing constants
+    sc = np.power(er * (0.66 - 0.06) + 0.06, 2)
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    max_hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_loss), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Avoid division by zero
-    chop = np.full_like(close, 50.0)  # Default to neutral
-    valid = (atr_14 > 0) & (max_hh > min_ll)
-    chop[valid] = 100 * np.log10(atr_14[valid] * 14 / (max_hh[valid] - min_ll[valid])) / np.log10(14)
-    
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data for volatility regime filter (ATR ratio)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 60:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Based on previous day's high, low, close
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
+    # Calculate weekly ATR(14)
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
+    tr1 = high_w - low_w
+    tr2 = np.abs(high_w - np.roll(close_w, 1))
+    tr3 = np.abs(low_w - np.roll(close_w, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    pivot = (ph + pl + pc) / 3
-    range_hl = ph - pl
+    # Calculate average ATR over past 52 weeks (1 year)
+    atr_ma_52 = pd.Series(atr_w).rolling(window=52, min_periods=52).mean().values
+    # Weekly ATR ratio (current vs annual average)
+    atr_ratio_w = np.divide(atr_w, atr_ma_52, out=np.ones_like(atr_ma_52), where=atr_ma_52!=0)
     
-    # Camarilla levels
-    r4 = pc + range_hl * 1.5000
-    r3 = pc + range_hl * 1.2500
-    r2 = pc + range_hl * 1.1666
-    r1 = pc + range_hl * 1.0833
-    s1 = pc - range_hl * 1.0833
-    s2 = pc - range_hl * 1.1666
-    s3 = pc - range_hl * 1.2500
-    s4 = pc - range_hl * 1.5000
-    
-    # Align to 4h timeframe (use previous day's levels)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # 20-period volume average for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly ATR ratio to daily timeframe (with 1-week delay for completed bar)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_weekly, atr_ratio_w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Wait for both indicators
+    start_idx = max(50, 52)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(chop[i]) or np.isnan(r1_4h[i]) or np.isnan(r2_4h[i]) or 
-            np.isnan(s1_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(atr_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        chop_val = chop[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
+        # Low volatility regime filter: weekly ATR ratio < 1.0 (below average volatility)
+        low_vol_regime = atr_ratio_aligned[i] < 1.0
         
         if position == 0:
-            # Determine market regime
-            is_ranging = chop_val > 61.8
-            is_trending = chop_val < 38.2
-            
-            if is_ranging:
-                # Mean reversion in ranging market
-                # Long near support, Short near resistance
-                if close[i] <= s1_4h[i] and vol > 1.5 * vol_ma:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] >= r1_4h[i] and vol > 1.5 * vol_ma:
-                    signals[i] = -0.25
-                    position = -1
-            elif is_trending:
-                # Breakout in trending market
-                # Buy break above R1, Sell break below S1
-                if close[i] > r1_4h[i] and vol > 1.5 * vol_ma:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < s1_4h[i] and vol > 1.5 * vol_ma:
-                    signals[i] = -0.25
-                    position = -1
+            # Long entry: KAMA rising, RSI > 50, low volatility regime
+            if (kama[i] > kama[i-1] and rsi[i] > 50 and low_vol_regime):
+                signals[i] = 0.25
+                position = 1
+            # Short entry: KAMA falling, RSI < 50, low volatility regime
+            elif (kama[i] < kama[i-1] and rsi[i] < 50 and low_vol_regime):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit conditions
-            if chop_val > 61.8 and close[i] >= r1_4h[i]:  # Take profit at resistance in range
-                signals[i] = 0.0
-                position = 0
-            elif chop_val < 38.2 and close[i] < s1_4h[i]:  # Stop loss if breaks support in trend
+            # Long exit: KAMA falling OR RSI < 40
+            if (kama[i] < kama[i-1] or rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit conditions
-            if chop_val > 61.8 and close[i] <= s1_4h[i]:  # Take profit at support in range
-                signals[i] = 0.0
-                position = 0
-            elif chop_val < 38.2 and close[i] > r1_4h[i]:  # Stop loss if breaks resistance in trend
+            # Short exit: KAMA rising OR RSI > 60
+            if (kama[i] > kama[i-1] or rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
