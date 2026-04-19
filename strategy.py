@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_R1_S1_Breakout_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_VolumeTrend_4h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,36 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Pivot points
+    # Daily trend filter: EMA34
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate previous day's Pivot, R1, S1
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    
-    # Align daily pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # ATR for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(30, 20)  # Ensure enough data for indicators
+    start_idx = max(40, 34, 20, 14)
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
@@ -58,26 +55,30 @@ def generate_signals(prices):
         volume_ok = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above R1 with volume
-            if price > r1_aligned[i] and volume_ok:
+            # Long: price breaks above Donchian high + daily uptrend + volume
+            if price > high_20[i] and price > ema_34_1d_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume
-            elif price < s1_aligned[i] and volume_ok:
+                entry_price = price
+            # Short: price breaks below Donchian low + daily downtrend + volume
+            elif price < low_20[i] and price < ema_34_1d_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Exit: price returns below S1 (mean reversion to opposite level)
-            if price < s1_aligned[i]:
+            # Exit conditions: stoploss or mean reversion
+            stop_loss = entry_price - 2.5 * atr[i]
+            if price < stop_loss or price < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above R1 (mean reversion to opposite level)
-            if price > r1_aligned[i]:
+            # Exit conditions: stoploss or mean reversion
+            stop_loss = entry_price + 2.5 * atr[i]
+            if price > stop_loss or price > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
