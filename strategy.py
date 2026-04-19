@@ -1,20 +1,15 @@
-# [62931] 6h_Pivot_R1_S1_Breakout_VolumeATR_Filter_v1
-# Hypothesis: 6h timeframe with daily pivot points (R1/S1) and volume confirmation reduces noise.
-# Uses 2x volume filter and ATR-based stop to avoid chop. Targets 12-37 trades/year.
-# Works in bull (breakouts) and bear (mean reversion at pivots) via symmetric long/short logic.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Pivot_R1_S1_Breakout_VolumeATR_Filter_v1"
-timeframe = "6h"
+name = "4h_12h_Pivot_R1S1_Breakout_VolumeATR_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,7 +31,7 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily pivot levels to 6h timeframe
+    # Align daily pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -48,7 +43,7 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (6h)
+    # Volume confirmation: current volume > 2.0x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Additional filter: only trade when price is away from extremes (avoid chop)
