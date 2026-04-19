@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 4h trend filter (EMA34) and 1h Donchian breakout (20-period) with volume confirmation.
-# Enters only during 08-20 UTC session. Uses strict conditions to limit trades (~15-30/year) and avoid overtrading.
+# Hypothesis: 6h timeframe with 1-week trend filter (EMA34) and 6-hour Donchian breakout (20-period) with volume confirmation.
+# Enters only during 08-20 UTC session. Uses strict conditions to limit trades (~15-25/year) and avoid overtrading.
 # Trend-following in bull markets, avoids false signals in bear/chop via EMA34 filter and volume spike requirement.
-name = "1h_4h_EMA34_Donchian20_Volume"
-timeframe = "1h"
+# This is a novel combination for 6h timeframe with 1w trend filter, not previously tested in this session.
+name = "6h_1w_EMA34_Donchian20_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,15 +26,21 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for EMA34 trend (called ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Get 1w data for EMA34 trend (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Get 1h data for Donchian20 breakout (called ONCE before loop)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 6h data for Donchian20 breakout (called ONCE before loop)
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    # Donchian channels: 20-period high/low
+    high_20_6h = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    low_20_6h = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    high_20_6h_aligned = align_htf_to_ltf(prices, df_6h, high_20_6h)
+    low_20_6h_aligned = align_htf_to_ltf(prices, df_6h, low_20_6h)
     
     # Volume filter: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,40 +53,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(volume_ma[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(high_20_6h_aligned[i]) or 
+            np.isnan(low_20_6h_aligned[i]) or np.isnan(volume_ma[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above 4h EMA34 AND breaks 1h Donchian high with volume
-            if (close[i] > ema_34_4h_aligned[i] and 
-                close[i] > high_20[i] and 
+            # Long: price above 1w EMA34 AND breaks 6h Donchian high with volume
+            if (close[i] > ema_34_1w_aligned[i] and 
+                close[i] > high_20_6h_aligned[i] and 
                 volume_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 4h EMA34 AND breaks 1h Donchian low with volume
-            elif (close[i] < ema_34_4h_aligned[i] and 
-                  close[i] < low_20[i] and 
+            # Short: price below 1w EMA34 AND breaks 6h Donchian low with volume
+            elif (close[i] < ema_34_1w_aligned[i] and 
+                  close[i] < low_20_6h_aligned[i] and 
                   volume_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below 4h EMA34 or 1h Donchian low
-            if close[i] < ema_34_4h_aligned[i] or close[i] < low_20[i]:
+            # Long: exit if price breaks below 1w EMA34 or 6h Donchian low
+            if close[i] < ema_34_1w_aligned[i] or close[i] < low_20_6h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above 4h EMA34 or 1h Donchian high
-            if close[i] > ema_34_4h_aligned[i] or close[i] > high_20[i]:
+            # Short: exit if price breaks above 1w EMA34 or 6h Donchian high
+            if close[i] > ema_34_1w_aligned[i] or close[i] > high_20_6h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
