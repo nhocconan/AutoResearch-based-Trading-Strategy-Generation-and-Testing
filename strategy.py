@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with 12-hour trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high AND price > 12h EMA50 AND volume > 1.3x 12h average volume
-# Short when price breaks below Donchian(20) low AND price < 12h EMA50 AND volume > 1.3x 12h average volume
-# Exit when price returns to Donchian midpoint or reverses with volume confirmation
-# Uses Donchian for trend structure, EMA for higher timeframe trend filter, volume for breakout confirmation.
-# Target: 20-50 trades/year per symbol.
-name = "4h_Donchian_Breakout_Trend_Volume"
-timeframe = "4h"
+# Hypothesis: Daily 20-day Donchian breakout with weekly trend filter and volume confirmation.
+# Long when price breaks above 20-day high AND price > weekly EMA50 AND volume > 1.5x daily average volume
+# Short when price breaks below 20-day low AND price < weekly EMA50 AND volume > 1.5x daily average volume
+# Exit when price crosses back below/above 20-day moving average or when weekly trend reverses
+# Uses Donchian for breakout signals, weekly EMA for trend filter, volume for confirmation.
+# Target: 10-25 trades/year per symbol to stay within frequency limits.
+name = "1d_Donchian_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,74 +23,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12-hour data for Donchian channels and EMA
-    df_12h = get_htf_data(prices, '12h')
+    # Get daily data for Donchian calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # Donchian channels (20-period high/low)
-    high_20 = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
-    donchian_high = high_20
-    donchian_low = low_20
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Donchian channels (20-period)
+    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # 12-period EMA for trend filter
-    ema_50 = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align Donchian channels to daily timeframe (same timeframe, so direct use)
+    # But we still use align for consistency and to handle any potential misalignment
+    donchian_high = align_htf_to_ltf(prices, df_1d, high_20)
+    donchian_low = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).mean().values
+    # Get weekly data for trend filter (EMA 50)
+    df_1w = get_htf_data(prices, '1w')
+    weekly_ema50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
-    # Align all indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # Get daily average volume for confirmation
+    vol_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure Donchian and EMA are ready
+    start_idx = 20  # Ensure Donchian channels are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_ema50_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        d_high = donchian_high_aligned[i]
-        d_low = donchian_low_aligned[i]
-        d_mid = donchian_mid_aligned[i]
-        ema = ema_50_aligned[i]
+        upper_band = donchian_high[i]
+        lower_band = donchian_low[i]
+        weekly_ema = weekly_ema50_aligned[i]
         vol_ma = vol_ma_20_aligned[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.3 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long entry: break above Donchian high + above EMA50 + volume confirmation
-            if price > d_high and price > ema and volume_confirmed:
+            # Long entry: price breaks above 20-day high AND weekly uptrend AND volume confirmation
+            if price > upper_band and price > weekly_ema and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below Donchian low + below EMA50 + volume confirmation
-            elif price < d_low and price < ema and volume_confirmed:
+            # Short entry: price breaks below 20-day low AND weekly downtrend AND volume confirmation
+            elif price < lower_band and price < weekly_ema and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to midpoint OR breaks below low with volume
-            if price < d_mid or (price < d_low and volume_confirmed):
+            # Long exit: price crosses below 20-day moving average OR weekly trend turns bearish
+            mid_point = (upper_band + lower_band) / 2
+            if price < mid_point or price < weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to midpoint OR breaks above high with volume
-            if price > d_mid or (price > d_high and volume_confirmed):
+            # Short exit: price crosses above 20-day moving average OR weekly trend turns bullish
+            mid_point = (upper_band + lower_band) / 2
+            if price > mid_point or price > weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
