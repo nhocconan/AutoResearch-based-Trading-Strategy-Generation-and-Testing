@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""
-6h_ElderRay_BullBearPower_With_Regime_Filter
-Hypothesis: Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13) identifies institutional buying/selling pressure.
-Combined with 1-day trend filter (price > EMA50 for long, < EMA50 for short) to avoid counter-trend trades.
-Volume confirmation ensures institutional participation. Designed for 6h timeframe to target 50-150 total trades over 4 years.
-Works in bull/bear via trend filter - only takes longs in uptrend, shorts in downtrend.
-"""
+# 12h_TrueRangeBreakout_Volume_V2
+# Hypothesis: 12h breakout of True Range with volume confirmation. Uses True Range to capture volatility breakouts, 
+# works in both bull and bear by requiring volume confirmation to avoid false signals in low-volume chop.
+# Targets 50-150 total trades over 4 years (12-37/year) by using strict volume threshold (2.0x average).
 
-name = "6h_ElderRay_BullBearPower_With_Regime_Filter"
-timeframe = "6h"
+name = "12h_TrueRangeBreakout_Volume_V2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,96 +22,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray calculation
-    def ema(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        multiplier = 2.0 / (period + 1)
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]):
-                result[i] = (arr[i] - result[i-1]) * multiplier + result[i-1]
-            else:
-                result[i] = np.nan
-        return result
+    # True Range calculation
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # EMA50 for 1-day trend filter
-    def ema_long(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        multiplier = 2.0 / (period + 1)
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]):
-                result[i] = (arr[i] - result[i-1]) * multiplier + result[i-1]
-            else:
-                result[i] = np.nan
-        return result
+    # Average True Range (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Breakout levels: previous close ± 1.5 * ATR
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]  # First period
+    upper_break = prev_close + 1.5 * atr
+    lower_break = prev_close - 1.5 * atr
     
-    # Calculate EMA50 on 1-day close for trend filter
-    ema50_1d = ema_long(df_1d['close'].values, 50)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Calculate EMA13 for Elder Ray (on 6h data)
-    ema13 = ema(close, 13)
-    
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average (strict for fewer trades)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    volume_confirm = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure enough data for EMA50 and volume MA
+    start_idx = max(20, 14)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_ma[i])):
+        if np.isnan(atr[i]) or np.isnan(upper_break[i]) or np.isnan(lower_break[i]) or np.isnan(volume_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only long in uptrend (price > EMA50), only short in downtrend (price < EMA50)
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
-        
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) + volume + uptrend
-            if (bull_power[i] > 0 and 
-                volume_confirm[i] and 
-                uptrend):
+            # Long: price breaks above upper_break with volume confirmation
+            if close[i] > upper_break[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (selling pressure) + volume + downtrend
-            elif (bear_power[i] < 0 and 
-                  volume_confirm[i] and 
-                  downtrend):
+            # Short: price breaks below lower_break with volume confirmation
+            elif close[i] < lower_break[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Bull Power turns negative or trend changes to downtrend
-            if (bull_power[i] <= 0) or (not uptrend):
+            # Long: exit if price breaks below previous close or volume dries up
+            if close[i] < prev_close[i] or not volume_confirm[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Bear Power turns positive or trend changes to uptrend
-            if (bear_power[i] >= 0) or (not downtrend):
+            # Short: exit if price breaks above previous close or volume dries up
+            if close[i] > prev_close[i] or not volume_confirm[i]:
                 signals[i] = 0.0
                 position = 0
             else:
