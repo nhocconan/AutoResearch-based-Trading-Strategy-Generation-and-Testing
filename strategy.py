@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h KAMA (Kaufman Adaptive Moving Average) + 12h RSI + volume confirmation
-# KAMA adapts to market noise - slow in ranging markets, fast in trending markets
-# 12h RSI provides higher timeframe momentum filter
-# Volume confirmation ensures breakouts have conviction
-# Designed to work in both bull and bear markets by adapting speed to market conditions
-# Target: 15-25 trades/year per symbol with disciplined entries
-name = "6h_KAMA_12hRSI_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Williams Alligator + volume confirmation + 1d EMA trend filter
+# Williams Alligator consists of three smoothed moving averages (Jaws 13, Teeth 8, Lips 5)
+# In strong trends, the lines are well-separated and aligned (Jaws > Teeth > Lips for uptrend)
+# In ranging markets, the lines intertwine and frequently cross
+# Combined with volume confirmation and daily EMA trend filter to reduce false signals
+# Target: 20-30 trades/year per symbol with disciplined entries
+name = "4h_WilliamsAlligator_1dEMA_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,61 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h RSI for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Daily EMA34 for trend bias
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    rsi_period = 14
-    delta = np.diff(df_12h['close'])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    avg_gain = np.full_like(df_12h['close'], np.nan, dtype=float)
-    avg_loss = np.full_like(df_12h['close'], np.nan, dtype=float)
+    # Williams Alligator components (SMMA = Smoothed Moving Average)
+    def smoothed_moving_average(data, period):
+        sma = np.full_like(data, np.nan, dtype=float)
+        if len(data) >= period:
+            sma[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
+        return sma
     
-    if len(gain) >= rsi_period:
-        avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
-        for i in range(rsi_period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    # Calculate Alligator lines on 4h data
+    jaw = smoothed_moving_average(close, 13)  # Blue line (13-period)
+    teeth = smoothed_moving_average(close, 8)   # Red line (8-period)
+    lips = smoothed_moving_average(close, 5)    # Green line (5-period)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    
-    # KAMA on 6h data
-    def kama(data, period=10, fast=2, slow=30):
-        kama_values = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return kama_values
-        
-        # Efficiency ratio
-        change = np.abs(np.diff(data, period))
-        volatility = np.sum(np.abs(np.diff(data)), axis=0) if len(data) > 1 else 0
-        er = np.zeros_like(data)
-        for i in range(period, len(data)):
-            if volatility[i-period+1:i+1].sum() > 0:
-                er[i] = change[i] / volatility[i-period+1:i+1].sum()
-            else:
-                er[i] = 0
-        
-        # Smoothing constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        
-        # Initialize KAMA
-        kama_values[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            kama_values[i] = kama_values[i-1] + sc[i] * (data[i] - kama_values[i-1])
-        
-        return kama_values
-    
-    kama_values = kama(close, period=10, fast=2, slow=30)
-    
-    # Volume spike: volume > 1.3 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.3)
+    # Volume spike: volume > 1.5 * 30-period average
+    volume_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -86,36 +56,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_values[i]) or np.isnan(rsi_12h_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above KAMA + RSI > 50 (bullish momentum) + volume spike
-            if (close[i] > kama_values[i] and 
-                rsi_12h_aligned[i] > 50 and 
+            # Long: Lips > Teeth > Jaw (bullish alignment) + above daily EMA + volume spike
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + RSI < 50 (bearish momentum) + volume spike
-            elif (close[i] < kama_values[i] and 
-                  rsi_12h_aligned[i] < 50 and 
+            # Short: Jaw > Teeth > Lips (bearish alignment) + below daily EMA + volume spike
+            elif (jaw[i] > teeth[i] and teeth[i] > lips[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses below KAMA or RSI turns bearish
-            if (close[i] < kama_values[i]) or (rsi_12h_aligned[i] < 50):
+            # Long: exit if Alligator lines intertwine (Lips < Teeth) or price breaks below daily EMA
+            if (lips[i] < teeth[i]) or (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses above KAMA or RSI turns bullish
-            if (close[i] > kama_values[i]) or (rsi_12h_aligned[i] > 50):
+            # Short: exit if Alligator lines intertwine (Jaw < Teeth) or price breaks above daily EMA
+            if (jaw[i] < teeth[i]) or (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
