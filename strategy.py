@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_Breakout_VolumeATR_v1"
-timeframe = "4h"
+name = "12h_Daily_Pivot_R1S1_Breakout_VolumeATR"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,19 +31,19 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily pivot levels to 4h timeframe
+    # Align daily pivot levels to 12h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # Daily ATR for volatility filter (14-period)
-    tr = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr = np.maximum(tr, np.abs(low_1d[1:] - close_1d[:-1]))
-    tr = np.concatenate([[np.nan], tr])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])
+    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (4h)
+    # Volume confirmation: current volume > 2.0x 20-period average (12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
