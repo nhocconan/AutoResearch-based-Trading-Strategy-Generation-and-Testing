@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ElderRay_BullBear_Power_With_Trend_v1"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,23 +23,26 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA for Elder Ray
-    close_1d_series = pd.Series(close_1d)
-    ema_13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d ATR(14) for Camarilla width
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Bull Power and Bear Power
-    bull_power_1d = high_1d - ema_13_1d
-    bear_power_1d = low_1d - ema_13_1d
+    # Calculate Camarilla levels using previous day's data
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
     
-    # Smooth the power values with 3-period EMA
-    bull_power_smooth = pd.Series(bull_power_1d).ewm(span=3, adjust=False, min_periods=3).mean().values
-    bear_power_smooth = pd.Series(bear_power_1d).ewm(span=3, adjust=False, min_periods=3).mean().values
+    camarilla_H4 = prev_close + 1.1/2 * (prev_high - prev_low)
+    camarilla_L4 = prev_close - 1.1/2 * (prev_high - prev_low)
     
-    # Align to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_smooth)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_smooth)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
-    # 6h trend filter: EMA(34) slope
+    # 4h trend filter: EMA(34) slope
     close_s = pd.Series(close)
     ema_34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_slope = ema_34 - np.roll(ema_34, 1)
@@ -54,7 +57,7 @@ def generate_signals(prices):
     start_idx = max(100, 34)
     
     for i in range(start_idx, n):
-        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or \
+        if np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or \
            np.isnan(ema_34_slope[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
@@ -71,26 +74,26 @@ def generate_signals(prices):
         bearish_trend = ema_34_slope[i] < 0
         
         if position == 0:
-            # Long: Bull Power > 0 (bulls in control) with volume and bullish trend
-            if bull_power_aligned[i] > 0 and volume_ok and bullish_trend:
+            # Long: price breaks above H4 with volume and bullish trend
+            if price > camarilla_H4_aligned[i] and volume_ok and bullish_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bears in control) with volume and bearish trend
-            elif bear_power_aligned[i] < 0 and volume_ok and bearish_trend:
+            # Short: price breaks below L4 with volume and bearish trend
+            elif price < camarilla_L4_aligned[i] and volume_ok and bearish_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Bull Power <= 0 or trend turns bearish
-            if bull_power_aligned[i] <= 0 or not bullish_trend:
+            # Exit: price returns below H4 or trend turns bearish
+            if price < camarilla_H4_aligned[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Bear Power >= 0 or trend turns bullish
-            if bear_power_aligned[i] >= 0 or not bearish_trend:
+            # Exit: price returns above L4 or trend turns bullish
+            if price > camarilla_L4_aligned[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
