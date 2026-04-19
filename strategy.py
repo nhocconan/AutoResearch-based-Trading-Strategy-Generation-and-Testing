@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Weekly_Pivot_R1S1_Breakout_VolumeATR_v1"
-timeframe = "12h"
+name = "1d_Weekly_Pivot_R1S1_Breakout_VolumeATR_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +31,7 @@ def generate_signals(prices):
     r1_1w = 2 * pivot_1w - low_1w
     s1_1w = 2 * pivot_1w - high_1w
     
-    # Align weekly pivot levels to 12h timeframe
+    # Align weekly pivot levels to daily timeframe
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
@@ -43,7 +43,7 @@ def generate_signals(prices):
     atr_14_1w = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (12h)
+    # Volume confirmation: current volume > 2.0x 20-period average (daily)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
