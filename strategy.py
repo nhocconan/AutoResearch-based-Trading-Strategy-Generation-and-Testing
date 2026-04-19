@@ -3,13 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_TrendVolume_Squeeze_v1"
-timeframe = "4h"
+# Hypothesis: 1d weekly trend filter + weekly pivot R1/S1 breakout with volume confirmation
+# Weekly trend: price above/below weekly EMA34 determines bias
+# Weekly pivot levels act as dynamic support/resistance
+# Volume confirms breakout strength
+# Target: 15-25 trades/year, works in bull/bear via trend filter
+
+name = "1d_WeeklyTrend_Pivot_R1S1_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,38 +23,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volatility (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend and pivot calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Daily 200 EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Weekly high, low, close for EMA and pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Daily ATR for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
-    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    # Weekly EMA34 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 4h Donchian channels (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly pivot point calculation (using weekly OHLC)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly R1 and S1 using Camarilla formula
+    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12
+    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12
     
-    # 4h volume confirmation (20-period average)
+    # Align weekly data to daily timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 34  # Need EMA34 warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
-            np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(pivot_1w_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -56,43 +65,34 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        ema200 = ema200_1d_aligned[i]
-        atr = atr14_1d_aligned[i]
-        upper = high_max_20[i]
-        lower = low_min_20[i]
+        ema34 = ema34_1w_aligned[i]
+        pivot = pivot_1w_aligned[i]
+        r1 = r1_1w_aligned[i]
+        s1 = s1_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # Volatility filter: avoid extremely low volatility (squeeze)
-        # Use 50-period ATR average to normalize
-        if i >= 50:
-            atr_ma_50 = pd.Series(atr14_1d_aligned[:i+1]).rolling(window=50, min_periods=50).mean().iloc[-1]
-            volatility_normal = atr > 0.5 * atr_ma_50 and atr < 2.0 * atr_ma_50
-        else:
-            volatility_normal = True
-        
         if position == 0:
-            # Long: break above upper Donchian with uptrend, volume, and normal volatility
-            if price > upper and price > ema200 and volume_confirmed and volatility_normal:
+            # Long: weekly uptrend (price > EMA34) + break above weekly R1 + volume
+            if price > ema34 and price > r1 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian with downtrend, volume, and normal volatility
-            elif price < lower and price < ema200 and volume_confirmed and volatility_normal:
+            # Short: weekly downtrend (price < EMA34) + break below weekly S1 + volume
+            elif price < ema34 and price < s1 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price below lower Donchian or trend reversal
-            if price < lower or price < ema200:
+            # Exit: weekly downtrend or price breaks below weekly pivot
+            if price < ema34 or price < pivot:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above upper Donchian or trend reversal
-            if price > upper or price > ema200:
+            # Exit: weekly uptrend or price breaks above weekly pivot
+            if price > ema34 or price > pivot:
                 signals[i] = 0.0
                 position = 0
             else:
