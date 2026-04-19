@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_KAMA_RSI_Trend_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Spike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,70 +19,86 @@ def generate_signals(prices):
     
     # Get daily data once before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    # KAMA on daily for trend
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    direction = np.abs(np.diff(close_1d, n=9, prepend=close_1d[:9]))
-    er = np.where(change != 0, direction / change, 0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
     
-    # RSI(14) on 12h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla pivot levels from previous day
+    prev_close = np.roll(close_1d, 1)
+    prev_close[0] = np.nan
+    prev_high = np.roll(high_1d, 1)
+    prev_high[0] = np.nan
+    prev_low = np.roll(low_1d, 1)
+    prev_low[0] = np.nan
     
-    # Volume confirmation on 12h
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Pivot = (H + L + C) / 3
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
+    # R4 = C + (H - L) * 1.1 / 2
+    r4 = prev_close + (prev_high - prev_low) * 1.1 / 2.0
+    # S4 = C - (H - L) * 1.1 / 2
+    s4 = prev_close - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Time filter: 08-20 UTC
+    # Align to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: current volume > 2.5x 20-period average (more restrictive)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Time filter: 08-20 UTC (active hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     time_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 20
     
     for i in range(start_idx, n):
         if not time_filter[i]:
             signals[i] = 0.0
             continue
             
-        if np.isnan(kama_12h[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
+           np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
-            
+        
         price = close[i]
         vol = volume[i]
-        vol_ma_val = vol_ma[i]
+        vol_ma = vol_ma_20[i]
         
-        volume_ok = vol > 1.5 * vol_ma_val
+        # Volume spike: current volume > 2.5x average (more restrictive filter)
+        volume_spike = vol > 2.5 * vol_ma
         
         if position == 0:
-            if price > kama_12h[i] and rsi[i] > 50 and volume_ok:
+            # Long: Price breaks above R1 with volume spike
+            if price > r1_4h[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            elif price < kama_12h[i] and rsi[i] < 50 and volume_ok:
+            # Short: Price breaks below S1 with volume spike
+            elif price < s1_4h[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
+        
         elif position == 1:
-            if price < kama_12h[i] or rsi[i] < 40:
+            # Exit: Price returns below S1 (reversal signal)
+            if price < s1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            if price > kama_12h[i] or rsi[i] > 60:
+            # Exit: Price returns above R1 (reversal signal)
+            if price > r1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
