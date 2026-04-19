@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12-hour Donchian breakout with volume confirmation and 1-day ATR filter.
-# Works in both bull and bear markets by requiring breakout alignment with daily volatility regime.
-# Target: 20-35 trades/year per symbol with disciplined entries to minimize fee drag.
-name = "4h_Donchian20_12h_Volume_ATR1d"
+# Hypothesis: 4h strategy using 1-day Donchian breakout with volume confirmation and ADX trend filter.
+# Combines daily price channel breakouts with volume spikes and ADX(14) > 25 to filter chop.
+# Works in both bull and bear markets by requiring strong trend alignment (ADX) and institutional
+# participation (volume spike) to avoid false breakouts. Target: 20-40 trades/year per symbol.
+name = "4h_Donchian1d_ADX14_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,28 +21,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day ATR for volatility filter
+    # Daily Donchian channels (20-period)
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate 20-period high/low for Donchian channels
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 4h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    
+    # Daily ADX(14) for trend strength
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    tr1 = np.maximum(df_1d['high'], df_1d['close'].shift(1)) - np.minimum(df_1d['low'], df_1d['close'].shift(1))
-    atr_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate True Range
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d)
+    tr2 = pd.Series(high_1d).abs() - pd.Series(low_1d).shift(1)
+    tr3 = pd.Series(high_1d).shift(1).abs() - pd.Series(low_1d)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean()
     
-    # 12-hour Donchian channels (20-period)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Calculate Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = -pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    donch_high = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    # Smoothed DM and TR
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.rolling(window=14, min_periods=14).mean().values
     
-    # Volume spike: volume > 1.5 * 20-period average
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume spike: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,36 +74,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above 12h Donchian high, with volume spike and sufficient volatility
-            if (close[i] > donch_high_aligned[i] and 
-                volume_spike[i] and 
-                atr_1d_aligned[i] > 0):
+            # Long: price breaks above daily Donchian high, strong trend (ADX>25), volume spike
+            if (close[i] > high_20_aligned[i] and 
+                adx_aligned[i] > 25 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 12h Donchian low, with volume spike and sufficient volatility
-            elif (close[i] < donch_low_aligned[i] and 
-                  volume_spike[i] and 
-                  atr_1d_aligned[i] > 0):
+            # Short: price breaks below daily Donchian low, strong trend (ADX>25), volume spike
+            elif (close[i] < low_20_aligned[i] and 
+                  adx_aligned[i] > 25 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below 12h Donchian low
-            if close[i] < donch_low_aligned[i]:
+            # Long: exit if price breaks below daily Donchian low or ADX weakens (<20)
+            if (close[i] < low_20_aligned[i]) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above 12h Donchian high
-            if close[i] > donch_high_aligned[i]:
+            # Short: exit if price breaks above daily Donchian high or ADX weakens (<20)
+            if (close[i] > high_20_aligned[i]) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
