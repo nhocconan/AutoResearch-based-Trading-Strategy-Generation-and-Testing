@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour 1-week Camarilla pivot breakout with volume confirmation.
-# Uses weekly Camarilla levels (H5, L5, H6, L6) calculated from previous week's range.
-# Long when price breaks above H6 with volume > 1.5x 20-period average.
-# Short when price breaks below L6 with volume > 1.5x 20-period average.
-# Exit when price returns to weekly midpoint (H4/L4 average).
-# Weekly Camarilla provides institutional support/resistance, breakouts capture momentum,
-# volume confirms institutional participation. Works in trending markets (bull/bear).
-name = "6h_WeeklyCamarilla_H6L6_Breakout_Volume"
-timeframe = "6h"
+# Hypothesis: 12-hour timeframe using Donchian(20) breakout with 1-day trend filter (EMA50),
+# volume confirmation (>1.5x 20-period average), and ATR(14) stoploss.
+# Long when price breaks above Donchian upper band AND price > EMA50 (1d) AND volume spike.
+# Short when price breaks below Donchian lower band AND price < EMA50 (1d) AND volume spike.
+# Exit when price crosses opposite Donchian band or ATR-based stoploss hits.
+# Designed for fewer trades (<30/year) with strong trend capture in both bull and bear markets.
+name = "12h_Donchian_EMA50_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,73 +23,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Camarilla levels from previous week's data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Previous week's high, low, close
-    prev_week_high = df_1w['high'].shift(1).values  # Previous week's high
-    prev_week_low = df_1w['low'].shift(1).values    # Previous week's low
-    prev_week_close = df_1w['close'].shift(1).values # Previous week's close
+    # Calculate ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels for current week based on previous week
-    # H6 = Close + 1.163*(High - Low)
-    # L6 = Close - 1.163*(High - Low)
-    # H4 = Close + 0.550*(High - Low)
-    # L4 = Close - 0.550*(High - Low)
-    range_wk = prev_week_high - prev_week_low
-    h6 = prev_week_close + 1.163 * range_wk
-    l6 = prev_week_close - 1.163 * range_wk
-    h4 = prev_week_close + 0.550 * range_wk
-    l4 = prev_week_close - 0.550 * range_wk
-    midpoint = (h4 + l4) / 2  # Weekly midpoint for exit
-    
-    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
-    h6_aligned = align_htf_to_ltf(prices, df_1w, h6)
-    l6_aligned = align_htf_to_ltf(prices, df_1w, l6)
-    midpoint_aligned = align_htf_to_ltf(prices, df_1w, midpoint)
+    # Get 1-day EMA50 for trend filter (updated only after daily close)
+    df_1d = get_htf_data(prices, '1d')
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    atr_multiplier = 2.5  # ATR multiplier for stoploss
     
-    start_idx = 20  # Wait for volume MA calculation
+    start_idx = max(20, 14, 50)  # Wait for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(h6_aligned[i]) or np.isnan(l6_aligned[i]) or 
-            np.isnan(midpoint_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Current values
         price = close[i]
+        upper_band = high_roll[i]
+        lower_band = low_roll[i]
+        trend = ema50_1d_aligned[i]
+        atr_val = atr[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long entry: price breaks above H6 with volume spike
-            if price > h6_aligned[i] and vol > 1.5 * vol_ma:
+            # Long entry: price breaks above upper band AND price > trend AND volume spike
+            if price > upper_band and price > trend and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below L6 with volume spike
-            elif price < l6_aligned[i] and vol > 1.5 * vol_ma:
+                entry_price = price
+            # Short entry: price breaks below lower band AND price < trend AND volume spike
+            elif price < lower_band and price < trend and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: price returns to weekly midpoint
-            if price <= midpoint_aligned[i]:
+            # Long exit conditions
+            exit_signal = False
+            # Exit if price crosses below lower band
+            if price < lower_band:
+                exit_signal = True
+            # Exit if ATR-based stoploss hit (price < entry_price - atr_multiplier * atr)
+            elif price < entry_price - atr_multiplier * atr_val:
+                exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to weekly midpoint
-            if price >= midpoint_aligned[i]:
+            # Short exit conditions
+            exit_signal = False
+            # Exit if price crosses above upper band
+            if price > upper_band:
+                exit_signal = True
+            # Exit if ATR-based stoploss hit (price > entry_price + atr_multiplier * atr)
+            elif price > entry_price + atr_multiplier * atr_val:
+                exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
