@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d trend filter
-# Uses tight entry conditions to limit trades (target: 20-50/year) and avoid fee drag
-# Works in bull markets via breakouts and in bear via short breakdowns
-# Only trades when volume confirms breakout and higher timeframe trend aligns
-name = "4h_DonchianBreakout_VolumeTrend_v1"
+# Hypothesis: 4h Camarilla Pivot Breakout with Volume Confirmation and 1d Trend Filter
+# Uses 1d Camarilla levels for structure, volume to confirm breakouts, and 1d EMA50 for trend bias.
+# Designed to work in both bull (breakouts) and bear (breakdowns) markets with limited trades.
+# Target: 20-50 trades/year to avoid fee drag while maintaining edge.
+name = "4h_CamarillaBreakout_VolumeTrend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,11 +29,32 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 4h Donchian channels (20-period)
-    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d Camarilla pivot levels (based on previous day's range)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].shift(1).values  # Previous day's close
     
-    # 4h ATR for position sizing and stops
+    # Calculate Camarilla levels for each day
+    R4 = close_1d_prev + 1.5 * (high_1d - low_1d)
+    R3 = close_1d_prev + 1.1 * (high_1d - low_1d)
+    R2 = close_1d_prev + 0.6 * (high_1d - low_1d)
+    R1 = close_1d_prev + 0.3 * (high_1d - low_1d)
+    S1 = close_1d_prev - 0.3 * (high_1d - low_1d)
+    S2 = close_1d_prev - 0.6 * (high_1d - low_1d)
+    S3 = close_1d_prev - 1.1 * (high_1d - low_1d)
+    S4 = close_1d_prev - 1.5 * (high_1d - low_1d)
+    
+    # Align Camarilla levels to 4h timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # 4h ATR for volatility filtering
     tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
     tr[0] = high[0] - low[0]
     atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
@@ -45,7 +66,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if np.isnan(ema50_1d_aligned[i]) or \
-           np.isnan(donch_high_20[i]) or np.isnan(donch_low_20[i]) or np.isnan(atr_4h[i]):
+           np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(atr_4h[i]):
             signals[i] = 0.0
             continue
         
@@ -60,26 +81,26 @@ def generate_signals(prices):
         volume_filter = volume[i] > 1.5 * avg_volume
         
         if position == 0:
-            # Long: breakout above Donchian high + volume + 1d uptrend
-            if high[i] > donch_high_20[i-1] and volume_filter and price > ema50_1d_aligned[i]:
+            # Long: break above R1 with volume and 1d uptrend
+            if high[i] > R1_aligned[i-1] and volume_filter and price > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below Donchian low + volume + 1d downtrend
-            elif low[i] < donch_low_20[i-1] and volume_filter and price < ema50_1d_aligned[i]:
+            # Short: break below S1 with volume and 1d downtrend
+            elif low[i] < S1_aligned[i-1] and volume_filter and price < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below Donchian low or ATR-based stop
-            if close[i] < donch_low_20[i] or close[i] < close[i-1] - 1.5 * atr:
+            # Exit: price closes below S1 or ATR-based stop
+            if close[i] < S1_aligned[i] or close[i] < close[i-1] - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above Donchian high or ATR-based stop
-            if close[i] > donch_high_20[i] or close[i] > close[i-1] + 1.5 * atr:
+            # Exit: price closes above R1 or ATR-based stop
+            if close[i] > R1_aligned[i] or close[i] > close[i-1] + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
