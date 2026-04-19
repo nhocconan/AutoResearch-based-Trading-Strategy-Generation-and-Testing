@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation and ADX(14) trend filter.
-# Uses 1w ADX to filter strong trends only, reducing whipsaws in sideways markets.
-# Volume confirmation ensures breakout validity. Works in bull/bear markets by
-# filtering weak trends and choppy markets. Target: 20-40 trades/year per symbol.
-name = "12h_Donchian20_ADX1w_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX(14) > 25 trend filter.
+# Long when price breaks above 20-period high, short when breaks below 20-period low.
+# Requires volume > 1.5x 20-period average and strong trend (ADX > 25).
+# Exits when price crosses the 10-period moving average in opposite direction.
+# Designed to work in both bull and bear markets by filtering weak trends and choppy markets.
+# Target: 20-40 trades/year per symbol.
+name = "4h_Donchian20_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,13 +23,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ADX trend filter (higher timeframe for stronger trend signal)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Donchian channels (20-period)
+    def calculate_donchian(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-(period-1):i+1])
+            lower[i] = np.min(low[i-(period-1):i+1])
+        return upper, lower
     
-    # Calculate ADX on weekly (14-period)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    
+    # 10-period moving average for exit
+    ma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    
+    # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -71,21 +81,7 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    
-    # Align 1w ADX to 12h
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Donchian channels (20-period) on 12h data
-    def donchian_channels(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(high, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-(period-1):i+1])
-            lower[i] = np.min(low[i-(period-1):i+1])
-        return upper, lower
-    
-    donch_upper, donch_lower = donchian_channels(high, low, 20)
+    adx = calculate_adx(high, low, close, 14)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -93,47 +89,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 35)  # Ensure Donchian and ADX are ready
+    start_idx = max(30, 28)  # Ensure Donchian, MA, ADX and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or 
-            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ma_10[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_1w_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        ma = ma_10[i]
+        adx_val = adx[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # ADX trend strength filter (weekly)
+        # ADX trend strength filter
         strong_trend = adx_val > 25
         
         if position == 0:
             # Enter long if price breaks above Donchian upper, strong trend, and volume confirmation
-            if price > donch_upper[i] and strong_trend and volume_confirmed:
+            if price > upper and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
             # Enter short if price breaks below Donchian lower, strong trend, and volume confirmation
-            elif price < donch_lower[i] and strong_trend and volume_confirmed:
+            elif price < lower and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below Donchian lower or trend weakens
-            if price < donch_lower[i] or adx_val < 20:  # Trend weakening
+            # Exit long when price crosses below 10-period MA
+            if price < ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above Donchian upper or trend weakens
-            if price > donch_upper[i] or adx_val < 20:  # Trend weakening
+            # Exit short when price crosses above 10-period MA
+            if price > ma:
                 signals[i] = 0.0
                 position = 0
             else:
