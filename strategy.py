@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_AggroDefense_Pivot"
-timeframe = "6h"
+name = "1d_1w_Pivot_R1_S1_Breakout_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,31 +17,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for Pivot and 1d EMA ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Previous day Pivot, R1, S1
-    prev_high_1d = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
-    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1_1d = 2 * pivot_1d - prev_low_1d
-    s1_1d = 2 * pivot_1d - prev_high_1d
-    
-    # === 1w data for weekly trend filter ===
+    # Get weekly data for Pivot points
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    # Weekly EMA(21) for trend
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align all to 6h timeframe
-    pivot_1d_a = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_a = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_a = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema_21_1w_a = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate previous week's Pivot, R1, S1
+    prev_high = np.concatenate([[np.nan], high_1w[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1w[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1w[:-1]])
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    
+    # Align weekly pivot levels to daily timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,10 +43,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)  # Ensure enough data
+    start_idx = max(30, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_1d_a[i]) or np.isnan(r1_1d_a[i]) or np.isnan(s1_1d_a[i]) or np.isnan(ema_21_1w_a[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -63,31 +57,27 @@ def generate_signals(prices):
         # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
-        # Weekly trend: price above/below weekly EMA21
-        weekly_uptrend = price > ema_21_1w_a[i]
-        weekly_downtrend = price < ema_21_1w_a[i]
-        
         if position == 0:
-            # Long: price breaks above R1d with volume AND weekly uptrend
-            if price > r1_1d_a[i] and volume_ok and weekly_uptrend:
+            # Long: price breaks above R1 with volume
+            if price > r1_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1d with volume AND weekly downtrend
-            elif price < s1_1d_a[i] and volume_ok and weekly_downtrend:
+            # Short: price breaks below S1 with volume
+            elif price < s1_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to pivot (mean reversion to mean)
-            if price < pivot_1d_a[i]:
+            # Exit: price returns below S1 (mean reversion to opposite level)
+            if price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to pivot (mean reversion to mean)
-            if price > pivot_1d_a[i]:
+            # Exit: price returns above R1 (mean reversion to opposite level)
+            if price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
