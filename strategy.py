@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Daily_Pivot_R1S1_Breakout_VolumeATR_v1"
+name = "4h_Daily_Range_Swing_Rejection"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation (once before loop)
+    # Get daily data for range calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily high, low, close for pivot calculation
+    # Daily high, low, close for range calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points: P = (H+L+C)/3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    # Daily range and midpoint
+    daily_range = high_1d - low_1d
+    daily_mid = (high_1d + low_1d) / 2.0
     
-    # Align daily pivot levels to 4h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align daily range and midpoint to 4h timeframe
+    daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
+    daily_mid_aligned = align_htf_to_ltf(prices, df_1d, daily_mid)
     
-    # Daily ATR for volatility filter (14-period)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
-    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Previous day's range and midpoint (for rejection logic)
+    prev_range = np.roll(daily_range_aligned, 1)
+    prev_mid = np.roll(daily_mid_aligned, 1)
+    prev_range[0] = np.nan
+    prev_mid[0] = np.nan
     
-    # Volume confirmation: current volume > 2.5x 20-period average (4h)
+    # 4h ATR for volatility filter
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
+    tr = np.maximum(tr, np.absolute(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: current volume > 2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(prev_range[i]) or np.isnan(prev_mid[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        pivot = pivot_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        atr = atr_14_1d_aligned[i]
+        rng = prev_range[i]
+        mid = prev_mid[i]
+        atr_val = atr[i]
         
-        volume_confirmed = vol > 2.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: break above R1 with volume
-            if price > r1 and volume_confirmed:
+            # Long rejection: price rejected below 50% of prev day's range, now reversing up with volume
+            lower_bound = mid - 0.5 * rng
+            if price > lower_bound and close[i-1] <= lower_bound and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume
-            elif price < s1 and volume_confirmed:
+            # Short rejection: price rejected above 50% of prev day's range, now reversing down with volume
+            upper_bound = mid + 0.5 * rng
+            if price < upper_bound and close[i-1] >= upper_bound and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price below pivot or ATR-based stop
-            if price < pivot or price < close[i-1] - 2.0 * atr:
+            # Exit: price breaks below 25% of prev day's range or ATR stop
+            lower_exit = mid - 0.75 * rng
+            if price < lower_exit or price < close[i-1] - 1.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above pivot or ATR-based stop
-            if price > pivot or price > close[i-1] + 2.0 * atr:
+            # Exit: price breaks above 75% of prev day's range or ATR stop
+            upper_exit = mid + 0.75 * rng
+            if price > upper_exit or price > close[i-1] + 1.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
