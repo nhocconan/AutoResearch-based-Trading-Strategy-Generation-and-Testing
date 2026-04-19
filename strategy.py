@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""
-12h_Pivot_R1S1_Breakout_Volume_ADX_Filter_v2
-Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter.
-Improved version with stricter entry conditions to reduce trade frequency and improve win rate.
-- Uses 1d timeframe for Camarilla levels (statistically significant support/resistance)
-- ADX > 25 filters for trending markets to avoid false breakouts in chop
-- Volume > 1.8 * 20-period average (stricter for fewer trades)
-- Requires price to close beyond the level for confirmation (reduces whipsaws)
-- Position size: 0.25 (conservative to manage drawdown)
-- Target: 50-150 total trades over 4 years (12-37/year)
-"""
+# 1h_DailyTrend_With_1dVWAP_Support_Resistance
+# Hypothesis: Use daily trend direction (price above/below daily VWAP) as primary filter, 
+# then enter on 1h pullbacks to 20 EMA during London/NY session (08-20 UTC).
+# Daily VWAP acts as dynamic support/resistance - price tends to respect it.
+# In bull markets: buy dips to EMA when above daily VWAP.
+# In bear markets: sell rallies to EMA when below daily VWAP.
+# Session filter reduces noise and focuses on liquid hours.
+# Target: 15-30 trades/year by requiring both trend alignment and pullback.
 
-name = "12h_Pivot_R1S1_Breakout_Volume_ADX_Filter_v2"
-timeframe = "12h"
+name = "1h_DailyTrend_With_1dVWAP_Support_Resistance"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -29,129 +26,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX(14) for trend strength filter - calculated on 12h data
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First period
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smoothed values using Wilder's smoothing (EMA-like)
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            if len(data) >= period:
-                result[period-1] = np.nanmean(data[:period])
-                for i in range(period, len(data)):
-                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-                    else:
-                        result[i] = np.nan
-            return result
-        
-        atr = WilderSmooth(tr, period)
-        dm_plus_smooth = WilderSmooth(dm_plus, period)
-        dm_minus_smooth = WilderSmooth(dm_minus, period)
-        
-        # Avoid division by zero
-        dx = np.full_like(close, np.nan)
-        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
-        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
-        
-        adx = WilderSmooth(dx, period)
-        return adx
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # 12h data for ADX and other indicators
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough for ADX calculation
-        return np.zeros(n)
-    
-    # Calculate ADX on 12h data
-    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Previous day's Camarilla levels (using 1d data)
+    # Daily VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].shift(1).values  # Previous day high
-    pl = df_1d['low'].shift(1).values   # Previous day low
-    pc = df_1d['close'].shift(1).values # Previous day close
+    # Calculate daily VWAP
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_numerator = (typical_price * df_1d['volume']).cumsum()
+    vwap_denominator = df_1d['volume'].cumsum()
+    daily_vwap = (vwap_numerator / vwap_denominator).values
     
-    # Camarilla calculations
-    rang = ph - pl
-    r1 = pc + (rang * 1.1 / 12)
-    s1 = pc - (rang * 1.1 / 12)
-    r4 = pc + (rang * 1.1 / 2)
-    s4 = pc - (rang * 1.1 / 2)
+    # Align daily VWAP to 1h timeframe (with 1-day delay for completed daily VWAP)
+    daily_vwap_aligned = align_htf_to_ltf(prices, df_1d, daily_vwap, additional_delay_bars=1)
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: volume > 1.8 * 20-period average (stricter for fewer trades)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.8)
+    # 20 EMA on 1h for pullback entries
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure enough data for all indicators
+    start_idx = max(30, 20)  # Need enough data for EMA
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
+        # Skip if required data is NaN
+        if np.isnan(daily_vwap_aligned[i]) or np.isnan(ema_20[i]):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_12h_aligned[i] > 25
+        # Session filter: 08-20 UTC
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            continue
+        
+        # Determine daily trend: price above/below daily VWAP
+        price_above_vwap = close[i] > daily_vwap_aligned[i]
         
         if position == 0:
-            # Long: price closes above R1 with volume and strong trend
-            if (close[i] > r1_aligned[i] and 
-                volume_confirm[i] and 
-                strong_trend):
-                signals[i] = 0.25
+            # Long: price above daily VWAP (bullish trend) + pullback to EMA20
+            if price_above_vwap and close[i] <= ema_20[i] * 1.002:  # Allow small buffer
+                signals[i] = 0.20
                 position = 1
-            # Short: price closes below S1 with volume and strong trend
-            elif (close[i] < s1_aligned[i] and 
-                  volume_confirm[i] and 
-                  strong_trend):
-                signals[i] = -0.25
+            # Short: price below daily VWAP (bearish trend) + rally to EMA20
+            elif not price_above_vwap and close[i] >= ema_20[i] * 0.998:  # Allow small buffer
+                signals[i] = -0.20
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price closes below S1 or trend weakens (ADX < 20)
-            if (close[i] < s1_aligned[i]) or (adx_12h_aligned[i] < 20):
+            # Long: exit if price breaks below daily VWAP (trend change) or significant rally
+            if not price_above_vwap or close[i] >= ema_20[i] * 1.03:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:
-            # Short: exit if price closes above R1 or trend weakens (ADX < 20)
-            if (close[i] > r1_aligned[i]) or (adx_12h_aligned[i] < 20):
+            # Short: exit if price breaks above daily VWAP (trend change) or significant pullback
+            if price_above_vwap or close[i] <= ema_20[i] * 0.97:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
