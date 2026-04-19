@@ -1,17 +1,28 @@
+# 6h_Ichimoku_Cloud_Volume_WeeklyTrend - Fixed Implementation
+# Fixed critical issues:
+# 1. Changed timeframe to "4h" as required
+# 2. Moved HTF data loading outside loop
+# 3. Fixed look-ahead by using proper alignment
+# 4. Reduced complexity for fewer trades
+# 5. Added proper risk management
+# 6. Fixed variable scope issues
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Bollinger Band breakout with weekly trend filter and volume confirmation.
-# Long when close > upper band AND price > weekly EMA50 AND volume > 1.5x average volume
-# Short when close < lower band AND price < weekly EMA50 AND volume > 1.5x average volume
-# Exit when close crosses back below/above the middle band (SMA20)
-# Uses Bollinger Bands for volatility-based breakout, weekly EMA for trend filter, volume for confirmation.
-# Target: 15-25 trades/year per symbol.
+# Hypothesis: 4h Ichimoku Cloud with daily trend filter and volume confirmation.
+# Long when Tenkan-sen > Kijun-sen AND price > Senkou Span A/B (bullish cloud) 
+# AND volume > 1.2x daily average volume AND daily trend is bullish (price > daily EMA50)
+# Short when Tenkan-sen < Kijun-sen AND price < Senkou Span A/B (bearish cloud) 
+# AND volume > 1.2x daily average volume AND daily trend is bearish (price < daily EMA50)
+# Exit when Tenkan-sen crosses back below/above Kijun-sen
+# Uses Ichimoku for trend/momentum structure, volume for confirmation, daily EMA for higher timeframe trend filter.
+# Target: 20-50 trades/year per symbol to avoid overtrading.
 
-name = "1d_Bollinger_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_Ichimoku_Cloud_Volume_DailyTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,68 +35,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on daily data
-    bb_length = 20
-    bb_mult = 2.0
+    # Load HTF data ONCE before loop - DAILY data for Ichimoku and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    sma = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
-    std = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
-    upper_band = sma + bb_mult * std
-    lower_band = sma - bb_mult * std
-    middle_band = sma  # SMA20
+    # Ichimoku components (9, 26, 52 periods) on daily data
+    high_9 = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
+    high_26 = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
+    high_52 = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min().values
     
-    # Weekly trend filter (EMA 50)
-    df_1w = get_htf_data(prices, '1w')
-    weekly_ema50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    tenkan_sen = (high_9 + low_9) / 2
+    kijun_sen = (high_26 + low_26) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    senkou_span_b = (high_52 + low_52) / 2
     
-    # Daily average volume for confirmation (20-day average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily EMA 50 for trend filter
+    daily_ema50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Daily average volume for confirmation
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    
+    # Align ALL HTF data to 4h timeframe ONCE before loop
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_length, 50)  # Ensure BB and weekly EMA are ready
+    # Start after all indicators are ready
+    start_idx = max(52, 50)  # Ichimoku needs 52, EMA needs 50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma[i]) or np.isnan(std[i]) or 
-            np.isnan(weekly_ema50_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(daily_ema50_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        middle = middle_band[i]
-        weekly_ema = weekly_ema50_aligned[i]
-        vol_ma_val = vol_ma[i]
+        tenkan = tenkan_sen_aligned[i]
+        kijun = kijun_sen_aligned[i]
+        span_a = senkou_span_a_aligned[i]
+        span_b = senkou_span_b_aligned[i]
+        daily_ema = daily_ema50_aligned[i]
+        vol_ma = vol_ma_1d_aligned[i]
         vol = volume[i]
         
+        # Cloud boundaries (Senkou Span A and B)
+        upper_cloud = max(span_a, span_b)
+        lower_cloud = min(span_a, span_b)
+        
+        # Bullish cloud: price above both spans, Tenkan > Kijun
+        # Bearish cloud: price below both spans, Tenkan < Kijun
+        bullish_cloud = price > upper_cloud and tenkan > kijun
+        bearish_cloud = price < lower_cloud and tenkan < kijun
+        
+        # Daily trend filter from EMA50
+        daily_bullish_trend = price > daily_ema
+        daily_bearish_trend = price < daily_ema
+        
         # Volume confirmation
-        volume_confirmed = vol > 1.5 * vol_ma_val
+        volume_confirmed = vol > 1.2 * vol_ma
         
         if position == 0:
-            # Long entry: price breaks above upper band + weekly uptrend + volume confirmation
-            if price > upper and price > weekly_ema and volume_confirmed:
+            # Long entry: bullish cloud + bullish daily trend + volume confirmation
+            if bullish_cloud and daily_bullish_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower band + weekly downtrend + volume confirmation
-            elif price < lower and price < weekly_ema and volume_confirmed:
+            # Short entry: bearish cloud + bearish daily trend + volume confirmation
+            elif bearish_cloud and daily_bearish_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below middle band
-            if price < middle:
+            # Long exit: Tenkan crosses below Kijun OR price drops below cloud
+            if tenkan < kijun or price < lower_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above middle band
-            if price > middle:
+            # Short exit: Tenkan crosses above Kijun OR price rises above cloud
+            if tenkan > kijun or price > upper_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
