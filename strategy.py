@@ -3,15 +3,26 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with weekly trend filter, volume confirmation, and ATR-based exit
-# Works in bull markets via breakouts, in bear via short breakdowns
-# Weekly trend prevents counter-trend trades, reducing whipsaw
-# Volume confirmation ensures breakout authenticity
-# Target: 8-15 trades/year, low frequency to minimize fee drag
-
-name = "1d_Donchian20_WeeklyTrend_Volume_ATRExit"
-timeframe = "1d"
+name = "6h_WilliamsFractal_1d_Trend_Signal_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_williams_fractals(high, low, n=2):
+    """Calculate Williams Fractals: bearish (high) and bullish (low)"""
+    high = np.asarray(high)
+    low = np.asarray(low)
+    bearish = np.zeros(len(high), dtype=bool)
+    bullish = np.zeros(len(low), dtype=bool)
+    
+    for i in range(n, len(high) - n):
+        # Bearish fractal: high[i] is highest in window [i-n, i+n]
+        if high[i] == np.max(high[i-n:i+n+1]):
+            bearish[i] = True
+        # Bullish fractal: low[i] is lowest in window [i-n, i+n]
+        if low[i] == np.min(low[i-n:i+n+1]):
+            bullish[i] = True
+    
+    return bearish, bullish
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,78 +34,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Williams Fractals (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA34 for trend determination
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Daily high, low for Williams Fractals
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Fractals on daily timeframe
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_1d, low_1d, n=2)
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Convert to float for alignment (True=1.0, False=0.0)
+    bearish_fractal_float = bearish_fractal.astype(float)
+    bullish_fractal_float = bullish_fractal.astype(float)
+    
+    # Align fractals to 6h timeframe with extra delay for confirmation
+    # Williams fractals need 2 extra daily bars after the center bar for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal_float, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal_float, additional_delay_bars=2)
+    
+    # 60-period EMA on 6h for trend filter
+    close_series = pd.Series(close)
+    ema_60 = close_series.ewm(span=60, adjust=False, min_periods=60).values
+    
+    # Volume confirmation: current volume > 1.5x 20-period average (6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need both Donchian and EMA warmup
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_60[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        weekly_ema = ema_34_1w_aligned[i]
+        ema = ema_60[i]
+        bearish = bearish_fractal_aligned[i] > 0.5
+        bullish = bullish_fractal_aligned[i] > 0.5
         
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: break above 20-day high with volume and weekly uptrend
-            if price > high_20[i] and volume_confirmed and price > weekly_ema:
+            # Long: bullish fractal + price above EMA + volume
+            if bullish and price > ema and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-day low with volume and weekly downtrend
-            elif price < low_20[i] and volume_confirmed and price < weekly_ema:
+            # Short: bearish fractal + price below EMA + volume
+            elif bearish and price < ema and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price below 20-day low or ATR-based stop
-            atr_period = 14
-            if i >= atr_period:
-                tr = np.maximum(high[i-atr_period+1:i+1] - low[i-atr_period+1:i+1],
-                               np.absolute(high[i-atr_period+1:i+1] - close[i-atr_period:i]))
-                tr = np.maximum(tr, np.absolute(low[i-atr_period+1:i+1] - close[i-atr_period:i]))
-                atr = np.mean(tr)
-                if price < low_20[i] or price < close[i-1] - 2.5 * atr:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: bearish fractal or price below EMA
+            if bearish or price < ema:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above 20-day high or ATR-based stop
-            atr_period = 14
-            if i >= atr_period:
-                tr = np.maximum(high[i-atr_period+1:i+1] - low[i-atr_period+1:i+1],
-                               np.absolute(high[i-atr_period+1:i+1] - close[i-atr_period:i]))
-                tr = np.maximum(tr, np.absolute(low[i-atr_period+1:i+1] - close[i-atr_period:i]))
-                atr = np.mean(tr)
-                if price > high_20[i] or price > close[i-1] + 2.5 * atr:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: bullish fractal or price above EMA
+            if bullish or price > ema:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
