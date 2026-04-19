@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h trend (EMA34) and 1d momentum (RSI14) for direction,
-# with 1h Donchian breakout (20) + volume confirmation for entry.
-# Trend-following in bull/bear via 4h EMA34 filter, momentum confirmation via 1d RSI>50 for long/<50 for short.
-# Volume spike (>1.5x 20MA) ensures institutional participation. Session filter (08-20 UTC) reduces noise.
-# Target: 15-30 trades/year via tight multi-condition entry.
-name = "1h_4hEMA34_1dRSI14_Donchian20_Volume"
-timeframe = "1h"
+# Hypothesis: 6h timeframe with weekly Donchian breakout + daily RSI filter + volume confirmation.
+# Weekly Donchian (10-period) defines trend, daily RSI(14) < 40 for long / > 60 for short adds mean-reversion edge within trend.
+# Volume > 1.5x 20-period average confirms breakout strength. Session filter 08-20 UTC to avoid low-liquidity hours.
+# Designed for ~20-30 trades/year to avoid fee drag. Works in bull (trend + pullback) and bear (counter-trend bounces).
+
+name = "6d_1w_Donchian10_1d_RSI14_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,13 +27,17 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for EMA34 trend (called ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Get weekly data for Donchian breakout (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    # Weekly Donchian channels: 10-period high/low
+    high_10_1w = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
+    low_10_1w = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
+    high_10_1w_aligned = align_htf_to_ltf(prices, df_1w, high_10_1w)
+    low_10_1w_aligned = align_htf_to_ltf(prices, df_1w, low_10_1w)
     
-    # Get 1d data for RSI14 momentum (called ONCE before loop)
+    # Get daily data for RSI (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     # RSI(14) calculation
@@ -43,61 +47,55 @@ def generate_signals(prices):
     avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     rs = avg_gain / avg_loss
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d = rsi_14_1d.fillna(50).values  # neutral when undefined
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    # Get 1h data for Donchian20 breakout and volume filter
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume filter: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)  # volume spike
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(volume_ma[i]) or
+        if (np.isnan(high_10_1w_aligned[i]) or np.isnan(low_10_1w_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(volume_ma[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: 4h uptrend (price > EMA34) AND 1d bullish momentum (RSI>50) 
-            #        AND breaks 1h Donchian high with volume spike
-            if (close[i] > ema_34_4h_aligned[i] and 
-                rsi_14_1d_aligned[i] > 50 and 
-                close[i] > high_20[i] and 
+            # Long: price above weekly Donchian high AND RSI < 40 (oversold) with volume
+            if (close[i] > high_10_1w_aligned[i] and 
+                rsi_1d_aligned[i] < 40 and 
                 volume_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend (price < EMA34) AND 1d bearish momentum (RSI<50) 
-            #        AND breaks 1h Donchian low with volume spike
-            elif (close[i] < ema_34_4h_aligned[i] and 
-                  rsi_14_1d_aligned[i] < 50 and 
-                  close[i] < low_20[i] and 
+            # Short: price below weekly Donchian low AND RSI > 60 (overbought) with volume
+            elif (close[i] < low_10_1w_aligned[i] and 
+                  rsi_1d_aligned[i] > 60 and 
                   volume_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if 4h trend breaks or 1h Donchian low broken
-            if close[i] < ema_34_4h_aligned[i] or close[i] < low_20[i]:
+            # Long: exit if price breaks below weekly Donchian low or RSI > 60
+            if close[i] < low_10_1w_aligned[i] or rsi_1d_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if 4h trend breaks or 1h Donchian high broken
-            if close[i] > ema_34_4h_aligned[i] or close[i] > high_20[i]:
+            # Short: exit if price breaks above weekly Donchian high or RSI < 40
+            if close[i] > high_10_1w_aligned[i] or rsi_1d_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
