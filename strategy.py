@@ -3,12 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d Donchian breakout, volume confirmation, and ADX trend filter.
-# Targets breakouts in trending markets with volume confirmation to avoid false breakouts.
-# Designed to work in both bull and bear markets by capturing strong directional moves.
-# Expects 10-30 trades per year per symbol, staying within the 50-150 total trades target over 4 years.
-name = "12h_1d_Donchian20_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_ADX_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,26 +21,37 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 10-period Donchian channels on 1d (using prior day to avoid look-ahead)
-    # Highest high of last 10 days (excluding current)
-    highest_high = pd.Series(high_1d).rolling(window=10, min_periods=10).max().shift(1).values
-    lowest_low = pd.Series(low_1d).rolling(window=10, min_periods=10).min().shift(1).values
+    # Calculate 1d ATR(14) for Camarilla width
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Donchian levels to 12h timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1d, highest_high)
-    donchian_low = align_htf_to_ltf(prices, df_1d, lowest_low)
+    # Calculate Camarilla levels using previous day's data
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
     
-    # ADX(14) calculation on 12h data
-    tr = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
-    tr = np.maximum(tr, np.abs(high[1:] - close[:-1]))
-    tr = np.maximum(tr, np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr])
+    camarilla_H4 = prev_close + 1.1/2 * (prev_high - prev_low)
+    camarilla_L4 = prev_close - 1.1/2 * (prev_high - prev_low)
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    
+    # ADX(14) calculation on 4h data
+    tr4 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
+    tr4 = np.maximum(tr4, np.abs(high[1:] - close[:-1]))
+    tr4 = np.maximum(tr4, np.abs(low[1:] - close[:-1]))
+    tr4 = np.concatenate([[np.nan], tr4])
     
     plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
     minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
     
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    tr14 = pd.Series(tr4).rolling(window=14, min_periods=14).sum().values
     plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
     minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
@@ -59,10 +66,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20, 14)
+    start_idx = max(100, 34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+        if np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or \
            np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
@@ -78,26 +85,26 @@ def generate_signals(prices):
         trending = adx[i] > 25
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and trending market
-            if price > donchian_high[i] and volume_ok and trending:
+            # Long: price breaks above H4 with volume and trending market
+            if price > camarilla_H4_aligned[i] and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and trending market
-            elif price < donchian_low[i] and volume_ok and trending:
+            # Short: price breaks below L4 with volume and trending market
+            elif price < camarilla_L4_aligned[i] and volume_ok and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below Donchian high or ADX drops below 20 (range)
-            if price < donchian_high[i] or adx[i] < 20:
+            # Exit: price returns below H4 or ADX drops below 20 (range)
+            if price < camarilla_H4_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above Donchian low or ADX drops below 20 (range)
-            if price > donchian_low[i] or adx[i] < 20:
+            # Exit: price returns above L4 or ADX drops below 20 (range)
+            if price > camarilla_L4_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
