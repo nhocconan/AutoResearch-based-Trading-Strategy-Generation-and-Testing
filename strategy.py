@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d EMA200 trend filter and volume confirmation.
-# Donchian channels identify trend strength via breakouts of recent high/low.
-# We trade breakouts in the direction of the long-term trend (EMA200) to avoid counter-trend trades.
-# Volume confirmation ensures breakouts have conviction. Works in bull/bear markets.
-# Target: 15-35 trades/year per symbol.
-name = "12h_Donchian20_EMA200_Volume_Breakout"
-timeframe = "12h"
+# Hypothesis: 4h Williams %R mean reversion with 12h trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions. We trade reversals from extreme levels
+# only when aligned with the 12h trend (EMA34) and confirmed by volume spikes.
+# Works in bull/bear markets: captures mean reversion in ranges and pullbacks in trends.
+# Target: 20-40 trades/year per symbol.
+name = "4h_WilliamsR_EMA34_Volume_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,70 +22,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Williams %R (14) on 4h
+    wr_period = 14
+    highest_high = pd.Series(high).rolling(window=wr_period, min_periods=wr_period).max().values
+    lowest_low = pd.Series(low).rolling(window=wr_period, min_periods=wr_period).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate EMA200 on daily
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Get 12h data for EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Donchian Channel (20-period) on 12h
-    dc_period = 20
-    upper_channel = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
-    lower_channel = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
+    # Calculate EMA34 on 12h
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA200 to 12h
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align 12h EMA34 to 4h
+    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(dc_period, 200, 20)  # Ensure Donchian, EMA200, and volume MA are ready
+    start_idx = max(wr_period, 34, 20)  # Ensure Williams %R, EMA34, and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(williams_r[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        upper = upper_channel[i]
-        lower = lower_channel[i]
-        ema_200_val = ema_200_aligned[i]
+        wr = williams_r[i]
+        ema_34_val = ema_34_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
-        
-        # Breakout conditions
-        bullish_breakout = price > upper  # Price breaks above upper channel
-        bearish_breakout = price < lower  # Price breaks below lower channel
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Look for breakout in direction of long-term trend (EMA200)
-            if bullish_breakout and (price > ema_200_val) and volume_confirmed:
+            # Look for mean reversion from extreme Williams %R levels
+            # Long: oversold (< -80) with price above 12h EMA34 (uptrend bias)
+            # Short: overbought (> -20) with price below 12h EMA34 (downtrend bias)
+            if wr < -80 and close[i] > ema_34_val and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            elif bearish_breakout and (price < ema_200_val) and volume_confirmed:
+            elif wr > -20 and close[i] < ema_34_val and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns to lower channel (mean reversion)
-            if price < lower_channel[i]:
+            # Exit long when Williams %R returns to neutral territory (> -50)
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns to upper channel
-            if price > upper_channel[i]:
+            # Exit short when Williams %R returns to neutral territory (< -50)
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
