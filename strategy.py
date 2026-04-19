@@ -3,20 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d weekly pivot point breakout with volume confirmation and ATR stop
-# Weekly pivot levels (S1/R1) act as strong support/resistance
-# Breakouts with volume indicate institutional interest
-# ATR-based stops manage risk in both bull and bear markets
-# Weekly timeframe reduces noise, daily execution improves timing
-# Target: 20-50 trades/year to minimize fee drag
-
-name = "1d_1wPivot_S1R1_Breakout_VolumeATR_Tight"
-timeframe = "1d"
+name = "6h_1dTrix_Volume_Crossover"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,29 +17,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points and ATR
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data for TRIX calculation
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly ATR(10)
-    tr1 = np.maximum(high_1w[1:], close_1w[:-1]) - np.minimum(low_1w[1:], close_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Calculate TRIX(15): Triple EMA of 1-period log returns
+    # TRIX = EMA(EMA(EMA(log(close)), 15), 15), 15) * 100
+    log_close = np.log(close_1d)
+    ema1 = pd.Series(log_close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = np.diff(ema3, prepend=ema3[0]) * 100  # Approximate derivative
     
-    # Weekly pivot points: P = (H+L+C)/3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    s1_1w = 2 * pivot_1w - high_1w
-    r1_1w = 2 * pivot_1w - low_1w
-    
-    # Align to daily timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    # Align TRIX to 6h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,45 +38,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_1w_aligned[i]
+        trix_val = trix_aligned[i]
         
         volume_confirmed = vol > 1.5 * vol_ma
-        s1 = s1_1w_aligned[i]
-        r1 = r1_1w_aligned[i]
         
         if position == 0:
-            # Long: Break above R1 with volume
-            if price > r1 and volume_confirmed:
+            # Long: TRIX crosses above zero with volume
+            if i > 0 and trix_aligned[i-1] <= 0 and trix_val > 0 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume
-            elif price < s1 and volume_confirmed:
+            # Short: TRIX crosses below zero with volume
+            elif i > 0 and trix_aligned[i-1] >= 0 and trix_val < 0 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below S1 or ATR stop (2.0x ATR)
-            if price < s1 or price < (high[i] - 2.0 * atr):
+            # Exit: TRIX crosses below zero
+            if trix_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above R1 or ATR stop (2.0x ATR)
-            if price > r1 or price > (low[i] + 2.0 * atr):
+            # Exit: TRIX crosses above zero
+            if trix_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
