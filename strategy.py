@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyBreakout_VolumeTrend_v1"
-timeframe = "1d"
+name = "12h_1d_Pivot_R1_S1_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 400:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,27 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for multi-timeframe analysis
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for multi-timeframe analysis
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly ATR for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr_1w = np.maximum(high_1w - low_1w, np.absolute(high_1w - np.roll(close_1w, 1)), np.absolute(low_1w - np.roll(close_1w, 1)))
-    tr_1w[0] = high_1w[0] - low_1w[0]  # Fix first value
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # 1d pivot levels (R1, S1) from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    prev_high_1d = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
+    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    r1_1d = 2 * pivot_1d - prev_low_1d
+    s1_1d = 2 * pivot_1d - prev_high_1d
     
-    # Weekly EMA200 for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Align 1d pivot levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Weekly Donchian channels for breakout signals
-    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
+    # 1d ATR for volatility filter and stoploss
+    tr_1d = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)), np.absolute(low_1d - np.roll(close_1d, 1)))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 12h EMA34 for trend filter
+    ema34_12h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,12 +51,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20, 14)  # Ensure enough data for all indicators
+    start_idx = max(20, 34, 14)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(atr_1w_aligned[i]) or np.isnan(ema200_1w_aligned[i]) or \
-           np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or \
-           np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or \
+           np.isnan(s1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or \
+           np.isnan(ema34_12h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -61,34 +67,34 @@ def generate_signals(prices):
         # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
-        # Trend bias: long bias if price > weekly EMA200, short bias if price < weekly EMA200
-        long_bias = price > ema200_1w_aligned[i]
-        short_bias = price < ema200_1w_aligned[i]
+        # Trend filter: price above/below EMA34
+        above_ema = price > ema34_12h[i]
+        below_ema = price < ema34_12h[i]
         
         if position == 0:
-            # Long: breakout above weekly Donchian high + above weekly EMA200 + volume
-            if price > donchian_high_20_aligned[i] and long_bias and volume_ok:
+            # Long: price breaks above R1 with volume and trend alignment
+            if price > r1_1d_aligned[i] and volume_ok and above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below weekly Donchian low + below weekly EMA200 + volume
-            elif price < donchian_low_20_aligned[i] and short_bias and volume_ok:
+            # Short: price breaks below S1 with volume and trend alignment
+            elif price < s1_1d_aligned[i] and volume_ok and below_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price drops below weekly EMA200 or breaks below weekly Donchian low
-            if price < ema200_1w_aligned[i] or price < donchian_low_20_aligned[i]:
+            # Hold long: maintain position
+            signals[i] = 0.25
+            # Exit: price drops below S1 or trend turns bearish
+            if price < s1_1d_aligned[i] or price < ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price rises above weekly EMA200 or breaks above weekly Donchian high
-            if price > ema200_1w_aligned[i] or price > donchian_high_20_aligned[i]:
+            # Hold short: maintain position
+            signals[i] = -0.25
+            # Exit: price rises above R1 or trend turns bullish
+            if price > r1_1d_aligned[i] or price > ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
