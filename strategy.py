@@ -1,23 +1,17 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h price action relative to 1-day Volume-Weighted Average Price (VWAP)
-# combined with 6h RSI(14) for momentum and 6h volume spike filter.
-# VWAP acts as dynamic support/resistance: price above VWAP = bullish bias,
-# price below VWAP = bearish bias. RSI filters for overbought/oversold conditions
-# to avoid chasing extremes. Volume spike confirms institutional interest.
-# Designed for 6h timeframe to capture institutional flows with low trade frequency.
-# Works in both bull and bear markets by adapting to VWAP as dynamic fair value.
-# Entry: Price crosses above VWAP with RSI<70 and volume spike (long).
-# Entry: Price crosses below VWAP with RSI>30 and volume spike (short).
-# Exit: Price crosses back across VWAP in opposite direction.
-# Target: 15-30 trades/year (~60-120 over 4 years) to minimize fee drag.
-
-name = "6h_VWAP_RSI_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Donchian(20) breakout + 12h MA trend + volume spike
+# Donchian breakout provides clear entry/exit signals, 12h MA filters for trend direction
+# Volume spike confirms breakout strength, reducing false signals
+# Designed for 4h timeframe to capture medium-term trends with controlled trade frequency
+# Entry: Price breaks above Donchian upper band (20-period) + 12h MA up + volume spike
+# Exit: Price breaks below Donchian lower band (20-period) OR 12h MA down
+# Uses strict conditions to limit trades (~20-40/year) and avoid overtrading
+name = "4h_Donchian_MA12_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,66 +24,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP for each 6h bar using intraday approximation
-    # VWAP = sum(price * volume) / sum(volume) where price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = typical_price * volume
-    vwap_denominator = volume
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Cumulative sums for VWAP calculation (reset daily)
-    # We'll use rolling window of 4 bars (24h/6h) to approximate daily VWAP
-    vwap = pd.Series(vwap_numerator).rolling(window=4, min_periods=1).sum().values / \
-           pd.Series(vwap_denominator).rolling(window=4, min_periods=1).sum().values
+    # 12h MA trend (using 12h data)
+    df_12h = get_htf_data(prices, '12h')
+    ma_12h = pd.Series(df_12h['close']).rolling(window=20, min_periods=20).mean().values
+    ma_12h_aligned = align_htf_to_ltf(prices, df_12h, ma_12h)
     
-    # RSI(14) on 6h timeframe
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume spike: volume > 1.8 * 20-period average
+    # Volume filter: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.8)
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vwap[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ma_12h_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price crosses above VWAP + RSI not overbought + volume spike
-            if (close[i] > vwap[i] and close[i-1] <= vwap[i-1] and  # crossed above
-                rsi[i] < 70 and 
+            # Long: price breaks above Donchian high + 12h MA up + volume spike
+            if (close[i] > donchian_high[i] and 
+                ma_12h_aligned[i] > ma_12h_aligned[i-1] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below VWAP + RSI not oversold + volume spike
-            elif (close[i] < vwap[i] and close[i-1] >= vwap[i-1] and  # crossed below
-                  rsi[i] > 30 and 
+            # Short: price breaks below Donchian low + 12h MA down + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  ma_12h_aligned[i] < ma_12h_aligned[i-1] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses back below VWAP
-            if close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
+            # Long: exit if price breaks below Donchian low OR 12h MA down
+            if (close[i] < donchian_low[i]) or (ma_12h_aligned[i] < ma_12h_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses back above VWAP
-            if close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
+            # Short: exit if price breaks above Donchian high OR 12h MA up
+            if (close[i] > donchian_high[i]) or (ma_12h_aligned[i] > ma_12h_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
