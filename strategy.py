@@ -1,17 +1,9 @@
-# Tested by: 2025-06-03
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above 20-period high with price above 1w EMA20 and volume spike (>2.0x average).
-# Short when price breaks below 20-period low with price below 1w EMA20 and volume spike.
-# Uses 1w EMA20 as trend filter to avoid counter-trend trades, reducing whipsaw in sideways markets.
-# Volume confirmation ensures breakouts have institutional participation.
-# Target: 12-37 trades/year per symbol (~50-150 total over 4 years).
-name = "12h_Donchian20_1wEMA20_Volume"
-timeframe = "12h"
+# 6h_Camarilla_R3_S3_1dEMA34_Volume
+# Hypothesis: Price action around daily pivots exhibits mean-reverting behavior at S3/R3 levels in ranging markets and breakout behavior when trends are strong. 
+# Combines S3/R3 fade/breakout logic with 1d EMA34 trend filter and volume confirmation to work in both trending and ranging markets.
+# Target: 12-37 trades/year per symbol by requiring confluence of price level, trend, and volume.
+name = "6h_Camarilla_R3_S3_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,66 +16,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA20 calculation
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get daily data for Camarilla pivot and EMA34 calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA20 on weekly close
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla pivot levels (R3, S3) from previous day
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r3 = pivot + (high_1d - low_1d) * 1.1 / 2
+    s3 = pivot - (high_1d - low_1d) * 1.1 / 2
     
-    # Align 1w EMA20 to 12h timeframe (wait for weekly close)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align Camarilla levels to 6h timeframe (wait for daily close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate Donchian(20) channels on 12h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA34 on daily close
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Align 1d EMA34 to 6h timeframe (wait for daily close)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need Donchian and volume MA data
+    start_idx = max(20, 34)  # Need volume MA and EMA data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_20_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper_channel = high_roll[i]
-        lower_channel = low_roll[i]
-        ema_trend = ema_20_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 2.0 * vol_ma
+        volume_confirmed = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Enter long: price breaks above upper channel AND above 1w EMA20
-            if price > upper_channel and price > ema_trend and volume_confirmed:
+            # Enter long: price breaks above R3 AND above 1d EMA34
+            if price > r3_val and price > ema_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower channel AND below 1w EMA20
-            elif price < lower_channel and price < ema_trend and volume_confirmed:
+            # Enter short: price breaks below S3 AND below 1d EMA34
+            elif price < s3_val and price < ema_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price breaks below lower channel or below 1w EMA20
-            if price < lower_channel or price < ema_trend:
+            # Exit long when price breaks below S3 or below 1d EMA34
+            if price < s3_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price breaks above upper channel or above 1w EMA20
-            if price > upper_channel or price > ema_trend:
+            # Exit short when price breaks above R3 or above 1d EMA34
+            if price > r3_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
