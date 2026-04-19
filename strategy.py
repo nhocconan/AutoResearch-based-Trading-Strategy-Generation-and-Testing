@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with daily volume confirmation and ATR-based trend filter.
-# Long when price breaks above 20-period high AND volume > 1.5x daily average volume AND ATR(14) > EMA(ATR, 20) (trending market)
-# Short when price breaks below 20-period low AND volume > 1.5x daily average volume AND ATR(14) > EMA(ATR, 20)
-# Exit when price crosses the opposite Donchian band or ATR drops below EMA(ATR, 20) (trend weakening)
-# Uses Donchian for trend structure, volume for confirmation, ATR/EMA for trend strength filter.
-# Target: 15-35 trades/year per symbol.
-
-name = "12h_Donchian_Volume_ATRTrend"
-timeframe = "12h"
+# Hypothesis: 4-hour Donchian channel breakout with daily volume confirmation and weekly trend filter.
+# Long when price breaks above Donchian(20) high AND daily volume > 1.5x average daily volume AND price > weekly EMA(50)
+# Short when price breaks below Donchian(20) low AND daily volume > 1.5x average daily volume AND price < weekly EMA(50)
+# Exit when price crosses back below/above Donchian midline (10-period average of high/low)
+# Uses Donchian for trend/breakout structure, volume for confirmation, weekly EMA for higher timeframe trend filter.
+# Target: 20-40 trades/year per symbol.
+name = "4h_Donchian_Breakout_Volume_WeeklyTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,84 +23,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume and ATR calculations
+    # Get daily data for volume average
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily average volume (20-period SMA)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Daily average volume (20-period)
     vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate ATR(14) on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA (50-period)
+    weekly_ema50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # EMA of ATR(20) for trend strength filter
-    atr_ema = pd.Series(atr_14).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align ATR and its EMA to 12h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_ema_aligned = align_htf_to_ltf(prices, df_1d, atr_ema)
-    
-    # Calculate Donchian channels (20-period) on 12h data
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channels (20-period high/low) - calculated on 4h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Donchian and ATR EMA need 20 periods
+    start_idx = max(20, 20)  # Ensure Donchian and weekly EMA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or
-            np.isnan(atr_ema_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(weekly_ema50_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper_band = high_max[i]
-        lower_band = low_min[i]
+        upper_channel = high_20[i]
+        lower_channel = low_20[i]
+        midline = donchian_mid[i]
         vol_ma = vol_ma_1d_aligned[i]
+        weekly_ema = weekly_ema50_aligned[i]
         vol = volume[i]
-        atr = atr_14_aligned[i]
-        atr_ema_val = atr_ema_aligned[i]
-        
-        # Trend strength filter: ATR > EMA(ATR) indicates trending market
-        trending_market = atr > atr_ema_val
         
         # Volume confirmation
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long entry: price breaks above upper band + volume + trend
-            if price > upper_band and volume_confirmed and trending_market:
+            # Long entry: break above upper channel + volume confirmation + above weekly EMA
+            if price > upper_channel and volume_confirmed and price > weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower band + volume + trend
-            elif price < lower_band and volume_confirmed and trending_market:
+            # Short entry: break below lower channel + volume confirmation + below weekly EMA
+            elif price < lower_channel and volume_confirmed and price < weekly_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below lower band OR trend weakens
-            if price < lower_band or not trending_market:
+            # Long exit: price crosses below midline
+            if price < midline:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above upper band OR trend weakens
-            if price > upper_band or not trending_market:
+            # Short exit: price crosses above midline
+            if price > midline:
                 signals[i] = 0.0
                 position = 0
             else:
