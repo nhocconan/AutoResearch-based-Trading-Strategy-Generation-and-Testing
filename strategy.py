@@ -3,21 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Ichimoku Cloud with daily trend filter and volume confirmation.
-# Long when: Price breaks above Tenkan-sen (conversion line) AND Kijun-sen (base line) AND above cloud (Senkou Span A/B)
-#            AND daily EMA50 is rising AND volume > 1.5x 20-period average
-# Short when: Price breaks below Tenkan-sen AND below Kijun-sen AND below cloud
-#             AND daily EMA50 is falling AND volume > 1.5x 20-period average
-# Exit when: Price crosses back below Tenkan-sen (for long) or above Tenkan-sen (for short)
-# Ichimoku provides multi-line support/resistance, daily EMA50 filters trend, volume confirms breakout strength.
-# Target: 15-35 trades/year per symbol. Works in bull (buy breakouts above cloud) and bear (sell breakdowns below cloud).
-name = "6h_Ichimoku_Cloud_Trend_Volume"
-timeframe = "6h"
+# Hypothesis: 4-hour Williams %R (14) with daily ADX (14) regime filter and volume confirmation.
+# Long when: Williams %R < -80 (oversold), daily ADX > 25 (trending), volume > 1.5x 20-period average
+# Short when: Williams %R > -20 (overbought), daily ADX > 25 (trending), volume > 1.5x 20-period average
+# Exit when: Williams %R crosses back above -50 (long) or below -50 (short)
+# Williams %R identifies momentum extremes, ADX filters for trending markets, volume confirms strength.
+# Works in bull (buy oversold dips) and bear (sell overbought rallies). Target: 20-30 trades/year.
+name = "4h_WilliamsR_ADX25_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,40 +23,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for Ichimoku components and EMA50
+    # 1-day data for Williams %R and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components on daily data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2.0
+    # Calculate Williams %R (14) on daily data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2.0
+    # Calculate ADX (14) on daily data
+    # ADX requires +DI and -DI calculation
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2.0)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2.0
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    di_plus = 100 * pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    di_minus = 100 * pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate EMA50 on daily data for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1D data to 6H timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 1D data to 4H timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,54 +68,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # Wait for Ichimoku calculation (needs 52 periods)
+    start_idx = 14  # Wait for Williams %R and ADX calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        tenkan = tenkan_sen_aligned[i]
-        kijun = kijun_sen_aligned[i]
-        span_a = senkou_span_a_aligned[i]
-        span_b = senkou_span_b_aligned[i]
-        ema50 = ema50_1d_aligned[i]
+        wr = williams_r_aligned[i]
+        adx_val = adx_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Cloud top and bottom
-        cloud_top = max(span_a, span_b)
-        cloud_bottom = min(span_a, span_b)
-        
         if position == 0:
-            # Long entry: Price breaks above Tenkan AND Kijun AND above cloud, EMA50 up, volume spike
-            if (price > tenkan and price > kijun and price > cloud_top and
-                close[i-1] <= tenkan and  # Was at or below Tenkan
-                ema50 > ema50_1d_aligned[i-1] and vol > 1.5 * vol_ma):
+            # Long entry: Williams %R oversold (< -80), ADX > 25 (trending), volume spike
+            if (wr < -80 and adx_val > 25 and vol > 1.5 * vol_ma):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below Tenkan AND Kijun AND below cloud, EMA50 down, volume spike
-            elif (price < tenkan and price < kijun and price < cloud_bottom and
-                  close[i-1] >= tenkan and  # Was at or above Tenkan
-                  ema50 < ema50_1d_aligned[i-1] and vol > 1.5 * vol_ma):
+            # Short entry: Williams %R overbought (> -20), ADX > 25 (trending), volume spike
+            elif (wr > -20 and adx_val > 25 and vol > 1.5 * vol_ma):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses back below Tenkan-sen
-            if price < tenkan:
+            # Long exit: Williams %R crosses back above -50
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses back above Tenkan-sen
-            if price > tenkan:
+            # Short exit: Williams %R crosses back below -50
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
