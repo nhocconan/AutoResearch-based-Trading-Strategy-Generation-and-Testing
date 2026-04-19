@@ -1,11 +1,15 @@
-# 4h_Camarilla_R1S1_Breakout_Volume_Trend_Filter
-# Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation and EMA trend filter
-# Uses 1d Camarilla levels (statistically significant support/resistance) and 4h EMA for trend direction
-# Volume confirmation ensures institutional participation. Designed for 4h to target 75-200 total trades over 4 years.
-# Works in bull/bear via EMA trend filter - only long in uptrend, short in downtrend.
+#!/usr/bin/env python3
+"""
+6h_WeeklyPivot_Breakout_Volume_V1
+Hypothesis: 6h breakouts of weekly (Monday) pivot levels (R1/S1) with volume confirmation.
+Weekly pivots provide strong institutional support/resistance that holds across market regimes.
+Breakouts with volume indicate genuine institutional participation, reducing false signals.
+Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
+Works in bull/bear via volume confirmation and pivot-level structure.
+"""
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_Volume_V1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,105 +26,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA(34) for trend filter on 4h data
-    def ema(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        multiplier = 2.0 / (period + 1)
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]) and not np.isnan(arr[i]):
-                result[i] = arr[i] * multiplier + result[i-1] * (1 - multiplier)
-            else:
-                result[i] = np.nan
-        return result
-    
-    # 4h data for EMA
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 35:
-        return np.zeros(n)
-    
-    ema_34_4h = ema(df_4h['close'].values, 34)
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Previous day's Camarilla levels (using 1d data)
+    # Get weekly data (resampled from daily for pivot calculation)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].shift(1).values  # Previous day high
-    pl = df_1d['low'].shift(1).values   # Previous day low
-    pc = df_1d['close'].shift(1).values # Previous day close
+    # Calculate weekly pivot points from previous week
+    # Group by week starting Monday
+    df_1d = df_1d.copy()
+    df_1d['week_start'] = df_1d.index.to_series().dt.to_period('W').dt.start_time
     
-    # Handle first value where shift creates NaN
-    ph[0] = ph[1] if len(ph) > 1 else ph[0]
-    pl[0] = pl[1] if len(pl) > 1 else pl[0]
-    pc[0] = pc[1] if len(pc) > 1 else pc[0]
+    # Get previous week's OHLC for pivot calculation
+    weekly_agg = df_1d.groupby('week_start').agg({
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).shift(1)  # Previous week's data
     
-    # Camarilla calculations
-    rang = ph - pl
-    # Avoid division by zero or negative ranges
-    rang = np.where(rang <= 0, np.full_like(rang, 1e-10), rang)
+    if len(weekly_agg) < 2:
+        return np.zeros(n)
     
-    r1 = pc + (rang * 1.1 / 12)
-    s1 = pc - (rang * 1.1 / 12)
-    r4 = pc + (rang * 1.1 / 2)
-    s4 = pc - (rang * 1.1 / 2)
+    # Calculate weekly pivot levels
+    ph = weekly_agg['high'].values  # Previous week high
+    pl = weekly_agg['low'].values   # Previous week low
+    pc = weekly_agg['close'].values # Previous week close
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Weekly pivot point and support/resistance levels
+    pw = (ph + pl + pc) / 3  # Weekly pivot
+    r1 = 2 * pw - pl         # Weekly R1
+    s1 = 2 * pw - ph         # Weekly S1
+    r4 = pw + 3 * (ph - pl)  # Weekly R4 (strong breakout)
+    s4 = pw - 3 * (ph - pl)  # Weekly S4 (strong breakdown)
     
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Align weekly levels to 6h timeframe
+    # Need to map each 6h bar to its corresponding week's levels
+    week_start_series = df_1d.index.to_series().dt.to_period('W').dt.start_time
+    week_start_ffilled = week_start_series.ffill()
+    
+    # Create mapping from date to weekly levels
+    week_to_levels = {}
+    for idx, week_start in enumerate(weekly_agg.index):
+        week_to_levels[week_start] = {
+            'r1': r1[idx],
+            's1': s1[idx],
+            'r4': r4[idx],
+            's4': s4[idx]
+        }
+    
+    # Map each daily bar to its weekly levels
+    r1_daily = np.full(len(df_1d), np.nan)
+    s1_daily = np.full(len(df_1d), np.nan)
+    r4_daily = np.full(len(df_1d), np.nan)
+    s4_daily = np.full(len(df_1d), np.nan)
+    
+    for i, week_start in enumerate(week_start_ffilled.values):
+        if week_start in week_to_levels:
+            levels = week_to_levels[week_start]
+            r1_daily[i] = levels['r1']
+            s1_daily[i] = levels['s1']
+            r4_daily[i] = levels['r4']
+            s4_daily[i] = levels['s4']
+    
+    # Align weekly levels to 6h timeframe
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1_daily)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1_daily)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4_daily)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4_daily)
+    
+    # Volume confirmation: volume > 1.8 * 20-period average (stricter for fewer trades)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    volume_confirm = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(35, 20)  # Ensure enough data for all indicators
+    start_idx = max(20, 10)  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: EMA direction
-        uptrend = close[i] > ema_34_4h_aligned[i]
-        downtrend = close[i] < ema_34_4h_aligned[i]
-        
         if position == 0:
-            # Long: price breaks above R1 with volume and uptrend
-            if (close[i] > r1_aligned[i] and 
-                volume_confirm[i] and 
-                uptrend):
+            # Long: price breaks above weekly R1 with volume confirmation
+            if (close[i] > r1_6h[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  volume_confirm[i] and 
-                  downtrend):
+            # Short: price breaks below weekly S1 with volume confirmation
+            elif (close[i] < s1_6h[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 or trend reverses
-            if (close[i] < s1_aligned[i]) or (not uptrend):
+            # Long: exit if price breaks below weekly S1 or strong breakdown below S4
+            if (close[i] < s1_6h[i]) or (close[i] < s4_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 or trend reverses
-            if (close[i] > r1_aligned[i]) or (not downtrend):
+            # Short: exit if price breaks above weekly R1 or strong breakout above R4
+            if (close[i] > r1_6h[i]) or (close[i] > r4_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
