@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian20_VolumeTrend_V1"
-timeframe = "4h"
+name = "6h_1d_Pivot_R1_S1_Breakout_Volume_Only"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,73 +23,66 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-day)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d range (previous day)
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Align to 4h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    range_1d = prev_high - prev_low
     
-    # 4h trend filter: EMA(34)
-    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Camarilla levels for previous day
+    # R1 = close + (range * 1.1/12)
+    # S1 = close - (range * 1.1/12)
+    r1 = prev_close + (range_1d * 1.1 / 12)
+    s1 = prev_close - (range_1d * 1.1 / 12)
     
-    # Volume filter: current volume > 1.5x 20-period average (20 * 4h = 80h ~ 3.3 days)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume filter: current volume > 2.0x 24-period average (24 * 6h = 4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(30, 24)
     
     for i in range(start_idx, n):
-        if np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or np.isnan(ema_34[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma_24[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        ema = ema_34[i]
+        vol_ma = vol_ma_24[i]
         
         # Volume filter
-        volume_ok = vol > 1.5 * vol_ma
-        
-        # Trend filter
-        uptrend = price > ema
-        downtrend = price < ema
+        volume_ok = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: price breaks above 20-day high with volume and uptrend
-            if price > high_20_aligned[i] and volume_ok and uptrend:
+            # Long: price breaks above R1 with volume
+            if price > r1_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low with volume and downtrend
-            elif price < low_20_aligned[i] and volume_ok and downtrend:
+            # Short: price breaks below S1 with volume
+            elif price < s1_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below 20-day low or reverse signal
-            if price < low_20_aligned[i]:
+            # Exit: price returns below S1 (mean reversion)
+            if price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif price < low_20_aligned[i] and volume_ok and downtrend:
-                # Reverse to short
-                signals[i] = -0.25
-                position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above 20-day high or reverse signal
-            if price > high_20_aligned[i]:
+            # Exit: price returns above R1 (mean reversion)
+            if price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif price > high_20_aligned[i] and volume_ok and uptrend:
-                # Reverse to long
-                signals[i] = 0.25
-                position = 1
             else:
                 signals[i] = -0.25
     
