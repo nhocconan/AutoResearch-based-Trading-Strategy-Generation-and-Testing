@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 1d Donchian breakout with volume confirmation
-# Choppiness Index > 61.8 = range (mean revert), < 38.2 = trending (trend follow)
-# In trending regime: Donchian breakout (20-period) with volume spike
-# In ranging regime: Mean reversion at Donchian bands (buy lower band, sell upper band)
-# Uses 1d Donchian for structure, 4h Choppiness for regime, volume for confirmation
-# Designed to work in both bull (trend following) and bear (mean reversion in ranges)
-# Target: 20-35 trades/year to avoid fee drag
-name = "4h_Chop_Donchian1d_Regime_Volume_v1"
-timeframe = "4h"
+# Hypothesis: 6h Williams Alligator (13,8,5) + 12h Trend Filter + Volume Confirmation
+# Williams Alligator uses smoothed median prices (Jaw:13, Teeth:8, Lips:5) to identify trends
+# When Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend, intertwined = sideways
+# Trend filter: 12h EMA50 slope (rising/falling) to avoid counter-trend trades
+# Volume: current > 1.5x 20-period average for confirmation
+# Designed to catch strong trends while avoiding whipsaws in ranging markets
+# Target: 15-25 trades/year per side to stay within 60-100 total/year for 6h
+name = "6h_WilliamsAlligator_12hTrendFilter_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,47 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels (structure)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d Donchian channels (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # 12h EMA50 for trend direction
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_slope = ema_50_12h - np.roll(ema_50_12h, 1)
+    ema_50_12h_slope[0] = 0
+    ema_50_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h_slope)
     
-    # 4h Choppiness Index (14-period) for regime detection
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Williams Alligator components (using median price = (high+low)/2)
+    median_price = (high + low) / 2
     
-    # True Range sum over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Max(high) - Min(low) over 14 periods
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_hl = max_high - min_low
-    
-    # Avoid division by zero
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = 100 * np.log10(tr_sum / range_hl) / np.log10(14)
-    
-    # 4h ATR for stops
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Jaw (13-period SMMA of median)
+    jaw = pd.Series(median_price).ewm(alpha=1/13, adjust=False, min_periods=13).mean().values
+    # Teeth (8-period SMMA of median)
+    teeth = pd.Series(median_price).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values
+    # Lips (5-period SMMA of median)
+    lips = pd.Series(median_price).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 30  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
-           np.isnan(chop[i]) or np.isnan(atr_4h[i]):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
+           np.isnan(ema_50_12h_slope_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -75,60 +62,40 @@ def generate_signals(prices):
             avg_volume = volume[i]
         volume_filter = volume[i] > 1.5 * avg_volume
         
-        # Regime detection
-        is_trending = chop[i] < 38.2  # Trending market
-        is_ranging = chop[i] > 61.8   # Ranging market
+        # Williams Alligator signals
+        lips_above_teeth = lips[i] > teeth[i]
+        teeth_above_jaw = teeth[i] > jaw[i]
+        lips_below_teeth = lips[i] < teeth[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
+        
+        # Trend filter from 12h EMA50 slope
+        uptrend_filter = ema_50_12h_slope_aligned[i] > 0
+        downtrend_filter = ema_50_12h_slope_aligned[i] < 0
         
         if position == 0:
-            if is_trending:
-                # Trending regime: Donchian breakout with volume
-                if close[i] > donchian_high_aligned[i] and volume_filter:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < donchian_low_aligned[i] and volume_filter:
-                    signals[i] = -0.25
-                    position = -1
-            elif is_ranging:
-                # Ranging regime: Mean reversion at Donchian bands
-                if close[i] <= donchian_low_aligned[i] and volume_filter:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] >= donchian_high_aligned[i] and volume_filter:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Lips > Teeth > Jaw (bullish alignment) + 12h uptrend + volume
+            if lips_above_teeth and teeth_above_jaw and uptrend_filter and volume_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short: Lips < Teeth < Jaw (bearish alignment) + 12h downtrend + volume
+            elif lips_below_teeth and teeth_below_jaw and downtrend_filter and volume_filter:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit conditions
-            if is_trending:
-                # In trending regime: exit on Donchian reversal or 2x ATR stop
-                if close[i] < donchian_low_aligned[i] or close[i] < close[i-1] - 2.0 * atr_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit long: Lips cross below Teeth OR 12h trend turns down
+            if lips[i] < teeth[i] or ema_50_12h_slope_aligned[i] < 0:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging regime: exit at opposite Donchian band or 2x ATR stop
-                if close[i] >= donchian_high_aligned[i] or close[i] < close[i-1] - 2.0 * atr_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions
-            if is_trending:
-                # In trending regime: exit on Donchian reversal or 2x ATR stop
-                if close[i] > donchian_high_aligned[i] or close[i] > close[i-1] + 2.0 * atr_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit short: Lips cross above Teeth OR 12h trend turns up
+            if lips[i] > teeth[i] or ema_50_12h_slope_aligned[i] > 0:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging regime: exit at opposite Donchian band or 2x ATR stop
-                if close[i] <= donchian_low_aligned[i] or close[i] > close[i-1] + 2.0 * atr_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
