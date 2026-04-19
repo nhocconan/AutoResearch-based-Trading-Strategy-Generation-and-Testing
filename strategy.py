@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Bands + 1d Volume + 4h CCI momentum
-# Bollinger Bands (20, 2) for volatility-based entries
-# 1d volume spike (>2x average) for conviction
-# 4h CCI (20) for momentum confirmation (CCI > 100 long, < -100 short)
-# Exit on opposite band touch or CCI mean reversion
-# Designed to work in trending markets with volume confirmation
-# Target: 20-35 trades/year to avoid fee drag
-name = "4h_BB_CCI_1dVolume_v1"
+# Hypothesis: 4h Donchian breakout + 1d volume spike + 1d volatility filter
+# Donchian(20) breakout provides trend-following edge
+# 1d volume spike (>2x average) confirms institutional participation
+# 1d volatility filter (ATR ratio < 0.8) avoids high-volatility chop
+# Designed for low-frequency, high-conviction trades in both bull and bear markets
+# Target: 20-35 trades/year to minimize fee drag
+name = "4h_Donchian_Vol_VolFilter_1d_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation
+    # Get 1d data for volume and volatility filters
     df_1d = get_htf_data(prices, '1d')
     
     # 1d Volume average (20-period)
@@ -32,17 +31,25 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # 4h Bollinger Bands (20, 2)
-    sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper = sma + 2 * std
-    lower = sma - 2 * std
+    # 1d ATR (14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio_1d = atr_1d / atr_ma_1d
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
     
-    # 4h CCI (20)
-    tp = (high + low + close) / 3
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (tp - sma_tp) / (0.015 * mad)
+    # 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,38 +57,36 @@ def generate_signals(prices):
     start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(cci[i]) or np.isnan(vol_ma_1d_aligned[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
         # Volume filter: current 1d volume > 2x average
-        if i >= 20:
-            vol_ma = vol_ma_1d_aligned[i]
-        else:
-            vol_ma = vol_ma_1d_aligned[i] if not np.isnan(vol_ma_1d_aligned[i]) else volume[i]
-        volume_filter = vol_ma > 0 and volume[i] > 2 * vol_ma
+        vol_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 2 * vol_ma_1d_aligned[i]
+        # Volatility filter: 1d ATR ratio < 0.8 (low volatility regime)
+        vol_regime_filter = atr_ratio_1d_aligned[i] < 0.8
         
         if position == 0:
-            # Long entry: price touches lower BB + CCI > 100 + volume
-            if close[i] <= lower[i] and cci[i] > 100 and volume_filter:
+            # Long entry: price breaks above Donchian high + volume + low vol
+            if close[i] > highest_high[i] and vol_filter and vol_regime_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price touches upper BB + CCI < -100 + volume
-            elif close[i] >= upper[i] and cci[i] < -100 and volume_filter:
+            # Short entry: price breaks below Donchian low + volume + low vol
+            elif close[i] < lowest_low[i] and vol_filter and vol_regime_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches upper BB OR CCI < -50 (mean reversion)
-            if close[i] >= upper[i] or cci[i] < -50:
+            # Long exit: price breaks below Donchian low
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price touches lower BB OR CCI > 50 (mean reversion)
-            if close[i] <= lower[i] or cci[i] > 50:
+            # Short exit: price breaks above Donchian high
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
