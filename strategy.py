@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Elder Ray Index + volume confirmation + 1d ADX trend filter
-# Elder Ray consists of Bull Power (High - EMA13) and Bear Power (Low - EMA13)
-# Strong uptrend: Bull Power > 0 and rising, Bear Power < 0
-# Strong downtrend: Bear Power < 0 and falling, Bull Power > 0
-# Combined with volume confirmation and daily ADX trend filter to reduce false signals
-# Target: 20-30 trades/year per symbol with disciplined entries
-name = "4h_ElderRay_1dADX_Volume"
-timeframe = "4h"
+# Hypothesis: Weekly Donchian breakout (20-period) + daily volume confirmation + ADX trend filter
+# Weekly Donchian channels provide strong support/resistance levels from higher timeframe
+# Breakouts with volume confirmation indicate institutional participation
+# ADX filter ensures we only trade in trending conditions (ADX > 25) to avoid false breakouts in ranging markets
+# Daily timeframe balances trade frequency and signal quality for sustainable performance
+name = "1d_WeeklyDonchian20_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,62 +22,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily ADX for trend strength filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Weekly Donchian channels (20-period high/low)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate ADX components on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Donchian high and low
+    donchian_high = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
-                        np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    # Daily volume confirmation: volume > 1.5 * 20-day average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_ma * 1.5)
     
-    # Smoothed values
-    def smoothed_average(data, period):
+    # Daily ADX for trend strength filter (ADX > 25 = trending)
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value has no previous close
+    
+    # Calculate Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth TR and DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smooth(data, period):
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) >= period:
+            # First value is simple average
             result[period-1] = np.mean(data[:period])
+            # Subsequent values: smoothed = previous * (1 - 1/period) + current * (1/period)
             for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
+                result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
         return result
     
-    tr_smoothed = smoothed_average(tr, 14)
-    dm_plus_smoothed = smoothed_average(dm_plus, 14)
-    dm_minus_smoothed = smoothed_average(dm_minus, 14)
+    atr = wilders_smooth(tr, 14)
+    dm_plus_smooth = wilders_smooth(dm_plus, 14)
+    dm_minus_smooth = wilders_smooth(dm_minus, 14)
     
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed != 0, 100 * dm_plus_smoothed / tr_smoothed, 0)
-    di_minus = np.where(tr_smoothed != 0, 100 * dm_minus_smoothed / tr_smoothed, 0)
+    # Calculate DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smoothed_average(dx, 14)
-    adx_1d = adx  # Already calculated on daily data
+    # Calculate DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smooth(dx, 14)
     
-    # Align daily ADX to 4h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Elder Ray components on 4h data
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Volume spike: volume > 1.5 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Trend filter: ADX > 25
+    trend_filter = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -87,43 +88,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when ADX > 25 (trending market)
-        if adx_1d_aligned[i] > 25:
-            if position == 0:
-                # Long: Bull Power > 0 and rising, Bear Power < 0, with volume spike
-                if (bull_power[i] > 0 and i > start_idx and bull_power[i] > bull_power[i-1] and 
-                    bear_power[i] < 0 and volume_spike[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Bear Power < 0 and falling, Bull Power > 0, with volume spike
-                elif (bear_power[i] < 0 and i > start_idx and bear_power[i] < bear_power[i-1] and 
-                      bull_power[i] > 0 and volume_spike[i]):
-                    signals[i] = -0.25
-                    position = -1
-                    
-            elif position == 1:
-                # Long: exit if Bull Power turns negative or ADX weakens
-                if bull_power[i] <= 0 or adx_1d_aligned[i] < 20:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-                    
-            elif position == -1:
-                # Short: exit if Bear Power turns positive or ADX weakens
-                if bear_power[i] >= 0 or adx_1d_aligned[i] < 20:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-        else:
-            # In ranging markets, stay flat
-            signals[i] = 0.0
-            position = 0
+        if position == 0:
+            # Long: price breaks above weekly Donchian high + volume confirmation + trend filter
+            if (close[i] > donchian_high_aligned[i] and 
+                volume_confirm[i] and 
+                trend_filter[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below weekly Donchian low + volume confirmation + trend filter
+            elif (close[i] < donchian_low_aligned[i] and 
+                  volume_confirm[i] and 
+                  trend_filter[i]):
+                signals[i] = -0.25
+                position = -1
+                
+        elif position == 1:
+            # Long: exit if price breaks below weekly Donchian low or ADX falls below 20 (trend weakening)
+            if (close[i] < donchian_low_aligned[i]) or (adx[i] < 20):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:
+            # Short: exit if price breaks above weekly Donchian high or ADX falls below 20 (trend weakening)
+            if (close[i] > donchian_high_aligned[i]) or (adx[i] < 20):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
