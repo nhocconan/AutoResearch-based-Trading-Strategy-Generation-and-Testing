@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1d Parabolic SAR trend filter, volume confirmation, and ADX trend strength.
-# Long when price > SAR, ADX > 20, volume > 1.3x 20-period average.
-# Short when price < SAR, ADX > 20, volume > 1.3x 20-period average.
-# Uses daily Parabolic SAR for trend direction to reduce whipsaws in both bull and bear markets.
-# Target: 20-40 trades/year per symbol (~80-160 total over 4 years).
-name = "6h_PSAR_ADX_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above upper Donchian channel, ADX > 25, volume > 1.5x 20-period average.
+# Short when price breaks below lower Donchian channel, ADX > 25, volume > 1.5x 20-period average.
+# Exit when price crosses back through the Donchian midline (10-period average of high/low).
+# Uses discrete position size 0.25 to minimize churn. Designed for 4h timeframe
+# to capture trends while avoiding whipsaws. Target: 20-40 trades/year per symbol (~80-160 total over 4 years).
+name = "4h_Donchian20_ADX25_Volume_ExitMidline"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,67 +23,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Parabolic SAR trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Parabolic SAR on daily
-    def calculate_parabolic_sar(high, low, close, iaf=0.02, maxaf=0.2):
-        n = len(close)
-        sar = np.zeros(n)
-        trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
-        af = iaf
-        ep = 0
-        
-        # Initialize
-        if close[1] > close[0]:
-            trend[0] = 1
-            sar[0] = low[0]
-            ep = high[0]
-        else:
-            trend[0] = -1
-            sar[0] = high[0]
-            ep = low[0]
-        
-        for i in range(1, n):
-            if trend[i-1] == 1:  # Uptrend
-                sar[i] = sar[i-1] + af * (ep - sar[i-1])
-                # SAR cannot be above the low of the past two periods
-                sar[i] = min(sar[i], min(low[i-1], low[i-2] if i>=2 else low[i-1]))
-                
-                # Trend reversal
-                if low[i] < sar[i]:
-                    trend[i] = -1
-                    sar[i] = ep
-                    ep = low[i]
-                    af = iaf
-                else:
-                    trend[i] = 1
-                    if high[i] > ep:
-                        ep = high[i]
-                        af = min(af + iaf, maxaf)
-            else:  # Downtrend
-                sar[i] = sar[i-1] + af * (ep - sar[i-1])
-                # SAR cannot be below the high of the past two periods
-                sar[i] = max(sar[i], max(high[i-1], high[i-2] if i>=2 else high[i-1]))
-                
-                # Trend reversal
-                if high[i] > sar[i]:
-                    trend[i] = 1
-                    sar[i] = ep
-                    ep = high[i]
-                    af = iaf
-                else:
-                    trend[i] = -1
-                    if low[i] < ep:
-                        ep = low[i]
-                        af = min(af + iaf, maxaf)
-        
-        return sar
-    
-    sar_1d = calculate_parabolic_sar(high_1d, low_1d, close_1d)
+    # Calculate Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max_20 + low_min_20) / 2.0
     
     # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
@@ -132,56 +76,56 @@ def generate_signals(prices):
     
     adx = calculate_adx(high, low, close, 14)
     
-    # Align 1d SAR to 6h
-    sar_aligned = align_htf_to_ltf(prices, df_1d, sar_1d)
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure volume MA and ADX are ready
+    start_idx = 20  # Ensure Donchian and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sar_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        sar_val = sar_aligned[i]
+        upper_channel = high_max_20[i]
+        lower_channel = low_min_20[i]
+        midline = donchian_mid[i]
         adx_val = adx[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.3 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
         # ADX trend strength filter
-        strong_trend = adx_val > 20
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long if price above SAR, strong trend, and volume confirmation
-            if price > sar_val and strong_trend and volume_confirmed:
+            # Enter long if price breaks above upper channel, strong trend, and volume confirmation
+            if price > upper_channel and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price below SAR, strong trend, and volume confirmation
-            elif price < sar_val and strong_trend and volume_confirmed:
+            # Enter short if price breaks below lower channel, strong trend, and volume confirmation
+            elif price < lower_channel and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below SAR or trend weakens
-            if price < sar_val or adx_val < 15:  # Trend weakening
+            # Exit long when price crosses below the midline
+            if price < midline:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above SAR or trend weakens
-            if price > sar_val or adx_val < 15:  # Trend weakening
+            # Exit short when price crosses above the midline
+            if price > midline:
                 signals[i] = 0.0
                 position = 0
             else:
