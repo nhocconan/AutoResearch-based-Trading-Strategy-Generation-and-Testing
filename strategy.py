@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1-day ADX trend filter and volume confirmation.
-# Long when: price closes above Donchian upper channel (20-period), ADX(1d) > 20, volume > 1.5x 20-period average
-# Short when: price closes below Donchian lower channel (20-period), ADX(1d) > 20, volume > 1.5x 20-period average
-# Exit when price returns to the Donchian middle (average of upper and lower) or reverses to opposite channel.
-# Designed for ~15-25 trades/year per symbol. Works in both bull and bear markets by only taking trades in strong trends (ADX > 20).
-name = "12h_Donchian20_ADX_Volume_Trend"
-timeframe = "12h"
+# Hypothesis: 4h Wilder's Volatility VIX Fix with 1-day ATR and volume confirmation.
+# Long when: VIX Fix > 90 (extreme fear), price closes above 10-period EMA, volume > 1.8x 20-period average
+# Short when: VIX Fix > 90 (extreme fear), price closes below 10-period EMA, volume > 1.8x 20-period average
+# Exit when VIX Fix < 50 (reduced fear) or price crosses 10-period EMA in opposite direction.
+# Designed for ~20-30 trades/year per symbol. Works in both bull and bear markets by capturing mean reversion during extreme volatility spikes.
+name = "4h_WilderVIXFix_Volume_EMA10"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,28 +22,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for ADX trend filter
+    # 1-day data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX on daily data
-    # True Range
+    # Calculate ATR on daily data (14-period)
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values (Wilder's smoothing)
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -58,26 +48,17 @@ def generate_signals(prices):
     
     atr_period = 14
     atr = wilders_smoothing(tr, atr_period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
     
-    # Directional Indicators
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    # Align ATR to 4h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, atr_period)
+    # Calculate Wilder's Volatility VIX Fix on 4h data
+    # VIX Fix = (Highest High in 22-period - Close) / ATR * 100
+    highest_high_22 = pd.Series(high).rolling(window=22, min_periods=22).max().values
+    vix_fix = ((highest_high_22 - close) / atr_aligned) * 100
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian Channels on 12h data (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_20
-    donchian_lower = lowest_20
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # 10-period EMA for trend filter
+    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
     
     # Volume average (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -85,42 +66,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 30  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
+        if (np.isnan(vix_fix[i]) or np.isnan(ema_10[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_aligned[i]
+        vix_val = vix_fix[i]
+        ema_val = ema_10[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long breakout: price closes above upper Donchian with ADX > 20 and volume confirmation
-            if price > donchian_upper[i] and adx_val > 20 and vol > 1.5 * vol_ma:
-                signals[i] = 0.25
-                position = 1
-            # Short breakdown: price closes below lower Donchian with ADX > 20 and volume confirmation
-            elif price < donchian_lower[i] and adx_val > 20 and vol > 1.5 * vol_ma:
-                signals[i] = -0.25
-                position = -1
+            # Extreme fear condition: VIX Fix > 90
+            if vix_val > 90 and vol > 1.8 * vol_ma:
+                if price > ema_val:
+                    # Long: extreme fear + price above EMA
+                    signals[i] = 0.25
+                    position = 1
+                elif price < ema_val:
+                    # Short: extreme fear + price below EMA
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle channel or breaks below lower band
-            if price <= donchian_middle[i] or price < donchian_lower[i]:
+            # Long exit: fear subsided or price crossed below EMA
+            if vix_val < 50 or price < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle channel or breaks above upper band
-            if price >= donchian_middle[i] or price > donchian_upper[i]:
+            # Short exit: fear subsided or price crossed above EMA
+            if vix_val < 50 or price > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
