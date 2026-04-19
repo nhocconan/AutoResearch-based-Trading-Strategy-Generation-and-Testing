@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w EMA trend filter and volume confirmation.
-# Long when: price breaks above Donchian upper (20) and price > 1w EMA(20) and volume > 1.5x 20-day avg volume
-# Short when: price breaks below Donchian lower (20) and price < 1w EMA(20) and volume > 1.5x 20-day avg volume
-# Exit when price crosses back through Donchian midpoint or volume drops below average.
-# Uses price breakout for entry, weekly trend for direction filter, and volume surge for confirmation.
-# Designed for ~10-20 trades/year per symbol to minimize fee drag.
-name = "1d_Donchian_20_1wEMA20_VolumeConfirm"
-timeframe = "1d"
+# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
+# Williams %R > -20 = overbought, < -80 = oversold.
+# Long when: Williams %R crosses above -80 from below AND price > 12h EMA(34) AND volume > 1.5x 20-period average.
+# Short when: Williams %R crosses below -20 from above AND price < 12h EMA(34) AND volume > 1.5x 20-period average.
+# Exit when Williams %R crosses back through -50.
+# Uses mean reversion in extreme zones with trend filter to avoid counter-trend trades.
+# Designed for ~15-25 trades/year per symbol (60-100 total over 4 years).
+name = "6h_WilliamsR_12hEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,20 +24,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_20_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_20)
+    # 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_34_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_34)
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
+    # Williams %R(14) on 6h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Volume confirmation: current volume > 1.5x 20-day average volume
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -45,39 +46,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_1w_20_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_12h_34_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_1w = ema_1w_20_aligned[i]
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        mid = donchian_mid[i]
-        vol_surge = volume_surge[i]
+        ema_12h = ema_12h_34_aligned[i]
+        vol_filter = volume_filter[i]
+        wr = williams_r[i]
+        wr_prev = williams_r[i-1]
         
         if position == 0:
-            # Long: breakout above upper, price above 1w EMA, volume surge
-            if price > upper and price > ema_1w and vol_surge:
+            # Long: Williams %R crosses above -80 from below, price above 12h EMA34, high volume
+            if wr_prev <= -80 and wr > -80 and price > ema_12h and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below lower, price below 1w EMA, volume surge
-            elif price < lower and price < ema_1w and vol_surge:
+            # Short: Williams %R crosses below -20 from above, price below 12h EMA34, high volume
+            elif wr_prev >= -20 and wr < -20 and price < ema_12h and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below midpoint or volume drops below average
-            if price < mid or volume[i] < vol_ma_20[i]:
+            # Long exit: Williams %R crosses above -50
+            if wr_prev <= -50 and wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above midpoint or volume drops below average
-            if price > mid or volume[i] < vol_ma_20[i]:
+            # Short exit: Williams %R crosses below -50
+            if wr_prev >= -50 and wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
