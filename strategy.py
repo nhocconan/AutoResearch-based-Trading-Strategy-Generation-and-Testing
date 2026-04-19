@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_V1"
-timeframe = "12h"
+name = "4h_Donchian20_12hTrend_Volume_V1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,75 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h trend: EMA34
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate Camarilla pivot levels (using previous day's data)
-    def calculate_camarilla(high_arr, low_arr, close_arr):
-        n_days = len(close_arr)
-        R1 = np.full(n_days, np.nan)
-        S1 = np.full(n_days, np.nan)
-        
-        for i in range(1, n_days):
-            # Use previous day's OHLC
-            high_prev = high_arr[i-1]
-            low_prev = low_arr[i-1]
-            close_prev = close_arr[i-1]
-            
-            # Camarilla formulas
-            R1[i] = close_prev + (high_prev - low_prev) * 1.1 / 12
-            S1[i] = close_prev - (high_prev - low_prev) * 1.1 / 12
-        
-        return R1, S1
+    # Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    R1, S1 = calculate_camarilla(high_1d, low_1d, close_1d)
-    
-    # Calculate volume spike indicator (volume > 1.5 * 20-period average)
+    # Volume filter: volume > 1.2 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
-    
-    # Align Camarilla levels to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    volume_filter = volume > (volume_ma * 1.2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 25  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i]):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation required
-        vol_confirm = volume_spike[i]
-        
         if position == 0:
-            # Long when price breaks above R1 with volume
-            if close[i] > R1_aligned[i] and vol_confirm:
+            # Long: price breaks above upper Donchian + uptrend + volume
+            if close[i] > high_roll[i] and close[i] > ema_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S1 with volume
-            elif close[i] < S1_aligned[i] and vol_confirm:
+            # Short: price breaks below lower Donchian + downtrend + volume
+            elif close[i] < low_roll[i] and close[i] < ema_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price falls below S1 (reversal)
-            if close[i] < S1_aligned[i]:
+            # Long: exit on breakdown below lower Donchian
+            if close[i] < low_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price rises above R1 (reversal)
-            if close[i] > R1_aligned[i]:
+            # Short: exit on breakout above upper Donchian
+            if close[i] > high_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
