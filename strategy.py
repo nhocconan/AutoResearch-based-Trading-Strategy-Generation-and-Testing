@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 1d Donchian breakout + volume confirmation
-# Choppiness Index > 61.8 = range (mean revert), < 38.2 = trending (trend follow)
-# Long: Donchian breakout above upper band in trending regime (1d ADX > 25)
-# Short: Donchian breakdown below lower band in trending regime (1d ADX > 25)
-# Exit: Opposite Donchian band touch or 1.5x ATR stop
-# Designed to work in both bull (trend follow) and bear (trend follow) markets
-# Target: 20-35 trades/year to avoid fee drag
-name = "4h_Chop_Donchian1d_Volume_v1"
-timeframe = "4h"
+# Hypothesis: 1d Weekly Keltner Channel Breakout with Volume and ADX Trend Filter
+# Uses weekly ATR-based channel (EMA20 ± 2*ATR) for breakout signals
+# ADX(14) > 25 filters for trending markets only
+# Volume > 1.5x 20-day average confirms breakout strength
+# Designed for low-frequency, high-conviction trades in both bull and bear markets
+# Target: 15-25 trades/year to minimize fee drag
+name = "1d_WeeklyKeltnerBreakout_ADX_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,96 +23,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for regime and Donchian (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for Keltner Channel (ONCE before loop)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # 1d ADX for trend strength filter (trending when ADX > 25)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA20 for Keltner middle line
+    close_weekly = df_weekly['close'].values
+    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = high_1d[0] - low_1d[0]
+    # Weekly ATR for Keltner width
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    tr_weekly = np.maximum(high_weekly - low_weekly, 
+                          np.maximum(np.abs(high_weekly - np.roll(close_weekly, 1)), 
+                                   np.abs(low_weekly - np.roll(close_weekly, 1))))
+    tr_weekly[0] = high_weekly[0] - low_weekly[0]
+    atr_weekly = pd.Series(tr_weekly).rolling(window=10, min_periods=10).mean().values
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Keltner Channel bounds: EMA20 ± 2*ATR
+    kc_upper_weekly = ema20_weekly + 2.0 * atr_weekly
+    kc_lower_weekly = ema20_weekly - 2.0 * atr_weekly
     
-    # Smoothed values
-    tr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False).mean().values / tr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False).mean().values / tr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align weekly Keltner levels to daily
+    kc_upper_aligned = align_htf_to_ltf(prices, df_weekly, kc_upper_weekly)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_weekly, kc_lower_weekly)
+    ema20_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
     
-    # 1d Donchian channels (20-period)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_high_1d = align_htf_to_ltf(prices, df_1d, high_20)
-    donch_low_1d = align_htf_to_ltf(prices, df_1d, low_20)
+    # Daily ADX for trend strength filter
+    # Calculate +DI and -DI
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # 4h Choppiness Index (14-period)
-    tr_4h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_4h[0] = high[0] - low[0]
-    atr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    sum_tr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_tr_14 / 14) / np.log10(highest_high_14 - lowest_low_14 + 1e-10)
-    chop = np.where((highest_high_14 - lowest_low_14) > 0, chop, 50.0)  # avoid division by zero
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # 4h ATR for stops
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    # True Range for ADX
+    tr = np.maximum(high - low, 
+                   np.maximum(np.abs(high - np.roll(close, 1)), 
+                            np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Smoothed +DM, -DM, and TR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # +DI and -DI
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Volume filter: current volume > 1.5x 20-day average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(donch_high_1d[i]) or \
-           np.isnan(donch_low_1d[i]) or np.isnan(chop[i]) or np.isnan(atr_4h[i]):
+        if np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or \
+           np.isnan(adx[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x average volume (20-period)
-        if i >= 20:
-            avg_volume = np.mean(volume[i-20:i])
-        else:
-            avg_volume = volume[i]
-        volume_filter = volume[i] > 1.5 * avg_volume
+        # Volume filter
+        volume_filter = volume[i] > 1.5 * vol_ma20[i]
         
-        # Regime filter: trending when ADX > 25
-        trending = adx_1d_aligned[i] > 25
+        # ADX trend filter: only trade when ADX > 25
+        trend_filter = adx[i] > 25
         
         if position == 0:
-            # Long: Donchian breakout above upper band in trending regime + volume
-            if trending and close[i] > donch_high_1d[i] and volume_filter:
+            # Long: Close breaks above weekly Keltner upper + volume + trend
+            if close[i] > kc_upper_aligned[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown below lower band in trending regime + volume
-            elif trending and close[i] < donch_low_1d[i] and volume_filter:
+            # Short: Close breaks below weekly Keltner lower + volume + trend
+            elif close[i] < kc_lower_aligned[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Touch lower Donchian band or 1.5x ATR stop
-            if close[i] < donch_low_1d[i] or close[i] < high[i-1] - 1.5 * atr_4h[i]:
+            # Exit: Close crosses below weekly EMA20 or opposite breakout
+            if close[i] < ema20_aligned[i] or close[i] < kc_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Touch upper Donchian band or 1.5x ATR stop
-            if close[i] > donch_high_1d[i] or close[i] > low[i-1] + 1.5 * atr_4h[i]:
+            # Exit: Close crosses above weekly EMA20 or opposite breakout
+            if close[i] > ema20_aligned[i] or close[i] > kc_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
