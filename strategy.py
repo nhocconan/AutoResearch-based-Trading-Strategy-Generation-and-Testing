@@ -1,3 +1,8 @@
+# 1d_1w_Pivot_R1S1_Breakout_VolumeATR_v1
+# Hypothesis: Weekly Pivot R1/S1 breakouts with volume confirmation and ATR-based trailing stop work across bull/bear cycles. Breakouts indicate institutional interest; volume confirms validity; ATR stop adapts to volatility.
+# Timeframe: 1d for balance of signal quality and trade frequency. Weekly pivot provides structural context; daily execution avoids overtrading.
+# Expected: 20-50 trades/year per symbol. Works in trends (breakout continuation) and ranges (false breakouts filtered by volume/vol).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
