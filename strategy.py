@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and 1w EMA34 trend filter.
-# Only trades during 08-20 UTC session to avoid low-liquidity periods.
-# Designed for ~20-30 trades/year (80-120 over 4 years) to minimize fee drag.
-# Trend-following in bull markets, avoids false signals in bear/chop via EMA34 filter and volume spike.
-name = "4h_1d_Donchian20_Volume_1wEMA34"
-timeframe = "4h"
+# Hypothesis: 1d timeframe with 1-week trend filter (EMA34) and 1-day Donchian breakout (20-period) with volume confirmation.
+# Enters only during 08-20 UTC session. Uses strict conditions to limit trades (~15-25/year) and avoid overtrading.
+# Trend-following in bull markets, avoids false signals in bear/chop via EMA34 filter and volume spike requirement.
+name = "1d_1w_EMA34_Donchian20_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
