@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining weekly pivot levels with volume confirmation and ADX trend filter.
-# Uses weekly pivot points (R1, S1) as dynamic support/resistance. Enters long when price breaks above R1
-# with volume confirmation and strong trend (ADX > 25). Enters short when price breaks below S1 with
-# same conditions. Exits when price returns to the weekly pivot level (PP) or trend weakens.
-# Weekly pivot provides institutional reference points that work in both bull and bear markets.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years).
-name = "6h_WeeklyPivot_R1S1_Breakout_Volume_ADX"
-timeframe = "6h"
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
+# Long when price breaks above Donchian high and above weekly EMA200 with volume spike.
+# Short when price breaks below Donchian low and below weekly EMA200 with volume spike.
+# Uses weekly trend filter to avoid counter-trend trades in strong trends.
+# Target: 15-25 trades/year per symbol to minimize fee drag.
+name = "1d_Donchian20_EMA200w_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,120 +22,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_w = get_htf_data(prices, '1w')
+    # Get weekly data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points: PP = (H + L + C) / 3
-    # R1 = 2*PP - L, S1 = 2*PP - H
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Calculate EMA200 on weekly
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    pp_w = (high_w + low_w + close_w) / 3.0
-    r1_w = 2 * pp_w - low_w
-    s1_w = 2 * pp_w - high_w
+    # Align weekly EMA200 to daily
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Align weekly pivots to 6h (wait for weekly bar to close)
-    pp_w_aligned = align_htf_to_ltf(prices, df_w, pp_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
+    # Calculate Donchian channels (20-period) on daily
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # ADX calculation (14-period) on 6h data
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-                
-            tr[i] = max(high[i] - low[i], 
-                       abs(high[i] - close[i-1]), 
-                       abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        
-        atr[period] = np.mean(tr[1:period+1])
-        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        dx = np.zeros_like(close)
-        dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
-        
-        adx = np.zeros_like(close)
-        adx[2*period] = np.mean(dx[period:2*period+1])
-        for i in range(2*period+1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx = calculate_adx(high, low, close, 14)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 28)  # Ensure volume MA and ADX are ready
+    start_idx = 200  # Ensure weekly EMA200 is ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
-            np.isnan(s1_w_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        pp = pp_w_aligned[i]
-        r1 = r1_w_aligned[i]
-        s1 = s1_w_aligned[i]
-        adx_val = adx[i]
+        ema_200_val = ema_200_1w_aligned[i]
+        donchian_high_val = donchian_high[i]
+        donchian_low_val = donchian_low[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
-        
-        # ADX trend strength filter
-        strong_trend = adx_val > 25
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Enter long if price breaks above R1, strong trend, and volume confirmation
-            if price > r1 and strong_trend and volume_confirmed:
+            # Enter long if price breaks above Donchian high, above weekly EMA200, and volume confirmation
+            if price > donchian_high_val and price > ema_200_val and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price breaks below S1, strong trend, and volume confirmation
-            elif price < s1 and strong_trend and volume_confirmed:
+            # Enter short if price breaks below Donchian low, below weekly EMA200, and volume confirmation
+            elif price < donchian_low_val and price < ema_200_val and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns to pivot point or trend weakens
-            if price < pp or adx_val < 20:  # Trend weakening
+            # Exit long when price breaks below Donchian low or falls below weekly EMA200
+            if price < donchian_low_val or price < ema_200_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns to pivot point or trend weakens
-            if price > pp or adx_val < 20:  # Trend weakening
+            # Exit short when price breaks above Donchian high or rises above weekly EMA200
+            if price > donchian_high_val or price > ema_200_val:
                 signals[i] = 0.0
                 position = 0
             else:
