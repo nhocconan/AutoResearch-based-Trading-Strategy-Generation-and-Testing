@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA(34) trend filter and volume confirmation.
-# Long: price > Donchian upper + 12h EMA up + volume > 1.5x avg.
-# Short: price < Donchian lower + 12h EMA down + volume > 1.5x avg.
-# Exit: opposite Donchian band touch.
-# Target: 80-180 total trades over 4 years (20-45/year).
-name = "4h_Donchian20_12hEMA34_VolumeFilter"
-timeframe = "4h"
+# Hypothesis: 1h timeframe with 4h trend filter (EMA) and 1d regime filter (Chop).
+# Long when price > 4h EMA20 AND Chop < 50 (trending), with 1h pullback entry.
+# Short when price < 4h EMA20 AND Chop < 50, with 1h bounce entry.
+# Uses Chop to avoid ranging markets where trend following fails.
+# Target: 60-150 total trades over 4 years (15-37/year).
+name = "1h_4hEMA_1dChop_Pullback"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,67 +20,96 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for EMA calculation (called ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 4h data for EMA trend (called ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate EMA(34) on 12h timeframe
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA20 on 4h
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Align EMA to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Get 1d data for Chop regime (called ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian channels (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Chop on 1d (14-period)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: volume > 1.5 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log10(sum(atr) / (max(high) - min(low))) / log10(14)
+    sum_atr = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_atr / (highest_high - lowest_low + 1e-10)) / np.log10(14)
+    chop[np.isnan(chop)] = 100  # Default to ranging when undefined
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 1h EMA for pullback entry
+    ema_1h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure enough data for EMA
+    start_idx = 30  # Ensure enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(chop_aligned[i]) or np.isnan(ema_1h[i]):
             signals[i] = 0.0
             continue
             
-        # Calculate EMA slope for trend
-        ema_now = ema_12h_aligned[i]
-        ema_prev = ema_12h_aligned[i-1]
-        ema_up = ema_now > ema_prev
-        ema_down = ema_now < ema_prev
+        # Check regime: trending (Chop < 50)
+        trending = chop_aligned[i] < 50
+        
+        if not trending or not in_session[i]:
+            # Exit position if not trending or outside session
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+            
+        # Trend direction from 4h EMA
+        trend_up = close[i] > ema_4h_aligned[i]
+        trend_down = close[i] < ema_4h_aligned[i]
         
         if position == 0:
-            # Long when price breaks above Donchian high + EMA up + volume
-            if close[i] > donchian_high[i] and ema_up and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: pullback to 1h EMA in uptrend
+            if trend_up and close[i] <= ema_1h[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short when price breaks below Donchian low + EMA down + volume
-            elif close[i] < donchian_low[i] and ema_down and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: bounce to 1h EMA in downtrend
+            elif trend_down and close[i] >= ema_1h[i]:
+                signals[i] = -0.20
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price touches Donchian low
-            if close[i] <= donchian_low[i]:
+            # Long: exit on trend reversal or overextension
+            if not trend_up or close[i] > ema_1h[i] * 1.02:  # 2% above EMA
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:
-            # Short position: exit when price touches Donchian high
-            if close[i] >= donchian_high[i]:
+            # Short: exit on trend reversal or overextension
+            if not trend_down or close[i] < ema_1h[i] * 0.98:  # 2% below EMA
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
