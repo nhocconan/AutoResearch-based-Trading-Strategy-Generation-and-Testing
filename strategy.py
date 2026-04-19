@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_S1R1_S2R2_VolumeATR"
-timeframe = "12h"
+name = "4h_PivotBreakout_VolumeATR_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,25 +17,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for ATR calculation (better resolution than 12h)
-    df_1h = get_htf_data(prices, '1h')
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
-    
-    # Calculate ATR(14) on 1h
-    tr1 = np.maximum(high_1h[1:], close_1h[:-1]) - np.minimum(low_1h[1:], close_1h[:-1])
-    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
-    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1h_aligned = align_htf_to_ltf(prices, df_1h, atr_1h)
-    
-    # Get 1d data for pivot points
+    # Get daily data for pivot points and ATR calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate daily ATR(14) on daily data
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate daily pivot points: P = (H+L+C)/3
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
@@ -45,14 +39,14 @@ def generate_signals(prices):
     s2_1d = pivot_1d - (high_1d - low_1d)
     r2_1d = pivot_1d + (high_1d - low_1d)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -64,7 +58,7 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
             np.isnan(r1_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
-            np.isnan(r2_1d_aligned[i]) or np.isnan(atr_1h_aligned[i]) or 
+            np.isnan(r2_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -72,10 +66,10 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_1h_aligned[i]
+        atr = atr_1d_aligned[i]
         
         # Volume and volatility filters
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 1.8 * vol_ma
         volatility_filter = atr > 0  # Always true but keeps structure
         
         # Pivot levels
@@ -86,32 +80,26 @@ def generate_signals(prices):
         pivot = pivot_1d_aligned[i]
         
         if position == 0:
-            # Long conditions:
-            # 1. Breakout above R2 with volume (strong bullish)
-            # 2. Mean reversion from S1 with volume (bullish bounce)
-            if ((price > r2 and volume_confirmed) or 
-                (price < s1 and price > s2 and volume_confirmed and price > pivot)):
+            # Long: Breakout above R2 with volume confirmation
+            if price > r2 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions:
-            # 1. Breakdown below S2 with volume (strong bearish)
-            # 2. Mean reversion from R1 with volume (bearish rejection)
-            elif ((price < s2 and volume_confirmed) or 
-                  (price > r1 and price < r2 and volume_confirmed and price < pivot)):
+            # Short: Breakdown below S2 with volume confirmation
+            elif price < s2 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: breakdown below S1 or reversal at R1
-            if price < s1 or (price > r1 and price < r2):
+            # Exit long: Price closes below pivot (mean reversion) or ATR-based stop
+            if price < pivot or price < (high[i] - 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: breakout above S2 or reversal at R1
-            if price > r2 or (price < r1 and price > s2):
+            # Exit short: Price closes above pivot (mean reversion) or ATR-based stop
+            if price > pivot or price > (low[i] + 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
