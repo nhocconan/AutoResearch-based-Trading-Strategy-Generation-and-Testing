@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with weekly volume confirmation and weekly ATR filter.
-# Long when price breaks above 20-day Donchian high AND weekly volume > 1.5x weekly average volume AND weekly ATR(14) < weekly ATR(50) (low volatility regime)
-# Short when price breaks below 20-day Donchian low AND weekly volume > 1.5x weekly average volume AND weekly ATR(14) < weekly ATR(50)
-# Exit when price crosses back through the Donchian midpoint
-# Uses Donchian for trend following structure, weekly volume for confirmation, weekly ATR regime filter to avoid chop.
-# Target: 7-25 trades/year per symbol.
-name = "1d_Donchian_WeeklyVolume_ATRRegime"
-timeframe = "1d"
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d volume confirmation.
+# Long when price breaks above upper BB after squeeze (BB width < 50th percentile) AND 1d volume > 1.5x 20-day average.
+# Short when price breaks below lower BB after squeeze with same volume condition.
+# Exit when price returns to middle band.
+# Bollinger squeeze identifies low volatility breakouts, volume confirms institutional interest.
+# Works in both bull/bear markets by capturing volatility expansion phases.
+# Target: 15-25 trades/year per symbol (90-100 total over 4 years).
+name = "6h_BollingerSqueeze_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,74 +24,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR and volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    # Calculate True Range components
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    # Align ATR arrays to daily timeframe
-    atr14_aligned = align_htf_to_ltf(prices, df_1w, atr14)
-    atr50_aligned = align_htf_to_ltf(prices, df_1w, atr50)
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
     
-    # Get weekly average volume for confirmation
-    vol_ma_1w = pd.Series(df_1w['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # Calculate 1d average volume (20-day)
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate daily Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_roll + low_roll) / 2
+    # Calculate Bollinger Bands (20, 2) on 6h
+    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma + 2 * std
+    lower_bb = ma - 2 * std
+    bb_width = upper_bb - lower_bb
+    
+    # Calculate Bollinger Band width percentile (50-period lookback) for squeeze condition
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else np.nan, raw=False
+    ).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure indicators are ready
+    start_idx = max(20, 50)  # Ensure BB and percentile are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr14_aligned[i]) or np.isnan(atr50_aligned[i]) or 
-            np.isnan(vol_ma_1w_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(donchian_mid[i])):
+        if (np.isnan(ma[i]) or np.isnan(std[i]) or np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or np.isnan(bb_width_percentile[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr14_val = atr14_aligned[i]
-        atr50_val = atr50_aligned[i]
-        vol_ma = vol_ma_1w_aligned[i]
         vol = volume[i]
-        upper = high_roll[i]
-        lower = low_roll[i]
-        mid = donchian_mid[i]
+        vol_ma = vol_ma_1d_aligned[i]
+        width_percentile = bb_width_percentile[i]
+        upper = upper_bb[i]
+        lower = lower_bb[i]
+        mid = ma[i]
         
-        # Regime filter: only trade in low volatility (weekly ATR14 < weekly ATR50)
-        vol_regime = atr14_val < atr50_val
+        # Squeeze condition: BB width below 50th percentile (low volatility)
+        squeeze = width_percentile < 50
         
         if position == 0:
-            # Long entry: break above upper band + volume spike + low vol regime
-            if price > upper and vol > 1.5 * vol_ma and vol_regime:
+            # Long entry: break above upper BB after squeeze + volume spike
+            if price > upper and squeeze and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below lower band + volume spike + low vol regime
-            elif price < lower and vol > 1.5 * vol_ma and vol_regime:
+            # Short entry: break below lower BB after squeeze + volume spike
+            elif price < lower and squeeze and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below midpoint
-            if price < mid:
+            # Long exit: price returns to middle band
+            if price >= mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above midpoint
-            if price > mid:
+            # Short exit: price returns to middle band
+            if price <= mid:
                 signals[i] = 0.0
                 position = 0
             else:
