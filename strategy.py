@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h trend filter and volume confirmation
-# - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# - Bullish: Bull Power > 0 AND Bear Power rising (less negative)
-# - Bearish: Bear Power < 0 AND Bull Power falling (less positive)
-# - 12h EMA34 trend filter: only take longs when price > 12h EMA34, shorts when price < 12h EMA34
-# - Volume confirmation: current 6h volume > 1.5x 20-period average 6h volume
-# - Designed to capture momentum in trending markets while filtering counter-trend moves
-# - Target: 15-30 trades/year to avoid excessive fee drag
+# Hypothesis: 1d KAMA (Kaufman Adaptive Moving Average) with 1w trend filter and volume confirmation
+# - KAMA adapts to market noise: follows price closely in trending markets, stays flat in ranging markets
+# - Only take long when price > KAMA AND price > 1w EMA50 (uptrend on both timeframes)
+# - Only take short when price < KAMA AND price < 1w EMA50 (downtrend on both timeframes)
+# - Volume confirmation: current 1d volume > 1.5x 20-period average volume
+# - Designed to reduce whipsaws in ranging markets while capturing trends in both bull and bear markets
+# - Target: 15-25 trades/year to minimize fee drag
 
-name = "6h_ElderRay_12hTrend_Volume_v1"
-timeframe = "6h"
+name = "1d_KAMA_1wTrend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,63 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Elder Ray components: EMA13 of close
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # High - EMA13
-    bear_power = low - ema13   # Low - EMA13
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Slope of Bear Power (for bullish confirmation: bear power rising = less negative)
-    bear_power_series = pd.Series(bear_power)
-    bear_power_slope = bear_power_series.diff().values
+    # 1w EMA(50) for trend direction
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Slope of Bull Power (for bearish confirmation: bull power falling = less positive)
-    bull_power_series = pd.Series(bull_power)
-    bull_power_slope = bull_power_series.diff().values
+    # KAMA (Kaufman Adaptive Moving Average) parameters
+    er_period = 10  # Efficiency Ratio period
+    fast_sc = 2/(2+1)  # smoothing constant for fastest EMA
+    slow_sc = 2/(30+1)  # smoothing constant for slowest EMA
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_period))  # absolute change over er_period periods
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # sum of absolute changes over er_period
     
-    # Volume confirmation: 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Avoid division by zero
+    er = np.zeros_like(change)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
+    
+    # Calculate smoothing constant (SC)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[er_period] = close[er_period]  # seed value
+    
+    for i in range(er_period + 1, n):
+        if not np.isnan(sc[i-er_period]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i-er_period] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # 20-period average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = max(50, er_period + 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(bear_power_slope[i]) or \
-           np.isnan(bull_power_slope[i]) or np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = vol_ma[i] > 0 and volume[i] > 1.5 * vol_ma[i]
+        # Volume filter: current volume > 1.5x 20-period average volume
+        volume_filter = vol_ma_20[i] > 0 and volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Look for long entry: bull power positive, bear power rising (less negative), uptrend, volume
-            if bull_power[i] > 0 and bear_power_slope[i] > 0 and close[i] > ema34_12h_aligned[i] and volume_filter:
+            # Look for long entry: uptrend on both timeframes + volume
+            if close[i] > kama[i] and close[i] > ema_50_1w_aligned[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: bear power negative, bull power falling (less positive), downtrend, volume
-            elif bear_power[i] < 0 and bull_power_slope[i] < 0 and close[i] < ema34_12h_aligned[i] and volume_filter:
+            # Look for short entry: downtrend on both timeframes + volume
+            elif close[i] < kama[i] and close[i] < ema_50_1w_aligned[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on bear power turning negative or trend reversal
-            if bear_power[i] < 0 or close[i] < ema34_12h_aligned[i]:
+            # Long position: exit when trend breaks on either timeframe
+            if close[i] <= kama[i] or close[i] <= ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on bull power turning positive or trend reversal
-            if bull_power[i] > 0 or close[i] > ema34_12h_aligned[i]:
+            # Short position: exit when trend breaks on either timeframe
+            if close[i] >= kama[i] or close[i] >= ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
