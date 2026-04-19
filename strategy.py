@@ -1,20 +1,57 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_Volume_ADX_Filter_v2
-# Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
-# Camarilla levels provide statistically significant support/resistance from previous day's price action
-# ADX > 25 filters for trending markets to avoid false breakouts in chop
-# Volume confirmation ensures institutional participation
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
-# Works in bull/bear via ADX trend filter and volatility-adjusted breakouts
-# This version includes an additional volatility filter (ATR-based) to reduce whipsaws in low volatility environments
-
-name = "12h_Camarilla_R1S1_Breakout_Volume_ADX_Filter_v2"
-timeframe = "12h"
-leverage = 1.0
+"""
+6h_Camarilla_R1_S1_Breakout_Volume_ADX_Filter
+Hypothesis: 6h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
+Uses daily Camarilla levels from previous day, filtered by 6h ADX > 25 for trending markets.
+Volume confirmation ensures institutional participation. Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
+Works in bull/bear via ADX trend filter and volatility-adjusted breakouts.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX using Wilder's smoothing"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Wilder's smoothing
+    def WilderSmooth(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                else:
+                    result[i] = np.nan
+        return result
+    
+    atr = WilderSmooth(tr, period)
+    dm_plus_smooth = WilderSmooth(dm_plus, period)
+    dm_minus_smooth = WilderSmooth(dm_minus, period)
+    
+    # DX calculation
+    dx = np.full_like(close, np.nan)
+    mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+    dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+    
+    adx = WilderSmooth(dx, period)
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,74 +63,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ATR for volatility filter - calculated on 12h data
-    def calculate_atr(high, low, close, period=14):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        atr = np.zeros_like(tr)
-        atr[0] = tr[0]
-        for i in range(1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
-    
-    # ADX(14) for trend strength filter - calculated on 12h data
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smoothed values using Wilder's smoothing (EMA-like)
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            if len(data) >= period:
-                result[period-1] = np.nanmean(data[:period])
-                for i in range(period, len(data)):
-                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-                    else:
-                        result[i] = np.nan
-            return result
-        
-        atr = WilderSmooth(tr, period)
-        dm_plus_smooth = WilderSmooth(dm_plus, period)
-        dm_minus_smooth = WilderSmooth(dm_minus, period)
-        
-        # Avoid division by zero
-        dx = np.full_like(close, np.nan)
-        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
-        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
-        
-        adx = WilderSmooth(dx, period)
-        return adx
-    
-    # 12h data for ATR, ADX and other indicators
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough for ATR/ADX calculation
+    # 6h data for ADX calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
         return np.zeros(n)
     
-    # Calculate ATR and ADX on 12h data
-    atr_12h = calculate_atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
-    atr_12h_ma = pd.Series(atr_12h).rolling(window=20, min_periods=20).mean().values  # 20-period ATR average
-    atr_12h_ma_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_ma)
-    
-    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Calculate ADX on 6h data
+    adx_6h = calculate_adx(df_6h['high'].values, df_6h['low'].values, df_6h['close'].values, 14)
+    adx_6h_aligned = align_htf_to_ltf(prices, df_6h, adx_6h)
     
     # Previous day's Camarilla levels (using 1d data)
     df_1d = get_htf_data(prices, '1d')
@@ -112,25 +89,15 @@ def generate_signals(prices):
     r4 = pc + (rang * 1.1 / 2)
     s4 = pc - (rang * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 6h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (slightly stricter for fewer trades)
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
-    
-    # Volatility filter: current ATR > 0.7 * 20-period average ATR (avoid low volatility whipsaws)
-    volatility_filter = atr_12h_ma_aligned > 0
-    if len(atr_12h_ma_aligned) > 0:
-        # Only require volatility filter when we have sufficient data
-        volatility_condition = np.full_like(atr_12h_ma_aligned, True, dtype=bool)
-        valid_atr = ~np.isnan(atr_12h_ma_aligned)
-        if np.any(valid_atr):
-            volatility_condition[valid_atr] = atr_12h_ma_aligned[valid_atr] > (np.nanmedian(atr_12h_ma_aligned[valid_atr]) * 0.7)
-        volatility_filter = volatility_condition
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -139,35 +106,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+        if (np.isnan(adx_6h_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(atr_12h_ma_aligned[i])):
+            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # ADX filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_12h_aligned[i] > 25
+        strong_trend = adx_6h_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above R1 with volume, strong trend, and sufficient volatility
+            # Long: price breaks above R1 with volume and strong trend
             if (close[i] > r1_aligned[i] and 
                 volume_confirm[i] and 
-                strong_trend and
-                volatility_filter[i]):
+                strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume, strong trend, and sufficient volatility
+            # Short: price breaks below S1 with volume and strong trend
             elif (close[i] < s1_aligned[i] and 
                   volume_confirm[i] and 
-                  strong_trend and
-                  volatility_filter[i]):
+                  strong_trend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
             # Long: exit if price breaks below S1 or trend weakens (ADX < 20)
-            if (close[i] < s1_aligned[i]) or (adx_12h_aligned[i] < 20):
+            if (close[i] < s1_aligned[i]) or (adx_6h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -175,10 +139,14 @@ def generate_signals(prices):
                 
         elif position == -1:
             # Short: exit if price breaks above R1 or trend weakens (ADX < 20)
-            if (close[i] > r1_aligned[i]) or (adx_12h_aligned[i] < 20):
+            if (close[i] > r1_aligned[i]) or (adx_6h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+name = "6h_Camarilla_R1_S1_Breakout_Volume_ADX_Filter"
+timeframe = "6h"
+leverage = 1.0
