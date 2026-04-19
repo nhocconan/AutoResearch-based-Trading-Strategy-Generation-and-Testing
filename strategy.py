@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_RVI_BullishEngulfing_Volume_Trend"
-timeframe = "4h"
+name = "6h_1d_Ichimoku_Kumo_Twist_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,80 +17,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA34)
+    # Get 1d data for Ichimoku
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate RVI (Relative Vigor Index) on 4h
-    # RVI = (Close - Open) / (High - Low) smoothed
-    open_ = prices['open'].values
-    numerator = close - open_
-    denominator = high - low
-    # Avoid division by zero
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    raw_rvi = numerator / denominator
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # Smooth RVI with 10-period SMA
-    rvi = pd.Series(raw_rvi).rolling(window=10, min_periods=10).mean().values
-    rvi_signal = pd.Series(rvi).rolling(window=4, min_periods=4).mean().values  # Signal line
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Volume filter: current volume > 1.3x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
+    
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # Not used for signals as it requires future data
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Kumo (Cloud) top and bottom
+    kumo_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    kumo_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    
+    # Volume filter: current volume > 1.8x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure enough data for indicators
+    start_idx = max(60, 30)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(rvi[i]) or np.isnan(rvi_signal[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or np.isnan(vol_ma_30[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_30[i]
         
         # Volume filter
-        volume_ok = vol > 1.3 * vol_ma
+        volume_ok = vol > 1.8 * vol_ma
         
-        # Trend filter: price relative to daily EMA34
-        price_above_ema = price > ema34_1d_aligned[i]
-        price_below_ema = price < ema34_1d_aligned[i]
+        # Kumo twist: Senkou A crossing above/below Senkou B
+        # We detect twist by comparing current and previous values
+        if i > 0:
+            senkou_a_prev = senkou_a_aligned[i-1]
+            senkou_b_prev = senkou_b_aligned[i-1]
+            kumo_top_prev = np.maximum(senkou_a_prev, senkou_b_prev)
+            kumo_bottom_prev = np.minimum(senkou_a_prev, senkou_b_prev)
+            
+            # Bullish twist: Senkou A crosses above Senkou B
+            bullish_twist = senkou_a_prev <= senkou_b_prev and senkou_a > senkou_b
+            # Bearish twist: Senkou A crosses below Senkou B
+            bearish_twist = senkou_a_prev >= senkou_b_prev and senkou_a < senkou_b
+        else:
+            bullish_twist = False
+            bearish_twist = False
         
-        # Bullish engulfing pattern: current bullish candle engulfs previous bearish candle
-        bullish_engulf = (close[i] > open_[i]) and (open_[i-1] > close[i-1]) and \
-                         (close[i] >= open_[i-1]) and (open_[i] <= close[i-1])
-        
-        # Bearish engulfing pattern: current bearish candle engulfs previous bullish candle
-        bearish_engulf = (close[i] < open_[i]) and (open_[i-1] < close[i-1]) and \
-                         (close[i] <= open_[i-1]) and (open_[i] >= close[i-1])
+        # Price above/below cloud
+        price_above_kumo = price > kumo_top
+        price_below_kumo = price < kumo_bottom
         
         if position == 0:
-            # Long: RVI crosses above signal line + bullish engulfing + volume + uptrend
-            if rvi[i] > rvi_signal[i] and rvi[i-1] <= rvi_signal[i-1] and bullish_engulf and volume_ok and price_above_ema:
+            # Long: bullish Kumo twist + price above cloud + volume
+            if bullish_twist and price_above_kumo and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: RVI crosses below signal line + bearish engulfing + volume + downtrend
-            elif rvi[i] < rvi_signal[i] and rvi[i-1] >= rvi_signal[i-1] and bearish_engulf and volume_ok and price_below_ema:
+            # Short: bearish Kumo twist + price below cloud + volume
+            elif bearish_twist and price_below_kumo and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: RVI crosses below signal line (momentum loss)
-            if rvi[i] < rvi_signal[i] and rvi[i-1] >= rvi_signal[i-1]:
+            # Exit: price closes below Kumo (cloud support broken)
+            if price < kumo_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RVI crosses above signal line (momentum loss)
-            if rvi[i] > rvi_signal[i] and rvi[i-1] <= rvi_signal[i-1]:
+            # Exit: price closes above Kumo (cloud resistance broken)
+            if price > kumo_top:
                 signals[i] = 0.0
                 position = 0
             else:
