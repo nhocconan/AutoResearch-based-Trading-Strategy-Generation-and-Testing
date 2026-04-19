@@ -1,15 +1,24 @@
-#/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_7K_Pivot_Breakout_1wTrend_v1"
-timeframe = "1d"
+# Hypothesis: 6h Camarilla Pivot Levels + Volume Spike + 1d Trend Filter
+# - Long when price breaks above Camarilla R3 with volume spike (>1.5x 20-period 1d avg volume) in uptrend (price > 1d EMA50)
+# - Short when price breaks below Camarilla S3 with volume spike in downtrend (price < 1d EMA50)
+# - Exit when price returns to Camarilla pivot (central level) or trend reverses
+# - Designed to capture breakouts with institutional volume in trending markets
+# - Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag
+# - Works in both bull and bear markets by following 1d trend filter
+
+name = "6h_Camarilla_R3S3_Breakout_Volume_1dTrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,63 +26,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w EMA(50) for trend direction
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Camarilla levels from previous 1d bar
+    # H, L, C from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate 7K pivot levels (1d)
-    pivot = (high + low + close) / 3
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
+    # Camarilla levels
+    range_ = prev_high - prev_low
+    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
+    camarilla_r3 = camarilla_pivot + 1.1 * range_ / 6
+    camarilla_s3 = camarilla_pivot - 1.1 * range_ / 6
     
-    # Calculate 7-period ATR for position sizing and volatility filter
-    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
-    tr2 = np.absolute(np.roll(close, 1) - low)
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # First bar
-    atr = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
+    # Align Camarilla levels to 6h timeframe (wait for 1d bar to close)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: 1d volume > 1.5x 20-period average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
             
+        # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d average to 6h: 1d has 4x 6h bars, so divide by 4
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 4.0)
+        
         if position == 0:
-            # Long entry: price breaks above R1 + uptrend (price > 1w EMA50) + volatility filter
-            if high[i] > r1[i] and close[i] > ema_50_1w_aligned[i] and atr[i] > 0:
-                # Size based on volatility (inverse ATR) with cap
-                size = min(0.30, 0.05 * (np.median(atr) / atr[i])) if np.median(atr) > 0 else 0.25
-                signals[i] = size
+            # Look for long entry: price breaks above R3 + volume spike + uptrend
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i-1] <= camarilla_r3_aligned[i-1] and  # Just broke above
+                volume_filter and 
+                close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 + downtrend (price < 1w EMA50) + volatility filter
-            elif low[i] < s1[i] and close[i] < ema_50_1w_aligned[i] and atr[i] > 0:
-                size = min(0.30, 0.05 * (np.median(atr) / atr[i])) if np.median(atr) > 0 else 0.25
-                signals[i] = -size
+            # Look for short entry: price breaks below S3 + volume spike + downtrend
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i-1] >= camarilla_s3_aligned[i-1] and  # Just broke below
+                  volume_filter and 
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on breakdown below S1 or trend reversal
-            if low[i] < s1[i] or close[i] < ema_50_1w_aligned[i]:
+            # Long position: exit when price returns to pivot or trend reverses
+            if (close[i] <= camarilla_pivot_aligned[i] or 
+                close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # Maintain position
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on breakout above R1 or trend reversal
-            if high[i] > r1[i] or close[i] > ema_50_1w_aligned[i]:
+            # Short position: exit when price returns to pivot or trend reverses
+            if (close[i] >= camarilla_pivot_aligned[i] or 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # Maintain position
+                signals[i] = -0.25
     
     return signals
