@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum strategy with 4h trend filter and 1d regime filter.
-# Long when: 1h RSI > 55, 4h close > 4h EMA50, 1d ADX < 25 (low volatility regime)
-# Short when: 1h RSI < 45, 4h close < 4h EMA50, 1d ADX < 25
-# Uses session filter (08-20 UTC) to avoid low-volume periods.
-# Discrete position size 0.20 to minimize churn. Target: 20-40 trades/year per symbol.
-name = "1h_RSI4hEMA50_1dADX_Volume"
-timeframe = "1h"
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above Donchian upper band + volume > 1.5x avg + ADX > 25.
+# Short when price breaks below Donchian lower band + volume > 1.5x avg + ADX > 25.
+# Exit when price crosses opposite Donchian band or ADX falls below 20.
+# Uses discrete position size 0.25 to minimize churn. Designed for 4h timeframe.
+# Target: 20-50 trades/year per symbol (~80-200 total over 4 years).
+name = "4h_Donchian20_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,24 +23,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute hour filter for session (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Calculate EMA50 on 4h
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Get 1d data for regime filter (ADX)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate ADX(14) on daily
+    # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -57,7 +45,7 @@ def generate_signals(prices):
                        abs(high[i] - close[i-1]), 
                        abs(low[i] - close[i-1]))
         
-        # Wilder's smoothing
+        # Smooth using Wilder's smoothing (alpha = 1/period)
         atr = np.zeros_like(tr)
         plus_dm_smooth = np.zeros_like(plus_dm)
         minus_dm_smooth = np.zeros_like(minus_dm)
@@ -85,91 +73,60 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx = calculate_adx(high, low, close, 14)
     
-    # Calculate RSI(14) on 1h
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi = calculate_rsi(close, 14)
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34)  # Ensure indicators are ready
+    start_idx = max(20, 28)  # Ensure Donchian and ADX are ready
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # Skip if any required data is not available
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_50_4h_val = ema_50_4h_aligned[i]
-        adx_1d_val = adx_1d_aligned[i]
-        rsi_val = rsi[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        adx_val = adx[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.3 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
-        # Regime filter: low volatility (ADX < 25) for mean reversion
-        low_volatility = adx_1d_val < 25
+        # ADX trend strength filter
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long if RSI > 55, 4h uptrend, low volatility, volume confirmation
-            if (rsi_val > 55 and price > ema_50_4h_val and 
-                low_volatility and volume_confirmed):
-                signals[i] = 0.20
+            # Enter long if price breaks above upper band, strong trend, and volume confirmation
+            if price > upper and strong_trend and volume_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Enter short if RSI < 45, 4h downtrend, low volatility, volume confirmation
-            elif (rsi_val < 45 and price < ema_50_4h_val and 
-                  low_volatility and volume_confirmed):
-                signals[i] = -0.20
+            # Enter short if price breaks below lower band, strong trend, and volume confirmation
+            elif price < lower and strong_trend and volume_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when RSI < 50 or trend breaks
-            if rsi_val < 50 or price < ema_50_4h_val:
+            # Exit long when price crosses below lower band or trend weakens
+            if price < lower or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when RSI > 50 or trend breaks
-            if rsi_val > 50 or price > ema_50_4h_val:
+            # Exit short when price crosses above upper band or trend weakens
+            if price > upper or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
