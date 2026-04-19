@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w EMA trend filter and volume confirmation
-# Uses 1w EMA50 for stronger trend bias, reducing false signals in chop
-# Williams Alligator identifies trend alignment: Lips>Teeth>Jaw for uptrend, Jaw>Teeth>Lips for downtrend
-# Volume spike (>2x 20-period average) confirms momentum
-# Target: 20-30 trades/year per symbol with disciplined entries
-name = "1d_WilliamsAlligator_1wEMA_Volume"
-timeframe = "1d"
+# Hypothesis: 12h Pivot Reversal Strategy with Weekly ADX filter and Volume Confirmation
+# Uses weekly pivot points (R1, S1) as key support/resistance levels
+# Weekly ADX > 25 filters for trending conditions to avoid whipsaws in ranging markets
+# Volume spike (>1.5x 24-period average) confirms breakout validity
+# Target: 15-25 trades/year per symbol with disciplined entries
+# Works in bull markets (buy S1 bounces, sell R1 rejections) and bear markets (sell R1 breaks, buy S1 breaks)
+name = "12h_PivotReversal_WeeklyADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,31 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w EMA50 for trend bias
+    # Weekly data for pivot points and ADX
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = (2 * Pivot) - L
+    # S1 = (2 * Pivot) - H
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Williams Alligator components (SMMA = Smoothed Moving Average)
-    def smoothed_moving_average(data, period):
-        sma = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            sma[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
-        return sma
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = (2 * pivot) - weekly_low
+    s1 = (2 * pivot) - weekly_high
     
-    # Calculate Alligator lines on 1d data
-    jaw = smoothed_moving_average(close, 13)  # Blue line (13-period)
-    teeth = smoothed_moving_average(close, 8)   # Red line (8-period)
-    lips = smoothed_moving_average(close, 5)    # Green line (5-period)
+    # Align weekly pivot levels to 12h timeframe (wait for weekly bar close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Volume spike: volume > 2.0 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
+    # Weekly ADX for trend strength filtering
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # First value is NaN
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_plus = np.concatenate([[np.nan], dm_plus])
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_minus = np.concatenate([[np.nan], dm_minus])
+        
+        # Smoothed values
+        def smooth_wilder(values, period):
+            smoothed = np.full_like(values, np.nan)
+            if len(values) >= period:
+                smoothed[period-1] = np.nansum(values[:period])
+                for i in range(period, len(values)):
+                    smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
+            return smoothed
+        
+        atr = smooth_wilder(tr, period)
+        dm_plus_smooth = smooth_wilder(dm_plus, period)
+        dm_minus_smooth = smooth_wilder(dm_minus, period)
+        
+        # DI+ and DI-
+        di_plus = np.where(atr != 0, (dm_plus_smooth / atr) * 100, 0)
+        di_minus = np.where(atr != 0, (dm_minus_smooth / atr) * 100, 0)
+        
+        # DX and ADX
+        dx = np.where((di_plus + di_minus) != 0, 
+                      np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+        adx = smooth_wilder(dx, period)
+        return adx
+    
+    adx = calculate_adx(weekly_high, weekly_low, weekly_close, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume confirmation: volume > 1.5 * 24-period average (2 weeks of 12h data)
+    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,36 +99,49 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade in trending markets (ADX > 25)
+        if adx_aligned[i] <= 25:
+            # In ranging markets, stay flat or use mean reversion at extremes
+            if position == 1 and close[i] < pivot_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and close[i] > pivot_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
+        
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) + above 1w EMA + volume spike
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_spike[i]):
+            # Long signals: price breaks above S1 with volume OR bounces off S1
+            if ((close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1] and volume_spike[i]) or
+                (close[i] >= s1_aligned[i] * 0.995 and close[i] <= s1_aligned[i] * 1.005 and 
+                 close[i-1] < s1_aligned[i-1] and volume_spike[i])):
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaw > Teeth > Lips (bearish alignment) + below 1w EMA + volume spike
-            elif (jaw[i] > teeth[i] and teeth[i] > lips[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_spike[i]):
+            # Short signals: price breaks below R1 with volume OR rejection at R1
+            elif ((close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1] and volume_spike[i]) or
+                  (close[i] <= r1_aligned[i] * 1.005 and close[i] >= r1_aligned[i] * 0.995 and
+                   close[i-1] > r1_aligned[i-1] and volume_spike[i])):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Alligator lines intertwine (Lips < Teeth) or price breaks below 1w EMA
-            if (lips[i] < teeth[i]) or (close[i] < ema_50_1w_aligned[i]):
+            # Long exit: price breaks below pivot or reaches R1
+            if close[i] < pivot_aligned[i] or close[i] >= r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Alligator lines intertwine (Jaw < Teeth) or price breaks above 1w EMA
-            if (jaw[i] < teeth[i]) or (close[i] > ema_50_1w_aligned[i]):
+            # Short exit: price breaks above pivot or reaches S1
+            if close[i] > pivot_aligned[i] or close[i] <= s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
