@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX(14) trend filter.
-# Long when price breaks above 20-period high with volume spike and ADX > 25.
-# Short when price breaks below 20-period low with volume spike and ADX > 25.
-# Exit when price crosses the 20-period midpoint or ADX weakens (< 20).
-# Designed for 4h timeframe to capture strong trends with low frequency.
-# Uses strict conditions to limit trades (~20-40/year) and avoid overtrading.
-name = "4h_Donchian20_Volume_ADX"
-timeframe = "4h"
+# Hypothesis: 6h Williams %R reversal from daily extremes with volume confirmation.
+# Williams %R identifies overbought/oversold conditions; reversals from extreme levels
+# (%R > -10 for overbought, %R < -90 for oversold) with volume spike indicate high-probability
+# mean reversion. Works in both bull (fade rallies) and bear (fade crashes) markets.
+# Uses tight conditions to limit trades (~15-25/year) and avoid overtrading.
+name = "6h_WilliamsR_Extreme_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,28 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    mid_20 = (high_20 + low_20) / 2
+    # Daily Williams %R
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # ADX(14) for trend strength
-    plus_dm = np.diff(high, prepend=high[0])
-    minus_dm = np.diff(low, prepend=low[0]) * -1
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    high_14 = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    low_14 = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    close_1d = df_1d['close'].values
+    williams_r = -100 * (high_14 - close_1d) / (high_14 - low_14)
     
-    tr = np.maximum(
-        np.maximum(high - low, np.abs(high - np.roll(close, 1))),
-        np.maximum(np.abs(low - np.roll(close, 1)), np.abs(high - np.roll(close, 1)))
-    )
-    tr[0] = high[0] - low[0]
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align to 6h timeframe (waits for prior day close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Volume spike: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,36 +48,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(adx[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above Donchian high with volume and trend
-            if (close[i] > high_20[i] and 
-                volume_spike[i] and 
-                adx[i] > 25):
+            # Long: reversal from oversold (%R < -90) with volume spike
+            if (williams_r_aligned[i] < -90 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume and trend
-            elif (close[i] < low_20[i] and 
-                  volume_spike[i] and 
-                  adx[i] > 25):
+            # Short: reversal from overbought (%R > -10) with volume spike
+            elif (williams_r_aligned[i] > -10 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses midpoint or trend weakens
-            if (close[i] < mid_20[i]) or (adx[i] < 20):
+            # Long: exit when %R returns to neutral (> -50) or reversal signal
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses midpoint or trend weakens
-            if (close[i] > mid_20[i]) or (adx[i] < 20):
+            # Short: exit when %R returns to neutral (< -50) or reversal signal
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
