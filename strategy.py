@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter.
-# Long when price breaks above R3 or S3 with volume > 1.5x average and weekly close > weekly open (bullish week).
-# Short when price breaks below S3 or R3 with volume > 1.5x average and weekly close < weekly open (bearish week).
-# Exit when price returns to the central pivot point (PP) or reverses at opposite S/R level.
-# Designed for ~15-25 trades/year per symbol (~60-100 total over 4 years).
-name = "12h_Camarilla_Pivot_Breakout_Volume_WeeklyTrend"
-timeframe = "12h"
+# Hypothesis: 4h Donchian breakout with volume confirmation and 12h ADX trend filter.
+# Long when: price breaks above Donchian(20) high, volume > 1.2x 20-period avg, 12h ADX > 25 (trending)
+# Short when: price breaks below Donchian(20) low, volume > 1.2x 20-period avg, 12h ADX > 25
+# Exit when price crosses the Donchian midpoint or ADX < 20 (range).
+# Designed for ~25-40 trades/year per symbol.
+name = "4h_Donchian20_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,87 +22,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    # Calculate Camarilla levels for each day
-    # Typical price = (high + low + close) / 3
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Volume filter: 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Camarilla levels
-    PP = typical_price
-    S1 = PP - (range_1d * 1.1 / 12)
-    S2 = PP - (range_1d * 1.1 / 6)
-    S3 = PP - (range_1d * 1.1 / 4)
-    R1 = PP + (range_1d * 1.1 / 12)
-    R2 = PP + (range_1d * 1.1 / 6)
-    R3 = PP + (range_1d * 1.1 / 4)
+    # 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align Camarilla levels to 12h timeframe
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    # Calculate ADX(14) on 12h
+    # True Range
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # 1d volume for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = vol_1d / (vol_ma_20 + 1e-10)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
     
-    # 1w data for trend filter (weekly bullish/bearish)
-    df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True for bullish week
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1d, weekly_bullish.astype(float))
+    # Smooth TR, DM+, DM-
+    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(PP_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(R3_aligned[i]) or
-            np.isnan(vol_ratio_aligned[i]) or np.isnan(weekly_bullish_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio_val = vol_ratio_aligned[i]
-        weekly_bull = weekly_bullish_aligned[i] > 0.5  # Convert back to boolean
+        vol = volume[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
+        donch_mid_val = donch_mid[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Long conditions: break above R3 or S3 with volume confirmation and bullish week
-            if vol_ratio_val > 1.5 and weekly_bull:
-                if price > R3_aligned[i] or price > S3_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Short conditions: break below S3 or R3 with volume confirmation and bearish week
-            elif vol_ratio_val > 1.5 and not weekly_bull:
-                if price < S3_aligned[i] or price < R3_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: break above Donchian high, volume > 1.2x avg, ADX > 25 (trending)
+            if price > donch_high_val and vol > 1.2 * vol_avg[i] and adx_val > 25:
+                signals[i] = 0.25
+                position = 1
+            # Short: break below Donchian low, volume > 1.2x avg, ADX > 25
+            elif price < donch_low_val and vol > 1.2 * vol_avg[i] and adx_val > 25:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price returns to PP or breaks below S1 (reversal)
-            if price <= PP_aligned[i] or price < S1_aligned[i]:
+            # Long exit: price crosses below Donchian midpoint or ADX < 20 (range)
+            if price < donch_mid_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to PP or breaks above R1 (reversal)
-            if price >= PP_aligned[i] or price > R1_aligned[i]:
+            # Short exit: price crosses above Donchian midpoint or ADX < 20
+            if price > donch_mid_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
