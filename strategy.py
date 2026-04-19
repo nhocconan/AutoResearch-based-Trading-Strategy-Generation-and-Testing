@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Camarilla_R1_S1_Breakout_Volume_V1"
-timeframe = "12h"
+name = "6h_1d_AdaptiveKeltnerBreakout_V1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,83 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation (daily)
+    # Get 1d data for ATR and EMA
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 1d ATR(10)
+    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(low_1d[1:], high_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate EMA34 on weekly close for trend
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA(20) for trend
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla pivot levels (using previous day's data)
-    def calculate_camarilla(high_arr, low_arr, close_arr):
-        n_days = len(close_arr)
-        R1 = np.full(n_days, np.nan)
-        S1 = np.full(n_days, np.nan)
-        
-        for i in range(1, n_days):
-            # Use previous day's OHLC
-            high_prev = high_arr[i-1]
-            low_prev = low_arr[i-1]
-            close_prev = close_arr[i-1]
-            
-            # Camarilla formulas
-            R1[i] = close_prev + (high_prev - low_prev) * 1.1 / 12
-            S1[i] = close_prev - (high_prev - low_prev) * 1.1 / 12
-        
-        return R1, S1
+    # Calculate dynamic Keltner channels: EMA20 ± 2*ATR10
+    upper_keltner = ema_20 + 2.0 * atr_10
+    lower_keltner = ema_20 - 2.0 * atr_10
     
-    R1, S1 = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Align to 6h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    # Align Camarilla levels to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Calculate volume spike indicator (volume > 2.0 * 50-period average for fewer trades)
-    volume_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
+    # Volume spike filter (6-period EMA on 6h data)
+    volume_ema = pd.Series(volume).ewm(span=6, adjust=False, min_periods=6).mean().values
+    volume_spike = volume > (1.5 * volume_ema)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_34_1w_aligned[i]):
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(ema_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation required
         vol_confirm = volume_spike[i]
         
         if position == 0:
-            # Long when price breaks above R1 with volume AND weekly trend is up (price > EMA34)
-            if close[i] > R1_aligned[i] and vol_confirm and close[i] > ema_34_1w_aligned[i]:
+            # Long: close breaks above upper Keltner + volume + price > EMA (uptrend)
+            if close[i] > upper_aligned[i] and vol_confirm and close[i] > ema_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S1 with volume AND weekly trend is down (price < EMA34)
-            elif close[i] < S1_aligned[i] and vol_confirm and close[i] < ema_34_1w_aligned[i]:
+            # Short: close breaks below lower Keltner + volume + price < EMA (downtrend)
+            elif close[i] < lower_aligned[i] and vol_confirm and close[i] < ema_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price falls below S1 (reversal) or weekly trend turns down
-            if close[i] < S1_aligned[i] or close[i] < ema_34_1w_aligned[i]:
+            # Exit long: close below EMA (trend change) OR opposite Keltner touch
+            if close[i] < ema_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price rises above R1 (reversal) or weekly trend turns up
-            if close[i] > R1_aligned[i] or close[i] > ema_34_1w_aligned[i]:
+            # Exit short: close above EMA (trend change) OR opposite Keltner touch
+            if close[i] > ema_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
