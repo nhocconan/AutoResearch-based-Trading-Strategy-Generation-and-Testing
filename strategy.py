@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_RSI_Reversal_Extreme"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_MediumTermTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,67 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly RSI for trend context (14-period)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get daily data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly RSI with proper smoothing
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_close = np.roll(close_1d, 1)
+    prev_close[0] = np.nan
+    prev_high = np.roll(high_1d, 1)
+    prev_high[0] = np.nan
+    prev_low = np.roll(low_1d, 1)
+    prev_low[0] = np.nan
     
-    # Wilder's smoothing (alpha = 1/14)
-    alpha = 1.0 / 14
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
+    # Pivot = (H + L + C) / 3
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
     
-    for i in range(len(gain)):
-        if i == 0:
-            avg_gain[i] = gain[i]
-            avg_loss[i] = loss[i]
-        else:
-            avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-            avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    # Align to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = np.where(avg_loss == 0, 100, rsi_1w)
-    rsi_1w = np.where(avg_gain == 0, 0, rsi_1w)
-    
-    # Align weekly RSI to daily
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Daily RSI for entry signals (14-period)
-    delta_d = np.diff(close, prepend=close[0])
-    gain_d = np.where(delta_d > 0, delta_d, 0)
-    loss_d = np.where(delta_d < 0, -delta_d, 0)
-    
-    avg_gain_d = np.zeros_like(gain_d)
-    avg_loss_d = np.zeros_like(loss_d)
-    
-    for i in range(len(gain_d)):
-        if i == 0:
-            avg_gain_d[i] = gain_d[i]
-            avg_loss_d[i] = loss_d[i]
-        else:
-            avg_gain_d[i] = alpha * gain_d[i] + (1 - alpha) * avg_gain_d[i-1]
-            avg_loss_d[i] = alpha * loss_d[i] + (1 - alpha) * avg_loss_d[i-1]
-    
-    rs_d = np.where(avg_loss_d != 0, avg_gain_d / avg_loss_d, 100)
-    rsi_d = 100 - (100 / (1 + rs_d))
-    rsi_d = np.where(avg_loss_d == 0, 100, rsi_d)
-    rsi_d = np.where(avg_gain_d == 0, 0, rsi_d)
-    
-    # Volume confirmation: current volume > 1.8x 20-day average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Medium-term trend filter: 12h EMA(50) - requires 50 periods
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for weekly RSI alignment
+    start_idx = 50  # Need EMA(50) warmup
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi_d[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i]):
             signals[i] = 0.0
             continue
         
@@ -85,30 +63,34 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume filter
-        volume_ok = vol > 1.8 * vol_ma
+        # Volume spike: current volume > 1.5x average
+        volume_spike = vol > 1.5 * vol_ma
+        
+        # Trend filter: price above EMA50 for long, below for short
+        uptrend = price > ema_50[i]
+        downtrend = price < ema_50[i]
         
         if position == 0:
-            # Long: Weekly RSI > 50 (bullish bias) + Daily RSI < 25 (oversold) + Volume
-            if rsi_1w_aligned[i] > 50 and rsi_d[i] < 25 and volume_ok:
+            # Long: Price breaks above R1 with volume spike and uptrend
+            if price > r1_12h[i] and volume_spike and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly RSI < 50 (bearish bias) + Daily RSI > 75 (overbought) + Volume
-            elif rsi_1w_aligned[i] < 50 and rsi_d[i] > 75 and volume_ok:
+            # Short: Price breaks below S1 with volume spike and downtrend
+            elif price < s1_12h[i] and volume_spike and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Daily RSI > 60 (overbought) or weekly RSI turns bearish
-            if rsi_d[i] > 60 or rsi_1w_aligned[i] < 45:
+            # Exit: Price returns below S1 (reversal signal)
+            if price < s1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Daily RSI < 40 (oversold) or weekly RSI turns bullish
-            if rsi_d[i] < 40 or rsi_1w_aligned[i] > 55:
+            # Exit: Price returns above R1 (reversal signal)
+            if price > r1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
