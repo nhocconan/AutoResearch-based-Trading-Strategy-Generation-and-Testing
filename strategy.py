@@ -3,24 +3,31 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 12h RSI divergence filter and volume confirmation.
-# Uses RSI divergence on 12h timeframe to detect weakening momentum before reversals,
-# combined with 6h price action and volume to enter trades in the direction of the higher timeframe trend.
-# Works in both bull and bear markets by filtering for exhaustion signals.
-# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and cost.
-name = "6h_12h_RSIDivergence_VolumeFilter"
+# Hypothesis: 6h timeframe with 1d Williams Fractal breakout and 12h EMA trend filter.
+# Uses daily Williams fractals to identify potential breakout levels, with 12h EMA for trend direction.
+# Works in both bull and bear markets by only taking breakouts in the direction of the higher timeframe trend.
+# Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and cost.
+name = "6h_12hEMA_1dWilliamsFractalBreakout"
 timeframe = "6h"
 leverage = 1.0
 
-def calculate_rsi(prices, period=14):
-    delta = np.diff(prices)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_williams_fractals(high, low):
+    """Calculate Williams Fractals: bearish (high) and bullish (low)"""
+    n = len(high)
+    bearish = np.zeros(n, dtype=bool)
+    bullish = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n - 2):
+        # Bearish fractal: highest high with two lower highs on each side
+        if (high[i] > high[i-1] and high[i] > high[i-2] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            bearish[i] = True
+        # Bullish fractal: lowest low with two higher lows on each side
+        if (low[i] < low[i-1] and low[i] < low[i-2] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            bullish[i] = True
+            
+    return bearish, bullish
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,69 +39,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for RSI calculation (called ONCE before loop)
+    # Get 1d data for Williams fractals (called ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Williams fractals on 1d timeframe
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_1d, low_1d)
+    
+    # Williams fractals need 2 extra bars for confirmation (formation + confirmation)
+    bearish_fractal_confirmed = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2)
+    bullish_fractal_confirmed = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2)
+    
+    # Get 12h data for EMA trend filter (called ONCE before loop)
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate RSI on 12h timeframe
-    rsi_12h = calculate_rsi(close_12h, 14)
+    # Calculate EMA34 on 12h timeframe
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Align RSI to 6h timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    
-    # 6h EMA20 for trend filter
-    ema20 = pd.Series(close).ewm(span=20, adjust=False).mean().values
-    
-    # Volume filter: volume > 1.5 * 20-period average
+    # Volume filter: volume > 1.3 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    volume_filter = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data for EMA and RSI
+    start_idx = 40  # Ensure enough data for EMA and fractals
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(rsi_12h_aligned[i]) or np.isnan(ema20[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema34_12h_aligned[i]) or np.isnan(volume_ma[i]):
             signals[i] = 0.0
             continue
             
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        bullish_div = False
-        if i >= 3:
-            if (low[i] < low[i-2] and low[i-2] < low[i-4] and 
-                rsi_12h_aligned[i] > rsi_12h_aligned[i-2] and rsi_12h_aligned[i-2] > rsi_12h_aligned[i-4]):
-                bullish_div = True
-        
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        bearish_div = False
-        if i >= 3:
-            if (high[i] > high[i-2] and high[i-2] > high[i-4] and 
-                rsi_12h_aligned[i] < rsi_12h_aligned[i-2] and rsi_12h_aligned[i-2] < rsi_12h_aligned[i-4]):
-                bearish_div = True
+        # Check for fractal breakouts
+        bullish_breakout = bullish_fractal_confirmed[i] > 0.5 and close[i] > high[i-1]
+        bearish_breakout = bearish_fractal_confirmed[i] > 0.5 and close[i] < low[i-1]
         
         if position == 0:
-            # Long when bullish divergence, price above EMA20, and volume confirmation
-            if bullish_div and close[i] > ema20[i] and volume_filter[i]:
+            # Long when bullish fractal breakout and price above 12h EMA34
+            if bullish_breakout and close[i] > ema34_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short when bearish divergence, price below EMA20, and volume confirmation
-            elif bearish_div and close[i] < ema20[i] and volume_filter[i]:
+            # Short when bearish fractal breakout and price below 12h EMA34
+            elif bearish_breakout and close[i] < ema34_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when bearish divergence or price falls below EMA20
-            if bearish_div or close[i] < ema20[i]:
+            # Long position: exit when price closes below 12h EMA34 or bearish fractal breakout
+            if close[i] < ema34_12h_aligned[i] or bearish_breakout:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when bullish divergence or price rises above EMA20
-            if bullish_div or close[i] > ema20[i]:
+            # Short position: exit when price closes above 12h EMA34 or bullish fractal breakout
+            if close[i] > ema34_12h_aligned[i] or bullish_breakout:
                 signals[i] = 0.0
                 position = 0
             else:
