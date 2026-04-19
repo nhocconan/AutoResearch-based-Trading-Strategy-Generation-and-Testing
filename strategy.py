@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_RSI4060_Confluence"
-timeframe = "6h"
+name = "4h_1d_WickRejection_Engulfing_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,36 +12,31 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily RSI(14) - higher timeframe trend filter
+    # Get daily data for context
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Weekly RSI(14) - higher timeframe trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    delta_w = np.diff(close_1w, prepend=close_1w[0])
-    gain_w = np.where(delta_w > 0, delta_w, 0)
-    loss_w = np.where(delta_w < 0, -delta_w, 0)
-    avg_gain_w = pd.Series(gain_w).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss_w = pd.Series(loss_w).ewm(alpha=1/14, adjust=False).mean().values
-    rs_w = avg_gain_w / (avg_loss_w + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs_w))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Daily EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # 4h range for wick analysis
+    range_4h = high - low
+    upper_wick = high - np.maximum(open_, close)
+    lower_wick = np.minimum(open_, close) - low
+    
+    # Bullish engulfing: current green candle engulfs previous red candle
+    bullish_engulf = (close > open_) & (open_ < np.roll(close, 1)) & (close > np.roll(open_, 1)) & (np.roll(close, 1) < np.roll(open_, 1))
+    # Bearish engulfing: current red candle engulfs previous green candle
+    bearish_engulf = (close < open_) & (open_ > np.roll(close, 1)) & (close < np.roll(open_, 1)) & (np.roll(close, 1) > np.roll(open_, 1))
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -50,40 +45,54 @@ def generate_signals(prices):
     start_idx = max(30, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        upw = upper_wick[i]
+        loww = lower_wick[i]
+        rng = range_4h[i]
         
         # Volume filter
-        volume_ok = vol > 1.3 * vol_ma
+        volume_ok = vol > 1.5 * vol_ma
+        
+        # Wick rejection: long wick relative to body
+        body = abs(close[i] - open_[i])
+        if body > 0:
+            upper_wick_ratio = upw / body
+            lower_wick_ratio = loww / body
+        else:
+            upper_wick_ratio = 0
+            lower_wick_ratio = 0
+        
+        # Wick rejection conditions
+        upper_wick_rej = upper_wick_ratio > 2.0  # Long upper wick
+        lower_wick_rej = lower_wick_ratio > 2.0  # Long lower wick
         
         if position == 0:
-            # Long: RSI between 40-60 on both timeframes (neutral momentum) + volume
-            if (40 <= rsi_1d_aligned[i] <= 60) and (40 <= rsi_1w_aligned[i] <= 60) and volume_ok:
+            # Long: bullish engulfing + lower wick rejection + price above daily EMA200
+            if bullish_engulf[i] and lower_wick_rej and price > ema200_1d_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI outside 40-60 on both timeframes (extreme momentum) + volume
-            elif ((rsi_1d_aligned[i] < 40 or rsi_1d_aligned[i] > 60) and 
-                  (rsi_1w_aligned[i] < 40 or rsi_1w_aligned[i] > 60) and volume_ok):
+            # Short: bearish engulfing + upper wick rejection + price below daily EMA200
+            elif bearish_engulf[i] and upper_wick_rej and price < ema200_1d_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: RSI moves above 60 or below 40 on either timeframe
-            if (rsi_1d_aligned[i] > 60 or rsi_1d_aligned[i] < 40 or 
-                rsi_1w_aligned[i] > 60 or rsi_1w_aligned[i] < 40):
+            # Exit: bearish engulfing or upper wick rejection
+            if bearish_engulf[i] or upper_wick_rej:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RSI moves into 40-60 range on either timeframe
-            if (40 <= rsi_1d_aligned[i] <= 60) or (40 <= rsi_1w_aligned[i] <= 60):
+            # Exit: bullish engulfing or lower wick rejection
+            if bullish_engulf[i] or lower_wick_rej:
                 signals[i] = 0.0
                 position = 0
             else:
