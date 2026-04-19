@@ -1,20 +1,15 @@
-# Hypothesis: 12h timeframe with daily Camarilla pivot breakouts (R1/S1) plus volume confirmation and ATR-based risk management.
-# Lower trade frequency on 12h reduces fee drag, while pivot levels provide institutional support/resistance.
-# Volume confirmation filters false breakouts. ATR stop manages risk in both bull and bear markets.
-# Designed to work in trending and ranging markets by using volatility-adjusted exits.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_R1S1_Breakout_VolumeATR_v1"
-timeframe = "12h"
+name = "4h_1dPivot_R1S1_Breakout_VolumeATR_Tight_v9"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,7 +31,7 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily pivot levels to 12h timeframe
+    # Align daily pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -48,7 +43,7 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (12h)
+    # Volume confirmation: current volume > 2.0x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -76,11 +71,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: break above R1 with volume
             if price > r1 and volume_confirmed:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: break below S1 with volume
             elif price < s1 and volume_confirmed:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -89,7 +84,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit: price above pivot or ATR-based stop
@@ -97,6 +92,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
