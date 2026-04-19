@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume_ADX_Filter
-Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
-Camarilla levels provide statistically significant intraday support/resistance
-ADX > 25 filters for trending markets to avoid false breakouts in chop
-Volume confirmation ensures institutional participation
-Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
-Works in bull/bear via ADX trend filter and volatility-adjusted breakouts
+6h_Camarilla_Pivot_Confluence_V1
+Hypothesis: 6s Camarilla R1/S1 breakout with 1d RSI filter and volume confirmation
+- Combines intraday support/resistance (Camarilla) with daily momentum (RSI)
+- Requires volume > 1.5x 20-period average to avoid false breakouts
+- Works in bull/bear via RSI filter (RSI>50 for longs, RSI<50 for shorts)
+- Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 """
 
-name = "12h_Pivot_R1S1_Breakout_Volume_ADX_Filter"
-timeframe = "12h"
+name = "6h_Camarilla_Pivot_Confluence_V1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -27,58 +26,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX(14) for trend strength filter - calculated on 12h data
-    # ADX > 25 indicates strong trend (avoid chop/range)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First period
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smoothed values using Wilder's smoothing (EMA-like)
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            if len(data) >= period:
-                result[period-1] = np.nanmean(data[:period])
-                for i in range(period, len(data)):
-                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-                    else:
-                        result[i] = np.nan
-            return result
-        
-        atr = WilderSmooth(tr, period)
-        dm_plus_smooth = WilderSmooth(dm_plus, period)
-        dm_minus_smooth = WilderSmooth(dm_minus, period)
-        
-        # Avoid division by zero
-        dx = np.full_like(close, np.nan)
-        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
-        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
-        
-        adx = WilderSmooth(dx, period)
-        return adx
-    
-    # 12h data for ADX and other indicators
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough for ADX calculation
+    # 6h data for RSI calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 14:
         return np.zeros(n)
     
-    # Calculate ADX on 12h data
-    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # RSI(14) on 6h data
+    def calculate_rsi(close_prices, period=14):
+        delta = np.diff(close_prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close_prices)
+        avg_loss = np.zeros_like(close_prices)
+        
+        if len(close_prices) >= period:
+            avg_gain[period-1] = np.mean(gain[:period])
+            avg_loss[period-1] = np.mean(loss[:period])
+            
+            for i in range(period, len(close_prices)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_6h = calculate_rsi(df_6h['close'].values, 14)
+    rsi_6h_aligned = align_htf_to_ltf(prices, df_6h, rsi_6h)
     
     # Previous day's Camarilla levels (using 1d data)
     df_1d = get_htf_data(prices, '1d')
@@ -97,15 +72,15 @@ def generate_signals(prices):
     r4 = pc + (rang * 1.1 / 2)
     s4 = pc - (rang * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 6h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 1.3 * 20-period average (slightly relaxed for fewer trades)
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -114,40 +89,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+        if (np.isnan(rsi_6h_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_12h_aligned[i] > 25
+        # RSI filter: RSI > 50 for long bias, RSI < 50 for short bias
+        rsi_bullish = rsi_6h_aligned[i] > 50
+        rsi_bearish = rsi_6h_aligned[i] < 50
         
         if position == 0:
-            # Long: price breaks above R1 with volume and strong trend
+            # Long: price breaks above R1 with volume and RSI bullish
             if (close[i] > r1_aligned[i] and 
                 volume_confirm[i] and 
-                strong_trend):
+                rsi_bullish):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and strong trend
+            # Short: price breaks below S1 with volume and RSI bearish
             elif (close[i] < s1_aligned[i] and 
                   volume_confirm[i] and 
-                  strong_trend):
+                  rsi_bearish):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 or trend weakens (ADX < 20)
-            if (close[i] < s1_aligned[i]) or (adx_12h_aligned[i] < 20):
+            # Long: exit if price breaks below S1 or RSI turns bearish
+            if (close[i] < s1_aligned[i]) or (rsi_6h_aligned[i] < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 or trend weakens (ADX < 20)
-            if (close[i] > r1_aligned[i]) or (adx_12h_aligned[i] < 20):
+            # Short: exit if price breaks above R1 or RSI turns bullish
+            if (close[i] > r1_aligned[i]) or (rsi_6h_aligned[i] > 50):
                 signals[i] = 0.0
                 position = 0
             else:
