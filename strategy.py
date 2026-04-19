@@ -1,22 +1,22 @@
+# 6h_WeeklyPivot_Continuation - Weekly Pivot Breakout with Volume Filter
+# Hypothesis: Weekly pivot levels (R4/S4) act as strong support/resistance.
+# Breaking above R4 with volume indicates bullish momentum; breaking below S4 indicates bearish momentum.
+# Weekly timeframe filters out daily noise, suitable for 6h entries.
+# Works in both bull/bear: In bull, buy R4 breakouts; in bear, sell S4 breakdowns.
+# Target: 15-25 trades/year per symbol with disciplined entries.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + Donchian(20) breakout + volume confirmation
-# Choppiness Index > 61.8 = ranging market (mean revert at Donchian bounds)
-# Choppiness Index < 38.2 = trending market (breakout in direction of trend)
-# In ranging: long at lower band, short at upper band
-# In trending: long on upper breakout, short on lower breakout
-# Volume spike (>1.5x 20-period average) confirms the move
-# Target: 20-30 trades/year per symbol with disciplined entries
-name = "4h_Chop_Donchian_Breakout_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Continuation"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,109 +24,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Choppiness Index
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Weekly high/low/close for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot levels: P = (H+L+C)/3, R4 = P + 3*(H-L), S4 = P - 3*(H-L)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r4 = pp + 3.0 * (weekly_high - weekly_low)
+    s4 = pp - 3.0 * (weekly_high - weekly_low)
     
-    # ATR(14)
-    atr = np.full_like(close_1d, np.nan, dtype=float)
-    if len(tr) >= 14:
-        atr[13] = np.nanmean(tr[1:15])  # first ATR
-        for i in range(14, len(tr)):
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Align weekly levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
     
-    # Sum of ATR over 14 periods
-    atr_sum = np.full_like(close_1d, np.nan, dtype=float)
-    if len(atr) >= 28:  # need 14 + 14
-        for i in range(27, len(atr_sum)):
-            atr_sum[i] = np.nansum(atr[i-13:i+1])
-    
-    # Choppiness Index = 100 * log10(atr_sum / (highest_high - lowest_low)) / log10(14)
-    highest_high = np.full_like(close_1d, np.nan, dtype=float)
-    lowest_low = np.full_like(close_1d, np.nan, dtype=float)
-    for i in range(13, len(close_1d)):
-        highest_high[i] = np.nanmax(high_1d[i-13:i+1])
-        lowest_low[i] = np.nanmin(low_1d[i-13:i+1])
-    
-    chop = np.full_like(close_1d, np.nan, dtype=float)
-    for i in range(27, len(close_1d)):
-        if atr_sum[i] > 0 and highest_high[i] > lowest_low[i]:
-            chop[i] = 100 * np.log10(atr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(14)
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Donchian channels (20-period) on 4h
-    highest_high_20 = np.full_like(close, np.nan, dtype=float)
-    lowest_low_20 = np.full_like(close, np.nan, dtype=float)
-    for i in range(19, len(close)):
-        highest_high_20[i] = np.max(high[i-19:i+1])
-        lowest_low_20[i] = np.min(low[i-19:i+1])
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
-    volume_ma = np.full_like(volume, np.nan, dtype=float)
-    for i in range(19, len(volume)):
-        volume_ma[i] = np.mean(volume[i-19:i+1])
-    volume_spike = volume > (volume_ma * 1.5)
+    # Volume filter: volume > 1.5 * 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 20  # Ensure volume MA is valid
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(chop_aligned[i]) or np.isnan(highest_high_20[i]) or 
-            np.isnan(lowest_low_20[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        chop_val = chop_aligned[i]
-        donchian_upper = highest_high_20[i]
-        donchian_lower = lowest_low_20[i]
-        
         if position == 0:
-            # Determine regime
-            if chop_val > 61.8:  # ranging market
-                # Mean reversion at Donchian bounds
-                if close[i] <= donchian_lower and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] >= donchian_upper and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-            elif chop_val < 38.2:  # trending market
-                # Breakout in direction of trend
-                if close[i] > donchian_upper and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < donchian_lower and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # else: neutral zone (38.2-61.8), no action
+            # Long: price breaks above R4 with volume confirmation
+            if close[i] > r4_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below S4 with volume confirmation
+            elif close[i] < s4_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
                 
         elif position == 1:
-            # Long: exit on opposite Donchian touch or chop becomes extreme ranging
-            if close[i] >= donchian_upper or (chop_val > 61.8 and close[i] >= (donchian_upper + donchian_lower) / 2):
+            # Long: exit if price breaks below R4 (failed breakout) or volume drops
+            if close[i] < r4_aligned[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit on opposite Donchian touch or chop becomes extreme ranging
-            if close[i] <= donchian_lower or (chop_val > 61.8 and close[i] <= (donchian_upper + donchian_lower) / 2):
+            # Short: exit if price breaks above S4 (failed breakdown) or volume drops
+            if close[i] > s4_aligned[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
