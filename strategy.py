@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Pivot_R1_S1_Breakout_Volume_v1"
-timeframe = "1d"
+name = "4h_Donchian20_Volume_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Pivot points
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Donchian(20) channels
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate previous week's Pivot, R1, S1
-    prev_high = np.concatenate([[np.nan], high_1w[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1w[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1w[:-1]])
+    # 1d trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    
-    # Align weekly pivot levels to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Volume filter: current volume > 1.8x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume filter: current volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 10)  # Ensure enough data for indicators
+    start_idx = max(34, 20)  # Wait for EMA34 and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma_50[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_50[i]
+        vol_ma = vol_ma_20[i]
+        trend = ema_34_1d_aligned[i]
         
         # Volume filter
-        volume_ok = vol > 1.8 * vol_ma
+        volume_ok = vol > 1.3 * vol_ma
         
         if position == 0:
-            # Long: price breaks above R1 with volume
-            if price > r1_aligned[i] and volume_ok:
+            # Long: price breaks above Donchian high + uptrend + volume
+            if price > donchian_high[i] and price > trend and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume
-            elif price < s1_aligned[i] and volume_ok:
+            # Short: price breaks below Donchian low + downtrend + volume
+            elif price < donchian_low[i] and price < trend and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below S1 (mean reversion to opposite level)
-            if price < s1_aligned[i]:
+            # Exit: price breaks below Donchian low
+            if price < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above R1 (mean reversion to opposite level)
-            if price > r1_aligned[i]:
+            # Exit: price breaks above Donchian high
+            if price > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
