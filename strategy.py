@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1S1_Breakout_VolumeATR_v2"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_VolumeATR_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,7 +31,7 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align 1d pivot levels to 12h timeframe
+    # Align 1d pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -43,30 +43,30 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 2.0x 30-period average (12h)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: current volume > 1.8x 24-period average (4h)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
             np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_30[i])):
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_30[i]
+        vol_ma = vol_ma_24[i]
         pivot = pivot_1d_aligned[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
         
-        volume_confirmed = vol > 2.0 * vol_ma
+        volume_confirmed = vol > 1.8 * vol_ma
         
         if position == 0:
             # Long: break above R1 with volume
@@ -80,7 +80,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Exit: price below pivot or ATR-based stop
-            if price < pivot or price < close[i-1] - 2.0 * atr:
+            if price < pivot or price < close[i-1] - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,7 +88,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: price above pivot or ATR-based stop
-            if price > pivot or price > close[i-1] + 2.0 * atr:
+            if price > pivot or price > close[i-1] + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
