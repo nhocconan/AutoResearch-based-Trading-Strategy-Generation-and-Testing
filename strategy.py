@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly trend filter with daily Donchian breakout and volume confirmation
-# Uses 1-week Donchian(10) to determine primary trend direction
-# Enters on daily Donchian(20) breakout in trend direction with volume > 1.5x 20-day average
-# Exits when price crosses back below/above daily Donchian(10) opposite band
-# Designed to capture major trend moves while avoiding counter-trend whipsaws
-# Target: 15-25 trades/year per symbol (~60-100 total over 4 years)
+# Hypothesis: 6h Donchian breakout with 1d pivot reversal zones and volume confirmation
+# In ranging markets, price tends to reverse at daily pivot S1/R1 (mean reversion)
+# In trending markets, price breaks through daily pivot S2/R2 with volume (breakout)
+# Uses 1d pivots as dynamic support/resistance with volume filter to distinguish
+# between breakouts and reversals. Works in both bull and bear markets by
+# adapting to volatility regime via ATR filter.
+# Target: 20-40 trades/year per symbol (~80-160 total over 4 years)
 
-name = "1d_WeeklyTrend_DonchianBreakout_Volume"
-timeframe = "1d"
+name = "6h_1dPivot_S1R1_S2R2_VolumeATR"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,86 +25,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get 1h data for ATR calculation (better resolution than 6h)
+    df_1h = get_htf_data(prices, '1h')
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
     
-    # Calculate weekly Donchian(10) for trend determination
-    # Upper band: highest high of last 10 weekly periods
-    # Lower band: lowest low of last 10 weekly periods
-    dh_1w = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
-    dl_1w = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
+    # Calculate ATR(14) on 1h
+    tr1 = np.maximum(high_1h[1:], close_1h[:-1]) - np.minimum(low_1h[1:], close_1h[:-1])
+    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
+    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1h_aligned = align_htf_to_ltf(prices, df_1h, atr_1h)
     
-    # Align weekly Donchian bands to daily timeframe
-    dh_1w_aligned = align_htf_to_ltf(prices, df_1w, dh_1w)
-    dl_1w_aligned = align_htf_to_ltf(prices, df_1w, dl_1w)
+    # Get 1d data for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily Donchian channels for entry/exit
-    dh_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    dl_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    dh_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    dl_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Calculate daily pivot points: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Support and resistance levels
+    s1_1d = 2 * pivot_1d - high_1d
+    r1_1d = 2 * pivot_1d - low_1d
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r2_1d = pivot_1d + (high_1d - low_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Align pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need daily Donchian(20) and volume MA data
+    start_idx = 20  # Need volume MA and ATR data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(dh_1w_aligned[i]) or np.isnan(dl_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
+            np.isnan(r2_1d_aligned[i]) or np.isnan(atr_1h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        weekly_upper = dh_1w_aligned[i]
-        weekly_lower = dl_1w_aligned[i]
-        daily_high_20 = dh_20[i]
-        daily_low_20 = dl_20[i]
-        daily_high_10 = dh_10[i]
-        daily_low_10 = dl_10[i]
-        vol_ma = vol_ma_20[i]
         vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        atr = atr_1h_aligned[i]
         
-        # Volume confirmation threshold
+        # Volume and volatility filters
         volume_confirmed = vol > 1.5 * vol_ma
+        volatility_filter = atr > 0  # Always true but keeps structure
         
-        # Determine trend based on weekly Donchian
-        # Uptrend: price above weekly upper band
-        # Downtrend: price below weekly lower band
-        # Sideways: between bands (no trades)
-        if price > weekly_upper:
-            trend = 1  # uptrend
-        elif price < weekly_lower:
-            trend = -1  # downtrend
-        else:
-            trend = 0  # sideways/no trend
+        # Pivot levels
+        s1 = s1_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s2 = s2_1d_aligned[i]
+        r2 = r2_1d_aligned[i]
+        pivot = pivot_1d_aligned[i]
         
         if position == 0:
-            # Enter long: daily breaks above 20-day high in uptrend with volume
-            if trend == 1 and price > daily_high_20 and volume_confirmed:
+            # Long conditions:
+            # 1. Breakout above R2 with volume (strong bullish)
+            # 2. Mean reversion from S1 with volume (bullish bounce)
+            if ((price > r2 and volume_confirmed) or 
+                (price < s1 and price > s2 and volume_confirmed and price > pivot)):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: daily breaks below 20-day low in downtrend with volume
-            elif trend == -1 and price < daily_low_20 and volume_confirmed:
+            # Short conditions:
+            # 1. Breakdown below S2 with volume (strong bearish)
+            # 2. Mean reversion from R1 with volume (bearish rejection)
+            elif ((price < s2 and volume_confirmed) or 
+                  (price > r1 and price < r2 and volume_confirmed and price < pivot)):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price breaks below 10-day low
-            if price < daily_low_10:
+            # Exit long: breakdown below S1 or reversal at R1
+            if price < s1 or (price > r1 and price < r2):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price breaks above 10-day high
-            if price > daily_high_10:
+            # Exit short: breakout above S1 or reversal at S1
+            if price > s2 or (price < r1 and price > s2):
                 signals[i] = 0.0
                 position = 0
             else:
