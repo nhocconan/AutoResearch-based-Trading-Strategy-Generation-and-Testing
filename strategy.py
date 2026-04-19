@@ -1,18 +1,20 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI divergence with 12h volume confirmation and 4h trend filter
-# - RSI(14) for overbought/oversold: long when RSI < 30, short when RSI > 70
-# - 12h volume > 1.5x 20-period average for conviction
-# - 4h EMA(50) trend filter: only take longs when price > EMA50, shorts when price < EMA50
-# - Exit on opposite RSI extreme or trend reversal
-# - Designed to work in both bull and bear markets by following trend filter
-# - Target: 25-40 trades/year to avoid excessive fee drag
+# Hypothesis: 1h RSI reversal with 4h trend filter and 1d volume confirmation
+# - RSI(14) on 1h for mean reversion: long when RSI < 30, short when RSI > 70
+# - 4h EMA(50) trend filter: only take longs when price > 4h EMA50, shorts when price < 4h EMA50
+# - 1d volume > 1.2x 20-period average for conviction
+# - Exit on opposite RSI extreme (RSI > 70 for longs, RSI < 30 for shorts)
+# - Session filter: only trade between 08:00-20:00 UTC to avoid low-volume periods
+# - Fixed position size of 0.20 to manage risk
+# - Designed to work in both bull and bear markets by following 4h trend
+# - Target: ~20-30 trades/year to avoid excessive fee drift
 
-name = "4h_RSI_12hVolume_EMA50_v1"
-timeframe = "4h"
+name = "1h_RSI_4hTrend_1dVolume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,26 +27,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # 12h volume average (20-period)
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # 4h EMA(50) for trend direction
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # RSI(14) calculation
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # RSI(14) on 1h
     delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    rsi = rsi.fillna(50).values  # neutral when insufficient data
     
-    # 4h EMA(50) for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Pre-compute session filter (08:00-20:00 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,40 +62,42 @@ def generate_signals(prices):
     start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if np.isnan(ema_50[i]) or np.isnan(vol_ma_12h_aligned[i]) or np.isnan(rsi[i]):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            not in_session[i]):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 4h volume > 1.5x 12h average volume (scaled)
-        # Scale 12h average to 4h: 12h has 3x 4h bars, so divide by 3
-        volume_factor = vol_ma_12h_aligned[i] / 3.0
-        volume_filter = vol_ma_12h_aligned[i] > 0 and volume[i] > 1.5 * volume_factor
+        # Volume filter: current 1h volume > 1.2x 1d average volume (scaled)
+        # Scale 1d average to 1h: 1d has 24x 1h bars, so divide by 24
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.2 * (vol_ma_1d_aligned[i] / 24.0)
         
         if position == 0:
-            # Look for long entry: uptrend (price > EMA50) + oversold RSI + volume
-            if close[i] > ema_50[i] and rsi[i] < 30 and volume_filter:
-                signals[i] = 0.25
+            # Look for long entry: uptrend (price > 4h EMA50) + oversold RSI + volume + session
+            if close[i] > ema_50_4h_aligned[i] and rsi[i] < 30 and volume_filter:
+                signals[i] = 0.20
                 position = 1
-            # Look for short entry: downtrend (price < EMA50) + overbought RSI + volume
-            elif close[i] < ema_50[i] and rsi[i] > 70 and volume_filter:
-                signals[i] = -0.25
+            # Look for short entry: downtrend (price < 4h EMA50) + overbought RSI + volume + session
+            elif close[i] < ema_50_4h_aligned[i] and rsi[i] > 70 and volume_filter:
+                signals[i] = -0.20
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on overbought RSI or trend reversal
-            if rsi[i] > 70 or close[i] < ema_50[i]:
+            # Long position: exit on overbought RSI (RSI > 70)
+            if rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:
-            # Short position: exit on oversold RSI or trend reversal
-            if rsi[i] < 30 or close[i] > ema_50[i]:
+            # Short position: exit on oversold RSI (RSI < 30)
+            if rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
