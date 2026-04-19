@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + ADX(14) trend strength + volume confirmation.
-# Donchian breakouts capture momentum in both bull and bear markets.
-# ADX > 25 filters for trending conditions, avoiding whipsaws in ranges.
-# Volume spike confirms institutional participation.
-# Designed for 4h timeframe to balance trade frequency and signal quality.
-# Entry: Long when price breaks above Donchian(20) upper band and ADX > 25 and volume spike.
-# Short when price breaks below Donchian(20) lower band and ADX > 25 and volume spike.
-# Exit: Opposite Donchian band touch or ADX < 20 (trend weakening).
-# Uses strict conditions to limit trades (~20-40/year) and avoid overtrading.
-name = "4h_Donchian20_ADX_Volume"
-timeframe = "4h"
+# Hypothesis: 12h Williams Alligator (Jaw, Teeth, Lips) + volume spike + ADX trend filter.
+# The Alligator uses SMAs to detect trend alignment: Jaw (13-period), Teeth (8-period), Lips (5-period).
+# In uptrend: Lips > Teeth > Jaw; in downtrend: Lips < Teeth < Jaw.
+# Combined with volume confirmation (2x 20-period average) and ADX > 25 for trend strength.
+# Designed for 12h timeframe to capture strong trends with low frequency, suitable for both bull and bear markets.
+# Entry: Long when Lips > Teeth > Jaw and volume spike and ADX > 25; Short when Lips < Teeth < Jaw and volume spike and ADX > 25.
+# Exit: Opposite Alligator alignment (Lips < Teeth for long exit, Lips > Teeth for short exit).
+# Uses strict conditions to limit trades (~15-25/year) and avoid overtrading.
+name = "12h_WilliamsAlligator_ADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,24 +25,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Alligator: SMAs of median price (HL/2)
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # Jaw: 13-period
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values   # Teeth: 8-period
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values    # Lips: 5-period
     
-    # ADX(14) calculation
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
-    
-    # Pad arrays to match length
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
-    
+    # ADX(14) for trend strength
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     # Smoothed values
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr)
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
@@ -54,40 +61,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data for all indicators
+    start_idx = 20  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             np.isnan(adx[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above Donchian upper with trend strength and volume
-            if (close[i] > high_roll[i] and 
-                adx[i] > 25 and 
-                volume_spike[i]):
+            # Long: Lips > Teeth > Jaw (uptrend alignment) with volume and trend strength
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
+                volume_spike[i] and adx[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian lower with trend strength and volume
-            elif (close[i] < low_roll[i] and 
-                  adx[i] > 25 and 
-                  volume_spike[i]):
+            # Short: Lips < Teeth < Jaw (downtrend alignment) with volume and trend strength
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
+                  volume_spike[i] and adx[i] > 25):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price touches lower band or trend weakens
-            if (close[i] < low_roll[i]) or (adx[i] < 20):
+            # Long: exit if uptrend breaks (Lips < Teeth)
+            if lips[i] < teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price touches upper band or trend weakens
-            if (close[i] > high_roll[i]) or (adx[i] < 20):
+            # Short: exit if downtrend breaks (Lips > Teeth)
+            if lips[i] > teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
