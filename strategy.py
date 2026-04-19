@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter_v1"
-timeframe = "6h"
+name = "12h_1w_Camarilla_Pivot_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,98 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla and ATR
+    # Get weekly data for Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Get daily data for trend filter (EMA34) and volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels for previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly Camarilla pivot levels (R1, S1, R2, S2, R3, S3)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
+    
+    pivot = (high_w + low_w + close_w) / 3
+    range_w = high_w - low_w
+    
+    R1 = pivot + (range_w * 1.1 / 12)
+    S1 = pivot - (range_w * 1.1 / 12)
+    R2 = pivot + (range_w * 1.1 / 6)
+    S2 = pivot - (range_w * 1.1 / 6)
+    R3 = pivot + (range_w * 1.1 / 4)
+    S3 = pivot - (range_w * 1.1 / 4)
+    
+    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
+    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Previous day's range
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Calculate daily volume average (20-period) for volume confirmation
+    vol_1d = df_1d['volume'].values
+    vol_avg = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Handle first value
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Camarilla levels
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    R2 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    S2 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 4
-    R4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    S4 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    
-    # ATR for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_1d[0] - low_1d[0]  # first TR
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align to 6h timeframe
-    R1_6h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_6h = align_htf_to_ltf(prices, df_1d, S1)
-    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
-    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr)
-    
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align all indicators to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_6h[i]) or np.isnan(S1_6h[i]) or 
-            np.isnan(R4_6h[i]) or np.isnan(S4_6h[i]) or
-            np.isnan(atr_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_avg_aligned[i]) or
+            np.isnan(volume[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x average
-        volume_filter = volume[i] > 1.5 * vol_ma[i]
-        
-        # ATR filter: avoid extremely low volatility
-        atr_filter = atr_6h[i] > 0
+        # Volume confirmation: current volume > 1.5x daily average
+        vol_confirm = volume[i] > (vol_avg_aligned[i] * 1.5)
         
         if position == 0:
-            # Long breakout above R1 with volume
-            if (close[i] > R1_6h[i] and 
-                volume_filter and 
-                atr_filter):
+            # Long when price breaks above R3 with volume and above daily EMA34
+            if (close[i] > R3_aligned[i] and 
+                vol_confirm and 
+                close[i] > ema34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown below S1 with volume
-            elif (close[i] < S1_6h[i] and 
-                  volume_filter and 
-                  atr_filter):
+            # Short when price breaks below S3 with volume and below daily EMA34
+            elif (close[i] < S3_aligned[i] and 
+                  vol_confirm and 
+                  close[i] < ema34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit at R4 (take profit) or if price falls back below R1
-            if (close[i] >= R4_6h[i] or 
-                close[i] < R1_6h[i]):
+            # Long position: exit when price falls below R1 or volume drops
+            if (close[i] < R1_aligned[i] or 
+                volume[i] < (vol_avg_aligned[i] * 0.5)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit at S4 (take profit) or if price rises back above S1
-            if (close[i] <= S4_6h[i] or 
-                close[i] > S1_6h[i]):
+            # Short position: exit when price rises above S1 or volume drops
+            if (close[i] > S1_aligned[i] or 
+                volume[i] < (vol_avg_aligned[i] * 0.5)):
                 signals[i] = 0.0
                 position = 0
             else:
