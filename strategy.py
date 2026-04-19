@@ -1,16 +1,15 @@
+# [62931] 6h_Pivot_R1_S1_Breakout_VolumeATR_Filter_v1
+# Hypothesis: 6h timeframe with daily pivot points (R1/S1) and volume confirmation reduces noise.
+# Uses 2x volume filter and ATR-based stop to avoid chop. Targets 12-37 trades/year.
+# Works in bull (breakouts) and bear (mean reversion at pivots) via symmetric long/short logic.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d weekly trend filter + weekly pivot R1/S1 breakout with volume confirmation
-# Weekly trend: price above/below weekly EMA34 determines bias
-# Weekly pivot levels act as dynamic support/resistance
-# Volume confirms breakout strength
-# Target: 15-25 trades/year, works in bull/bear via trend filter
-
-name = "1d_WeeklyTrend_Pivot_R1S1_Breakout_Volume"
-timeframe = "1d"
+name = "6h_Pivot_R1_S1_Breakout_VolumeATR_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,76 +22,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend and pivot calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly high, low, close for EMA and pivot calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily high, low, close for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA34 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate R1 and S1 using Camarilla formula
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Weekly pivot point calculation (using weekly OHLC)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly R1 and S1 using Camarilla formula
-    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12
-    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12
+    # Align daily pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Align weekly data to daily timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Daily ATR for volatility filter (14-period)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])
+    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Volume confirmation: current volume > 2.0x 20-period average (6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Additional filter: only trade when price is away from extremes (avoid chop)
+    price_ma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need EMA34 warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(pivot_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(price_ma_50[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        ema34 = ema34_1w_aligned[i]
-        pivot = pivot_1w_aligned[i]
-        r1 = r1_1w_aligned[i]
-        s1 = s1_1w_aligned[i]
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        atr = atr_14_1d_aligned[i]
+        price_ma = price_ma_50[i]
         
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
+        # Only trade when price is not too far from MA (avoid extreme moves)
+        price_not_extreme = abs(price - price_ma) < 3 * atr
         
         if position == 0:
-            # Long: weekly uptrend (price > EMA34) + break above weekly R1 + volume
-            if price > ema34 and price > r1 and volume_confirmed:
+            # Long: break above R1 with volume and not extreme
+            if price > r1 and volume_confirmed and price_not_extreme:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend (price < EMA34) + break below weekly S1 + volume
-            elif price < ema34 and price < s1 and volume_confirmed:
+            # Short: break below S1 with volume and not extreme
+            elif price < s1 and volume_confirmed and price_not_extreme:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: weekly downtrend or price breaks below weekly pivot
-            if price < ema34 or price < pivot:
+            # Exit: price below pivot or ATR-based stop
+            if price < pivot or price < close[i-1] - 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: weekly uptrend or price breaks above weekly pivot
-            if price > ema34 or price > pivot:
+            # Exit: price above pivot or ATR-based stop
+            if price > pivot or price > close[i-1] + 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
