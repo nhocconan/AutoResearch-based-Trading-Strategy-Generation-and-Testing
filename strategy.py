@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1_S1_Breakout_Volume_ADXFilter"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1_S1_Breakout_Volume_ADXFilter_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,28 +32,36 @@ def generate_signals(prices):
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align daily pivot levels to 12h timeframe
+    # Align daily pivot levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # ADX for trend strength (14-period)
-    plus_dm = np.diff(high, prepend=high[0])
-    minus_dm = np.diff(low[::-1])[::-1]
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm < 0] = 0
+    # ADX for trend strength (14-period) - use proper Wilder's smoothing
+    up_move = np.diff(high, prepend=high[0])
+    down_move = np.diff(low[::-1])[::-1]  # low[i-1] - low[i]
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
     tr1 = np.abs(np.diff(high, prepend=high[0]))
     tr2 = np.abs(np.diff(low, prepend=low[0]))
     tr3 = np.abs(np.diff(close, prepend=close[0]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / 
-                     pd.Series(tr).ewm(alpha=1/14, adjust=False).mean())
-    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / 
-                      pd.Series(tr).ewm(alpha=1/14, adjust=False).mean())
+    # Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        alpha = 1.0 / period
+        result = np.full_like(data, np.nan)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    plus_di = 100 * wilder_smooth(plus_dm, 14) / (wilder_smooth(tr, 14) + 1e-10)
+    minus_di = 100 * wilder_smooth(minus_dm, 14) / (wilder_smooth(tr, 14) + 1e-10)
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    adx = wilder_smooth(dx, 14)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -75,8 +83,8 @@ def generate_signals(prices):
         # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
-        # Trend filter: ADX > 20 for trending market
-        trending = adx[i] > 20
+        # Trend filter: ADX > 25 for stronger trending market (reduce false signals)
+        trending = adx[i] > 25
         
         if position == 0:
             # Long: price breaks above R1 with volume and trending market
