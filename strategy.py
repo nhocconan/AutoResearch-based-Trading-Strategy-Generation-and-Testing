@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 12h trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. We trade reversals from extreme levels
-# only when aligned with the 12h trend (EMA34) and confirmed by volume spikes.
-# Works in bull/bear markets: captures mean reversion in ranges and pullbacks in trends.
-# Target: 20-40 trades/year per symbol.
-name = "4h_WilliamsR_EMA34_Volume_MeanReversion"
-timeframe = "4h"
+# Hypothesis: 1h Donchian breakout with 4h volume confirmation and 1d trend filter.
+# Uses 4h volume spike to confirm institutional interest and 1d EMA200 for trend direction.
+# Designed to work in both bull and bear markets by filtering breakouts with volume and trend.
+# Target: 15-37 trades/year per symbol.
+name = "1h_Donchian20_VolumeTrend_EMA200"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,70 +21,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams %R (14) on 4h
-    wr_period = 14
-    highest_high = pd.Series(high).rolling(window=wr_period, min_periods=wr_period).max().values
-    lowest_low = pd.Series(low).rolling(window=wr_period, min_periods=wr_period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Get 4h data for volume confirmation (spike detection)
+    df_4h = get_htf_data(prices, '4h')
+    vol_4h = df_4h['volume'].values
     
-    # Get 12h data for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 12h
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Donchian Channel (20-period) on 1h
+    donch_len = 20
+    upper_dc = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
+    lower_dc = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
     
-    # Align 12h EMA34 to 4h
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 4h volume average (20-period) for spike detection
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align 4h volume MA and 1d EMA200 to 1h timeframe
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(wr_period, 34, 20)  # Ensure Williams %R, EMA34, and volume MA are ready
+    start_idx = max(donch_len, 20, 200)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(williams_r[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
+            np.isnan(vol_ma_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        wr = williams_r[i]
-        ema_34_val = ema_34_aligned[i]
-        vol_ma = vol_ma_20[i]
+        price = close[i]
+        upper = upper_dc[i]
+        lower = lower_dc[i]
+        vol_ma = vol_ma_4h_aligned[i]
+        ema_200 = ema_200_1d_aligned[i]
         vol = volume[i]
         
-        # Volume confirmation threshold
+        # Volume confirmation: current volume > 2.0x 4h average volume
         volume_confirmed = vol > 2.0 * vol_ma
         
+        # Breakout conditions
+        bullish_breakout = price > upper
+        bearish_breakout = price < lower
+        
         if position == 0:
-            # Look for mean reversion from extreme Williams %R levels
-            # Long: oversold (< -80) with price above 12h EMA34 (uptrend bias)
-            # Short: overbought (> -20) with price below 12h EMA34 (downtrend bias)
-            if wr < -80 and close[i] > ema_34_val and volume_confirmed:
-                signals[i] = 0.25
+            # Look for entry: breakout in direction of 1d trend with volume confirmation
+            if bullish_breakout and (price > ema_200) and volume_confirmed:
+                signals[i] = 0.20
                 position = 1
-            elif wr > -20 and close[i] < ema_34_val and volume_confirmed:
-                signals[i] = -0.25
+            elif bearish_breakout and (price < ema_200) and volume_confirmed:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long when Williams %R returns to neutral territory (> -50)
-            if wr > -50:
+            # Exit long when price returns to 50% of the Donchian channel or trend changes
+            mid_point = (upper + lower) * 0.5
+            if price < mid_point:  # Return to midpoint
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short when Williams %R returns to neutral territory (< -50)
-            if wr < -50:
+            # Exit short when price returns to 50% of the Donchian channel
+            mid_point = (upper + lower) * 0.5
+            if price > mid_point:  # Return to midpoint
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
