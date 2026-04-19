@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Elder Ray Index with weekly trend filter.
-# Elder Ray measures bull/bear power using EMA13. Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# Weekly EMA34 determines trend: price above EMA34 = bullish trend, below = bearish trend.
-# In weekly bullish trend: long when Bull Power > 0 and rising, short when Bear Power < 0 and falling.
-# In weekly bearish trend: short when Bear Power < 0, long when Bull Power > 0 (counter-trend).
+# Hypothesis: 1d KAMA + RSI + chop filter - Weekly trend filter for daily signals
+# Use weekly Choppiness Index to determine regime: >61.8 = range (mean revert), <38.2 = trending (trend follow).
+# In trending regime: KAMA direction for trend following (long when KAMA rising, short when falling).
+# In ranging regime: RSI extremes for mean reversion (long RSI<30, short RSI>70).
 # Volume confirmation: volume > 1.5x 20-period average.
-# Target: 20-40 trades/year per symbol to stay within frequency limits.
-name = "12h_ElderRay_WeeklyTrend_Volume"
-timeframe = "12h"
+# Target: 15-25 trades/year per symbol to stay within frequency limits.
+name = "1d_KAMA_RSI_Chop_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,93 +23,202 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for Choppiness Index calculation
     df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate Choppiness Index (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA34 for trend
-    def ema(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Wilder's smoothing function
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
             return result
-        multiplier = 2 / (period + 1)
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = (arr[i] - result[i-1]) * multiplier + result[i-1]
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    ema34_1w = ema(close_1w, 34)
-    weekly_uptrend = close_1w > ema34_1w
-    weekly_downtrend = close_1w < ema34_1w
+    # ATR (14-period Wilder's smoothing)
+    atr_1w = wilder_smooth(tr, 14)
+    # Sum of TR over 14 periods
+    tr_sum_14 = wilder_smooth(tr, 14)
     
-    # Get daily data for Elder Ray calculation (EMA13)
+    # Highest high and lowest low over 14 periods
+    def highest_high(arr, period):
+        result = np.full_like(arr, np.nan)
+        for i in range(period-1, len(arr)):
+            result[i] = np.max(arr[i-period+1:i+1])
+        return result
+    
+    def lowest_low(arr, period):
+        result = np.full_like(arr, np.nan)
+        for i in range(period-1, len(arr)):
+            result[i] = np.min(arr[i-period+1:i+1])
+        return result
+    
+    hh_14 = highest_high(high_1w, 14)
+    ll_14 = lowest_low(low_1w, 14)
+    
+    # Avoid division by zero
+    safe_tr_sum = np.where(tr_sum_14 == 0, np.finfo(float).eps, tr_sum_14)
+    chop = 100 * np.log10(safe_tr_sum / (hh_14 - ll_14)) / np.log10(14)
+    # Handle cases where hh_14 == ll_14
+    chop = np.where((hh_14 - ll_14) == 0, 50, chop)  # Neutral when no range
+    
+    # Get daily data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    ema13_1d = ema(close_1d, 13)
-    bull_power = high - ema13_1d  # High - EMA13
-    bear_power = low - ema13_1d   # Low - EMA13
+    # KAMA (Adaptive Moving Average) - ER=10, FC=2, SC=30
+    def kama(close, er_length=10, fast_sc=2, slow_sc=30):
+        n = len(close)
+        if n < er_length:
+            return np.full(n, np.nan)
+        
+        # Calculate Efficiency Ratio
+        change = np.abs(np.diff(close, n=er_length))
+        abs_change = np.abs(np.diff(close))
+        abs_sum = np.zeros_like(close)
+        for i in range(er_length, len(close)):
+            abs_sum[i] = np.sum(abs_change[i-er_length+1:i+1])
+        
+        er = np.zeros(n)
+        er[er_length:] = change / np.where(abs_sum[er_length:] == 0, 1, abs_sum[er_length:])
+        
+        # Smoothing constants
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        
+        # Calculate KAMA
+        kama_vals = np.full(n, np.nan)
+        kama_vals[er_length] = close[er_length]
+        for i in range(er_length + 1, n):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        return kama_vals
     
-    # Smooth Elder Ray with 2-period EMA to reduce noise
-    bull_power_smooth = ema(bull_power, 2)
-    bear_power_smooth = ema(bear_power, 2)
+    # RSI (14-period)
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        for i in range(period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss == 0, np.inf, avg_gain / avg_loss)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
     
-    # Get 12h average volume for confirmation
+    # Calculate indicators
+    kama_vals = kama(close_1d, er_length=10, fast_sc=2, slow_sc=30)
+    rsi_vals = rsi(close_1d, period=14)
+    
+    # Align indicators to daily timeframe (already daily, but for consistency)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_vals)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_vals)
+    
+    # Get daily average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 12h timeframe
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_smooth)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_smooth)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(35, 20)  # Ensure EMA13, EMA34, and volume MA are ready
+    start_idx = max(34, 20)  # Ensure KAMA (10+), RSI (14), chop (14*2+6), and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
-        weekly_up = weekly_uptrend_aligned[i] > 0.5
-        weekly_down = weekly_downtrend_aligned[i] > 0.5
+        price = close[i]
+        chop_val = chop_aligned[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
+        # KAMA slope (trend direction)
+        kama_slope = kama_val - kama_aligned[i-1] if i > 0 else 0
+        
+        # Regime determination
+        is_ranging = chop_val > 61.8
+        is_trending = chop_val < 38.2
+        # Neutral zone (38.2-61.8) - no trades
+        
         if position == 0:
-            # Determine entry based on weekly trend
-            if weekly_up and volume_confirmed:
-                # Weekly uptrend: look for long signals from bull power
-                if bull_power_val > 0 and bull_power_val > bull_power_aligned[i-1]:
+            # Determine entry based on regime
+            if is_trending and volume_confirmed:
+                # Trending regime: KAMA direction
+                if kama_slope > 0:
                     signals[i] = 0.25
                     position = 1
-            elif weekly_down and volume_confirmed:
-                # Weekly downtrend: look for short signals from bear power
-                if bear_power_val < 0 and bear_power_val < bear_power_aligned[i-1]:
+                elif kama_slope < 0:
+                    signals[i] = -0.25
+                    position = -1
+            elif is_ranging and volume_confirmed:
+                # Ranging regime: RSI extremes
+                if rsi_val < 30:
+                    signals[i] = 0.25
+                    position = 1
+                elif rsi_val > 70:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: bull power turns negative or weekly trend changes
-            if bull_power_val <= 0 or not weekly_up:
+            # Long exit conditions
+            exit_signal = False
+            if is_trending:
+                # Exit when KAMA slope turns negative
+                if kama_slope < 0:
+                    exit_signal = True
+            else:
+                # Exit when RSI reaches overbought
+                if rsi_val > 70:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bear power turns positive or weekly trend changes
-            if bear_power_val >= 0 or not weekly_down:
+            # Short exit conditions
+            exit_signal = False
+            if is_trending:
+                # Exit when KAMA slope turns positive
+                if kama_slope > 0:
+                    exit_signal = True
+            else:
+                # Exit when RSI reaches oversold
+                if rsi_val < 30:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
