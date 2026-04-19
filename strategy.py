@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
-# Breakouts above/below 20-period high/low capture momentum moves.
-# Volume surge confirms breakout strength.
-# ADX > 25 ensures trending environment to avoid false breakouts in ranges.
-# Designed for 4h timeframe to capture medium-term trends with low frequency.
-# Entry: Long when close > Donchian High(20) and volume spike and ADX > 25.
-#        Short when close < Donchian Low(20) and volume spike and ADX > 25.
-# Exit: Opposite Donchian level touch or ADX < 20 (trend weakening).
-# Uses tight conditions to limit trades (~20-40/year) and avoid overtrading.
-name = "4h_Donchian20_Volume_ADX_Trend"
-timeframe = "4h"
+# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Donchian channel breakouts capture momentum in trending markets.
+# Weekly trend filter (price > weekly SMA50) ensures alignment with higher timeframe trend.
+# Volume confirmation (volume > 1.5x 20-day average) filters false breakouts.
+# Designed for 1d timeframe to capture swing trades with low frequency (~10-20 trades/year).
+# Entry: Long when close > upper Donchian(20) and price > weekly SMA50 and volume spike.
+# Exit: Close < lower Donchian(20) or weekly trend filter fails.
+# Uses strict conditions to limit trades and avoid overtrading.
+
+name = "1d_Donchian20_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,75 +26,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly trend filter: price > weekly SMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # ADX calculation (14-period)
-    # +DM, -DM, TR
-    high_diff = pd.Series(high).diff()
-    low_diff = -pd.Series(low).diff()  # negative of low diff
+    weekly_close = df_1w['close'].values
+    weekly_sma50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    weekly_sma50_aligned = align_htf_to_ltf(prices, df_1w, weekly_sma50)
     
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
+    # Daily Donchian(20) channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    tr1 = pd.Series(high) - pd.Series(low)
-    tr2 = abs(pd.Series(high) - pd.Series(close).shift(1))
-    tr3 = abs(pd.Series(low) - pd.Series(close).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # DI and DX
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume spike: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 1.5x 20-day average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(adx[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(weekly_sma50_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above Donchian High with volume and trend
-            if (close[i] > high_roll[i] and 
-                volume_spike[i] and 
-                adx[i] > 25):
+            # Long: break above upper Donchian with weekly uptrend and volume
+            if (close[i] > high_20[i] and 
+                close[i] > weekly_sma50_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian Low with volume and trend
-            elif (close[i] < low_roll[i] and 
-                  volume_spike[i] and 
-                  adx[i] > 25):
+            # Short: break below lower Donchian with weekly downtrend and volume
+            elif (close[i] < low_20[i] and 
+                  close[i] < weekly_sma50_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price touches Donchian Low or trend weakens
-            if (close[i] < low_roll[i]) or (adx[i] < 20):
+            # Long: exit if price breaks below lower Donchian or weekly trend fails
+            if (close[i] < low_20[i]) or (close[i] < weekly_sma50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price touches Donchian High or trend weakens
-            if (close[i] > high_roll[i]) or (adx[i] < 20):
+            # Short: exit if price breaks above upper Donchian or weekly trend fails
+            if (close[i] > high_20[i]) or (close[i] > weekly_sma50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
