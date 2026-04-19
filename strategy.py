@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA direction + RSI + chop filter
-# Uses KAMA (Kaufman Adaptive Moving Average) to capture trend direction,
-# combined with RSI for momentum confirmation and Choppiness Index to filter range-bound markets.
-# In trending markets (CHOP < 38.2), KAMA > RSI(50) signals long, KAMA < RSI(50) signals short.
-# In ranging markets (CHOP > 61.8), strategy remains flat to avoid whipsaw.
-# Weekly trend filter (1w EMA34) ensures alignment with higher timeframe momentum.
-# Designed for low trade frequency (10-25 trades/year) with high win rate in both bull and bear markets.
-name = "1d_KAMA_RSI_Chop_WeeklyEMA"
-timeframe = "1d"
+# Hypothesis: 6h KAMA (Kaufman Adaptive Moving Average) + 12h RSI + volume confirmation
+# KAMA adapts to market noise - slow in ranging markets, fast in trending markets
+# 12h RSI provides higher timeframe momentum filter
+# Volume confirmation ensures breakouts have conviction
+# Designed to work in both bull and bear markets by adapting speed to market conditions
+# Target: 15-25 trades/year per symbol with disciplined entries
+name = "6h_KAMA_12hRSI_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,85 +23,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # 12h RSI for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    rsi_period = 14
+    delta = np.diff(df_12h['close'])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # KAMA (Kaufman Adaptive Moving Average) - 14-period
-    def kama(data, period=14):
-        # Efficiency Ratio
-        change = np.abs(np.diff(data, n=period))
-        volatility = np.sum(np.abs(np.diff(data)), axis=0)
-        # Handle first period values
-        er = np.full_like(data, np.nan, dtype=float)
-        er[period:] = change[period-1:] / volatility[period-1:]
-        # Smoothing constants
-        sc = np.full_like(data, np.nan, dtype=float)
-        sc[period:] = (er[period:] * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-        # Initialize KAMA
-        kama_vals = np.full_like(data, np.nan, dtype=float)
-        kama_vals[period-1] = np.mean(data[:period])
-        # Calculate KAMA
+    avg_gain = np.full_like(df_12h['close'], np.nan, dtype=float)
+    avg_loss = np.full_like(df_12h['close'], np.nan, dtype=float)
+    
+    if len(gain) >= rsi_period:
+        avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
+        for i in range(rsi_period, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    
+    # KAMA on 6h data
+    def kama(data, period=10, fast=2, slow=30):
+        kama_values = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return kama_values
+        
+        # Efficiency ratio
+        change = np.abs(np.diff(data, period))
+        volatility = np.sum(np.abs(np.diff(data)), axis=0) if len(data) > 1 else 0
+        er = np.zeros_like(data)
         for i in range(period, len(data)):
-            if not np.isnan(sc[i]):
-                kama_vals[i] = kama_vals[i-1] + sc[i] * (data[i] - kama_vals[i-1])
+            if volatility[i-period+1:i+1].sum() > 0:
+                er[i] = change[i] / volatility[i-period+1:i+1].sum()
             else:
-                kama_vals[i] = kama_vals[i-1]
-        return kama_vals
-    
-    kama_vals = kama(close, 14)
-    
-    # RSI (14-period)
-    def rsi(data, period=14):
-        delta = np.diff(data)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full_like(data, np.nan, dtype=float)
-        avg_loss = np.full_like(data, np.nan, dtype=float)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(data)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.divide(avg_gain, avg_loss, out=np.full_like(data, np.nan, dtype=float), where=avg_loss!=0)
-        rsi_vals = 100 - (100 / (1 + rs))
-        return rsi_vals
-    
-    rsi_vals = rsi(close, 14)
-    
-    # Choppiness Index (14-period)
-    def choppy(data_high, data_low, data_close, period=14):
-        # True Range
-        tr1 = data_high[1:] - data_low[1:]
-        tr2 = np.abs(data_high[1:] - data_close[:-1])
-        tr3 = np.abs(data_low[1:] - data_close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # Align with original index
+                er[i] = 0
         
-        # Sum of TR over period
-        tr_sum = np.full_like(data_close, np.nan, dtype=float)
-        for i in range(period, len(data_close)):
-            tr_sum[i] = np.sum(tr[i-period+1:i+1])
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
         
-        # Highest high and lowest low over period
-        max_high = np.full_like(data_close, np.nan, dtype=float)
-        min_low = np.full_like(data_close, np.nan, dtype=float)
-        for i in range(period-1, len(data_close)):
-            max_high[i] = np.max(data_high[i-period+1:i+1])
-            min_low[i] = np.min(data_low[i-period+1:i+1])
+        # Initialize KAMA
+        kama_values[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            kama_values[i] = kama_values[i-1] + sc[i] * (data[i] - kama_values[i-1])
         
-        # Choppiness Index
-        chop = np.full_like(data_close, np.nan, dtype=float)
-        for i in range(period, len(data_close)):
-            if tr_sum[i] > 0 and max_high[i] > min_low[i]:
-                chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
-        return chop
+        return kama_values
     
-    chop_vals = choppy(high, low, close, 14)
+    kama_values = kama(close, period=10, fast=2, slow=30)
+    
+    # Volume spike: volume > 1.3 * 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -111,36 +86,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or np.isnan(chop_vals[i]) or 
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(kama_values[i]) or np.isnan(rsi_12h_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: KAMA > RSI(50) + CHOP < 38.2 (trending) + above weekly EMA
-            if (kama_vals[i] > 50 and rsi_vals[i] > 50 and 
-                chop_vals[i] < 38.2 and 
-                close[i] > ema_34_1w_aligned[i]):
+            # Long: price above KAMA + RSI > 50 (bullish momentum) + volume spike
+            if (close[i] > kama_values[i] and 
+                rsi_12h_aligned[i] > 50 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA < RSI(50) + CHOP < 38.2 (trending) + below weekly EMA
-            elif (kama_vals[i] < 50 and rsi_vals[i] < 50 and 
-                  chop_vals[i] < 38.2 and 
-                  close[i] < ema_34_1w_aligned[i]):
+            # Short: price below KAMA + RSI < 50 (bearish momentum) + volume spike
+            elif (close[i] < kama_values[i] and 
+                  rsi_12h_aligned[i] < 50 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if KAMA < RSI(50) or CHOP > 61.8 (ranging) or below weekly EMA
-            if (kama_vals[i] < 50) or (chop_vals[i] > 61.8) or (close[i] < ema_34_1w_aligned[i]):
+            # Long: exit if price crosses below KAMA or RSI turns bearish
+            if (close[i] < kama_values[i]) or (rsi_12h_aligned[i] < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if KAMA > RSI(50) or CHOP > 61.8 (ranging) or above weekly EMA
-            if (kama_vals[i] > 50) or (chop_vals[i] > 61.8) or (close[i] > ema_34_1w_aligned[i]):
+            # Short: exit if price crosses above KAMA or RSI turns bullish
+            if (close[i] > kama_values[i]) or (rsi_12h_aligned[i] > 50):
                 signals[i] = 0.0
                 position = 0
             else:
