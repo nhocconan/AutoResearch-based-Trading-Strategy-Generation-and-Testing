@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d momentum with 1w trend filter and 1d volatility filter.
-# Long when: 1d RSI(14) > 55, price > 1w EMA(34), and 1d ATR ratio < 0.7 (low volatility)
-# Short when: 1d RSI(14) < 45, price < 1w EMA(34), and 1d ATR ratio < 0.7
-# Exit when RSI crosses back to 50 or volatility increases.
-# Designed for ~10-20 trades/year per symbol to avoid fee drag.
-name = "1d_RSI_EMA34_ATRFilter"
-timeframe = "1d"
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (price above/below 200 EMA) and volume confirmation.
+# Long when: price breaks above Donchian upper (20-period high) + price > 1d EMA200 + volume > 1.5x 20-period avg volume
+# Short when: price breaks below Donchian lower (20-period low) + price < 1d EMA200 + volume > 1.5x 20-period avg volume
+# Exit when price crosses back through the Donchian midpoint or trend reverses.
+# Uses price breakouts for momentum, higher timeframe for trend alignment, and volume to avoid false breakouts.
+# Designed for ~20-30 trades/year per symbol.
+name = "4h_Donchian20_1dEMA200_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,80 +21,63 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
-    
-    # 1d data for ATR volatility filter
+    # 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_1d_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
-    # Calculate ATR(14) on 1d
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Donchian channels (20-period)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 10-period SMA of ATR for ratio
-    atr_ma_10 = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_ratio = atr_1d / (atr_ma_10 + 1e-10)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # 1d RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume confirmation: current volume > 1.5x 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for indicator calculations
+    start_idx = 20  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_1w_34_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(ema_1d_200_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_1w = ema_1w_34_aligned[i]
-        atr_ratio_val = atr_ratio_aligned[i]
-        rsi_val = rsi[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        middle = donchian_middle[i]
+        ema_1d = ema_1d_200_aligned[i]
+        vol_confirm = volume_confirm[i]
         
         if position == 0:
-            # Long: RSI > 55, price above 1w EMA34, low volatility (ATR ratio < 0.7)
-            if rsi_val > 55 and price > ema_1w and atr_ratio_val < 0.7:
+            # Long: break above upper + price above 1d EMA200 + volume confirmation
+            if price > upper and price > ema_1d and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45, price below 1w EMA34, low volatility (ATR ratio < 0.7)
-            elif rsi_val < 45 and price < ema_1w and atr_ratio_val < 0.7:
+            # Short: break below lower + price below 1d EMA200 + volume confirmation
+            elif price < lower and price < ema_1d and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI < 50 or volatility increases (ATR ratio > 1.3)
-            if rsi_val < 50 or atr_ratio_val > 1.3:
+            # Long exit: price crosses below middle OR trend reverses (price < 1d EMA200)
+            if price < middle or price < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI > 50 or volatility increases (ATR ratio > 1.3)
-            if rsi_val > 50 or atr_ratio_val > 1.3:
+            # Short exit: price crosses above middle OR trend reverses (price > 1d EMA200)
+            if price > middle or price > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
