@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Daily Pivot Point (Classic) R1/S1 breakout with weekly volume confirmation.
-# Long when price breaks above R1 pivot AND weekly volume > 1.5x weekly average volume.
-# Short when price breaks below S1 pivot AND weekly volume > 1.5x weekly average volume.
-# Exit when price returns to the daily pivot point (PP).
-# Uses daily pivot for structure, weekly volume for confirmation to reduce false signals.
-# Target: 10-20 trades/year per symbol.
-name = "1d_DailyPivot_R1S1_Breakout_WeeklyVolume"
-timeframe = "1d"
+# Hypothesis: 4h Camarilla Pivot R1/S1 breakout with 12h EMA trend filter and volume confirmation.
+# Long when price breaks above R1 (bullish) AND price > 12h EMA34 (uptrend) AND volume > 1.5x daily average volume.
+# Short when price breaks below S1 (bearish) AND price < 12h EMA34 (downtrend) AND volume > 1.5x daily average volume.
+# Exit when price crosses back through the pivot point (PP).
+# Uses Camarilla for precise intraday levels, EMA for trend filter, volume for confirmation.
+# Target: 20-30 trades/year per symbol.
+name = "4h_Camarilla_Pivot_R1S1_EMA_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,62 +23,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily pivot points (classic formula)
-    # PP = (H + L + C) / 3
-    # R1 = 2*PP - L
-    # S1 = 2*PP - H
-    pp = (high + low + close) / 3.0
-    r1 = 2 * pp - low
-    s1 = 2 * pp - high
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    # Calculate Camarilla levels using previous day's OHLC
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12, PP = (H+L+C)/3
+    prev_close = df_1d['close'].shift(1)
+    prev_high = df_1d['high'].shift(1)
+    prev_low = df_1d['low'].shift(1)
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    pp = (prev_high + prev_low + prev_close) / 3
+    # Align to 4h timeframe (wait for previous day's close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
     
-    # Get weekly data for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    # Calculate weekly average volume (20-period)
-    vol_ma_1w = pd.Series(df_1w['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # Get 12h EMA34 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # Get daily average volume for confirmation (20-day average)
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for weekly volume MA
+    start_idx = max(34, 20)  # Ensure EMA and volume MA are ready
     
     for i in range(start_idx, n):
-        # Skip if weekly volume data not available
-        if np.isnan(vol_ma_1w_aligned[i]):
+        # Skip if any required data is not available
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(pp_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        ema34 = ema34_aligned[i]
+        vol_ma = vol_ma_1d_aligned[i]
         vol = volume[i]
-        vol_ma = vol_ma_1w_aligned[i]
-        pivot = pp[i]
-        r1_level = r1[i]
-        s1_level = s1[i]
-        
-        # Volume confirmation: weekly volume > 1.5x weekly average
-        vol_confirmed = vol > 1.5 * vol_ma
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        pp = pp_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation
-            if price > r1_level and vol_confirmed:
+            # Long entry: break above R1 + uptrend + volume spike
+            if price > r1 and price > ema34 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation
-            elif price < s1_level and vol_confirmed:
+            # Short entry: break below S1 + downtrend + volume spike
+            elif price < s1 and price < ema34 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to or below pivot point
-            if price <= pivot:
+            # Long exit: price crosses below pivot point
+            if price < pp:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to or above pivot point
-            if price >= pivot:
+            # Short exit: price crosses above pivot point
+            if price > pp:
                 signals[i] = 0.0
                 position = 0
             else:
