@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d RSI filter and volume confirmation.
-# In bull markets: buy breakouts above Donchian(20) high when RSI(14) > 50 (uphill bias).
-# In bear markets: sell breakdowns below Donchian(20) low when RSI(14) < 50 (downhill bias).
-# Range markets: RSI between 40-60, no trades to avoid whipsaw.
-# Volume confirmation: volume > 1.5x 20-period average to filter weak breakouts.
+# Hypothesis: 12h Elder Ray Index with weekly trend filter.
+# Elder Ray measures bull/bear power using EMA13. Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Weekly EMA34 determines trend: price above EMA34 = bullish trend, below = bearish trend.
+# In weekly bullish trend: long when Bull Power > 0 and rising, short when Bear Power < 0 and falling.
+# In weekly bearish trend: short when Bear Power < 0, long when Bull Power > 0 (counter-trend).
+# Volume confirmation: volume > 1.5x 20-period average.
 # Target: 20-40 trades/year per symbol to stay within frequency limits.
-name = "4h_Donchian_RSI_Volume_Filter"
-timeframe = "4h"
+name = "12h_ElderRay_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI filter
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA34 for trend
+    def ema(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        multiplier = 2 / (period + 1)
+        result[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = (arr[i] - result[i-1]) * multiplier + result[i-1]
+        return result
+    
+    ema34_1w = ema(close_1w, 34)
+    weekly_uptrend = close_1w > ema34_1w
+    weekly_downtrend = close_1w < ema34_1w
+    
+    # Get daily data for Elder Ray calculation (EMA13)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate RSI (14-period) on daily
-    def calculate_rsi(prices, period=14):
-        delta = np.diff(prices, prepend=prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(prices)
-        avg_loss = np.zeros_like(prices)
-        
-        if len(prices) > period:
-            avg_gain[period] = np.mean(gain[1:period+1])
-            avg_loss[period] = np.mean(loss[1:period+1])
-            
-            for i in range(period+1, len(prices)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    ema13_1d = ema(close_1d, 13)
+    bull_power = high - ema13_1d  # High - EMA13
+    bear_power = low - ema13_1d   # Low - EMA13
     
-    rsi_1d = calculate_rsi(close_1d, 14)
+    # Smooth Elder Ray with 2-period EMA to reduce noise
+    bull_power_smooth = ema(bull_power, 2)
+    bear_power_smooth = ema(bear_power, 2)
     
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Donchian channels (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    donch_high = rolling_max(high_4h, 20)
-    donch_low = rolling_min(low_4h, 20)
-    
-    # Align indicators to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
-    
-    # Get 4h average volume for confirmation
+    # Get 12h average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align indicators to 12h timeframe
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_smooth)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_smooth)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure RSI (14*2+6), Donchian (20), and volume MA are ready
+    start_idx = max(35, 20)  # Ensure EMA13, EMA34, and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        rsi_val = rsi_aligned[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
+        weekly_up = weekly_uptrend_aligned[i] > 0.5
+        weekly_down = weekly_downtrend_aligned[i] > 0.5
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
@@ -102,26 +88,29 @@ def generate_signals(prices):
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above Donchian high AND RSI > 50 (bullish bias)
-            if price > donch_high_val and rsi_val > 50 and volume_confirmed:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below Donchian low AND RSI < 50 (bearish bias)
-            elif price < donch_low_val and rsi_val < 50 and volume_confirmed:
-                signals[i] = -0.25
-                position = -1
+            # Determine entry based on weekly trend
+            if weekly_up and volume_confirmed:
+                # Weekly uptrend: look for long signals from bull power
+                if bull_power_val > 0 and bull_power_val > bull_power_aligned[i-1]:
+                    signals[i] = 0.25
+                    position = 1
+            elif weekly_down and volume_confirmed:
+                # Weekly downtrend: look for short signals from bear power
+                if bear_power_val < 0 and bear_power_val < bear_power_aligned[i-1]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low OR RSI < 40
-            if price < donch_low_val or rsi_val < 40:
+            # Long exit: bull power turns negative or weekly trend changes
+            if bull_power_val <= 0 or not weekly_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high OR RSI > 60
-            if price > donch_high_val or rsi_val > 60:
+            # Short exit: bear power turns positive or weekly trend changes
+            if bear_power_val >= 0 or not weekly_down:
                 signals[i] = 0.0
                 position = 0
             else:
