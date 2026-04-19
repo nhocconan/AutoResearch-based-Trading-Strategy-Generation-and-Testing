@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 12/26 EMA crossover with 1d VWAP filter and volume confirmation
-# Long when fast EMA crosses above slow EMA, price > 1d VWAP, and volume spike
-# Short when fast EMA crosses below slow EMA, price < 1d VWAP, and volume spike
-# Uses 1d VWAP as trend filter to ensure alignment with daily trend
-# Volume confirmation reduces false breakouts
-# Target: 20-50 trades/year per symbol (~80-200 total over 4 years)
-name = "4h_EMA12_26_1dVWAP_Volume"
-timeframe = "4h"
+# Hypothesis: 12h Donchian breakout with weekly trend filter and volume confirmation.
+# Long when price breaks above Donchian high(20) with price above weekly EMA20 and volume spike (>1.5x average).
+# Short when price breaks below Donchian low(20) with price below weekly EMA20 and volume spike.
+# Uses weekly EMA20 as trend filter to avoid counter-trend trades, reducing whipsaw in sideways markets.
+# Volume confirmation ensures breakouts have institutional participation.
+# Target: 12-37 trades/year per symbol (~50-150 total over 4 years).
+name = "12h_Donchian20_WeeklyEMA20_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,76 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get weekly data for EMA20 calculation
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d VWAP (cumulative)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    vwap_num = np.cumsum(typical_price_1d * volume_1d)
-    vwap_den = np.cumsum(volume_1d)
-    vwap_1d = vwap_num / vwap_den
+    # Calculate EMA20 on weekly close
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align 1d VWAP to 4h timeframe (wait for daily close)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Align weekly EMA20 to 12h timeframe (wait for weekly close)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate EMA12 and EMA26 on 4h close
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # Calculate Donchian channels (20-period high/low)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(26, 20)  # Need EMA26 and volume MA data
+    start_idx = max(20, 20)  # Need Donchian and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(ema12[i]) or 
-            np.isnan(ema26[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_20_aligned[i]) or np.isnan(high_roll[i]) or 
+            np.isnan(low_roll[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vwap = vwap_1d_aligned[i]
-        ema_fast = ema12[i]
-        ema_slow = ema26[i]
+        donch_high = high_roll[i]
+        donch_low = low_roll[i]
+        ema_trend = ema_20_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 2.0 * vol_ma
-        
-        # EMA crossover signals
-        ema_cross_up = ema_fast > ema_slow and ema12[i-1] <= ema26[i-1]
-        ema_cross_down = ema_fast < ema_slow and ema12[i-1] >= ema26[i-1]
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter long: EMA bullish crossover, price > VWAP, volume confirmed
-            if ema_cross_up and price > vwap and volume_confirmed:
+            # Enter long: price breaks above Donchian high AND above weekly EMA20
+            if price > donch_high and price > ema_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: EMA bearish crossover, price < VWAP, volume confirmed
-            elif ema_cross_down and price < vwap and volume_confirmed:
+            # Enter short: price breaks below Donchian low AND below weekly EMA20
+            elif price < donch_low and price < ema_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when EMA bearish crossover or price < VWAP
-            if ema_cross_down or price < vwap:
+            # Exit long when price breaks below Donchian low or below weekly EMA20
+            if price < donch_low or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when EMA bullish crossover or price > VWAP
-            if ema_cross_up or price > vwap:
+            # Exit short when price breaks above Donchian high or above weekly EMA20
+            if price > donch_high or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
