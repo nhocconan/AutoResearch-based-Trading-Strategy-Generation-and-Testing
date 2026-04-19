@@ -1,10 +1,11 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_R1S1_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,10 +39,10 @@ def generate_signals(prices):
     # S1 = C - (H - L) * 1.1 / 12
     s1_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12.0
     
-    # Align to 6h timeframe
-    pivot_1d_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align to 12h timeframe
+    pivot_1d_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,7 +53,7 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_1d_6h[i]) or np.isnan(r1_1d_6h[i]) or np.isnan(s1_1d_6h[i]) or \
+        if np.isnan(pivot_1d_12h[i]) or np.isnan(r1_1d_12h[i]) or np.isnan(s1_1d_12h[i]) or \
            np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
@@ -66,28 +67,28 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above 1d R1 with volume spike
-            if price > r1_1d_6h[i] and volume_spike:
-                signals[i] = 0.25
+            if price > r1_1d_12h[i] and volume_spike:
+                signals[i] = 0.30
                 position = 1
             # Short: Price breaks below 1d S1 with volume spike
-            elif price < s1_1d_6h[i] and volume_spike:
-                signals[i] = -0.25
+            elif price < s1_1d_12h[i] and volume_spike:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below 1d S1 (reversal signal)
-            if price < s1_1d_6h[i]:
+            if price < s1_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit: Price returns above 1d R1 (reversal signal)
-            if price > r1_1d_6h[i]:
+            if price > r1_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
