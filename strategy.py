@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX trend filter.
-# Long when price breaks above Donchian upper band, ADX > 25, volume > 1.2x 20-period average.
-# Short when price breaks below Donchian lower band, ADX > 25, volume > 1.2x 20-period average.
-# Uses discrete position sizes (0.25) to minimize churn. Designed for 4h timeframe
-# to capture medium-term trends while avoiding whipsaws. Target: 25-50 trades/year per symbol.
-name = "4h_Donchian20_ADX25_Volume"
-timeframe = "4h"
+# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above R1 with volume > 1.5x avg and ADX > 25.
+# Short when price breaks below S1 with volume > 1.5x avg and ADX > 25.
+# Uses daily Camarilla pivots for structure, volume for confirmation, ADX for trend strength.
+# Designed for 12h timeframe to capture multi-day moves with fewer trades (<50/year).
+# Discrete position size (0.25) to minimize churn. Works in bull/bear via trend filter.
+name = "12h_Camarilla_R1S1_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,10 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and ADX confirmation
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX on daily (14-period)
+    # Calculate Camarilla levels (R1, S1) from previous day
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    rng = high_1d - low_1d
+    R1 = close_1d + 1.1 * rng / 12
+    S1 = close_1d - 1.1 * rng / 12
+    
+    # Align to 12h (previous day's levels available at open)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -71,73 +86,57 @@ def generate_signals(prices):
         
         return adx
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    adx = calculate_adx(high, low, close, 14)
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Volume confirmation: current volume > 1.2x 20-period average (daily)
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Donchian channels on 4h (20-period)
-    def donchian_channels(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(high, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-(period-1):i+1])
-            lower[i] = np.min(low[i-(period-1):i+1])
-        return upper, lower
-    
-    upper, lower = donchian_channels(high, low, 20)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 28)  # Ensure Donchian and ADX are ready
+    start_idx = 20  # Need volume MA and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_1d_aligned[i]
-        vol_ma = vol_ma_20_aligned[i]
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        adx_val = adx[i]
+        vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.2 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
         # ADX trend strength filter
         strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long if price breaks above upper band, strong trend, and volume confirmation
-            if price > upper[i] and strong_trend and volume_confirmed:
+            # Enter long if price breaks above R1, strong trend, and volume confirmation
+            if price > r1 and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price breaks below lower band, strong trend, and volume confirmation
-            elif price < lower[i] and strong_trend and volume_confirmed:
+            # Enter short if price breaks below S1, strong trend, and volume confirmation
+            elif price < s1 and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below lower band or trend weakens
-            if price < lower[i] or adx_val < 20:  # Trend weakening
+            # Exit long when price crosses below S1 or trend weakens
+            if price < s1 or adx_val < 20:  # Trend weakening or reversal signal
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above upper band or trend weakens
-            if price > upper[i] or adx_val < 20:  # Trend weakening
+            # Exit short when price crosses above R1 or trend weakens
+            if price > r1 or adx_val < 20:  # Trend weakening or reversal signal
                 signals[i] = 0.0
                 position = 0
             else:
