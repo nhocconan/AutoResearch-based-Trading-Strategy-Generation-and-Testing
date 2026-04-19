@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Keltner_MeanReversion_4hTrend_v1"
-timeframe = "1h"
+name = "12h_Pivot_R1S1_Breakout_VolumeATR_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,88 +17,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get daily data for pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA(20) for trend
-    close_4h_series = pd.Series(close_4h)
-    ema20_4h = close_4h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Daily high, low, close for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h ATR(14) for Keltner width
-    tr_4h = np.maximum(np.abs(high[1:] - low[1:]), np.abs(high[1:] - close_4h[:-1]))
-    tr_4h = np.maximum(tr_4h, np.abs(low[1:] - close_4h[:-1]))
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr14_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr14_4h)
+    # Calculate daily pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate R1 and S1 using Camarilla formula
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Calculate 1h EMA(20) for Keltner center
-    close_series = pd.Series(close)
-    ema20_1h = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align daily pivot levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate Keltner Bands (20, 2.0)
-    upper_keltner = ema20_1h + 2.0 * atr14_4h_aligned
-    lower_keltner = ema20_1h - 2.0 * atr14_4h_aligned
+    # Daily ATR for volatility filter (14-period)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])
+    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average (12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Time filter: 08-20 UTC (pre-market to post-US session)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    time_filter = (hours >= 8) & (hours <= 20)
+    # Trend filter: price above/below 20-period EMA
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40
+    start_idx = 30
     
     for i in range(start_idx, n):
-        # Skip if any data is NaN
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(atr14_4h_aligned[i]) or 
-            np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(time_filter[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Check time filter
-        if not time_filter[i]:
-            signals[i] = 0.0
-            continue
-            
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        ema_4h = ema20_4h_aligned[i]
-        upper = upper_keltner[i]
-        lower = lower_keltner[i]
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        atr = atr_14_1d_aligned[i]
+        ema = ema_20[i]
         
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price below lower Keltner + 4h uptrend + volume
-            if price < lower and price > ema_4h and volume_confirmed:
-                signals[i] = 0.20
+            # Long: break above R1 with volume and above EMA
+            if price > r1 and volume_confirmed and price > ema:
+                signals[i] = 0.25
                 position = 1
-            # Short: price above upper Keltner + 4h downtrend + volume
-            elif price > upper and price < ema_4h and volume_confirmed:
-                signals[i] = -0.20
+            # Short: break below S1 with volume and below EMA
+            elif price < s1 and volume_confirmed and price < ema:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price back to EMA(20) or opposite band touch
-            if price >= ema20_1h[i] or price >= upper:
+            # Exit: price below pivot or EMA
+            if price < pivot or price < ema:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price back to EMA(20) or opposite band touch
-            if price <= ema20_1h[i] or price <= lower:
+            # Exit: price above pivot or EMA
+            if price > pivot or price > ema:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
