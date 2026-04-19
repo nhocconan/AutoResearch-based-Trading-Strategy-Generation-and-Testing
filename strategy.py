@@ -1,13 +1,16 @@
-# 4h_1d_Camarilla_R1S1_Breakout_Volume
-# Hypothesis: 4h timeframe with Camarilla pivot levels (R1/S1) from daily chart for breakout signals.
-# Enters only during 08-20 UTC session with volume confirmation.
-# Uses 1d Camarilla levels (R1/S1) as key support/resistance levels.
-# Targets 20-50 trades/year (80-200 total over 4 years) with strict entry conditions.
-# Works in bull/bear by following price action at institutional pivot levels.
-# Camarilla levels are widely watched by institutions, providing high-probability breakout zones.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume"
-timeframe = "4h"
+# Hypothesis: 12h timeframe with 1d trend alignment (EMA50) and 1w mean reversion (RSI14).
+# Enters long when price is above 1d EMA50 and 1w RSI < 30 (oversold).
+# Enters short when price is below 1d EMA50 and 1w RSI > 70 (overbought).
+# Uses volume confirmation (volume > 1.5x 20-period average) to filter noise.
+# Designed for low-frequency, high-conviction trades targeting 12-37 trades/year.
+# Works in bull markets via trend following and in bear markets via mean reversion oversold bounces.
+name = "12h_1dEMA50_1wRSI_MeanReversion_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,78 +24,71 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time']
     
-    # Pre-compute session filter (08-20 UTC)
+    # Pre-compute session filter (00-23 UTC - all hours for 12h timeframe)
     hours = pd.DatetimeIndex(open_time).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    session_filter = np.ones(n, dtype=bool)  # No session filter for 12h
     
-    # Get 1d data for Camarilla pivot levels (called ONCE before loop)
+    # Get 1d data for EMA50 trend (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate previous day's Camarilla levels (R1, S1)
-    # Camarilla formulas: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C = previous close, H = previous high, L = previous low
-    prev_close = close_1d
-    prev_high = high_1d
-    prev_low = low_1d
+    # Get 1w data for RSI14 mean reversion (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Calculate RSI(14) on weekly data
+    delta = pd.Series(close_1w).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_1w = 100 - (100 / (1 + rs))
+    rsi_14_1w_values = rsi_14_1w.values
+    rsi_14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w_values)
     
-    # Shift to get previous day's values (avoid look-ahead)
-    prev_close_shifted = np.roll(prev_close, 1)
-    prev_high_shifted = np.roll(prev_high, 1)
-    prev_low_shifted = np.roll(prev_low, 1)
-    # First day has no previous day, set to NaN
-    prev_close_shifted[0] = np.nan
-    prev_high_shifted[0] = np.nan
-    prev_low_shifted[0] = np.nan
-    
-    # Calculate Camarilla R1 and S1 for previous day
-    camarilla_R1 = prev_close_shifted + (prev_high_shifted - prev_low_shifted) * 1.1 / 12
-    camarilla_S1 = prev_close_shifted - (prev_high_shifted - prev_low_shifted) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    
-    # Volume filter: volume > 1.3 * 20-period average
+    # Volume filter: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.3)
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for volume MA and shifted values
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
-            np.isnan(volume_ma[i]) or
-            not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_14_1w_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 with volume
-            if close[i] > camarilla_R1_aligned[i] and volume_filter[i]:
+            # Long: price above 1d EMA50 AND 1w RSI < 30 (oversold) with volume
+            if (close[i] > ema_50_1d_aligned[i] and 
+                rsi_14_1w_aligned[i] < 30 and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1 with volume
-            elif close[i] < camarilla_S1_aligned[i] and volume_filter[i]:
+            # Short: price below 1d EMA50 AND 1w RSI > 70 (overbought) with volume
+            elif (close[i] < ema_50_1d_aligned[i] and 
+                  rsi_14_1w_aligned[i] > 70 and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below Camarilla S1 (reversal signal)
-            if close[i] < camarilla_S1_aligned[i]:
+            # Long: exit if price breaks below 1d EMA50 or 1w RSI > 70 (overbought)
+            if close[i] < ema_50_1d_aligned[i] or rsi_14_1w_aligned[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above Camarilla R1 (reversal signal)
-            if close[i] > camarilla_R1_aligned[i]:
+            # Short: exit if price breaks above 1d EMA50 or 1w RSI < 30 (oversold)
+            if close[i] > ema_50_1d_aligned[i] or rsi_14_1w_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
