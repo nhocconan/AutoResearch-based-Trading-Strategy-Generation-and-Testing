@@ -3,8 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Supertrend_Filter_Volume_Spike"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA34) and volume spike.
+# Works in bull: breakouts capture momentum. Works in bear: EMA34 filter avoids false breakouts in downtrend.
+# Volume spike confirms institutional interest. Target 20-40 trades/year to minimize fee drag.
+name = "4h_Donchian20_EMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,80 +20,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once before loop
+    # Get daily data once before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Supertrend parameters
-    atr_period = 10
-    atr_multiplier = 3.0
+    # Calculate daily EMA34
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate ATR
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Align EMA34 to 4h timeframe (waits for daily close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Basic upper and lower bands
-    basic_ub = (high_1d + low_1d) / 2 + atr_multiplier * atr
-    basic_lb = (high_1d + low_1d) / 2 - atr_multiplier * atr
+    # Calculate 4h Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Initialize Supertrend arrays
-    final_ub = np.full_like(close_1d, np.nan)
-    final_lb = np.full_like(close_1d, np.nan)
-    supertrend = np.full_like(close_1d, np.nan)
-    direction = np.full_like(close_1d, np.nan)  # 1 for up, -1 for down
-    
-    # Calculate Supertrend
-    for i in range(1, len(close_1d)):
-        if np.isnan(atr[i]) or np.isnan(basic_ub[i]) or np.isnan(basic_lb[i]):
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
-            continue
-            
-        # Upper band logic
-        if i == 1:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
-        else:
-            if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
-                final_ub[i] = basic_ub[i]
-            else:
-                final_ub[i] = final_ub[i-1]
-                
-            # Lower band logic
-            if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
-                final_lb[i] = basic_lb[i]
-            else:
-                final_lb[i] = final_lb[i-1]
-        
-        # Supertrend logic
-        if i == 1:
-            supertrend[i] = final_lb[i]
-            direction[i] = 1
-        else:
-            if supertrend[i-1] == final_ub[i-1]:
-                if close_1d[i] <= final_ub[i]:
-                    supertrend[i] = final_ub[i]
-                    direction[i] = -1
-                else:
-                    supertrend[i] = final_ub[i]
-                    direction[i] = 1
-            else:
-                if close_1d[i] >= final_lb[i]:
-                    supertrend[i] = final_lb[i]
-                    direction[i] = 1
-                else:
-                    supertrend[i] = final_lb[i]
-                    direction[i] = -1
-    
-    # Align Supertrend direction to 12h timeframe
-    supertrend_dir_12h = align_htf_to_ltf(prices, df_1d, direction)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -99,38 +44,41 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(supertrend_dir_12h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        upper_channel = high_max_20[i]
+        lower_channel = low_min_20[i]
+        ema_34 = ema_34_1d_aligned[i]
         
-        # Volume spike: current volume > 2.0x average
-        volume_spike = vol > 2.0 * vol_ma
+        # Volume spike: current volume > 1.5x average
+        volume_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: Supertrend up + volume spike
-            if supertrend_dir_12h[i] == 1 and volume_spike:
+            # Long: Price breaks above upper Donchian with volume spike and above daily EMA34 (uptrend)
+            if price > upper_channel and volume_spike and price > ema_34:
                 signals[i] = 0.25
                 position = 1
-            # Short: Supertrend down + volume spike
-            elif supertrend_dir_12h[i] == -1 and volume_spike:
+            # Short: Price breaks below lower Donchian with volume spike and below daily EMA34 (downtrend)
+            elif price < lower_channel and volume_spike and price < ema_34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Supertrend flips down
-            if supertrend_dir_12h[i] == -1:
+            # Exit: Price returns below lower Donchian (reversal signal)
+            if price < lower_channel:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Supertrend flips up
-            if supertrend_dir_12h[i] == 1:
+            # Exit: Price returns above upper Donchian (reversal signal)
+            if price > upper_channel:
                 signals[i] = 0.0
                 position = 0
             else:
