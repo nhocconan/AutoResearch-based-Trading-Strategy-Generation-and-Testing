@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator + Elder Ray + Volume Spike for trend strength
-# Uses Williams Alligator (Jaw/Teeth/Lips) for trend direction, Elder Ray (Bull/Bear Power) for momentum,
-# and volume confirmation to filter false signals. Designed to work in both bull and bear markets
-# by capturing strong trends with clear entry/exit rules. Targets 20-40 trades/year (80-160 total over 4 years).
-name = "4h_WilliamsAlligator_ElderRay_Volume_Spike"
-timeframe = "4h"
+# Hypothesis: 6h timeframe with 12h/1d trend alignment and volume confirmation.
+# Uses 12h EMA34 for trend direction and 1d Donchian breakout for momentum.
+# Enters only during 08-20 UTC session to avoid low-volume noise.
+# Targets 12-37 trades/year (50-150 total over 4 years) with strict entry conditions.
+# Works in bull/bear by following higher timeframe trends.
+name = "6h_12h1d_EMA34_Donchian20_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,61 +21,70 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Williams Alligator: SMoothed Moving Averages (using SMA as proxy for SMMA)
-    jaw_period, teeth_period, lips_period = 13, 8, 5
-    jaw_shift, teeth_shift, lips_shift = 8, 5, 3
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
-    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().shift(jaw_shift).values
-    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().shift(teeth_shift).values
-    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().shift(lips_shift).values
+    # Get 12h data for EMA34 trend (called ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Get 1d data for Donchian20 breakout (called ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    # Donchian channels: 20-period high/low
+    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
+    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
     
-    # Volume filter: volume > 2.0 * 20-period average (spike detection)
+    # Volume filter: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(jaw_period + jaw_shift, teeth_period + teeth_shift, lips_period + lips_shift, 20)
+    start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(volume_ma[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(high_20_1d_aligned[i]) or 
+            np.isnan(low_20_1d_aligned[i]) or np.isnan(volume_ma[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND Volume Spike
-            if (lips[i] > teeth[i] > jaw[i] and 
-                bull_power[i] > 0 and 
-                volume_spike[i]):
+            # Long: price above 12h EMA34 AND breaks 1d Donchian high with volume
+            if (close[i] > ema_34_12h_aligned[i] and 
+                close[i] > high_20_1d_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0 AND Volume Spike
-            elif (lips[i] < teeth[i] < jaw[i] and 
-                  bear_power[i] < 0 and 
-                  volume_spike[i]):
+            # Short: price below 12h EMA34 AND breaks 1d Donchian low with volume
+            elif (close[i] < ema_34_12h_aligned[i] and 
+                  close[i] < low_20_1d_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Lips < Teeth (loss of bullish alignment) OR Bear Power > 0 (bullish momentum fails)
-            if lips[i] < teeth[i] or bear_power[i] > 0:
+            # Long: exit if price breaks below 12h EMA34 or 1d Donchian low
+            if close[i] < ema_34_12h_aligned[i] or close[i] < low_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Lips > Teeth (loss of bearish alignment) OR Bull Power < 0 (bearish momentum fails)
-            if lips[i] > teeth[i] or bull_power[i] < 0:
+            # Short: exit if price breaks above 12h EMA34 or 1d Donchian high
+            if close[i] > ema_34_12h_aligned[i] or close[i] > high_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
