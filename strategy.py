@@ -3,25 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ADX + Volume + Volume Acceleration
-# Long when ADX > 25 (strong trend), volume > 1.5x 20-period average, and volume acceleration > 0 (increasing volume)
-# Short when ADX > 25, volume > 1.5x 20-period average, and volume acceleration < 0 (decreasing volume) AND price < 6h SMA50
-# Uses daily trend filter: only long when price > daily EMA50, only short when price < daily EMA50
-# Designed for 6h timeframe to capture trending moves with volume confirmation in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year).
-name = "6h_ADX_Volume_Acceleration"
-timeframe = "6h"
+# Hypothesis: 12h Donchian channel breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above upper band (20-period high) with volume > 2x average and ADX > 25.
+# Short when price breaks below lower band (20-period low) with volume > 2x average and ADX > 25.
+# Uses ATR-based stop loss to limit downside. Designed for 12h timeframe to capture multi-day trends.
+# Target: 15-30 trades/year per symbol (~60-120 total over 4 years).
+name = "12h_Donchian20_Volume_ADX_ATR"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Donchian channel (20-period)
+    def donchian_channels(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
+    
+    upper_band, lower_band = donchian_channels(high, low, 20)
     
     # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
@@ -71,62 +81,76 @@ def generate_signals(prices):
     
     adx = calculate_adx(high, low, close, 14)
     
-    # Volume and volume acceleration
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_change = np.diff(volume, prepend=volume[0])
-    vol_accel = np.diff(vol_change, prepend=vol_change[0])
+    # ATR calculation (14-period) for stop loss
+    def calculate_atr(high, low, close, period=14):
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
+        
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        return atr
     
-    # Get 1d data for daily EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    atr = calculate_atr(high, low, close, 14)
+    
+    # Volume confirmation: current volume > 2x 20-period average
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(20, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(30, 20)  # Ensure ADX, volume MA, and daily EMA are ready
+    start_idx = max(20, 14)  # Ensure Donchian, ADX, ATR are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50_aligned[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(adx[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx[i]
-        vol_ma = vol_ma_20[i]
         vol = volume[i]
-        vol_accel_val = vol_accel[i]
-        ema_50_val = ema_50_aligned[i]
+        vol_ma = vol_ma_20[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
         
         # ADX trend strength filter
-        strong_trend = adx_val > 25
+        strong_trend = adx[i] > 25
         
         if position == 0:
-            # Enter long if price above daily EMA50, strong trend, volume confirmation, and increasing volume
-            if price > ema_50_val and strong_trend and volume_confirmed and vol_accel_val > 0:
+            # Enter long if price breaks above upper band, strong trend, and volume confirmation
+            if price > upper_band[i] and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price below daily EMA50, strong trend, volume confirmation, decreasing volume
-            elif price < ema_50_val and strong_trend and volume_confirmed and vol_accel_val < 0:
+                entry_price = price
+            # Enter short if price breaks below lower band, strong trend, and volume confirmation
+            elif price < lower_band[i] and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Exit long when price crosses below daily EMA50 or trend weakens
-            if price < ema_50_val or adx_val < 20:
+            # Long position: exit on stop loss or trend reversal
+            stop_loss = entry_price - 2.5 * atr[i]
+            if price < stop_loss or adx[i] < 20:  # Stop loss or trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above daily EMA50 or trend weakens
-            if price > ema_50_val or adx_val < 20:
+            # Short position: exit on stop loss or trend reversal
+            stop_loss = entry_price + 2.5 * atr[i]
+            if price > stop_loss or adx[i] < 20:  # Stop loss or trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
