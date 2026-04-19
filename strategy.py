@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Pivot_R1S1_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Spike_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,18 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels from previous week
-    prev_close = np.roll(close_1w, 1)
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_close = np.roll(close_1d, 1)
     prev_close[0] = np.nan
-    prev_high = np.roll(high_1w, 1)
+    prev_high = np.roll(high_1d, 1)
     prev_high[0] = np.nan
-    prev_low = np.roll(low_1w, 1)
+    prev_low = np.roll(low_1d, 1)
     prev_low[0] = np.nan
     
     # Pivot = (H + L + C) / 3
@@ -42,20 +42,14 @@ def generate_signals(prices):
     # S4 = C - (H - L) * 1.1 / 2
     s4 = prev_close - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1w, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1w, s1)
-    r4_4h = align_htf_to_ltf(prices, df_1w, r4)
-    s4_4h = align_htf_to_ltf(prices, df_1w, s4)
+    # Align to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Daily trend filter: 4h close > 20 EMA on 1d timeframe
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_4h = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average on 4h
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -64,8 +58,8 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
-           np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or np.isnan(ema20_1d_4h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or \
+           np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -73,26 +67,22 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 1.5x average
-        volume_spike = vol > 1.5 * vol_ma
-        
-        # Trend filter: price above/below daily EMA20
-        uptrend = price > ema20_1d_4h[i]
-        downtrend = price < ema20_1d_4h[i]
+        # Volume spike: current volume > 2.0x average
+        volume_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike and uptrend
-            if price > r1_4h[i] and volume_spike and uptrend:
+            # Long: Price breaks above R1 with volume spike
+            if price > r1_12h[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume spike and downtrend
-            elif price < s1_4h[i] and volume_spike and downtrend:
+            # Short: Price breaks below S1 with volume spike
+            elif price < s1_12h[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below S1 (reversal signal)
-            if price < s1_4h[i]:
+            if price < s1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,7 +90,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: Price returns above R1 (reversal signal)
-            if price > r1_4h[i]:
+            if price > r1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
