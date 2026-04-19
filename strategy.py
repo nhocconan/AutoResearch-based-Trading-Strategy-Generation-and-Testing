@@ -1,14 +1,15 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-4h_ADX_KAMA_Trend_Filter_V1
-Hypothesis: 4h KAMA trend direction with ADX filter to avoid choppy markets.
-KAMA adapts to market noise - effective in both trending and ranging conditions.
-ADX > 25 ensures we only trade in strong trends, reducing false signals.
-Designed for 4h timeframe targeting 20-50 trades/year (80-200 total over 4 years).
-Works in bull/bear via adaptive trend following and volatility filtering.
+4h_Supertrend_EMA_200_Trend
+Hypothesis: Combines Supertrend (ATR-based trend) with EMA200 filter for trend direction.
+Supertrend captures medium-term trend changes, EMA200 filters for long-term bias.
+Works in bull via long signals when Supertrend flips up & price > EMA200.
+Works in bear via short signals when Supertrend flips down & price < EMA200.
+ATR-based stops reduce whipsaw in sideways markets.
+Designed for 4h timeframe targeting 20-50 trades/year.
 """
 
-name = "4h_ADX_KAMA_Trend_Filter_V1"
+name = "4h_Supertrend_EMA_200_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,83 +27,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.abs(np.diff(close, prepend=close[0]))
-        for i in range(1, len(volatility)):
-            volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-        
-        er = np.where(volatility > 0, change / volatility, 0)
-        
-        # Smoothing constants
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        
-        # KAMA calculation
-        kama = np.full_like(close, np.nan)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            if not np.isnan(kama[i-1]):
-                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-            else:
-                kama[i] = close[i]
-        return kama
-    
-    # Calculate ADX for trend strength
-    def calculate_adx(high, low, close, period=14):
-        # True Range
+    # ATR(10) for Supertrend
+    def calculate_atr(high, low, close, period=10):
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
         tr[0] = tr1[0]
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Wilder smoothing
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
-            # First value is simple average
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] + (1/period) * (data[i] - result[i-1])
-            return result
-        
-        atr = WilderSmooth(tr, period)
-        dm_plus_smooth = WilderSmooth(dm_plus, period)
-        dm_minus_smooth = WilderSmooth(dm_minus, period)
-        
-        # DX calculation
-        dx = np.full_like(close, np.nan)
-        dm_sum = dm_plus_smooth + dm_minus_smooth
-        mask = (dm_sum > 0) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
-        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / dm_sum[mask]
-        
-        # ADX
-        adx = WilderSmooth(dx, period)
-        return adx
+        atr = np.zeros_like(close)
+        for i in range(len(close)):
+            if i < period:
+                atr[i] = np.nan
+            else:
+                atr[i] = np.nanmean(tr[i-period+1:i+1])
+        return atr
     
-    # Get 4h data for KAMA and ADX
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
+    # EMA calculation
+    def calculate_ema(data, period):
+        ema = np.full_like(data, np.nan)
+        if len(data) < period:
+            return ema
+        multiplier = 2 / (period + 1)
+        ema[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
+        return ema
     
-    # Calculate indicators on 4h data
-    kama = calculate_kama(df_4h['close'].values, er_length=10, fast_sc=2, slow_sc=30)
-    adx = calculate_adx(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 14)
+    # Supertrend calculation
+    def calculate_supertrend(high, low, close, atr_period=10, multiplier=3.0):
+        atr = calculate_atr(high, low, close, atr_period)
+        
+        # Basic upper and lower bands
+        basic_ub = (high + low) / 2 + multiplier * atr
+        basic_lb = (high + low) / 2 - multiplier * atr
+        
+        # Final upper and lower bands
+        final_ub = np.full_like(close, np.nan)
+        final_lb = np.full_like(close, np.nan)
+        
+        for i in range(len(close)):
+            if i == 0:
+                final_ub[i] = basic_ub[i]
+                final_lb[i] = basic_lb[i]
+            else:
+                if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
+                    final_ub[i] = basic_ub[i]
+                else:
+                    final_ub[i] = final_ub[i-1]
+                    
+                if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
+                    final_lb[i] = basic_lb[i]
+                else:
+                    final_lb[i] = final_lb[i-1]
+        
+        # Supertrend
+        supertrend = np.full_like(close, np.nan)
+        for i in range(len(close)):
+            if i == 0:
+                supertrend[i] = final_ub[i]
+            else:
+                if supertrend[i-1] == final_ub[i-1] and close[i] <= final_ub[i]:
+                    supertrend[i] = final_ub[i]
+                elif supertrend[i-1] == final_ub[i-1] and close[i] > final_ub[i]:
+                    supertrend[i] = final_lb[i]
+                elif supertrend[i-1] == final_lb[i-1] and close[i] >= final_lb[i]:
+                    supertrend[i] = final_lb[i]
+                elif supertrend[i-1] == final_lb[i-1] and close[i] < final_lb[i]:
+                    supertrend[i] = final_ub[i]
+                else:
+                    supertrend[i] = supertrend[i-1]
+        
+        return supertrend, atr
     
-    # Align to lower timeframe (4h->4h is identity but keeps consistency)
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    # Calculate indicators
+    atr_period = 10
+    supertrend_multiplier = 3.0
+    ema_period = 200
+    
+    # Supertrend and ATR
+    supertrend, atr = calculate_supertrend(high, low, close, atr_period, supertrend_multiplier)
+    
+    # EMA200
+    ema_200 = calculate_ema(close, ema_period)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -111,43 +117,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(atr_period, ema_period, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(supertrend[i]) or np.isnan(ema_200[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_aligned[i] > 25
+        # Trend direction from Supertrend
+        # When price > Supertrend, trend is up (Supertrend acts as support)
+        # When price < Supertrend, trend is down (Supertrend acts as resistance)
+        trend_up = close[i] > supertrend[i]
+        trend_down = close[i] < supertrend[i]
+        
+        # EMA200 filter for long-term bias
+        price_above_ema = close[i] > ema_200[i]
+        price_below_ema = close[i] < ema_200[i]
         
         if position == 0:
-            # Long: price above KAMA with volume and strong trend
-            if (close[i] > kama_aligned[i] and 
-                volume_confirm[i] and 
-                strong_trend):
+            # Long: Supertrend up AND price > EMA200
+            if trend_up and price_above_ema and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA with volume and strong trend
-            elif (close[i] < kama_aligned[i] and 
-                  volume_confirm[i] and 
-                  strong_trend):
+            # Short: Supertrend down AND price < EMA200
+            elif trend_down and price_below_ema and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses below KAMA or trend weakens
-            if (close[i] < kama_aligned[i]) or (adx_aligned[i] < 20):
+            # Long: exit if Supertrend flips down OR price < EMA200
+            if trend_down or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses above KAMA or trend weakens
-            if (close[i] > kama_aligned[i]) or (adx_aligned[i] < 20):
+            # Short: exit if Supertrend flips up OR price > EMA200
+            if trend_up or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
