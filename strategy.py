@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ADX_Trend"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,12 +29,12 @@ def generate_signals(prices):
     r1_1d = close_1d + range_1d * 1.1 / 12.0
     s1_1d = close_1d - range_1d * 1.1 / 12.0
     
-    # Align Camarilla levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align Camarilla levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 12h ADX for trend strength (14-period)
+    # 4h ADX for trend strength (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -66,7 +66,7 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or \
+        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
            np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
@@ -75,9 +75,9 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         adx_val = adx[i]
-        pivot = pivot_12h[i]
-        r1 = r1_12h[i]
-        s1 = s1_12h[i]
+        pivot = pivot_4h[i]
+        r1 = r1_4h[i]
+        s1 = s1_4h[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
         trending = adx_val > 25  # Strong trend filter
@@ -85,11 +85,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Price breaks above R1 + volume + trending
             if price > r1 and volume_confirmed and trending:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 + volume + trending
             elif price < s1 and volume_confirmed and trending:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -98,7 +98,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit: Price returns above pivot
@@ -106,6 +106,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
