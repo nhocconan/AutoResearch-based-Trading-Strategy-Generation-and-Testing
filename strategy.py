@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WilliamsFractal_1d_Trend_Signal"
-timeframe = "6h"
+name = "12h_1w_KAMA_Trend_PriceAction_V1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,43 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams Fractals (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for KAMA trend (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate Williams Fractals on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate KAMA on weekly close
+    # Efficiency ratio
+    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    volatility = np.sum(np.abs(np.diff(close_1w)), axis=0)  # will fix below
+    # Proper ER calculation
+    er = np.zeros_like(close_1w)
+    for i in range(1, len(close_1w)):
+        if i == 0:
+            er[i] = 0
+        else:
+            direction = np.abs(close_1w[i] - close_1w[i-10]) if i >= 10 else np.abs(close_1w[i] - close_1w[0])
+            volatility = np.sum(np.abs(np.diff(close_1w[max(0,i-9):i+1])) if i >= 1 else np.abs(close_1w[i] - close_1w[i-1]))
+            er[i] = direction / volatility if volatility > 0 else 0
     
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(high_1d), np.nan)
+    # Smoothing constants
+    sc = (er * 0.6 + 0.064) ** 2  # 2 to 30 EMA equivalent
     
-    # Williams Fractal: bearish = high[n] is highest of [n-2, n-1, n, n+1, n+2]
-    #                 bullish = low[n] is lowest of [n-2, n-1, n, n+1, n+2]
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
+    # KAMA calculation
+    kama = np.zeros_like(close_1w)
+    kama[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
     
-    # Williams Fractals need 2 extra daily bars for confirmation (center bar + 2 more to confirm)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Align KAMA to 12h
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama)
     
-    # Daily EMA34 for trend filter (needs only completed daily candle)
-    ema_34_1d = pd.Series(close_1d:=df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # 6-period RSI for entry timing (on 6h timeframe)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # 12h price action: higher highs/lows for trend confirmation
+    # Higher high: current high > previous high
+    hh = high > np.roll(high, 1)
+    # Higher low: current low > previous low
+    hl = low > np.roll(low, 1)
+    # Lower high: current high < previous high
+    lh = high < np.roll(high, 1)
+    # Lower low: current low < previous low
+    ll = low < np.roll(low, 1)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,47 +63,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 30  # Need enough for weekly alignment and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        ema = ema_34_aligned[i]
-        rsi_val = rsi[i]
-        bullish_fractal = bullish_fractal_aligned[i]
-        bearish_fractal = bearish_fractal_aligned[i]
+        kama_val = kama_1w_aligned[i]
         
         volume_confirmed = vol > 1.5 * vol_ma
         
+        # Trend: price relative to weekly KAMA
+        above_kama = price > kama_val
+        below_kama = price < kama_val
+        
+        # Price action confirmation
+        strong_uptrend = hh[i] and hl[i]  # Higher high and higher low
+        strong_downtrend = lh[i] and ll[i]  # Lower high and lower low
+        
         if position == 0:
-            # Long: bullish fractal confirmed + price above EMA34 + RSI not overbought
-            if (not np.isnan(bullish_fractal) and price > ema and 
-                rsi_val < 70 and volume_confirmed):
+            # Long: above KAMA + uptrend price action + volume
+            if above_kama and strong_uptrend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish fractal confirmed + price below EMA34 + RSI not oversold
-            elif (not np.isnan(bearish_fractal) and price < ema and 
-                  rsi_val > 30 and volume_confirmed):
+            # Short: below KAMA + downtrend price action + volume
+            elif below_kama and strong_downtrend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price below EMA34 or bearish fractal forms
-            if price < ema or not np.isnan(bearish_fractal):
+            # Exit: below KAMA or breakdown in price action
+            if below_kama or (lh[i] and ll[i]):  # Lower high and lower low = breakdown
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above EMA34 or bullish fractal forms
-            if price > ema or not np.isnan(bullish_fractal):
+            # Exit: above KAMA or reversal in price action
+            if above_kama or (hh[i] and hl[i]):  # Higher high and higher low = reversal
                 signals[i] = 0.0
                 position = 0
             else:
