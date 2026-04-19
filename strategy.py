@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_Camarilla_R3S3_Fade_Breakout_R4S4_Volume"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,116 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly and daily data once before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data once before loop
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly data for directional bias (from previous week)
-    weekly_close = df_1w['close'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    
-    # Daily data for Camarilla levels (from previous day)
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    
-    # Weekly trend bias: price above/below weekly midpoint
-    weekly_mid = (weekly_high + weekly_low) / 2.0
-    weekly_bias = np.where(weekly_close > weekly_mid, 1, -1)
-    
-    # Daily Camarilla levels from previous day
-    prev_daily_close = np.roll(daily_close, 1)
-    prev_daily_high = np.roll(daily_high, 1)
-    prev_daily_low = np.roll(daily_low, 1)
-    prev_daily_close[0] = np.nan
-    prev_daily_high[0] = np.nan
-    prev_daily_low[0] = np.nan
+    # Calculate Camarilla pivot levels from previous day
+    prev_close = np.roll(close_1d, 1)
+    prev_close[0] = np.nan
+    prev_high = np.roll(high_1d, 1)
+    prev_high[0] = np.nan
+    prev_low = np.roll(low_1d, 1)
+    prev_low[0] = np.nan
     
     # Pivot = (H + L + C) / 3
-    pivot = (prev_daily_high + prev_daily_low + prev_daily_close) / 3.0
-    # R3 = C + (H - L) * 1.1 / 4
-    r3 = prev_daily_close + (prev_daily_high - prev_daily_low) * 1.1 / 4.0
-    # S3 = C - (H - L) * 1.1 / 4
-    s3 = prev_daily_close - (prev_daily_high - prev_daily_low) * 1.1 / 4.0
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
     # R4 = C + (H - L) * 1.1 / 2
-    r4 = prev_daily_close + (prev_daily_high - prev_daily_low) * 1.1 / 2.0
+    r4 = prev_close + (prev_high - prev_low) * 1.1 / 2.0
     # S4 = C - (H - L) * 1.1 / 2
-    s4 = prev_daily_close - (prev_daily_high - prev_daily_low) * 1.1 / 2.0
+    s4 = prev_close - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align weekly bias to 6h
-    weekly_bias_6h = align_htf_to_ltf(prices, df_1w, weekly_bias)
+    # Align to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Align daily Camarilla levels to 6h
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    # Volume confirmation: current volume > 1.5x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Time filter: 08-20 UTC (active hours)
+    # Time filter: 00-23 UTC (all hours for 12h timeframe)
     hours = pd.DatetimeIndex(prices['open_time']).hour
-    time_filter = (hours >= 8) & (hours <= 20)
+    time_filter = np.ones(n, dtype=bool)  # No time filter for 12h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         if not time_filter[i]:
             signals[i] = 0.0
             continue
             
-        if np.isnan(weekly_bias_6h[i]) or np.isnan(pivot_6h[i]) or np.isnan(r3_6h[i]) or \
-           np.isnan(s3_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or \
+           np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or np.isnan(vol_ma_30[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        bias = weekly_bias_6h[i]
+        vol_ma = vol_ma_30[i]
         
-        # Volume spike: current volume > 1.8x average
-        volume_spike = vol > 1.8 * vol_ma
+        # Volume spike: current volume > 1.5x average
+        volume_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Fade at R3/S3 in ranging markets (when bias is weak)
-            # Breakout at R4/S4 in trending markets (when bias is strong)
-            if bias > 0:  # Weekly bullish bias
-                # Fade at R3 (resistance) in weak trends
-                if price < r3_6h[i] and volume_spike:
-                    signals[i] = -0.25
-                    position = -1
-                # Breakout above R4 in strong trends
-                elif price > r4_6h[i] and volume_spike:
-                    signals[i] = 0.25
-                    position = 1
-            else:  # Weekly bearish bias
-                # Fade at S3 (support) in weak trends
-                if price > s3_6h[i] and volume_spike:
-                    signals[i] = 0.25
-                    position = 1
-                # Breakdown below S4 in strong trends
-                elif price < s4_6h[i] and volume_spike:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Price breaks above R1 with volume spike
+            if price > r1_12h[i] and volume_spike:
+                signals[i] = 0.25
+                position = 1
+            # Short: Price breaks below S1 with volume spike
+            elif price < s1_12h[i] and volume_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price returns to S3 (fade level) or breaks below S4 (stop)
-            if price < s3_6h[i]:
+            # Exit: Price returns below S1 (reversal signal)
+            if price < s1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to R3 (fade level) or breaks above R4 (stop)
-            if price > r3_6h[i]:
+            # Exit: Price returns above R1 (reversal signal)
+            if price > r1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
