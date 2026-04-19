@@ -1,17 +1,17 @@
-#!/usr/bin/env python3
+# 6h_Camarilla_R1_S1_Breakout_Volume_EMA34
+# Hypothesis: 6h Camarilla R1/S1 breakout with 12h EMA34 trend filter and volume confirmation
+# Camarilla levels provide intraday support/resistance with statistical edge
+# 12h EMA34 filters counter-trend trades and aligns with medium-term momentum
+# Volume confirmation ensures breakouts have institutional participation
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
+# Works in bull/bear via trend filter and volatility-adjusted breakouts
+name = "6h_Camarilla_R1_S1_Breakout_Volume_EMA34"
+timeframe = "6h"
+leverage = 1.0
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day ATR volatility filter and volume confirmation
-# Donchian breakouts capture institutional breakout momentum with statistical edge
-# ATR filter ensures volatility expansion precedes breakout (avoids low-volatility false breakouts)
-# Volume confirmation validates institutional participation
-# Target: 75-200 total trades over 4 years (19-50/year) with disciplined entries
-# Works in bull/bear via volatility filter and breakout directionality
-name = "4h_Donchian20_1dATR_Volume"
-timeframe = "4h"
-leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,76 +23,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day ATR(14) for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # 12h EMA34 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Previous day's Camarilla levels (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate Camarilla levels from previous day
+    ph = df_1d['high'].shift(1).values  # Previous day high
+    pl = df_1d['low'].shift(1).values   # Previous day low
+    pc = df_1d['close'].shift(1).values # Previous day close
     
-    # Donchian channel (20-period) on 4h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla calculations
+    rang = ph - pl
+    r1 = pc + (rang * 1.1 / 12)
+    s1 = pc - (rang * 1.1 / 12)
+    r4 = pc + (rang * 1.1 / 2)
+    s4 = pc - (rang * 1.1 / 2)
     
-    # Volume confirmation: volume > 1.8 * 20-period average
+    # Align Camarilla levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.8)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Ensure enough data for all indicators
+    start_idx = max(34, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: require ATR > 0.5 * 20-period ATR average
-        atr_ma = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values
-        vol_filter = atr_14_1d_aligned[i] > (atr_ma[i] * 0.5) if not np.isnan(atr_ma[i]) else False
-        
         if position == 0:
-            # Long: price breaks above upper Donchian with volume and volatility expansion
-            if (close[i] > high_20[i] and 
+            # Long: price breaks above R1 with volume and above 12h EMA34
+            if (close[i] > r1_aligned[i] and 
                 volume_confirm[i] and 
-                vol_filter):
+                close[i] > ema_34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with volume and volatility expansion
-            elif (close[i] < low_20[i] and 
+            # Short: price breaks below S1 with volume and below 12h EMA34
+            elif (close[i] < s1_aligned[i] and 
                   volume_confirm[i] and 
-                  vol_filter):
+                  close[i] < ema_34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below lower Donchian or ATR collapses
-            if (close[i] < low_20[i]) or (not vol_filter):
+            # Long: exit if price breaks below S1 or closes below 12h EMA34
+            if (close[i] < s1_aligned[i]) or (close[i] < ema_34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above upper Donchian or ATR collapses
-            if (close[i] > high_20[i]) or (not vol_filter):
+            # Short: exit if price breaks above R1 or closes above 12h EMA34
+            if (close[i] > r1_aligned[i]) or (close[i] > ema_34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
