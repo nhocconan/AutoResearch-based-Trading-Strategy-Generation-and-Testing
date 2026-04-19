@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d ADX trend filter, 4h Donchian20 breakout, and volume confirmation.
-# Uses 1d ADX(14) > 25 to identify trending markets (avoids chop) and Donchian breakouts for momentum.
-# Works in bull/bear by following higher timeframe trend direction and avoiding false breakouts in ranging markets.
-# Targets 20-40 trades/year (80-160 total over 4 years) with strict entry conditions.
-name = "4h_1d_ADX25_Donchian20_Volume"
+# Hypothesis: 4h timeframe with 1d EMA34 trend alignment, 4h Donchian20 breakout,
+# volume confirmation, and RSI filter for momentum confirmation. Uses tight entry
+# conditions to limit trades (~30-40/year) and avoid fee drag. Works in bull/bear
+# by following higher timeframe trends and avoiding choppy markets via EMA filter.
+name = "4h_1d_EMA34_Donchian20_Volume_RSI"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,55 +26,11 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX14 trend filter (called ONCE before loop)
+    # Get 1d data for EMA34 trend (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate ADX14: +DM, -DM, TR, then smoothed
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first value NaN
-    
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])  # skip first NaN
-        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
-        for i in range(period, len(arr)):
-            if not np.isnan(arr[i]):
-                result[i] = result[i-1] * (1 - 1/period) + arr[i] * (1/period)
-        return result
-    
-    tr_smooth = wilder_smooth(tr, 14)
-    plus_dm_smooth = wilder_smooth(plus_dm, 14)
-    minus_dm_smooth = wilder_smooth(minus_dm, 14)
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    adx_14_1d = adx
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Get 4h data for Donchian20 breakout (called ONCE before loop)
     df_4h = get_htf_data(prices, '4h')
@@ -90,6 +46,16 @@ def generate_signals(prices):
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (volume_ma * 1.5)
     
+    # RSI(14) for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -97,40 +63,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(adx_14_1d_aligned[i]) or np.isnan(high_20_4h_aligned[i]) or 
-            np.isnan(low_20_4h_aligned[i]) or np.isnan(volume_ma[i]) or
-            not session_filter[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20_4h_aligned[i]) or 
+            np.isnan(low_20_4h_aligned[i]) or np.isnan(volume_ma[i]) or 
+            np.isnan(rsi_values[i]) or not session_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        is_trending = adx_14_1d_aligned[i] > 25
-        
         if position == 0:
-            # Long: ADX > 25 AND price breaks above 4h Donchian high with volume
-            if (is_trending and 
+            # Long: price above 1d EMA34 AND breaks 4h Donchian high with volume and RSI>50
+            if (close[i] > ema_34_1d_aligned[i] and 
                 close[i] > high_20_4h_aligned[i] and 
-                volume_filter[i]):
+                volume_filter[i] and 
+                rsi_values[i] > 50):
                 signals[i] = 0.25
                 position = 1
-            # Short: ADX > 25 AND price breaks below 4h Donchian low with volume
-            elif (is_trending and 
+            # Short: price below 1d EMA34 AND breaks 4h Donchian low with volume and RSI<50
+            elif (close[i] < ema_34_1d_aligned[i] and 
                   close[i] < low_20_4h_aligned[i] and 
-                  volume_filter[i]):
+                  volume_filter[i] and 
+                  rsi_values[i] < 50):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if ADX drops below 20 (trend weakening) OR price breaks below 4h Donchian low
-            if (adx_14_1d_aligned[i] < 20) or (close[i] < low_20_4h_aligned[i]):
+            # Long: exit if price breaks below 1d EMA34 or 4h Donchian low
+            if close[i] < ema_34_1d_aligned[i] or close[i] < low_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if ADX drops below 20 (trend weakening) OR price breaks above 4h Donchian high
-            if (adx_14_1d_aligned[i] < 20) or (close[i] > high_20_4h_aligned[i]):
+            # Short: exit if price breaks above 1d EMA34 or 4h Donchian high
+            if close[i] > ema_34_1d_aligned[i] or close[i] > high_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
