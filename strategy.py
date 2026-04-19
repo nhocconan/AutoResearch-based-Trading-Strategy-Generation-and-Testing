@@ -1,10 +1,10 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KC_Breakout_Volume_Kelly_v1"
-timeframe = "4h"
+name = "6h_WilliamsFractal_1d_Trend_Signal"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,39 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Keltner Channel calculation (once before loop)
+    # Get daily data once before loop for Williams Fractals
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily high, low, close for ATR calculation
+    # Calculate Williams Fractals on daily high/low
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate daily True Range and ATR (20-period)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
-    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr_20_1d = pd.Series(tr1).rolling(window=20, min_periods=20).mean().values
+    # Williams Fractal: Bearish (sell) fractal = high with 2 lower highs on each side
+    # Bullish (buy) fractal = low with 2 higher lows on each side
+    bearish_fractal = np.zeros(len(high_1d), dtype=bool)
+    bullish_fractal = np.zeros(len(low_1d), dtype=bool)
     
-    # Calculate daily EMA (20-period) for Keltner Channel middle
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = True
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = True
     
-    # Calculate Keltner Channel bands (2 * ATR multiplier)
-    upper_1d = ema_20_1d + 2 * atr_20_1d
-    lower_1d = ema_20_1d - 2 * atr_20_1d
+    # Align fractals to 6h timeframe with 2-bar delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2)
     
-    # Align daily Keltner Channel levels to 4h timeframe
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Daily EMA34 for trend filter (only needs completed 1d candle)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (4h)
+    # 6-period ATR for volatility filter
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
+    tr = np.maximum(tr, np.absolute(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
+    atr_6 = pd.Series(tr).rolling(window=6, min_periods=6).mean().values
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Kelly criterion approximation: use volatility-adjusted position sizing
-    # Base size scaled by inverse volatility (lower volatility = larger position)
-    vol_normalized = atr_20_1d_aligned / np.nanmedian(atr_20_1d_aligned)
-    kelly_scale = np.clip(1.0 / vol_normalized, 0.5, 2.0)  # Scale between 0.5x and 2x
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,48 +60,45 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_6[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        upper = upper_1d_aligned[i]
-        lower = lower_1d_aligned[i]
-        ema_mid = ema_20_1d_aligned[i]
+        ema_34 = ema_34_1d_aligned[i]
+        atr = atr_6[i]
+        bearish_fract = bearish_fractal_aligned[i] > 0.5
+        bullish_fract = bullish_fractal_aligned[i] > 0.5
         
-        volume_confirmed = vol > 2.0 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: break above upper KC band with volume
-            if price > upper and volume_confirmed:
-                base_size = 0.25
-                adjusted_size = base_size * kelly_scale[i]
-                signals[i] = np.clip(adjusted_size, 0.15, 0.35)  # Keep within reasonable bounds
+            # Long: bullish fractal + price above EMA34 + volume
+            if bullish_fract and price > ema_34 and volume_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below lower KC band with volume
-            elif price < lower and volume_confirmed:
-                base_size = -0.25
-                adjusted_size = base_size * kelly_scale[i]
-                signals[i] = np.clip(adjusted_size, -0.35, -0.15)  # Keep within reasonable bounds
+            # Short: bearish fractal + price below EMA34 + volume
+            elif bearish_fract and price < ema_34 and volume_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price below EMA middle or volatility expansion
-            if price < ema_mid or vol > 3.0 * vol_ma:
+            # Exit: bearish fractal or price below EMA34
+            if bearish_fract or price < ema_34:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = np.clip(0.25 * kelly_scale[i], 0.15, 0.35)
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above EMA middle or volatility expansion
-            if price > ema_mid or vol > 3.0 * vol_ma:
+            # Exit: bullish fractal or price above EMA34
+            if bullish_fract or price > ema_34:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = np.clip(-0.25 * kelly_scale[i], -0.35, -0.15)
+                signals[i] = -0.25
     
     return signals
