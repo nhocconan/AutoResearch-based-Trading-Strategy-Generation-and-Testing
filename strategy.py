@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_R1_S1_Breakout_Volume_EMA34Filter"
-timeframe = "6h"
+name = "12h_1d_Pivot_R1_S1_Breakout_Volume_EMA34Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,13 +17,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Pivot points (daily pivot levels)
+    # Get 1d data for Pivot points and EMA
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Pivot, R1, S1
+    # Calculate previous day's Pivot, R1, S1 (classic formula)
     prev_high = np.concatenate([[np.nan], high_1d[:-1]])
     prev_low = np.concatenate([[np.nan], low_1d[:-1]])
     prev_close = np.concatenate([[np.nan], close_1d[:-1]])
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align daily pivot levels to 6h timeframe
+    # Align daily pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
