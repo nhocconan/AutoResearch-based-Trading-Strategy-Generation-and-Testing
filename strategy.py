@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WeeklyPivot_R1S1_Breakout_Volume"
-timeframe = "6h"
+name = "1d_WeeklyPivot_R1S1_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,61 +17,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for weekly pivot (once before loop)
+    df_w = get_htf_data(prices, '1w')
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate weekly pivot points (using last 5 days: Monday-Friday)
-    # Rolling window of 5 days for high/low/close
-    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
+    # Calculate weekly pivot points (using previous week's data)
+    # Weekly pivot = (High + Low + Close) / 3
+    pivot_w = (high_w + low_w + close_w) / 3.0
+    r1_w = 2 * pivot_w - low_w
+    s1_w = 2 * pivot_w - high_w
     
-    # Weekly pivot calculation
-    pivot = (high_5d + low_5d + close_5d) / 3.0
-    r1 = 2 * pivot - low_5d
-    s1 = 2 * pivot - high_5d
+    # Align weekly pivot levels to daily timeframe
+    # Use previous week's data (shift by 1 week) to avoid look-ahead
+    pivot_d = align_htf_to_ltf(prices, df_w, pivot_w, additional_delay_bars=1)
+    r1_d = align_htf_to_ltf(prices, df_w, r1_w, additional_delay_bars=1)
+    s1_d = align_htf_to_ltf(prices, df_w, s1_w, additional_delay_bars=1)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: current volume > 1.8x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
-           np.isnan(vol_ma_30[i]):
+        if np.isnan(pivot_d[i]) or np.isnan(r1_d[i]) or np.isnan(s1_d[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_30[i]
+        vol_ma = vol_ma_20[i]
         
-        volume_confirmed = vol > 1.8 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
             # Long: Price breaks above R1 with volume
-            if price > r1_6h[i] and volume_confirmed:
+            if price > r1_d[i] and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 with volume
-            elif price < s1_6h[i] and volume_confirmed:
+            elif price < s1_d[i] and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below pivot
-            if price < pivot_6h[i]:
+            if price < pivot_d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -79,7 +75,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: Price returns above pivot
-            if price > pivot_6h[i]:
+            if price > pivot_d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
