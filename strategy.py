@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Pivot_R1S1_Breakout_Volume_Filter"
-timeframe = "1h"
+name = "6h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter_v3"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,66 +29,67 @@ def generate_signals(prices):
     r1_1d = close_1d + range_1d * 1.1 / 12.0
     s1_1d = close_1d - range_1d * 1.1 / 12.0
     
-    # Align Camarilla levels to 1h timeframe
-    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align Camarilla levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # 4h EMA20 for trend filter
-    ema_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_4h_1h = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # 6h ATR for volatility and stop loss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_6h = pd.Series(tr).rolling(window=15, min_periods=15).mean().values
     
-    # Volume confirmation: current volume > 2.0x 20-period average (1h)
+    # Volume confirmation: current volume > 2.2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 80
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_1h[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or \
-           np.isnan(ema_4h_1h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
+           np.isnan(atr_6h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        ema_4h_val = ema_4h_1h[i]
-        pivot = pivot_1h[i]
-        r1 = r1_1h[i]
-        s1 = s1_1h[i]
+        atr = atr_6h[i]
+        pivot = pivot_6h[i]
+        r1 = r1_6h[i]
+        s1 = s1_6h[i]
         
-        volume_confirmed = vol > 2.0 * vol_ma
+        volume_confirmed = vol > 2.2 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above R1 + volume + 4h uptrend (price > EMA20)
-            if price > r1 and volume_confirmed and price > ema_4h_val:
-                signals[i] = 0.20
+            # Long: Price breaks above R1 + volume
+            if price > r1 and volume_confirmed:
+                signals[i] = 0.28
                 position = 1
-            # Short: Price breaks below S1 + volume + 4h downtrend (price < EMA20)
-            elif price < s1 and volume_confirmed and price < ema_4h_val:
-                signals[i] = -0.20
+            # Short: Price breaks below S1 + volume
+            elif price < s1 and volume_confirmed:
+                signals[i] = -0.28
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below pivot
-            if price < pivot:
+            # Exit: Price returns below pivot OR ATR stop (2.5x ATR from entry)
+            if price < pivot or price < (high[i] - 2.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.28
         
         elif position == -1:
-            # Exit: Price returns above pivot
-            if price > pivot:
+            # Exit: Price returns above pivot OR ATR stop (2.5x ATR from entry)
+            if price > pivot or price > (low[i] + 2.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.28
     
     return signals
