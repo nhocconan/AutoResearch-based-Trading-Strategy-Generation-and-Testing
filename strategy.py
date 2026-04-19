@@ -1,16 +1,17 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA + RSI(14) + Choppiness regime filter
-# Long when KAMA > previous KAMA (trend up) and RSI < 70 and Choppiness > 61.8 (range)
-# Short when KAMA < previous KAMA (trend down) and RSI > 30 and Choppiness > 61.8
-# Exit when KAMA direction changes or RSI reaches opposite extreme
-# Uses KAMA for trend, RSI for momentum, Choppiness for regime filter to avoid whipsaw
-# Target: 10-25 trades/year per symbol to stay within frequency limits for 1d
-name = "1d_KAMA_RSI_Chop"
-timeframe = "1d"
+# Hypothesis: 6h Camarilla pivot breakout with 1d RSI trend filter and volume confirmation.
+# Long when price breaks above R3 and 1d RSI > 55 and volume > 1.5x 6h average volume.
+# Short when price breaks below S3 and 1d RSI < 45 and volume > 1.5x 6h average volume.
+# Exit when price crosses back below/above H4/L4.
+# Uses Camarilla pivots for intraday support/resistance, RSI for trend filter, volume for confirmation.
+# Target: 15-35 trades/year per symbol (60-140 total over 4 years).
+name = "6h_Camarilla_RSI_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,152 +22,105 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate KAMA ( Kaufman Adaptive Moving Average )
-    def kama(price, er_length=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.diff(price, prepend=price[0]))
-        volatility = np.sum(np.abs(np.diff(price, prepend=price[0])), axis=0) if len(price.shape) > 1 else np.sum(np.abs(np.diff(price, prepend=price[0])))
-        # For 1D array
-        change = np.abs(np.diff(price, prepend=price[0]))
-        volatility = np.sum(np.abs(np.diff(price, prepend=price[0])))
-        # Actually need to compute per element
-        er = np.zeros_like(price)
-        for i in range(er_length, len(price)):
-            if np.sum(np.abs(np.diff(price[i-er_length:i+1]))) > 0:
-                er[i] = np.abs(price[i] - price[i-er_length]) / np.sum(np.abs(np.diff(price[i-er_length:i+1])))
-            else:
-                er[i] = 0
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        kama = np.zeros_like(price)
-        kama[0] = price[0]
-        for i in range(1, len(price)):
-            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
-        return kama
+    # Calculate Camarilla pivot levels from previous day
+    # Using previous day's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # First value: use current day's values (no previous day available)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Simpler: use EMA as proxy for trend (but we'll implement proper KAMA)
-    # Actually, let's use a simpler adaptive approach
-    er_length = 10
-    fast_sc = 2
-    slow_sc = 30
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.zeros_like(close)
-    for i in range(er_length, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-er_length:i+1])))
+    # Camarilla levels
+    R4 = prev_close + range_hl * 1.500
+    R3 = prev_close + range_hl * 1.250
+    R2 = prev_close + range_hl * 1.166
+    R1 = prev_close + range_hl * 1.083
+    S1 = prev_close - range_hl * 1.083
+    S2 = prev_close - range_hl * 1.166
+    S3 = prev_close - range_hl * 1.250
+    S4 = prev_close - range_hl * 1.500
+    H4 = R3  # Commonly used exit level
+    L4 = S3
     
-    er = np.zeros_like(close)
-    for i in range(er_length, len(close)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
+    # Get daily data for RSI calculation
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # Calculate RSI(14)
-    rsi_length = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Wilder's smoothing for RSI
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    # Wilder's smoothing
-    avg_gain[rsi_length] = np.mean(gain[1:rsi_length+1])
-    avg_loss[rsi_length] = np.mean(loss[1:rsi_length+1])
-    
-    for i in range(rsi_length+1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_length-1) + gain[i]) / rsi_length
-        avg_loss[i] = (avg_loss[i-1] * (rsi_length-1) + loss[i]) / rsi_length
-    
+    period = 14
+    avg_gain = wilder_smooth(gain, period)
+    avg_loss = wilder_smooth(loss, period)
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate Choppiness Index
-    chop_length = 14
-    atr = np.zeros_like(close)
-    for i in range(1, len(close)):
-        tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr[i] = tr
+    # Align RSI to 6h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Sum of ATR over chop_length periods
-    sum_atr = np.zeros_like(close)
-    for i in range(chop_length, len(close)):
-        sum_atr[i] = np.sum(atr[i-chop_length+1:i+1])
-    
-    # Highest high and lowest low over chop_length periods
-    highest_high = np.zeros_like(close)
-    lowest_low = np.zeros_like(close)
-    for i in range(chop_length-1, len(close)):
-        highest_high[i] = np.max(high[i-chop_length+1:i+1])
-        lowest_low[i] = np.min(low[i-chop_length+1:i+1])
-    
-    # Avoid division by zero
-    range_hl = highest_high - lowest_low
-    chop = np.zeros_like(close)
-    for i in range(chop_length-1, len(close)):
-        if sum_atr[i] > 0 and range_hl[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr[i] / range_hl[i]) / np.log10(chop_length)
-        else:
-            chop[i] = 50  # neutral
-    
-    # Get weekly data for additional filter (optional)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) > 0:
-        weekly_close = df_1w['close'].values
-        # Simple weekly trend: price above weekly EMA21
-        weekly_ema = np.zeros_like(weekly_close)
-        weekly_ema[0] = weekly_close[0]
-        for i in range(1, len(weekly_close)):
-            weekly_ema[i] = 0.1 * weekly_close[i] + 0.9 * weekly_ema[i-1]
-        # Align to daily
-        weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
-    else:
-        weekly_ema_aligned = np.full(n, np.nan)
+    # Get 6h average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(rsi_length, chop_length, er_length) + 5
+    start_idx = 20  # Ensure volume MA and pivots are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            (i > 0 and np.isnan(kama[i-1]))):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(H4[i]) or np.isnan(L4[i])):
             signals[i] = 0.0
             continue
         
-        # Optional: weekly filter (only trade in direction of weekly trend)
-        weekly_ok = True
-        if not np.isnan(weekly_ema_aligned[i]):
-            weekly_ok = close[i] > weekly_ema_aligned[i]  # only long above weekly EMA
+        price = close[i]
+        rsi = rsi_1d_aligned[i]
+        vol_ma = vol_ma_20[i]
+        vol = volume[i]
+        
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long entry: KAMA rising (trend up), RSI not overbought, choppy market
-            if kama[i] > kama[i-1] and rsi[i] < 70 and chop[i] > 61.8 and weekly_ok:
+            # Long entry: price breaks above R3, RSI > 55, volume confirmation
+            if price > R3[i] and rsi > 55 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: KAMA falling (trend down), RSI not oversold, choppy market
-            elif kama[i] < kama[i-1] and rsi[i] > 30 and chop[i] > 61.8 and not weekly_ok:
+            # Short entry: price breaks below S3, RSI < 45, volume confirmation
+            elif price < S3[i] and rsi < 45 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA turns down OR RSI overbought
-            if kama[i] < kama[i-1] or rsi[i] >= 70:
+            # Long exit: price crosses below H4 (R3)
+            if price < H4[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA turns up OR RSI oversold
-            if kama[i] > kama[i-1] or rsi[i] <= 30:
+            # Short exit: price crosses above L4 (S3)
+            if price > L4[i]:
                 signals[i] = 0.0
                 position = 0
             else:
