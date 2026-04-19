@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot levels (R1, S1) with volume confirmation and ADX trend filter.
-# Long when price breaks above R1 with volume > 1.5x 20-period average and ADX > 20.
-# Short when price breaks below S1 with volume > 1.5x 20-period average and ADX > 20.
-# Uses daily Camarilla levels calculated from prior day's OHLC. Designed for 4h timeframe
-# to capture breakouts with institutional levels while avoiding choppy markets.
-# Target: 20-40 trades/year per symbol (~80-160 total over 4 years).
-name = "4h_Camarilla_R1S1_Breakout_Volume_ADX"
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above Donchian upper band, volume > 2x 20-period average, ADX > 25.
+# Short when price breaks below Donchian lower band, volume > 2x 20-period average, ADX > 25.
+# Uses discrete position sizes (0.25) to minimize churn. Designed for 4h timeframe
+# to capture breakouts with strong momentum while filtering weak breakouts.
+# Target: 25-50 trades/year per symbol (~100-200 total over 4 years).
+name = "4h_Donchian20_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 25:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,22 +23,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels (R1, S1) for each day
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    daily_range = high_1d - low_1d
-    camarilla_r1 = close_1d + 1.1 * daily_range / 12
-    camarilla_s1 = close_1d - 1.1 * daily_range / 12
-    
-    # Align daily Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
@@ -88,55 +75,55 @@ def generate_signals(prices):
     
     adx = calculate_adx(high, low, close, 14)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure ADX and volume MA are ready
+    start_idx = 20  # Donchian needs 20 periods
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
             np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
+        upper_band = donch_high[i]
+        lower_band = donch_low[i]
         adx_val = adx[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
         
-        # ADX trend filter (weaker threshold for breakouts)
-        trending = adx_val > 20
+        # ADX trend strength filter
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long if price breaks above R1, volume confirmed, and trending
-            if price > r1 and volume_confirmed and trending:
+            # Enter long if price breaks above upper band, volume confirmation, and strong trend
+            if price > upper_band and volume_confirmed and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price breaks below S1, volume confirmed, and trending
-            elif price < s1 and volume_confirmed and trending:
+            # Enter short if price breaks below lower band, volume confirmation, and strong trend
+            elif price < lower_band and volume_confirmed and strong_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns below R1 or trend weakens
-            if price < r1 or adx_val < 15:  # Trend weakening
+            # Exit long when price crosses below lower band (breakdown)
+            if price < lower_band:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns above S1 or trend weakens
-            if price > s1 or adx_val < 15:  # Trend weakening
+            # Exit short when price crosses above upper band (breakout)
+            if price > upper_band:
                 signals[i] = 0.0
                 position = 0
             else:
