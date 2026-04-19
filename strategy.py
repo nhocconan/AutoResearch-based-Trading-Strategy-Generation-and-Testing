@@ -3,13 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_RSI_Divergence_Trend_Confirm_v1"
-timeframe = "4h"
+# Hypothesis: 1h timeframe with 4h/1d multi-timeframe confirmation using RSI mean reversion
+# In both bull and bear markets, RSI extremes combined with trend filters and volume provide edge
+# Uses 4h RSI for direction, 1d trend filter for regime, and 1h for precise entry timing
+# Target: 15-37 trades/year with strict entry conditions to avoid fee drag
+
+name = "1h_RSI_MeanReversion_4D_TrendFilter_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,26 +22,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 4h data for RSI (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate 14-period RSI on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # Calculate 4h RSI (14-period)
+    delta = np.diff(close_4h, prepend=close_4h[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_4h = 100 - (100 / (1 + rs))
     
-    # Align daily RSI to 4h timeframe
-    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align 4h RSI to 1h timeframe
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # 4h EMA34 for trend filter
-    ema_34 = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
+    # Get 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA (50-period) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d EMA50 to 1h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,45 +55,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_4h[i]) or np.isnan(ema_34[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        rsi = rsi_4h[i]
-        ema = ema_34[i]
+        rsi = rsi_4h_aligned[i]
+        ema_50 = ema_50_1d_aligned[i]
         
         volume_confirmed = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Bullish divergence setup: RSI < 30 (oversold) + price above EMA34 (uptrend bias)
-            if rsi < 30 and price > ema and volume_confirmed:
-                signals[i] = 0.25
+            # Long: RSI oversold (<30) + price above 1d EMA50 (uptrend filter) + volume
+            if rsi < 30 and price > ema_50 and volume_confirmed:
+                signals[i] = 0.20
                 position = 1
-            # Bearish divergence setup: RSI > 70 (overbought) + price below EMA34 (downtrend bias)
-            elif rsi > 70 and price < ema and volume_confirmed:
-                signals[i] = -0.25
+            # Short: RSI overbought (>70) + price below 1d EMA50 (downtrend filter) + volume
+            elif rsi > 70 and price < ema_50 and volume_confirmed:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: RSI returns to neutral (50) or price breaks below EMA34
-            if rsi >= 50 or price < ema:
+            # Exit: RSI returns to neutral (>50) or price breaks below 1d EMA50
+            if rsi > 50 or price < ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: RSI returns to neutral (50) or price breaks above EMA34
-            if rsi <= 50 or price > ema:
+            # Exit: RSI returns to neutral (<50) or price breaks above 1d EMA50
+            if rsi < 50 or price > ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
