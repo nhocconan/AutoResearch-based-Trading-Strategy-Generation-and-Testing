@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Fractal + Weekly EMA Trend Filter + Volume Spike
-# Uses weekly EMA(34) to determine trend direction (bullish/bearish).
-# In bullish weekly trend: long on bullish fractal break above prior high with volume spike.
-# In bearish weekly trend: short on bearish fractal break below prior low with volume spike.
-# In neutral weekly trend: no trades to avoid chop.
-# Volume confirmation: volume > 1.5x 20-period average to filter weak moves.
-# Target: 15-30 trades/year per symbol to stay within frequency limits.
-name = "12h_WilliamsFractal_WeeklyEMA_Trend_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
+# Uses ADX > 25 to filter for trending markets only, reducing false breakouts in ranging markets.
+# Entry: Long when price breaks above Donchian high with ADX > 25 and volume > 1.5x average.
+# Short when price breaks below Donchian low with ADX > 25 and volume > 1.5x average.
+# Exit: When price crosses the Donchian midline or reverses with opposite breakout.
+# Position size: 0.25 to limit drawdown during drawdown periods.
+# Target: 20-40 trades/year to stay within frequency limits and minimize fee drag.
+name = "4h_Donchian20_ADX25_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,114 +24,129 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA trend and fractals
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Weekly EMA(34) for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Williams Fractals (5-bar: bar is highest/lowest of 2 bars on each side)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    bullish_fractal = np.zeros(len(high_1w), dtype=bool)
-    bearish_fractal = np.zeros(len(low_1w), dtype=bool)
-    
-    for i in range(2, len(high_1w) - 2):
-        # Bullish fractal: lowest low of 5 bars
-        if (low_1w[i] < low_1w[i-1] and low_1w[i] < low_1w[i-2] and
-            low_1w[i] < low_1w[i+1] and low_1w[i] < low_1w[i+2]):
-            bullish_fractal[i] = True
-        # Bearish fractal: highest high of 5 bars
-        if (high_1w[i] > high_1w[i-1] and high_1w[i] > high_1w[i-2] and
-            high_1w[i] > high_1w[i+1] and high_1w[i] > high_1w[i+2]):
-            bearish_fractal[i] = True
-    
-    # Get daily data for reference levels (prior day high/low)
+    # Get daily data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Prior day high/low for breakout confirmation
-    prior_high_1d = np.roll(high_1d, 1)
-    prior_low_1d = np.roll(low_1d, 1)
-    prior_high_1d[0] = np.nan  # First day has no prior
-    prior_low_1d[0] = np.nan
+    # Calculate ADX (14-period)
+    def true_range(high, low, close_prev):
+        tr1 = high - low
+        tr2 = np.abs(high - close_prev)
+        tr3 = np.abs(low - close_prev)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align indicators to 12h timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal.astype(float), additional_delay_bars=2)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal.astype(float), additional_delay_bars=2)
-    prior_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_high_1d)
-    prior_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_low_1d)
+    # Calculate directional movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
     
-    # Get 12h average volume for confirmation
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Wilder's smoothing (14-period)
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    # Calculate TR and DM arrays
+    tr = np.concatenate([[np.nan], true_range(high_1d[1:], low_1d[1:], close_1d[:-1])])
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smooth TR, +DM, -DM
+    atr = wilder_smooth(tr, 14)
+    plus_di_smooth = wilder_smooth(plus_dm, 14)
+    minus_di_smooth = wilder_smooth(minus_dm, 14)
+    
+    # Calculate DI and DX
+    plus_di = 100 * plus_di_smooth / atr
+    minus_di = 100 * minus_di_smooth / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, 14)
+    
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Donchian channels (20-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            result[i] = np.max(arr[i-window+1:i+1])
+        return result
+    
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            result[i] = np.min(arr[i-window+1:i+1])
+        return result
+    
+    donch_high = rolling_max(high_4h, 20)
+    donch_low = rolling_min(low_4h, 20)
+    
+    # Align indicators to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    
+    # Get 4h average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(36, 20)  # Ensure EMA(34) + 2 delay, fractal + 2 delay, and volume MA are ready
+    start_idx = max(34, 20)  # Ensure ADX (14*2+6), Donchian (20), and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or np.isnan(prior_high_1d_aligned[i]) or
-            np.isnan(prior_low_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend = ema_34_1w_aligned[i]
-        bullish_fract = bullish_fractal_aligned[i] > 0.5
-        bearish_fract = bearish_fractal_aligned[i] > 0.5
-        prior_high = prior_high_1d_aligned[i]
-        prior_low = prior_low_1d_aligned[i]
+        adx_val = adx_aligned[i]
+        donch_high_val = donch_high_aligned[i]
+        donch_low_val = donch_low_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # Weekly trend determination (using prior weekly close to avoid look-ahead)
-        weekly_close = df_1w['close'].values
-        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
-        if np.isnan(weekly_close_aligned[i]):
-            signals[i] = 0.0
-            continue
-        prev_weekly_close = np.roll(weekly_close_aligned, 1)[i]
-        prev_weekly_close = np.nan if i == 0 else prev_weekly_close
-        if np.isnan(prev_weekly_close):
-            signals[i] = 0.0
-            continue
-        weekly_trend_up = weekly_close_aligned[i] > ema_trend
-        weekly_trend_down = weekly_close_aligned[i] < ema_trend
+        # Trend filter: ADX > 25 indicates trending market
+        is_trending = adx_val > 25
         
         if position == 0:
-            # Determine entry based on weekly trend
-            if weekly_trend_up and bullish_fract and volume_confirmed:
-                # Bullish weekly trend: long on bullish fractal break above prior day high
-                if price > prior_high:
+            # Enter only in trending markets with volume confirmation
+            if is_trending and volume_confirmed:
+                if price > donch_high_val:
                     signals[i] = 0.25
                     position = 1
-            elif weekly_trend_down and bearish_fract and volume_confirmed:
-                # Bearish weekly trend: short on bearish fractal break below prior day low
-                if price < prior_low:
+                elif price < donch_low_val:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: price crosses below prior day low or weekly EMA
-            if price < prior_low or price < ema_trend:
+            # Long exit: price crosses Donchian midline or reverse breakout
+            midline = (donch_high_val + donch_low_val) / 2
+            if price < midline or (price < donch_low_val and volume_confirmed):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above prior day high or weekly EMA
-            if price > prior_high or price > ema_trend:
+            # Short exit: price crosses Donchian midline or reverse breakout
+            midline = (donch_high_val + donch_low_val) / 2
+            if price > midline or (price > donch_high_val and volume_confirmed):
                 signals[i] = 0.0
                 position = 0
             else:
