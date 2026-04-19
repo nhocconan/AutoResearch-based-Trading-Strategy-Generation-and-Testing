@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_Pivot_R1S1_Breakout_Volume_Trend_v1"
-timeframe = "6h"
+name = "12h_1d_Supertrend_Filter_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,72 +17,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
     # Get daily data once before loop
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot levels from previous week
-    prev_close_w = np.roll(close_1w, 1)
-    prev_close_w[0] = np.nan
-    prev_high_w = np.roll(high_1w, 1)
-    prev_high_w[0] = np.nan
-    prev_low_w = np.roll(low_1w, 1)
-    prev_low_w[0] = np.nan
+    # Supertrend parameters
+    atr_period = 10
+    atr_multiplier = 3.0
     
-    # Pivot = (H + L + C) / 3
-    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3.0
-    # R1 = C + (H - L) * 1.1 / 12
-    r1_w = prev_close_w + (prev_high_w - prev_low_w) * 1.1 / 12.0
-    # S1 = C - (H - L) * 1.1 / 12
-    s1_w = prev_close_w - (prev_high_w - prev_low_w) * 1.1 / 12.0
+    # Calculate ATR
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate daily pivot levels from previous day
-    prev_close_d = np.roll(close_1d, 1)
-    prev_close_d[0] = np.nan
-    prev_high_d = np.roll(high_1d, 1)
-    prev_high_d[0] = np.nan
-    prev_low_d = np.roll(low_1d, 1)
-    prev_low_d[0] = np.nan
+    # Basic upper and lower bands
+    basic_ub = (high_1d + low_1d) / 2 + atr_multiplier * atr
+    basic_lb = (high_1d + low_1d) / 2 - atr_multiplier * atr
     
-    # Pivot = (H + L + C) / 3
-    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3.0
-    # R1 = C + (H - L) * 1.1 / 12
-    r1_d = prev_close_d + (prev_high_d - prev_low_d) * 1.1 / 12.0
-    # S1 = C - (H - L) * 1.1 / 12
-    s1_d = prev_close_d - (prev_high_d - prev_low_d) * 1.1 / 12.0
+    # Initialize Supertrend arrays
+    final_ub = np.full_like(close_1d, np.nan)
+    final_lb = np.full_like(close_1d, np.nan)
+    supertrend = np.full_like(close_1d, np.nan)
+    direction = np.full_like(close_1d, np.nan)  # 1 for up, -1 for down
     
-    # Align to 6h timeframe
-    pivot_w_6h = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r1_w_6h = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_6h = align_htf_to_ltf(prices, df_1w, s1_w)
-    pivot_d_6h = align_htf_to_ltf(prices, df_1d, pivot_d)
-    r1_d_6h = align_htf_to_ltf(prices, df_1d, r1_d)
-    s1_d_6h = align_htf_to_ltf(prices, df_1d, s1_d)
+    # Calculate Supertrend
+    for i in range(1, len(close_1d)):
+        if np.isnan(atr[i]) or np.isnan(basic_ub[i]) or np.isnan(basic_lb[i]):
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+            continue
+            
+        # Upper band logic
+        if i == 1:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
+                final_ub[i] = basic_ub[i]
+            else:
+                final_ub[i] = final_ub[i-1]
+                
+            # Lower band logic
+            if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
+                final_lb[i] = basic_lb[i]
+            else:
+                final_lb[i] = final_lb[i-1]
+        
+        # Supertrend logic
+        if i == 1:
+            supertrend[i] = final_lb[i]
+            direction[i] = 1
+        else:
+            if supertrend[i-1] == final_ub[i-1]:
+                if close_1d[i] <= final_ub[i]:
+                    supertrend[i] = final_ub[i]
+                    direction[i] = -1
+                else:
+                    supertrend[i] = final_ub[i]
+                    direction[i] = 1
+            else:
+                if close_1d[i] >= final_lb[i]:
+                    supertrend[i] = final_lb[i]
+                    direction[i] = 1
+                else:
+                    supertrend[i] = final_lb[i]
+                    direction[i] = -1
     
-    # Trend filter: 50-period EMA on 6h close
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Align Supertrend direction to 12h timeframe
+    supertrend_dir_12h = align_htf_to_ltf(prices, df_1d, direction)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_w_6h[i]) or np.isnan(r1_w_6h[i]) or np.isnan(s1_w_6h[i]) or \
-           np.isnan(pivot_d_6h[i]) or np.isnan(r1_d_6h[i]) or np.isnan(s1_d_6h[i]) or \
-           np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i]):
+        if np.isnan(supertrend_dir_12h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -90,34 +107,30 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 1.5x average
-        volume_spike = vol > 1.5 * vol_ma
-        
-        # Trend filter: price above/below EMA50
-        uptrend = price > ema_50[i]
-        downtrend = price < ema_50[i]
+        # Volume spike: current volume > 2.0x average
+        volume_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above weekly R1 with volume spike and uptrend
-            if price > r1_w_6h[i] and volume_spike and uptrend:
+            # Long: Supertrend up + volume spike
+            if supertrend_dir_12h[i] == 1 and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly S1 with volume spike and downtrend
-            elif price < s1_w_6h[i] and volume_spike and downtrend:
+            # Short: Supertrend down + volume spike
+            elif supertrend_dir_12h[i] == -1 and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below weekly S1 (reversal signal) or trend breaks
-            if price < s1_w_6h[i] or price < ema_50[i]:
+            # Exit: Supertrend flips down
+            if supertrend_dir_12h[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above weekly R1 (reversal signal) or trend breaks
-            if price > r1_w_6h[i] or price > ema_50[i]:
+            # Exit: Supertrend flips up
+            if supertrend_dir_12h[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
