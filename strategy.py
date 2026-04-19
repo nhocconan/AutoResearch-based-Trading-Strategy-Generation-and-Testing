@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_TRIX_VolumeSpike_Trend"
-timeframe = "4h"
+name = "6h_1d_WeeklyPivot_R1S1_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,58 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX on 4h data (no look-ahead)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = np.where(ema3[:-1] != 0, (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100, 0)
-    trix = np.concatenate([np.full(15, np.nan), trix])  # align length
+    # Get 1d data for weekly pivot (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Calculate weekly pivot points (using last 5 days: Monday-Friday)
+    # Rolling window of 5 days for high/low/close
+    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
+    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
     
-    # Volume spike: current volume > 2.0 x 20-period average
+    # Weekly pivot calculation
+    pivot = (high_5d + low_5d + close_5d) / 3.0
+    r1 = 2 * pivot - low_5d
+    s1 = 2 * pivot - high_5d
+    r2 = pivot + (high_5d - low_5d)
+    s2 = pivot - (high_5d - low_5d)
+    r3 = high_5d + 2 * (pivot - low_5d)
+    s3 = low_5d - 2 * (high_5d - pivot)
+    
+    # Align weekly pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Trend filter: price above/below 50-period EMA
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # ensure enough data for all indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(trix[i]) or np.isnan(trix_signal[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema50[i]):
+        if np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
+           np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        volume_spike = vol > 2.0 * vol_ma
+        
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: TRIX crosses above signal with volume spike and uptrend
-            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] and price > ema50[i] and volume_spike:
+            # Long: Price breaks above R1 with volume
+            if price > r1_6h[i] and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below signal with volume spike and downtrend
-            elif trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] and price < ema50[i] and volume_spike:
+            # Short: Price breaks below S1 with volume
+            elif price < s1_6h[i] and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: TRIX crosses below signal
-            if trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]:
+            # Exit: Price returns below pivot
+            if price < pivot_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: TRIX crosses above signal
-            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]:
+            # Exit: Price returns above pivot
+            if price > pivot_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
