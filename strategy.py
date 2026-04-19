@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 12h EMA34 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. We look for reversals from extreme levels
-# in the direction of the 12h trend (EMA34) with volume confirmation.
-# Works in bull/bear markets: avoids counter-trend trades, captures mean reversion within trends.
-# Target: 20-40 trades/year per symbol.
-name = "4h_WilliamsR_EMA34_Volume_MeanReversion"
-timeframe = "4h"
+# Hypothesis: 1d Bollinger Band squeeze breakout with 1w EMA50 trend filter and volume confirmation.
+# Bollinger Band squeeze identifies low volatility periods preceding explosive moves.
+# We trade breakouts in the direction of the weekly trend (EMA50) with volume confirmation.
+# Works in bull/bear markets: avoids false breakouts in ranging markets, captures true breakouts.
+# Target: 7-25 trades/year per symbol (30-100 total over 4 years).
+name = "1d_BB_Squeeze_EMA50_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,69 +22,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA34 on 12h
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA50 on weekly
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Williams %R (14 period) on 4h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Bollinger Bands (20, 2) on 1d
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma_20 + (bb_std * std_20)
+    lower_band = sma_20 - (bb_std * std_20)
+    bb_width = (upper_band - lower_band) / sma_20  # Normalized bandwidth
     
-    # Align 12h EMA34 to 4h
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Bollinger Band squeeze detection: bandwidth below 20-period mean
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze_condition = bb_width < bb_width_ma  # Bandwidth below average = squeeze
     
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Align 1w EMA50 to 1d
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 34, 20)  # Ensure Williams %R, EMA34, and volume MA are ready
+    start_idx = max(bb_period, 50, 20)  # Ensure BB, EMA50, and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(williams_r[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(bb_width[i]) or np.isnan(bb_width_ma[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        wr = williams_r[i]
-        ema_34_val = ema_34_aligned[i]
+        upper = upper_band[i]
+        lower = lower_band[i]
+        ema_50_val = ema_50_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
+        is_squeeze = squeeze_condition[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.3 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
-        # Williams %R levels
-        oversold = wr < -80  # Oversold condition
-        overbought = wr > -20  # Overbought condition
+        # Breakout conditions
+        bullish_breakout = price > upper  # Price breaks above upper band
+        bearish_breakout = price < lower  # Price breaks below lower band
         
         if position == 0:
-            # Look for mean reversion from extremes in direction of 12h trend
-            if oversold and (price > ema_34_val) and volume_confirmed:
+            # Look for entry after Bollinger Band squeeze, in direction of weekly trend
+            if is_squeeze and bullish_breakout and (price > ema_50_val) and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            elif overbought and (price < ema_34_val) and volume_confirmed:
+            elif is_squeeze and bearish_breakout and (price < ema_50_val) and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when Williams %R returns to neutral territory or trend weakens
-            if wr > -50:  # Return to neutral or overbought
+            # Exit long when price returns to middle band (mean reversion) or volatility expands
+            middle_band = sma_20[i]
+            if price < middle_band:  # Return to mean
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when Williams %R returns to neutral territory
-            if wr < -50:  # Return to neutral or oversold
+            # Exit short when price returns to middle band
+            middle_band = sma_20[i]
+            if price > middle_band:  # Return to mean
                 signals[i] = 0.0
                 position = 0
             else:
