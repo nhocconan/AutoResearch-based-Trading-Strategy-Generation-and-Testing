@@ -1,14 +1,20 @@
-# 12h_Donchian20_ADX25_VolumeFilter
-# Hypothesis: Donchian(20) breakout on 12h timeframe with ADX(14) > 25 for trend strength and volume > 1.5x 20-period average for confirmation.
-# Works in both bull and bear markets by filtering weak trends and choppy markets. Target: 20-40 trades/year per symbol.
-# Uses 1d EMA200 as additional trend filter to avoid counter-trend trades.
-name = "12h_Donchian20_ADX25_VolumeFilter"
-timeframe = "12h"
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Williams Alligator with jaw/teeth/lips crossover + volume confirmation + ADX filter.
+# The Alligator identifies trend direction (lips above teeth above jaw = bullish, reverse = bearish).
+# We enter on bullish/bearish alignment with volume confirmation and ADX > 20 to filter chop.
+# Works in trending markets (bull/bear) and avoids sideways chop via ADX filter.
+# Target: 20-30 trades/year per symbol to avoid fee drag.
+name = "4h_WilliamsAlligator_ADX20_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,14 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Williams Alligator: 3 SMAs (Jaw=13, Teeth=8, Lips=5) shifted forward
+    def sma(arr, period):
+        return pd.Series(arr).rolling(window=period, min_periods=period).mean().values
     
-    # Calculate EMA200 on daily
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    jaw = sma(close, 13)  # Blue line
+    teeth = sma(close, 8)  # Red line
+    lips = sma(close, 5)   # Green line
     
-    # ADX calculation (14-period)
+    # Shift forward as per Williams Alligator definition
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    # ADX calculation (14-period) for trend strength filter
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -69,70 +81,60 @@ def generate_signals(prices):
     
     adx = calculate_adx(high, low, close, 14)
     
-    # Align 1d EMA200 to 12h
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # Donchian channels (20-period)
-    def calculate_donchian(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(high, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-(period-1):i+1])
-            lower[i] = np.min(low[i-(period-1):i+1])
-        return upper, lower
-    
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 28)  # Ensure EMA200, ADX, and Donchian are ready
+    start_idx = max(34, 28)  # Ensure Alligator and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(adx[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_200_val = ema_200_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         adx_val = adx[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 1.3 * vol_ma
         
         # ADX trend strength filter
-        strong_trend = adx_val > 25
+        trending = adx_val > 20
+        
+        # Alligator alignment: bullish when lips > teeth > jaw, bearish when lips < teeth < jaw
+        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
+        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
         
         if position == 0:
-            # Enter long if price breaks above Donchian upper, strong trend, volume confirmation, and price above EMA200
-            if price > upper and strong_trend and volume_confirmed and price > ema_200_val:
+            # Enter long on bullish alignment with volume and trend confirmation
+            if bullish_alignment and volume_confirmed and trending:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price breaks below Donchian lower, strong trend, volume confirmation, and price below EMA200
-            elif price < lower and strong_trend and volume_confirmed and price < ema_200_val:
+            # Enter short on bearish alignment with volume and trend confirmation
+            elif bearish_alignment and volume_confirmed and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price breaks below Donchian lower or trend weakens
-            if price < lower or adx_val < 20:  # Trend weakening
+            # Exit long when bullish alignment breaks or trend weakens
+            if not bullish_alignment or adx_val < 15:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price breaks above Donchian upper or trend weakens
-            if price > upper or adx_val < 20:  # Trend weakening
+            # Exit short when bearish alignment breaks or trend weakens
+            if not bearish_alignment or adx_val < 15:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
