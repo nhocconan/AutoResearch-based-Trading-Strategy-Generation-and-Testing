@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_KAMA_RSI_Chop_Filter_V2"
-timeframe = "1d"
+name = "6h_1d_Stochastic_Trend_Confirmation_V1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,94 +17,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA on close
-    er_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Get 1d data for indicators
+    df_1d = get_htf_data(prices, '1d')
     
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Fix volatility calculation using rolling sum
-    volatility_series = pd.Series(np.abs(np.diff(close, prepend=close[0])))
-    volatility = volatility_series.rolling(window=er_period, min_periods=1).sum().values
+    # Calculate Stochastic %K on 1d data (14,3,3)
+    period_k = 14
+    period_d = 3
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    er = np.where(volatility > 0, change / volatility, 0)
-    sc = (er * (fast_ema - 1) + 1) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
+    def calculate_stochastic(high_arr, low_arr, close_arr, k_period, d_period):
+        n_days = len(close_arr)
+        lowest_low = np.full(n_days, np.nan)
+        highest_high = np.full(n_days, np.nan)
+        percent_k = np.full(n_days, np.nan)
+        percent_d = np.full(n_days, np.nan)
+        
+        for i in range(k_period - 1, n_days):
+            lowest_low[i] = np.min(low_arr[i - k_period + 1:i + 1])
+            highest_high[i] = np.max(high_arr[i - k_period + 1:i + 1])
+            if highest_high[i] != lowest_low[i]:
+                percent_k[i] = ((close_arr[i] - lowest_low[i]) / (highest_high[i] - lowest_low[i])) * 100
+            else:
+                percent_k[i] = 50.0
+        
+        # Calculate %D (SMA of %K)
+        k_series = pd.Series(percent_k)
+        d_values = k_series.rolling(window=d_period, min_periods=d_period).mean().values
+        
+        return percent_k, d_values
     
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    stoch_k, stoch_d = calculate_stochastic(high_1d, low_1d, close_1d, period_k, period_d)
     
-    # Calculate RSI
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align indicators to 6h timeframe
+    stoch_k_aligned = align_htf_to_ltf(prices, df_1d, stoch_k)
+    stoch_d_aligned = align_htf_to_ltf(prices, df_1d, stoch_d)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Get weekly data for chop filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate Chop on weekly high/low
-    chop_period = 14
-    atr = np.maximum(np.maximum(df_1w['high'] - df_1w['low'], 
-                                np.abs(df_1w['high'] - df_1w['close'].shift(1))),
-                        np.abs(df_1w['low'] - df_1w['close'].shift(1)))
-    atr_sum = pd.Series(atr).rolling(window=chop_period, min_periods=chop_period).sum().values
-    highest_high = pd.Series(df_1w['high']).rolling(window=chop_period, min_periods=chop_period).max().values
-    lowest_low = pd.Series(df_1w['low']).rolling(window=chop_period, min_periods=chop_period).min().values
-    
-    chop = np.where((highest_high - lowest_low) != 0, 
-                    100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(chop_period), 
-                    50)
-    
-    # Align indicators to daily
-    kama_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama)
-    rsi_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=0)
+    # Volume spike on 6h (volume > 1.5 * 20-period average)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(stoch_k_aligned[i]) or np.isnan(stoch_d_aligned[i]) or np.isnan(ema_34_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # Chop filter: only trade when chop < 61.8 (trending market)
-        chop_filter = chop_aligned[i] < 61.8
+        vol_confirm = volume_spike[i]
         
         if position == 0:
-            # Long when price > KAMA and RSI > 50 in trending market
-            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50 and chop_filter:
+            # Long when: Stochastic oversold (<20) + %K crosses above %D + above EMA34 + volume spike
+            if (stoch_k_aligned[i] < 20 and 
+                stoch_k_aligned[i] > stoch_d_aligned[i] and
+                close[i] > ema_34_aligned[i] and
+                vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short when price < KAMA and RSI < 50 in trending market
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50 and chop_filter:
+            # Short when: Stochastic overbought (>80) + %K crosses below %D + below EMA34 + volume spike
+            elif (stoch_k_aligned[i] > 80 and 
+                  stoch_k_aligned[i] < stoch_d_aligned[i] and
+                  close[i] < ema_34_aligned[i] and
+                  vol_confirm):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price < KAMA or RSI < 40
-            if close[i] < kama_aligned[i] or rsi_aligned[i] < 40:
+            # Long position: exit when Stochastic overbought or trend changes
+            if (stoch_k_aligned[i] > 80 or 
+                close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price > KAMA or RSI > 60
-            if close[i] > kama_aligned[i] or rsi_aligned[i] > 60:
+            # Short position: exit when Stochastic oversold or trend changes
+            if (stoch_k_aligned[i] < 20 or 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
