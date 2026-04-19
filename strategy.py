@@ -1,10 +1,13 @@
+# 1d_WeeklyTrend_Pivot_R1S1_Breakout_Volume
+# Hypothesis: Weekly trend filter (price above/below weekly MA200) improves 1d Camarilla pivot breakout performance in both bull and bear markets. Weekly trend reduces false breakouts during counter-trend moves. Volume confirmation ensures breakout strength. Target: 15-25 trades/year per symbol with controlled risk.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_RSI_ChopFilter_v2"
-timeframe = "4h"
+name = "1d_WeeklyTrend_Pivot_R1S1_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,88 +20,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data (once before loop)
+    # Get weekly data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Weekly MA200 for trend filter
+    close_1w = df_1w['close'].values
+    ma200_1w = pd.Series(close_1w).rolling(window=200, min_periods=200).mean().values
+    ma200_1w_aligned = align_htf_to_ltf(prices, df_1w, ma200_1w)
+    
+    # Get daily data for pivot calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # KAMA on close (ER=10, fast=2, slow=30)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]).reshape(-1, 10)), axis=1)
-    volatility = np.concatenate([np.full(9, np.nan), volatility])
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    sc = np.power(er * (2/2 - 2/30) + 2/30, 2)
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    kama = np.where(np.arange(len(close)) < 10, np.nan, kama)
+    # Daily high, low, close for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily ATR for volatility filter
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr_14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate R1 and S1 using Camarilla formula
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align daily pivot levels to 1d timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Choppiness index (14)
-    atr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
-    
-    # Volume confirmation
+    # Volume confirmation: current volume > 1.5x 20-period average (1d)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 200
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ma200_1w_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        chop_val = chop[i]
-        atr = atr_14[i]
         vol_ma = vol_ma_20[i]
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        weekly_ma = ma200_1w_aligned[i]
         
         volume_confirmed = vol > 1.5 * vol_ma
-        chop_filter = chop_val > 50  # avoid strong trends
         
         if position == 0:
-            # Long: price above KAMA, RSI > 50, chop filter, volume
-            if price > kama_val and rsi_val > 50 and chop_filter and volume_confirmed:
+            # Long: price above weekly MA200 AND break above R1 with volume
+            if price > weekly_ma and price > r1 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI < 50, chop filter, volume
-            elif price < kama_val and rsi_val < 50 and chop_filter and volume_confirmed:
+            # Short: price below weekly MA200 AND break below S1 with volume
+            elif price < weekly_ma and price < s1 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price below KAMA or RSI < 40
-            if price < kama_val or rsi_val < 40:
+            # Exit: price below weekly MA200 OR below pivot
+            if price < weekly_ma or price < pivot:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above KAMA or RSI > 60
-            if price > kama_val or rsi_val > 60:
+            # Exit: price above weekly MA200 OR above pivot
+            if price > weekly_ma or price > pivot:
                 signals[i] = 0.0
                 position = 0
             else:
