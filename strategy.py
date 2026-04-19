@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily RSI(14) with weekly trend filter (EMA21) and volume confirmation.
-# In bull markets: RSI > 55 + price above weekly EMA21 + volume > 1.5x average = long.
-# In bear markets: RSI < 45 + price below weekly EMA21 + volume > 1.5x average = short.
-# Weekly EMA21 filters trend direction to avoid counter-trend trades.
-# Volume confirmation ensures breakouts have conviction.
-# Designed for 1d timeframe to capture multi-day moves with low frequency (target: 15-25 trades/year).
-# Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
-name = "1d_RSI_WeeklyEMA_Volume"
-timeframe = "1d"
+# Hypothesis: 6h ADX + Williams Alligator combination
+# ADX > 25 identifies strong trends while Alligator (Jaw/Teeth/Lips) confirms direction.
+# Long when ADX > 25, Lips > Teeth > Jaw (bullish alignment)
+# Short when ADX > 25, Lips < Teeth < Jaw (bearish alignment)
+# Exit when ADX < 20 (trend weakening) or Alligator lines cross (signal reversal)
+# Uses smoothed SMAs to reduce whipsaw. Targets 20-40 trades/year for low frequency.
+name = "6h_ADX_Alligator_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,72 +18,81 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Weekly EMA21 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return np.zeros(n)
+    # Williams Alligator (SMAs with specific periods)
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
     
-    # Weekly EMA21
-    weekly_close = df_1w['close'].values
-    ema21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_aligned = align_htf_to_ltf(prices, df_1w, ema21)
+    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().values
+    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().values
+    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().values
     
-    # Daily RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Shift jaws/teeth/lips forward as per Alligator specification
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
     
-    # Volume confirmation: volume > 1.5 * 20-day average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    # ADX calculation
+    period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0  # First TR has no previous close
+    
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Ensure enough data for all indicators (21 for weekly EMA + 14 for RSI)
+    start_idx = max(jaw_period, teeth_period, lips_period, period) + 8  # Account for shifts
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema21_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI > 55, price above weekly EMA21, volume confirmation
-            if (rsi[i] > 55 and 
-                close[i] > ema21_aligned[i] and 
-                volume_confirm[i]):
+            # Bullish alignment: Lips > Teeth > Jaw
+            if (adx[i] > 25 and 
+                lips[i] > teeth[i] and 
+                teeth[i] > jaw[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45, price below weekly EMA21, volume confirmation
-            elif (rsi[i] < 45 and 
-                  close[i] < ema21_aligned[i] and 
-                  volume_confirm[i]):
+            # Bearish alignment: Lips < Teeth < Jaw
+            elif (adx[i] > 25 and 
+                  lips[i] < teeth[i] and 
+                  teeth[i] < jaw[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if RSI < 40 or price crosses below weekly EMA21
-            if (rsi[i] < 40) or (close[i] < ema21_aligned[i]):
+            # Exit: ADX weakening (<20) or Alligator cross (Lips < Teeth)
+            if (adx[i] < 20) or (lips[i] < teeth[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if RSI > 60 or price crosses above weekly EMA21
-            if (rsi[i] > 60) or (close[i] > ema21_aligned[i]):
+            # Exit: ADX weakening (<20) or Alligator cross (Lips > Teeth)
+            if (adx[i] < 20) or (lips[i] > teeth[i]):
                 signals[i] = 0.0
                 position = 0
             else:
