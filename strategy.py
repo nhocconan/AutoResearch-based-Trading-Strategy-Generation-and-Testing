@@ -3,7 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_Camarilla_R1S1_Breakout_Volume"
+# Hypothesis: 1h timeframe with 1d Camarilla R1/S1 breakout + volume confirmation + session filter
+# Uses daily pivot structure for direction, 1h for entry timing. Designed to work in both bull/bear
+# by capturing intraday momentum within established daily support/resistance levels.
+# Target: 15-35 trades/year to avoid fee drag.
+
+name = "1h_1d_Camarilla_R1S1_Breakout_Volume"
 timeframe = "1h"
 leverage = 1.0
 
@@ -37,22 +42,15 @@ def generate_signals(prices):
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
     # S1 = C - (H - L) * 1.1 / 12
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
-    # R4 = C + (H - L) * 1.1 / 2
-    r4 = prev_close + (prev_high - prev_low) * 1.1 / 2.0
-    # S4 = C - (H - L) * 1.1 / 2
-    s4 = prev_close - (prev_high - prev_low) * 1.1 / 2.0
     
     # Align to 1h timeframe
-    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
     r1_1h = align_htf_to_ltf(prices, df_1d, r1)
     s1_1h = align_htf_to_ltf(prices, df_1d, s1)
-    r4_1h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_1h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average (stricter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Time filter: 08-20 UTC
+    # Time filter: 08-20 UTC (reduces noise outside active sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     time_filter = (hours >= 8) & (hours <= 20)
     
@@ -66,8 +64,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        if np.isnan(pivot_1h[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or \
-           np.isnan(r4_1h[i]) or np.isnan(s4_1h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -75,7 +72,7 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        volume_confirmed = vol > 1.8 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma  # Stricter volume filter
         
         if position == 0:
             # Long: Price breaks above R1 with volume
