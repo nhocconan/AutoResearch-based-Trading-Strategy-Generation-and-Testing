@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_Volume"
-timeframe = "4h"
+name = "6h_1w_Pivot_R1_S1_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,27 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Pivot points
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for Pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate previous day's Pivot, R1, S1
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    # Calculate previous week's Pivot, R1, S1
+    prev_high = np.concatenate([[np.nan], high_1w[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1w[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1w[:-1]])
     
     pivot = (prev_high + prev_low + prev_close) / 3
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align daily pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Volume filter: current volume > 1.5x 20-period average (on 4h)
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
