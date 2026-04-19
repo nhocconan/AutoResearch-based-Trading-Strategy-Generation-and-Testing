@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Price Action with 1d Pivot Confluence and Volume Confirmation
-# In ranging markets, price respects daily pivot S1/R1 as support/resistance
-# In trending markets, price breaks through S2/R2 with volume confirmation
-# Uses 1d pivots as dynamic S/R with volume filter to distinguish breakouts from reversals
-# Works in both bull and bear markets by adapting to volatility regime via ATR filter
-# Target: 15-30 trades/year per symbol (~60-120 total over 4 years)
+# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation
+# In trending markets, price breaks Donchian channels with volume (continuation)
+# In ranging markets, price reverts from Donchian extremes with volume (mean reversion)
+# Uses 12h EMA34 as trend filter to distinguish between breakouts and reversals
+# Volume filter ensures only significant moves trigger entries
+# Works in both bull and bear markets by adapting to volatility regime via ATR stop
+# Target: 20-50 trades/year per symbol (~80-200 total over 4 years)
 
-name = "6h_1dPivot_S1R1_S2R2_VolumeATR_v2"
-timeframe = "6h"
+name = "4h_Donchian20_12hEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,40 +25,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for ATR calculation (better resolution than 6h)
-    df_1h = get_htf_data(prices, '1h')
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate ATR(14) on 1h
-    tr1 = np.maximum(high_1h[1:], close_1h[:-1]) - np.minimum(low_1h[1:], close_1h[:-1])
-    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
-    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1h_aligned = align_htf_to_ltf(prices, df_1h, atr_1h)
+    # Calculate EMA(34) on 12h
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Get 1d data for pivot points
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily pivot points: P = (H+L+C)/3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Support and resistance levels
-    s1_1d = 2 * pivot_1d - high_1d
-    r1_1d = 2 * pivot_1d - low_1d
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    
-    # Align pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    # Calculate Donchian channels (20-period) on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,60 +43,52 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need volume MA and ATR data
+    start_idx = 34  # Need EMA and Donchian data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
-            np.isnan(r2_1d_aligned[i]) or np.isnan(atr_1h_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_1h_aligned[i]
+        ema = ema_12h_aligned[i]
+        upper = high_max[i]
+        lower = low_min[i]
         
-        # Volume and volatility filters
+        # Volume filter
         volume_confirmed = vol > 1.5 * vol_ma
-        volatility_filter = atr > 0  # Always true but keeps structure
-        
-        # Pivot levels
-        s1 = s1_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
-        pivot = pivot_1d_aligned[i]
         
         if position == 0:
             # Long conditions:
-            # 1. Breakout above R2 with volume (strong bullish)
-            # 2. Mean reversion from S1 with volume (bullish bounce)
-            if ((price > r2 and volume_confirmed) or 
-                (price < s1 and price > s2 and volume_confirmed and price > pivot)):
+            # 1. Breakout above upper Donchian with volume AND price > 12h EMA (bullish continuation)
+            # 2. Bounce from lower Donchian with volume AND price < 12h EMA (bullish reversal)
+            if ((price > upper and volume_confirmed and price > ema) or 
+                (price < lower and volume_confirmed and price < ema)):
                 signals[i] = 0.25
                 position = 1
             # Short conditions:
-            # 1. Breakdown below S2 with volume (strong bearish)
-            # 2. Mean reversion from R1 with volume (bearish rejection)
-            elif ((price < s2 and volume_confirmed) or 
-                  (price > r1 and price < r2 and volume_confirmed and price < pivot)):
+            # 1. Breakdown below lower Donchian with volume AND price < 12h EMA (bearish continuation)
+            # 2. Rejection from upper Donchian with volume AND price > 12h EMA (bearish reversal)
+            elif ((price < lower and volume_confirmed and price < ema) or 
+                  (price > upper and volume_confirmed and price > ema)):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: breakdown below S1 or reversal at R1
-            if price < s1 or (price > r1 and price < r2):
+            # Exit long: breakdown below lower Donchian
+            if price < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: breakout above S2 or reversal at S1
-            if price > s2 or (price < r1 and price > s2):
+            # Exit short: breakout above upper Donchian
+            if price > upper:
                 signals[i] = 0.0
                 position = 0
             else:
