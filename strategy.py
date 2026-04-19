@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
+# 4h_RSI_Stochastic_Confluence
+# Hypothesis: Combining RSI mean reversion with Stochastic oscillator on 4h timeframe provides high-probability entries during pullbacks in trending markets. RSI identifies overbought/oversold conditions while Stochastic confirms momentum exhaustion. Volume filter ensures institutional participation. Designed to work in both bull and bear markets by capturing mean reversion within the dominant trend, reducing whipsaw and improving risk-reward.
+
+name = "4h_RSI_Stochastic_Confluence"
+timeframe = "4h"
+leverage = 1.0
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h Camarilla pivot breakout with 12h trend filter and volume confirmation.
-# Long when: Close breaks above R1 and 12h EMA34 is rising, volume > 1.5x average.
-# Short when: Close breaks below S1 and 12h EMA34 is falling, volume > 1.5x average.
-# Exit when price returns to pivot (PP) or reverses at S2/R2.
-# Uses Camarilla levels for mean reversion breakouts, higher timeframe for trend alignment,
-# and volume to confirm institutional participation. Designed for ~25-40 trades/year per symbol.
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Trend"
-timeframe = "4h"
-leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,80 +20,133 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_34_slope = ema_12h_34 - np.roll(ema_12h_34, 1)
-    ema_12h_34_slope[0] = 0
+    # RSI calculation
+    def calculate_rsi(close, period=14):
+        delta = np.diff(close)
+        delta = np.concatenate([[np.nan], delta])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        
+        # Wilder's smoothing
+        avg_gain[period] = np.nanmean(gain[1:period+1])
+        avg_loss[period] = np.nanmean(loss[1:period+1])
+        
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Calculate 4-session average volume for confirmation
-    vol_avg_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Stochastic oscillator calculation
+    def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+        lowest_low = np.zeros_like(low)
+        highest_high = np.zeros_like(high)
+        
+        for i in range(len(close)):
+            if i < k_period:
+                lowest_low[i] = np.nan
+                highest_high[i] = np.nan
+            else:
+                lowest_low[i] = np.min(low[i-k_period+1:i+1])
+                highest_high[i] = np.max(high[i-k_period+1:i+1])
+        
+        k_percent = np.divide((close - lowest_low), (highest_high - lowest_low), 
+                              out=np.full_like(close, np.nan), where=(highest_high-lowest_low)!=0) * 100
+        
+        # Smoothed K (D)
+        d_percent = np.full_like(close, np.nan)
+        for i in range(len(close)):
+            if i < k_period + d_period - 1:
+                d_percent[i] = np.nan
+            else:
+                d_percent[i] = np.nanmean(k_percent[i-d_period+1:i+1])
+        
+        return k_percent, d_percent
+    
+    # Get 4h data for indicators
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Calculate RSI on 4h close
+    rsi = calculate_rsi(df_4h['close'].values, 14)
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
+    
+    # Calculate Stochastic on 4h OHLC
+    stoch_k, stoch_d = calculate_stochastic(
+        df_4h['high'].values, 
+        df_4h['low'].values, 
+        df_4h['close'].values, 
+        14, 3
+    )
+    stoch_k_aligned = align_htf_to_ltf(prices, df_4h, stoch_k)
+    stoch_d_aligned = align_htf_to_ltf(prices, df_4h, stoch_d)
+    
+    # Volume confirmation: volume > 1.2 * 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_ma * 1.2)
+    
+    # ATR for stop loss
+    def calculate_atr(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+        return atr
+    
+    atr = calculate_atr(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for indicator calculations
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(ema_12h_34_slope[i]) or np.isnan(vol_avg_4[i]) or 
-            np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(rsi_aligned[i]) or np.isnan(stoch_k_aligned[i]) or 
+            np.isnan(stoch_d_aligned[i]) or np.isnan(volume_ma[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
-        
-        # Calculate Camarilla levels for current day using previous day's OHLC
-        # Need previous day's data - we'll use daily resampling from 4h data
-        # Group by date to get daily OHLC
-        if i < 24:  # Need at least 24 hours (6 bars of 4h) for previous day
-            signals[i] = 0.0
-            continue
-            
-        # Find start of current trading day (assuming 00:00 UTC)
-        # We'll use the last 6 bars (24h) to calculate daily OHLC
-        lookback = min(i, 24)
-        day_high = np.max(high[i-lookback+1:i+1])
-        day_low = np.min(low[i-lookback+1:i+1])
-        day_close = close[i-lookback+1]  # First bar of the period
-        
-        # Calculate Camarilla levels
-        range_val = day_high - day_low
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # Camarilla formulas
-        pp = (day_high + day_low + day_close) / 3
-        r1 = pp + (range_val * 1.1 / 12)
-        s1 = pp - (range_val * 1.1 / 12)
-        r2 = pp + (range_val * 1.1 / 6)
-        s2 = pp - (range_val * 1.1 / 6)
-        
-        price = close[i]
-        vol_ratio = volume[i] / (vol_avg_4[i] + 1e-10)
-        ema_slope = ema_12h_34_slope[i]
         
         if position == 0:
-            # Long: Price breaks above R1, 12h EMA trending up, volume confirmation
-            if price > r1 and ema_slope > 0 and vol_ratio > 1.5:
+            # Long: RSI oversold (<30) AND Stochastic K crosses above D (bullish momentum)
+            if (rsi_aligned[i] < 30 and 
+                stoch_k_aligned[i] > stoch_d_aligned[i] and 
+                stoch_k_aligned[i-1] <= stoch_d_aligned[i-1] and  # crossover
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1, 12h EMA trending down, volume confirmation
-            elif price < s1 and ema_slope < 0 and vol_ratio > 1.5:
+            # Short: RSI overbought (>70) AND Stochastic K crosses below D (bearish momentum)
+            elif (rsi_aligned[i] > 70 and 
+                  stoch_k_aligned[i] < stoch_d_aligned[i] and 
+                  stoch_k_aligned[i-1] >= stoch_d_aligned[i-1] and  # crossover
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
-        
+                
         elif position == 1:
-            # Long exit: Price returns to pivot or reaches R2
-            if price <= pp or price >= r2:
+            # Long: exit if RSI overbought OR Stochastic bearish crossover OR ATR stop
+            if (rsi_aligned[i] > 70) or \
+               (stoch_k_aligned[i] < stoch_d_aligned[i] and stoch_k_aligned[i-1] >= stoch_d_aligned[i-1]) or \
+               (close[i] < close[i-1] - 1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
+                
         elif position == -1:
-            # Short exit: Price returns to pivot or reaches S2
-            if price >= pp or price <= s2:
+            # Short: exit if RSI oversold OR Stochastic bullish crossover OR ATR stop
+            if (rsi_aligned[i] < 30) or \
+               (stoch_k_aligned[i] > stoch_d_aligned[i] and stoch_k_aligned[i-1] <= stoch_d_aligned[i-1]) or \
+               (close[i] > close[i-1] + 1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
