@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w high/low trend filter and volume confirmation
-# In trending markets, price breaks Donchian channels with volume (breakout)
-# Uses 1w high/low as trend filter: only long when above 1w low, short when below 1w high
-# Volume confirmation ensures breakouts are genuine
-# Works in both bull and bear markets by adapting to volatility regime via breakout strength
-# Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
+# Hypothesis: 4h Donchian(20) breakout with 1d volatility regime filter and volume confirmation
+# Uses daily ATR ratio to distinguish trending vs ranging markets:
+# - In trending markets (ATR ratio > 1.2): trade Donchian breakouts with volume
+# - In ranging markets (ATR ratio <= 1.2): fade Donchian touches at bands with volume
+# Adaptive to both bull and bear markets via volatility regime detection.
+# Target: 20-50 trades/year per symbol (~80-200 total over 4 years)
 
-name = "12h_Donchian20_1wTrend_Filter_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_VolatilityRegime_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,86 +24,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data for ATR calculation (volatility regime)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian(20) on 12h
-    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate ATR(10) on daily
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr_10 / atr_30  # >1.2 = trending, <=1.2 = ranging
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate Donchian channels (20-period) on 4h
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1w high/low for trend filter
-    highest_1w = pd.Series(high_1w).rolling(window=5, min_periods=5).max().values  # ~5 weeks
-    lowest_1w = pd.Series(low_1w).rolling(window=5, min_periods=5).min().values
-    
-    # Align indicators to 12h timeframe
-    highest_20_aligned = align_htf_to_ltf(prices, df_12h, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_12h, lowest_20)
-    highest_1w_aligned = align_htf_to_ltf(prices, df_1w, highest_1w)
-    lowest_1w_aligned = align_htf_to_ltf(prices, df_1w, lowest_1w)
-    
-    # Volume confirmation: current volume > 2x 20-period average
+    # Volume confirmation: current volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need Donchian and volume MA data
+    start_idx = 30  # Need ATR(30) and Donchian(20) data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
-            np.isnan(highest_1w_aligned[i]) or np.isnan(lowest_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        atr_ratio_val = atr_ratio_aligned[i]
         
-        # Volume and trend filters
-        volume_confirmed = vol > 2.0 * vol_ma
-        uptrend = price > lowest_1w_aligned[i]  # Above weekly low = bullish bias
-        downtrend = price < highest_1w_aligned[i]  # Below weekly high = bearish bias
+        # Volume confirmation
+        volume_confirmed = vol > 1.3 * vol_ma
         
         # Donchian levels
-        upper = highest_20_aligned[i]
-        lower = lowest_20_aligned[i]
+        upper = highest_20[i]
+        lower = lowest_20[i]
         
         if position == 0:
-            # Long: breakout above upper Donchian with volume and uptrend bias
-            if price > upper and volume_confirmed and uptrend:
-                signals[i] = 0.25
-                position = 1
-            # Short: breakdown below lower Donchian with volume and downtrend bias
-            elif price < lower and volume_confirmed and downtrend:
-                signals[i] = -0.25
-                position = -1
+            # Determine market regime
+            is_trending = atr_ratio_val > 1.2
+            
+            if is_trending:
+                # Trending market: trade breakouts
+                if price > upper and volume_confirmed:
+                    signals[i] = 0.30
+                    position = 1
+                elif price < lower and volume_confirmed:
+                    signals[i] = -0.30
+                    position = -1
+            else:
+                # Ranging market: fade Donchian touches
+                if price >= upper * 0.995 and volume_confirmed:  # Near upper band
+                    signals[i] = -0.30
+                    position = -1
+                elif price <= lower * 1.005 and volume_confirmed:  # Near lower band
+                    signals[i] = 0.30
+                    position = 1
         
         elif position == 1:
-            # Exit long: price returns to midpoint of Donchian channel
-            midpoint = (upper + lower) * 0.5
-            if price < midpoint:
+            # Exit long: price touches lower Donchian band or loses volume
+            if price <= lower or not volume_confirmed:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: price returns to midpoint of Donchian channel
-            midpoint = (upper + lower) * 0.5
-            if price > midpoint:
+            # Exit short: price touches upper Donchian band or loses volume
+            if price >= upper or not volume_confirmed:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
