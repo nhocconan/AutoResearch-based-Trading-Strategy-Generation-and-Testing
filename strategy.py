@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
+# 1d_W1_HighLow_Breakout_Volume_Trend
+# Hypothesis: 1d breakout above weekly high or below weekly low with volume confirmation and trend filter
+# Weekly high/low provides strong institutional support/resistance from multi-day price action
+# Volume confirmation ensures breakout has participation
+# Trend filter (ADX > 20) avoids false breakouts in choppy markets
+# Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year)
+# Works in bull/bear via trend filter and volatility-adjusted breakouts
 
-# 4h_MACD_Zero_Cross_With_Volume_Confirmation
-# Hypothesis: MACD line crossing zero on 4h timeframe indicates trend changes. 
-# MACD zero cross provides clear entry/exit signals with low latency. 
-# Volume confirmation filters out false signals. Works in both bull and bear markets
-# by capturing momentum shifts. Target 20-50 trades/year for low friction.
-
-name = "4h_MACD_Zero_Cross_With_Volume_Confirmation"
-timeframe = "4h"
+name = "1d_W1_HighLow_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,28 +25,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # MACD calculation
-    def calculate_macd(close_prices, fast=12, slow=26, signal=9):
-        # Calculate EMAs
-        ema_fast = pd.Series(close_prices).ewm(span=fast, adjust=False, min_periods=fast).mean().values
-        ema_slow = pd.Series(close_prices).ewm(span=slow, adjust=False, min_periods=slow).mean().values
-        macd_line = ema_fast - ema_slow
-        signal_line = pd.Series(macd_line).ewm(span=signal, adjust=False, min_periods=signal).mean().values
-        return macd_line, signal_line
+    # ADX(14) for trend strength filter - calculated on 1d data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values using Wilder's smoothing (EMA-like)
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
+        
+        atr = WilderSmooth(tr, period)
+        dm_plus_smooth = WilderSmooth(dm_plus, period)
+        dm_minus_smooth = WilderSmooth(dm_minus, period)
+        
+        # Avoid division by zero
+        dx = np.full_like(close, np.nan)
+        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+        
+        adx = WilderSmooth(dx, period)
+        return adx
     
-    # Get 4h data for MACD calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # 1d data for ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate MACD on 4h data
-    macd_line, signal_line = calculate_macd(df_4h['close'].values)
-    macd_line_aligned = align_htf_to_ltf(prices, df_4h, macd_line)
-    signal_line_aligned = align_htf_to_ltf(prices, df_4h, signal_line)
+    # Calculate ADX on 1d data
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Weekly data for high/low
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Weekly high and low from previous week
+    weekly_high = df_1w['high'].shift(1).values
+    weekly_low = df_1w['low'].shift(1).values
+    
+    # Align weekly levels to 1d timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,34 +101,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(macd_line_aligned[i]) or np.isnan(signal_line_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(weekly_high_aligned[i]) or 
+            np.isnan(weekly_low_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Trend filter: only trade when ADX > 20 (trending market)
+        strong_trend = adx_1d_aligned[i] > 20
+        
         if position == 0:
-            # Long: MACD crosses above zero with volume confirmation
-            if (macd_line_aligned[i] > 0 and macd_line_aligned[i-1] <= 0 and 
-                volume_confirm[i]):
+            # Long: price breaks above weekly high with volume and strong trend
+            if (close[i] > weekly_high_aligned[i] and 
+                volume_confirm[i] and 
+                strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: MACD crosses below zero with volume confirmation
-            elif (macd_line_aligned[i] < 0 and macd_line_aligned[i-1] >= 0 and 
-                  volume_confirm[i]):
+            # Short: price breaks below weekly low with volume and strong trend
+            elif (close[i] < weekly_low_aligned[i] and 
+                  volume_confirm[i] and 
+                  strong_trend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if MACD crosses below zero
-            if macd_line_aligned[i] < 0 and macd_line_aligned[i-1] >= 0:
+            # Long: exit if price breaks below weekly low or trend weakens (ADX < 15)
+            if (close[i] < weekly_low_aligned[i]) or (adx_1d_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if MACD crosses above zero
-            if macd_line_aligned[i] > 0 and macd_line_aligned[i-1] <= 0:
+            # Short: exit if price breaks above weekly high or trend weakens (ADX < 15)
+            if (close[i] > weekly_high_aligned[i]) or (adx_1d_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
