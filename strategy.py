@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA crossover (8/21) with 4h EMA(34) trend filter and volume spike confirmation.
-# EMA(8) crossing above EMA(21) indicates short-term bullish momentum; below indicates bearish.
-# 4h EMA(34) filters trades to align with higher timeframe trend, reducing counter-trend trades.
-# Volume spike (>1.5x 20-period average) confirms breakout strength.
-# Designed for 1h timeframe to capture medium-term moves with controlled frequency.
-# Entry: Long when EMA8 > EMA21, EMA8 > 4h EMA34, and volume spike; Short when EMA8 < EMA21, EMA8 < 4h EMA34, and volume spike.
-# Exit: Opposite EMA crossover or loss of volume confirmation.
-# Uses strict conditions to limit trades (~15-35/year) and avoid overtrading.
-name = "1h_EMA8_21_4hEMA34_Volume"
-timeframe = "1h"
+# Hypothesis: 6h strategy combining weekly pivot levels (P1/S1/R1) with volume confirmation and trend filter (EMA34).
+# Weekly P1 acts as major support/resistance; breakouts with volume indicate strong momentum.
+# EMA34 filters for trend alignment to avoid false breakouts in chop.
+# Designed for 6h timeframe to capture medium-term breakouts with low frequency.
+# Entry: Long when close > R1 and price > EMA34 and volume spike; Short when close < S1 and price < EMA34 and volume spike.
+# Exit: Opposite weekly pivot level touch (S1 for long exit, R1 for short exit) or trend reversal.
+# Uses strict conditions to limit trades (~15-25/year) and avoid overtrading.
+# Works in bull markets via breakout continuation and in bear markets via mean reversion at pivot levels.
+name = "6h_WeeklyPivot_EMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,63 +25,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA(8) and EMA(21) on 1h
-    close_s = pd.Series(close)
-    ema8 = close_s.ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # 4h EMA(34) - get once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 35:
+    # Weekly Pivot levels (based on prior week OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Prior week's OHLC for Pivot calculation
+    prev_week_close = df_1w['close'].shift(1).values
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_range = prev_week_high - prev_week_low
     
-    # Volume spike: volume > 1.5 * 20-period average
+    # Weekly Pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    weekly_p = (prev_week_high + prev_week_low + prev_week_close) / 3
+    weekly_r1 = 2 * weekly_p - prev_week_low
+    weekly_s1 = 2 * weekly_p - prev_week_high
+    
+    # Align to 6h timeframe (waits for prior week close)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # EMA34 trend filter
+    close_series = pd.Series(close)
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume spike: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Ensure enough data for all indicators
+    start_idx = 34  # Ensure enough data for EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema8[i]) or np.isnan(ema21[i]) or 
-            np.isnan(ema34_4h_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
+            np.isnan(ema34[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: EMA8 > EMA21, above 4h EMA34 trend, with volume spike
-            if (ema8[i] > ema21[i] and 
-                ema8[i] > ema34_4h_aligned[i] and 
+            # Long: break above R1 with uptrend and volume
+            if (close[i] > weekly_r1_aligned[i] and 
+                close[i] > ema34[i] and 
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: EMA8 < EMA21, below 4h EMA34 trend, with volume spike
-            elif (ema8[i] < ema21[i] and 
-                  ema8[i] < ema34_4h_aligned[i] and 
+            # Short: break below S1 with downtrend and volume
+            elif (close[i] < weekly_s1_aligned[i] and 
+                  close[i] < ema34[i] and 
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if EMA8 < EMA21 or loses volume confirmation
-            if (ema8[i] < ema21[i]) or (not volume_spike[i]):
+            # Long: exit if price touches S1 or trend turns down
+            if (close[i] < weekly_s1_aligned[i]) or (close[i] < ema34[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if EMA8 > EMA21 or loses volume confirmation
-            if (ema8[i] > ema21[i]) or (not volume_spike[i]):
+            # Short: exit if price touches R1 or trend turns up
+            if (close[i] > weekly_r1_aligned[i]) or (close[i] > ema34[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
