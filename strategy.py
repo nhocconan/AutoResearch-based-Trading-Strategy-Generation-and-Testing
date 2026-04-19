@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with daily pivot level confirmation and volume filter.
-# Long when price breaks above Donchian high AND above daily pivot (P) with volume confirmation.
-# Short when price breaks below Donchian low AND below daily pivot (P) with volume confirmation.
-# Uses daily pivots as structural support/resistance to filter breakouts in both bull and bear markets.
+# Hypothesis: 12h Donchian(20) breakout with daily ATR filter and volume confirmation.
+# Long when price breaks above Donchian high with volume > 1.5x average and ATR(14) > 0.5 * price.
+# Short when price breaks below Donchian low with volume > 1.5x average and ATR(14) > 0.5 * price.
+# Uses ATR filter to avoid ranging markets and volume to confirm breakout strength.
 # Target: 12-30 trades/year per symbol (~48-120 total over 4 years).
-name = "6h_Donchian20_DailyPivot_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,19 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily pivot points: P = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    
-    # Align daily pivot to 6h timeframe (wait for daily close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    
-    # Calculate Donchian channel (20-period) on 6h
+    # Calculate Donchian channel (20-period) on 12h
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -45,49 +33,57 @@ def generate_signals(prices):
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # ATR(14) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Donchian needs 20 periods
+    start_idx = max(20, 20, 14)  # Donchian needs 20, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         upper = donchian_high[i]
         lower = donchian_low[i]
-        pivot = pivot_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
+        atr_val = atr[i]
         
-        # Volume confirmation threshold
+        # Volume and ATR confirmation
         volume_confirmed = vol > 1.5 * vol_ma
+        atr_confirmed = atr_val > 0.5 * price  # Significant volatility
         
         if position == 0:
-            # Enter long: price breaks above Donchian high AND above daily pivot
-            if price > upper and price > pivot and volume_confirmed:
+            # Enter long: price breaks above Donchian high with volume and ATR confirmation
+            if price > upper and volume_confirmed and atr_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low AND below daily pivot
-            elif price < lower and price < pivot and volume_confirmed:
+            # Enter short: price breaks below Donchian low with volume and ATR confirmation
+            elif price < lower and volume_confirmed and atr_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price breaks below Donchian low or below pivot
-            if price < lower or price < pivot:
+            # Exit long when price breaks below Donchian low
+            if price < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price breaks above Donchian high or above pivot
-            if price > upper or price > pivot:
+            # Exit short when price breaks above Donchian high
+            if price > upper:
                 signals[i] = 0.0
                 position = 0
             else:
