@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_1dVolume_1wTrend_v2"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Filter_V2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,70 +17,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate KAMA on close
+    er_period = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Calculate 1d volume moving average (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ratio_1d = volume_1d / volume_ma_1d  # Current volume / 20-day average
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Fix volatility calculation using rolling sum
+    volatility_series = pd.Series(np.abs(np.diff(close, prepend=close[0])))
+    volatility = volatility_series.rolling(window=er_period, min_periods=1).sum().values
     
-    # Get 1w data for trend filter
+    er = np.where(volatility > 0, change / volatility, 0)
+    sc = (er * (fast_ema - 1) + 1) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate RSI
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Get weekly data for chop filter
     df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # 50-period EMA on weekly close
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Align 1d volume ratio and 1w EMA to 4h timeframe
-    volume_ratio_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio_1d)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Chop on weekly high/low
+    chop_period = 14
+    atr = np.maximum(np.maximum(df_1w['high'] - df_1w['low'], 
+                                np.abs(df_1w['high'] - df_1w['close'].shift(1))),
+                        np.abs(df_1w['low'] - df_1w['close'].shift(1)))
+    atr_sum = pd.Series(atr).rolling(window=chop_period, min_periods=chop_period).sum().values
+    highest_high = pd.Series(df_1w['high']).rolling(window=chop_period, min_periods=chop_period).max().values
+    lowest_low = pd.Series(df_1w['low']).rolling(window=chop_period, min_periods=chop_period).min().values
     
-    # Calculate Donchian channels on 4h (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(19, n):
-        highest_high[i] = np.max(high[i-19:i+1])
-        lowest_low[i] = np.min(low[i-19:i+1])
+    chop = np.where((highest_high - lowest_low) != 0, 
+                    100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(chop_period), 
+                    50)
+    
+    # Align indicators to daily
+    kama_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama)
+    rsi_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), rsi)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_ratio_aligned[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation: current volume > 1.5x 20-day average
-        volume_confirm = volume_ratio_aligned[i] > 1.5
-        
-        # Trend filter: price above/below 50-period weekly EMA
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Chop filter: only trade when chop < 61.8 (trending market)
+        chop_filter = chop_aligned[i] < 61.8
         
         if position == 0:
-            # Long when price breaks above upper Donchian + volume + uptrend
-            if close[i] > highest_high[i] and volume_confirm and uptrend:
+            # Long when price > KAMA and RSI > 50 in trending market
+            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50 and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below lower Donchian + volume + downtrend
-            elif close[i] < lowest_low[i] and volume_confirm and downtrend:
+            # Short when price < KAMA and RSI < 50 in trending market
+            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50 and chop_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price breaks below lower Donchian
-            if close[i] < lowest_low[i]:
+            # Long position: exit when price < KAMA or RSI < 40
+            if close[i] < kama_aligned[i] or rsi_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price breaks above upper Donchian
-            if close[i] > highest_high[i]:
+            # Short position: exit when price > KAMA or RSI > 60
+            if close[i] > kama_aligned[i] or rsi_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
