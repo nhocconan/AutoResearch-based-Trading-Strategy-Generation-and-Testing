@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_TRIX_Volume_Spike_Chop_Regime"
-timeframe = "1d"
+name = "6h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,76 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for TRIX and Chop calculation
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Pivot and ATR
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate TRIX on 1w close (12-period EMA of EMA of EMA)
-    close_1w = df_1w['close'].values
-    ema1 = pd.Series(close_1w).ewm(span=12, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False).mean().values
-    trix_raw = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
+    # Calculate daily pivot points (R1, S1, R2, S2, R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Chop on 1w high/low (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # Daily pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Support and Resistance levels
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
+    
+    # Calculate ATR(14) on 1d
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr14 / (highest_high14 - lowest_low14)) / np.log10(14)
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align TRIX and Chop to 1d timeframe
-    trix = align_htf_to_ltf(prices, df_1w, trix_raw)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=0)
+    # Align to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume spike on 1d (volume > 2.0 * 20-period average)
+    # Volume spike (volume > 1.8 * 20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
+    volume_spike = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if np.isnan(trix[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(atr_1d_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # Chop regime: > 61.8 = ranging (mean revert), < 38.2 = trending
-        is_ranging = chop_aligned[i] > 61.8
-        is_trending = chop_aligned[i] < 38.2
-        
-        # Volume confirmation
         vol_confirm = volume_spike[i]
+        atr = atr_1d_aligned[i]
         
         if position == 0:
-            # Long conditions: TRIX > 0 in ranging OR TRIX rising in trending + volume spike
-            if ((is_ranging and trix[i] > 0) or (is_trending and trix[i] > trix[i-1])) and vol_confirm:
+            # Long breakout above R1 with volume
+            if close[i] > r1_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: TRIX < 0 in ranging OR TRIX falling in trending + volume spike
-            elif ((is_ranging and trix[i] < 0) or (is_trending and trix[i] < trix[i-1])) and vol_confirm:
+            # Short breakdown below S1 with volume
+            elif close[i] < s1_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long exit: TRIX turns negative OR chop shifts to strong trending
-            if trix[i] < 0 or chop_aligned[i] < 20:  # Strong trend emerging
+            # Long: exit if price drops below pivot or ATR stop
+            if close[i] < pivot_aligned[i] or close[i] < (high[i] - 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short exit: TRIX turns positive OR chop shifts to strong trending
-            if trix[i] > 0 or chop_aligned[i] < 20:  # Strong trend emerging
+            # Short: exit if price rises above pivot or ATR stop
+            if close[i] > pivot_aligned[i] or close[i] > (low[i] + 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
