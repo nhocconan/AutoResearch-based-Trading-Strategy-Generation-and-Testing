@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume confirmation
-# Donchian breakouts capture breakouts in trending markets
-# ATR filter ensures volatility is not too high (avoid false breakouts in chop)
-# Volume confirmation ensures breakouts are supported by participation
-# Target: 20-50 trades/year, suitable for 4h timeframe with low turnover
-name = "4h_Donchian20_1dATR_Volume"
-timeframe = "4h"
+# Hypothesis: 1d KAMA with weekly trend filter and volume confirmation
+# KAMA adapts to market noise - faster in trends, slower in ranges
+# Weekly trend filter ensures we only trade in direction of higher timeframe trend
+# Volume confirmation filters false breakouts
+# Target: 30-100 total trades over 4 years (7-25/year) with disciplined entries
+name = "1d_KAMA_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,28 +22,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d ATR for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # 1w trend filter - EMA34
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # KAMA (Kaufman Adaptive Moving Average) on 1d
+    # Efficiency Ratio = |change| / sum(|changes|)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    abs_change = np.abs(np.diff(close, prepend=close[0]))
     
-    # Donchian channels (20-period) on 4h
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # ER over 10 periods
+    er_num = np.abs(np.subtract(close[9:], np.append([np.nan]*9, close[:-9])))
+    er_den = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if hasattr(np.sum, 'axis') else None
+    
+    # Simplified ER calculation
+    er = np.zeros(n)
+    for i in range(10, n):
+        if i >= 10:
+            direction = np.abs(close[i] - close[i-10])
+            volatility = np.sum(np.abs(np.diff(close[i-9:i+1])))
+            er[i] = direction / volatility if volatility != 0 else 0
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,43 +65,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data for Donchian and ATR
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid breakouts when ATR is too high (choppy markets)
-        atr_filter = atr_14_1d_aligned[i] < (np.mean(atr_14_1d_aligned[max(0, i-50):i+1]) * 1.5) if i >= 50 else True
-        
         if position == 0:
-            # Long: break above upper Donchian band + volume confirmation + ATR filter
-            if (close[i] > highest_20[i] and 
-                volume_confirm[i] and 
-                atr_filter):
+            # Long: price above KAMA + above weekly EMA34 + volume confirmation
+            if (close[i] > kama[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian band + volume confirmation + ATR filter
-            elif (close[i] < lowest_20[i] and 
-                  volume_confirm[i] and 
-                  atr_filter):
+            # Short: price below KAMA + below weekly EMA34 + volume confirmation
+            elif (close[i] < kama[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below lower Donchian band
-            if close[i] < lowest_20[i]:
+            # Long: exit if price crosses below KAMA or below weekly EMA34
+            if (close[i] < kama[i]) or (close[i] < ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above upper Donchian band
-            if close[i] > highest_20[i]:
+            # Short: exit if price crosses above KAMA or above weekly EMA34
+            if (close[i] > kama[i]) or (close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
