@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Pivot Breakout with Volume and ATR Filter
-# Weekly pivot levels (from weekly high/low/close) provide strong support/resistance
-# Price breaking above weekly R1 or below weekly S1 with volume confirmation
-# indicates institutional interest and trend continuation
-# ATR filter avoids choppy markets; only trade when volatility is expanding
-# Weekly timeframe ensures relevance for 6h chart; reduces noise
-# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
-# Works in bull (breakouts continuation) and bear (breakdowns continuation) markets
-name = "6h_WeeklyPivot_Breakout_Volume_ATR"
-timeframe = "6h"
+# Hypothesis: 12h KAMA with 1w EMA50 trend filter and volume confirmation
+# KAMA adapts to market noise, reducing whipsaws in sideways markets
+# 1w EMA50 provides strong trend bias to avoid counter-trend trades
+# Volume confirmation filters weak breakouts and confirms institutional participation
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+name = "12h_KAMA_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,44 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
+    # 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    # Support/resistance: R1 = 2*P - L, S1 = 2*P - H
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    # KAMA calculation
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_length))
+    abs_change = np.abs(np.diff(close, n=1))
+    er = np.zeros(n)
+    for i in range(er_length, n):
+        if np.sum(abs_change[i-er_length+1:i+1]) > 0:
+            er[i] = change[i] / np.sum(abs_change[i-er_length+1:i+1])
+        else:
+            er[i] = 0
     
-    # ATR filter: only trade when volatility is expanding (ATR > 20-period average)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0.0
-    tr2[0] = 0.0
-    tr3[0] = 0.0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
     
-    # ATR with 20-period
-    atr = np.zeros(n)
-    atr[19] = tr[:20].mean()
-    for i in range(20, n):
-        atr[i] = (atr[i-1] * 19 + tr[i]) / 20
-    
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    volatility_expanding = atr > (atr_ma * 1.0)  # ATR above its average
+    # KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,40 +61,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)  # Ensure enough data for ATR and volume MA
+    start_idx = max(er_length, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
-            np.isnan(atr_ma[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R1 + volume + volatility expanding
-            if (close[i] > weekly_r1_aligned[i] and 
-                volume_confirm[i] and 
-                volatility_expanding[i]):
+            # Long: Price above KAMA + above 1w EMA50 + volume confirmation
+            if (close[i] > kama[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 + volume + volatility expanding
-            elif (close[i] < weekly_s1_aligned[i] and 
-                  volume_confirm[i] and 
-                  volatility_expanding[i]):
+            # Short: Price below KAMA + below 1w EMA50 + volume confirmation
+            elif (close[i] < kama[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below weekly pivot OR volatility contracts
-            if (close[i] < weekly_pivot_aligned[i]) or (not volatility_expanding[i]):
+            # Long: exit if price crosses below KAMA or below 1w EMA50
+            if (close[i] < kama[i]) or (close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above weekly pivot OR volatility contracts
-            if (close[i] > weekly_pivot_aligned[i]) or (not volatility_expanding[i]):
+            # Short: exit if price crosses above KAMA or above 1w EMA50
+            if (close[i] > kama[i]) or (close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
