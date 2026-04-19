@@ -3,96 +3,94 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ADX + Williams Alligator combination
-# ADX > 25 identifies strong trends while Alligator (Jaw/Teeth/Lips) confirms direction.
-# Long when ADX > 25, Lips > Teeth > Jaw (bullish alignment)
-# Short when ADX > 25, Lips < Teeth < Jaw (bearish alignment)
-# Exit when ADX < 20 (trend weakening) or Alligator lines cross (signal reversal)
-# Uses smoothed SMAs to reduce whipsaw. Targets 20-40 trades/year for low frequency.
-name = "6h_ADX_Alligator_Trend"
-timeframe = "6h"
+# Hypothesis: 4h 1-day Camarilla Pivot Level (H3/L3) breakout with volume confirmation and momentum filter (RSI > 55 for long, < 45 for short).
+# Uses tight entry conditions to limit trades (~20-30/year) and avoid overtrading.
+# Works in bull markets via breakout momentum and in bear via mean reversion off H3/L3 levels.
+# Exit on opposite touch (L3 for long exit, H3 for short exit) or RSI reversal.
+# Designed for 4h timeframe with daily pivot calculation.
+name = "4h_Camarilla_H3L3_RSI_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator (SMAs with specific periods)
-    jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
+    # Daily Camarilla pivot levels (based on prior day OHLC)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().values
-    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().values
-    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().values
+    # Prior day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Shift jaws/teeth/lips forward as per Alligator specification
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
+    # Camarilla levels: H3/L3 = close ± (high-low)*1.1/2
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # ADX calculation
-    period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0  # First TR has no previous close
+    # Align to 4h timeframe (waits for prior day close)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+    # Volume spike: volume > 1.8 * 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(jaw_period, teeth_period, lips_period, period) + 8  # Account for shifts
+    start_idx = 20  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Bullish alignment: Lips > Teeth > Jaw
-            if (adx[i] > 25 and 
-                lips[i] > teeth[i] and 
-                teeth[i] > jaw[i]):
+            # Long: break above H3 with bullish momentum and volume
+            if (close[i] > camarilla_h3_aligned[i] and 
+                rsi[i] > 55 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Bearish alignment: Lips < Teeth < Jaw
-            elif (adx[i] > 25 and 
-                  lips[i] < teeth[i] and 
-                  teeth[i] < jaw[i]):
+            # Short: break below L3 with bearish momentum and volume
+            elif (close[i] < camarilla_l3_aligned[i] and 
+                  rsi[i] < 45 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Exit: ADX weakening (<20) or Alligator cross (Lips < Teeth)
-            if (adx[i] < 20) or (lips[i] < teeth[i]):
+            # Long: exit if price touches L3 or RSI turns bearish
+            if (close[i] < camarilla_l3_aligned[i]) or (rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Exit: ADX weakening (<20) or Alligator cross (Lips > Teeth)
-            if (adx[i] < 20) or (lips[i] > teeth[i]):
+            # Short: exit if price touches H3 or RSI turns bullish
+            if (close[i] > camarilla_h3_aligned[i]) or (rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
