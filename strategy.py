@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour 1-day/1-week Pivot R1/S1 breakout with volume confirmation and ATR filter.
-# Long when: Price breaks above R1, volume > 1.5x 20-period average, ATR(14) > 0.5 * ATR(50)
-# Short when: Price breaks below S1, volume > 1.5x 20-period average, ATR(14) > 0.5 * ATR(50)
-# Exit when: Price crosses back through the pivot point (PP)
-# Pivot levels provide institutional support/resistance, volume confirms breakout strength, ATR filter avoids low volatility whipsaws.
-# Target: 15-30 trades/year per symbol. Works in bull (buy breakouts) and bear (sell breakdowns).
-name = "12h_1d_1w_Pivot_R1S1_Breakout_Volume_ATRFilter"
+# Hypothesis: 12-hour Williams Alligator with daily EMA34 filter and volume spike confirmation.
+# Long when: Price above Alligator teeth (green line), jaws (blue) < teeth (green) < lips (red), daily EMA34 upward, volume > 1.5x 20-period average
+# Short when: Price below Alligator teeth (green line), jaws (blue) > teeth (green) > lips (red), daily EMA34 downward, volume > 1.5x 20-period average
+# Exit when: Price crosses back through the Alligator teeth (green line)
+# Alligator identifies trend direction and alignment, EMA34 filters trend strength, volume confirms momentum.
+# Target: 12-30 trades/year per symbol. Works in bull (buy alignments) and bear (sell alignments).
+name = "12h_WilliamsAlligator_EMA34_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,89 +23,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for pivot levels
+    # 1-day data for Williams Alligator and EMA34
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1-week data for ATR calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Williams Alligator lines (13, 8, 5 SMAs shifted forward)
+    # Jaw (blue): 13-period SMMA of median price, shifted 8 bars forward
+    median_price_1d = (high_1d + low_1d) / 2.0
+    sma13_1d = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().values
+    jaw_1d = np.roll(sma13_1d, 8)  # shift forward 8 bars
+    jaw_1d[:8] = np.nan  # first 8 values invalid
     
-    # Calculate daily pivot point (PP) and levels
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Teeth (green): 8-period SMMA of median price, shifted 5 bars forward
+    sma8_1d = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().values
+    teeth_1d = np.roll(sma8_1d, 5)  # shift forward 5 bars
+    teeth_1d[:5] = np.nan  # first 5 values invalid
     
-    # Calculate ATR on weekly data
-    tr1 = np.maximum(high_1w - low_1w, np.abs(high_1w - np.roll(close_1w, 1)))
-    tr2 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high_1w[0] - low_1w[0]  # First bar
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Lips (red): 5-period SMMA of median price, shifted 3 bars forward
+    sma5_1d = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().values
+    lips_1d = np.roll(sma5_1d, 3)  # shift forward 3 bars
+    lips_1d[:3] = np.nan  # first 3 values invalid
     
-    # Align data to 12H timeframe
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
-    atr_50_aligned = align_htf_to_ltf(prices, df_1w, atr_50)
+    # Calculate EMA34 on daily data for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 20-period volume average
+    # Align 1D data to 12H timeframe
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for ATR50 calculation
+    start_idx = 34  # Wait for EMA34 calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(atr_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        pp = pp_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        atr14 = atr_14_aligned[i]
-        atr50 = atr_50_aligned[i]
+        jaw = jaw_1d_aligned[i]
+        teeth = teeth_1d_aligned[i]
+        lips = lips_1d_aligned[i]
+        ema34 = ema34_1d_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # ATR filter: avoid low volatility whipsaws
-        atr_filter = atr14 > 0.5 * atr50
-        
         if position == 0:
-            # Long entry: Price breaks above R1, volume spike, ATR filter
-            if (price > r1 and close[i-1] <= r1 and 
-                vol > 1.5 * vol_ma and atr_filter):
+            # Long entry: Price above teeth, jaws < teeth < lips (bullish alignment), EMA34 upward, volume spike
+            if (price > teeth and jaw < teeth and teeth < lips and 
+                ema34 > ema34_1d_aligned[i-1] and vol > 1.5 * vol_ma):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below S1, volume spike, ATR filter
-            elif (price < s1 and close[i-1] >= s1 and 
-                  vol > 1.5 * vol_ma and atr_filter):
+            # Short entry: Price below teeth, jaws > teeth > lips (bearish alignment), EMA34 downward, volume spike
+            elif (price < teeth and jaw > teeth and teeth > lips and 
+                  ema34 < ema34_1d_aligned[i-1] and vol > 1.5 * vol_ma):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses back below pivot point
-            if price < pp:
+            # Long exit: Price crosses back below teeth
+            if price < teeth:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses back above pivot point
-            if price > pp:
+            # Short exit: Price crosses back above teeth
+            if price > teeth:
                 signals[i] = 0.0
                 position = 0
             else:
