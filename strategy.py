@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 12h trend alignment and volume confirmation.
-# Uses 12h EMA34 for trend direction and 4h Donchian breakout for momentum.
-# Enters only during 08-20 UTC session to avoid low-volume noise.
-# Targets 20-50 trades/year (80-200 total over 4 years) with strict entry conditions.
-# Works in bull/bear by following higher timeframe trends.
-name = "4h_12h_EMA34_Donchian20_Volume"
-timeframe = "4h"
+# Hypothesis: 1h timeframe with 4h EMA34 trend filter and 1h VWAP deviation for mean reversion entries.
+# Uses 4h EMA34 for trend direction (avoid counter-trend trades) and enters when price deviates >1.5σ from 1h VWAP.
+# Only trades during 08-20 UTC session to avoid low-volume noise.
+# Targets 15-37 trades/year (60-150 total over 4 years) by requiring both trend alignment and significant deviation.
+# Works in bull/bear by following higher timeframe trend while exploiting short-term mean reversion.
+name = "1h_4h_EMA34_VWAPDev_MeanRev"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,67 +27,64 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 12h data for EMA34 trend (called ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Get 4h data for Donchian20 breakout (called ONCE before loop)
+    # Get 4h data for EMA34 trend (called ONCE before loop)
     df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    # Donchian channels: 20-period high/low
-    high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    high_20_4h_aligned = align_htf_to_ltf(prices, df_4h, high_20_4h)
-    low_20_4h_aligned = align_htf_to_ltf(prices, df_4h, low_20_4h)
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Volume filter: volume > 1.5 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    # Calculate 1h VWAP and standard deviation for mean reversion signals
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
+    vwap_denominator = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    vwap = vwap_numerator / vwap_denominator
+    
+    # Calculate standard deviation of price deviation from VWAP
+    price_dev = typical_price - vwap
+    dev_std = pd.Series(price_dev).rolling(window=20, min_periods=20).std().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for VWAP calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(high_20_4h_aligned[i]) or 
-            np.isnan(low_20_4h_aligned[i]) or np.isnan(volume_ma[i]) or
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(vwap[i]) or 
+            np.isnan(dev_std[i]) or dev_std[i] == 0 or
             not session_filter[i]):
             signals[i] = 0.0
             continue
         
+        # Calculate z-score of price deviation from VWAP
+        z_score = price_dev[i] / dev_std[i]
+        
         if position == 0:
-            # Long: price above 12h EMA34 AND breaks 4h Donchian high with volume
-            if (close[i] > ema_34_12h_aligned[i] and 
-                close[i] > high_20_4h_aligned[i] and 
-                volume_filter[i]):
-                signals[i] = 0.25
+            # Long: uptrend (price > 4h EMA34) AND price significantly below VWAP (mean reversion long)
+            if (close[i] > ema_34_4h_aligned[i] and 
+                z_score < -1.5):
+                signals[i] = 0.20
                 position = 1
-            # Short: price below 12h EMA34 AND breaks 4h Donchian low with volume
-            elif (close[i] < ema_34_12h_aligned[i] and 
-                  close[i] < low_20_4h_aligned[i] and 
-                  volume_filter[i]):
-                signals[i] = -0.25
+            # Short: downtrend (price < 4h EMA34) AND price significantly above VWAP (mean reversion short)
+            elif (close[i] < ema_34_4h_aligned[i] and 
+                  z_score > 1.5):
+                signals[i] = -0.20
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below 12h EMA34 or 4h Donchian low
-            if close[i] < ema_34_12h_aligned[i] or close[i] < low_20_4h_aligned[i]:
+            # Long: exit if trend breaks or price reverts to VWAP
+            if close[i] < ema_34_4h_aligned[i] or z_score > -0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:
-            # Short: exit if price breaks above 12h EMA34 or 4h Donchian high
-            if close[i] > ema_34_12h_aligned[i] or close[i] > high_20_4h_aligned[i]:
+            # Short: exit if trend breaks or price reverts to VWAP
+            if close[i] > ema_34_4h_aligned[i] or z_score < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
