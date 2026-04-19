@@ -1,17 +1,11 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 12h_1dPivot_R1S1_Breakout_Volume_12hEMA34
+# Hypothesis: Price breaking above/below daily Camarilla pivot levels (R1/S1) with volume confirmation and 12h EMA trend filter
+# Works in bull markets (breakouts continue) and bear markets (reversions at S1/R1)
+# Pivot levels provide institutional support/resistance, volume confirms participation, EMA filter avoids counter-trend trades
+# Target: 15-30 trades/year per symbol (~60-120 total over 4 years)
 
-# Hypothesis: 1h momentum with 4h trend filter and volume confirmation
-# Uses 1h as primary timeframe with 4h EMA trend filter and volume spike (>1.5x average)
-# Long when: price > 4h EMA20, RSI(14) > 50, volume confirmed
-# Short when: price < 4h EMA20, RSI(14) < 50, volume confirmed
-# Volume confirmation ensures institutional participation
-# Target: 15-37 trades/year per symbol (~60-150 total over 4 years)
-
-name = "1h_EMA20_RSI_Volume"
-timeframe = "1h"
+name = "12h_1dPivot_R1S1_Breakout_Volume_12hEMA34"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,23 +18,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate 12h EMA34 for trend filter
+    ema_34_12h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate RSI(14) on 1h data
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Camarilla pivot levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    range_1d = high_1d - low_1d
+    r1 = close_1d + range_1d * 1.1 / 12
+    s1 = close_1d - range_1d * 1.1 / 12
+    
+    # Align pivot levels to 12h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,49 +43,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Need EMA and RSI data
+    start_idx = max(34, 20)  # Need EMA and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(rsi_values[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_12h[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend = ema_20_4h_aligned[i]
-        rsi_val = rsi_values[i]
+        ema_trend = ema_34_12h[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
-        # Volume confirmation threshold
+        # Volume threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter long: price > 4h EMA20 AND RSI > 50 AND volume confirmed
-            if price > ema_trend and rsi_val > 50 and volume_confirmed:
-                signals[i] = 0.20
+            # Enter long: price breaks above R1 with volume and above EMA trend
+            if price > r1_level and volume_confirmed and price > ema_trend:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price < 4h EMA20 AND RSI < 50 AND volume confirmed
-            elif price < ema_trend and rsi_val < 50 and volume_confirmed:
-                signals[i] = -0.20
+            # Enter short: price breaks below S1 with volume and below EMA trend
+            elif price < s1_level and volume_confirmed and price < ema_trend:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price < 4h EMA20 OR RSI <= 50
-            if price < ema_trend or rsi_val <= 50:
+            # Exit long: price falls below S1 or below EMA trend
+            if price < s1_level or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price > 4h EMA20 OR RSI >= 50
-            if price > ema_trend or rsi_val >= 50:
+            # Exit short: price rises above R1 or above EMA trend
+            if price > r1_level or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
