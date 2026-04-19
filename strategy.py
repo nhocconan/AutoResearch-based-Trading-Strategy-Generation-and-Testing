@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyKeltnerBreakout_WithVolume"
-timeframe = "1d"
+name = "4h_Pivot_R1_S1_Breakout_Volume_ADX_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 120:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA and ATR calculation (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # Get 1d data for pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA(20) of close
-    ema_w = pd.Series(close_w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate Camarilla pivot levels for 1d
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12.0
+    s1_1d = close_1d - range_1d * 1.1 / 12.0
     
-    # Calculate weekly ATR(10)
-    tr1_w = high_w - low_w
-    tr2_w = np.abs(high_w - np.roll(close_w, 1))
-    tr3_w = np.abs(low_w - np.roll(close_w, 1))
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    tr_w[0] = tr1_w[0]
-    atr_w = pd.Series(tr_w).rolling(window=10, min_periods=10).mean().values
+    # Align Camarilla levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate weekly Keltner channels
-    upper_w = ema_w + 2.0 * atr_w
-    lower_w = ema_w - 2.0 * atr_w
+    # 4h ADX for trend strength (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Align weekly EMA and Keltner channels to daily timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_weekly, ema_w)
-    upper_aligned = align_htf_to_ltf(prices, df_weekly, upper_w)
-    lower_aligned = align_htf_to_ltf(prices, df_weekly, lower_w)
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Volume confirmation: current volume > 2.0x 20-day average
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    di_plus = 100 * dm_plus14 / tr14
+    di_minus = 100 * dm_minus14 / tr14
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 120
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(ema_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or \
-           np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
+           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        ema = ema_aligned[i]
-        upper = upper_aligned[i]
-        lower = lower_aligned[i]
+        adx_val = adx[i]
+        pivot = pivot_4h[i]
+        r1 = r1_4h[i]
+        s1 = s1_4h[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
+        trending = adx_val > 25  # Strong trend filter
         
         if position == 0:
-            # Long: Price breaks above upper Keltner band + volume
-            if price > upper and volume_confirmed:
+            # Long: Price breaks above R1 + volume + trending
+            if price > r1 and volume_confirmed and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Keltner band + volume
-            elif price < lower and volume_confirmed:
+            # Short: Price breaks below S1 + volume + trending
+            elif price < s1 and volume_confirmed and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below EMA
-            if price < ema:
+            # Exit: Price returns below pivot
+            if price < pivot:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above EMA
-            if price > ema:
+            # Exit: Price returns above pivot
+            if price > pivot:
                 signals[i] = 0.0
                 position = 0
             else:
