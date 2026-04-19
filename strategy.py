@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WeeklyPivot_R1S1_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1w_VWAP_Deviation_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,35 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for VWAP calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate weekly pivot points (using last 5 days: Monday-Friday)
-    # Rolling window of 5 days for high/low/close
-    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
+    # Calculate weekly VWAP (volume-weighted average price)
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    vwap_num = np.cumsum(typical_price_1w * volume_1w)
+    vwap_den = np.cumsum(volume_1w)
+    vwap_1w = np.where(vwap_den != 0, vwap_num / vwap_den, np.nan)
     
-    # Weekly pivot calculation
-    pivot = (high_5d + low_5d + close_5d) / 3.0
-    r1 = 2 * pivot - low_5d
-    s1 = 2 * pivot - high_5d
-    r2 = pivot + (high_5d - low_5d)
-    s2 = pivot - (high_5d - low_5d)
-    r3 = high_5d + 2 * (pivot - low_5d)
-    s3 = low_5d - 2 * (high_5d - pivot)
+    # Calculate weekly VWAP standard deviation
+    squared_dev = (typical_price_1w - vwap_1w) ** 2 * volume_1w
+    var_num = np.cumsum(squared_dev)
+    vwap_var = np.where(vwap_den != 0, var_num / vwap_den, np.nan)
+    vwap_std_1w = np.sqrt(np.maximum(vwap_var, 0))
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    # Upper and lower bands (2 standard deviations)
+    upper_band_1w = vwap_1w + 2.0 * vwap_std_1w
+    lower_band_1w = vwap_1w - 2.0 * vwap_std_1w
+    
+    # Align weekly VWAP bands to 12h timeframe
+    vwap_12h = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    upper_12h = align_htf_to_ltf(prices, df_1w, upper_band_1w)
+    lower_12h = align_htf_to_ltf(prices, df_1w, lower_band_1w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,11 +51,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
-           np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or \
+        if np.isnan(vwap_12h[i]) or np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or \
            np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
@@ -69,26 +66,26 @@ def generate_signals(prices):
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above R1 with volume
-            if price > r1_6h[i] and volume_confirmed:
+            # Long: Price breaks above upper VWAP band with volume
+            if price > upper_12h[i] and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume
-            elif price < s1_6h[i] and volume_confirmed:
+            # Short: Price breaks below lower VWAP band with volume
+            elif price < lower_12h[i] and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below pivot
-            if price < pivot_6h[i]:
+            # Exit: Price returns below VWAP
+            if price < vwap_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above pivot
-            if price > pivot_6h[i]:
+            # Exit: Price returns above VWAP
+            if price > vwap_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
