@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze + 1d volume confirmation + 1d trend filter
-# - Bollinger Band width (BBW) < 20th percentile indicates squeeze (low volatility)
-# - Breakout from squeeze with volume > 1.5x 20-period 1d average volume for confirmation
-# - 1d EMA(50) trend filter: long when price > EMA50, short when price < EMA50
-# - Works in both bull and bear markets by capturing volatility expansion after consolidation
-# - Target: 20-40 trades/year to avoid excessive fee drag
+# Hypothesis: 12h 1D and 1W Pivot R1/S1 breakout with volume confirmation
+# - Uses 1D and 1W pivot points (R1, S1) from prior period
+# - Long when price breaks above R1 with volume > 1.5x average
+# - Short when price breaks below S1 with volume > 1.5x average
+# - Exit when price returns to pivot point or opposite level
+# - Designed for low frequency (<30 trades/year) to minimize fee drag
+# - Works in both bull and bear markets by following price action at key levels
 
-name = "6h_BollingerSqueeze_1dVolume_1dTrend_v1"
-timeframe = "6h"
+name = "12h_Pivot_R1S1_Breakout_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,80 +25,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and trend filters
+    # Get 1D data for pivot points
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d Bollinger Bands (20, 2)
-    close_1d = df_1d['close'].values
-    bb_mid = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_up = bb_mid + 2 * bb_std
-    bb_low = bb_mid - 2 * bb_std
-    bb_width = bb_up - bb_low
+    # Calculate 1D pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H
+    # Use previous day's values (already completed)
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    pivot_1d = typical_price_1d.values
+    r1_1d = (2 * pivot_1d - df_1d['low'].values)
+    s1_1d = (2 * pivot_1d - df_1d['high'].values)
     
-    # Bollinger Band width percentile (20-period lookback)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Align to 12h timeframe (waits for 1D bar to close)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Squeeze condition: BBW < 20th percentile
-    squeeze = bb_width_percentile < 20
+    # Get 1W data for pivot points
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1W pivot points
+    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
+    pivot_1w = typical_price_1w.values
+    r1_1w = (2 * pivot_1w - df_1w['low'].values)
+    s1_1w = (2 * pivot_1w - df_1w['high'].values)
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align to 12h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Align 1d indicators to 6h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Volume confirmation: 12h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 30  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        # Skip if any pivot data is NaN
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d average to 6h: 1d has 4x 6h bars, so divide by 4
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 4.0)
+        # Volume filter
+        volume_filter = vol_ma[i] > 0 and volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for breakout from squeeze with volume and trend alignment
-            if (squeeze_aligned[i] and 
-                volume_filter and 
-                close[i] > bb_up[i] and 
-                close[i] > ema_50_1d_aligned[i]):
+            # Long entry: price breaks above R1 from either timeframe with volume
+            if ((close[i] > r1_1d_aligned[i] or close[i] > r1_1w_aligned[i]) and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            elif (squeeze_aligned[i] and 
-                  volume_filter and 
-                  close[i] < bb_low[i] and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short entry: price breaks below S1 from either timeframe with volume
+            elif ((close[i] < s1_1d_aligned[i] or close[i] < s1_1w_aligned[i]) and volume_filter):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price returns to middle band or trend reversal
-            if close[i] < bb_mid[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: price returns to pivot or goes below S1
+            if (close[i] < pivot_1d_aligned[i] or close[i] < pivot_1w_aligned[i] or
+                close[i] < s1_1d_aligned[i] or close[i] < s1_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price returns to middle band or trend reversal
-            if close[i] > bb_mid[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: price returns to pivot or goes above R1
+            if (close[i] > pivot_1d_aligned[i] or close[i] > pivot_1w_aligned[i] or
+                close[i] > r1_1d_aligned[i] or close[i] > r1_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
