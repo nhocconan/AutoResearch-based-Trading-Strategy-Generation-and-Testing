@@ -3,33 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with weekly trend filter and volume confirmation.
-# Long when green line > red line > blue line (bullish alignment), weekly trend up, volume > 1.5x average.
-# Short when green line < red line < blue line (bearish alignment), weekly trend down, volume > 1.5x average.
-# Uses discrete position size (0.25) to minimize churn. Designed for 12h timeframe to capture multi-day trends.
-# Williams Alligator uses smoothed moving averages (SMMA) of median price: Jaw (13,8), Teeth (8,5), Lips (5,3).
-# Weekly trend filter uses EMA50 on weekly data to avoid counter-trend trades.
-# Target: 20-40 trades/year per symbol (~80-160 total over 4 years).
-
-name = "12h_WilliamsAlligator_WeeklyTrend_Volume"
-timeframe = "12h"
+# Hypothesis: 1d Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Long when price breaks above 20-day high, weekly close > weekly open (bullish weekly candle), and volume > 1.5x 20-day average.
+# Short when price breaks below 20-day low, weekly close < weekly open (bearish weekly candle), and volume > 1.5x 20-day average.
+# Uses discrete position sizes (0.25) to minimize churn. Designed for 1d timeframe
+# to capture major trend continuations while avoiding false breakouts in ranging markets.
+# Target: 10-25 trades/year per symbol (~40-100 total over 4 years).
+name = "1d_Donchian20_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
-
-def smma(data, period):
-    """Smoothed Moving Average (SMMA) - same as Wilder's smoothing"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
-    result = np.full_like(data, np.nan, dtype=float)
-    # First value is simple average
-    result[period-1] = np.mean(data[:period])
-    # Subsequent values: (prev * (period-1) + current) / period
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,71 +23,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate median price for Alligator
-    median_price = (high + low) / 2.0
-    
-    # Williams Alligator lines (using SMMA)
-    lips = smma(median_price, 5)   # Green, 5-period, 3-shift
-    teeth = smma(median_price, 8)  # Red, 8-period, 5-shift
-    jaw = smma(median_price, 13)   # Blue, 13-period, 8-shift
-    
     # Get weekly data for trend filter
     df_weekly = get_htf_data(prices, '1w')
-    close_weekly = df_weekly['close'].values
+    weekly_open = df_weekly['open'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate EMA50 on weekly
-    ema_50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align weekly EMA50 to 12h
-    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    # Calculate Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Align weekly trend data to daily
+    weekly_bullish = (weekly_close > weekly_open).astype(float)  # 1 for bullish, 0 for bearish
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_weekly, weekly_bullish)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13+8)  # Ensure Alligator lines and volume MA are ready
+    start_idx = 20  # Wait for Donchian channels to be ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(ema_50_weekly_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(weekly_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator alignment
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        price = close[i]
+        upper_band = high_max_20[i]
+        lower_band = low_min_20[i]
+        vol_ma = vol_ma_20[i]
+        vol = volume[i]
+        weekly_trend = weekly_trend_aligned[i]  # 1.0 for bullish weekly, 0.0 for bearish
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema_50_weekly_aligned[i]
-        weekly_downtrend = close[i] < ema_50_weekly_aligned[i]
-        
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter long if bullish alignment, weekly uptrend, and volume confirmation
-            if bullish_alignment and weekly_uptrend and volume_confirmed:
+            # Enter long if price breaks above 20-day high, weekly trend bullish, and volume confirmation
+            if price > upper_band and weekly_trend > 0.5 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if bearish alignment, weekly downtrend, and volume confirmation
-            elif bearish_alignment and weekly_downtrend and volume_confirmed:
+            # Enter short if price breaks below 20-day low, weekly trend bearish, and volume confirmation
+            elif price < lower_band and weekly_trend < 0.5 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when alignment breaks or weekly trend turns down
-            if not bullish_alignment or not weekly_uptrend:
+            # Exit long when price breaks below 20-day low or weekly trend turns bearish
+            if price < lower_band or weekly_trend < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when alignment breaks or weekly trend turns up
-            if not bearish_alignment or not weekly_downtrend:
+            # Exit short when price breaks above 20-day high or weekly trend turns bullish
+            if price > upper_band or weekly_trend > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
