@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h volume filter and 1d trend filter.
-# In both bull and bear markets, price tends to revert to mean during consolidation.
-# RSI < 30 (oversold) for long, RSI > 70 (overbought) for short.
-# Volume filter ensures we trade on institutional interest.
-# 1d EMA50 trend filter prevents trading against major trend.
-# Timeframe: 1h for entries, 4h for volume confirmation, 1d for trend direction.
-# Target: 20-30 trades/year per symbol to minimize fee drag.
-name = "1h_RSI14_4hVolume_1dEMA50_MeanReversion"
-timeframe = "1h"
+# Hypothesis: 6h Ichimoku Cloud with weekly trend filter.
+# Tenkan/Kijun cross above/below cloud provides momentum signals.
+# Weekly EMA200 determines long-term trend direction: only take longs above weekly EMA200, shorts below.
+# This avoids counter-trend trades in strong trends and works in both bull/bear markets by
+# following the higher timeframe trend. Target: 15-30 trades/year per symbol.
+name = "6h_Ichimoku_TK_Cross_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,95 +17,98 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get 4h data for volume confirmation
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
+    displacement = 26  # kijun period
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Calculate 14-period RSI
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close_prices)
-        avg_loss = np.zeros_like(close_prices)
-        
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period+1, len(close_prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
     
-    rsi = calculate_rsi(close, 14)
+    # Calculate Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Calculate EMA50 on daily
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
     
-    # Volume confirmation: 4h volume > 1.8x 20-period average
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align indicators to 1h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # Calculate weekly EMA200 for long-term trend
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure EMA50 and volume MA are ready
+    # Start after all indicators are ready: max(52, 200) + displacement for cloud
+    start_idx = max(senkou_span_b_period, 200) + displacement
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or
+            np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        rsi_val = rsi[i]
-        ema_50_val = ema_50_aligned[i]
-        vol_ma = vol_ma_20_aligned[i]
-        vol_4h = volume_4h[i // 4] if i >= 4 else 0  # 4 bars per 1h in 4h
+        # Calculate cloud boundaries (shifted forward by displacement)
+        senkou_span_a_lead = senkou_span_a[i - displacement] if i >= displacement else senkou_span_a[i]
+        senkou_span_b_lead = senkou_span_b[i - displacement] if i >= displacement else senkou_span_b[i]
         
-        # Volume confirmation: current 4h volume > 1.8x 20-period average
-        volume_confirmed = vol_4h > 1.8 * vol_ma
+        # Cloud top and bottom
+        cloud_top = max(senkou_span_a_lead, senkou_span_b_lead)
+        cloud_bottom = min(senkou_span_a_lead, senkou_span_b_lead)
+        
+        price = close[i]
+        tenkan = tenkan_sen[i]
+        kijun = kijun_sen[i]
+        weekly_ema = ema_200_1w_aligned[i]
+        
+        # Determine if price is above or below cloud
+        price_above_cloud = price > cloud_top
+        price_below_cloud = price < cloud_bottom
+        
+        # TK cross signals
+        tk_cross_up = tenkan > kijun
+        tk_cross_down = tenkan < kijun
         
         if position == 0:
-            # Enter long when RSI < 30 (oversold), price above EMA50 (uptrend), and volume confirmation
-            if rsi_val < 30 and price > ema_50_val and volume_confirmed:
-                signals[i] = 0.20
+            # Enter long: TK cross up, price above cloud, and above weekly EMA200
+            if tk_cross_up and price_above_cloud and price > weekly_ema:
+                signals[i] = 0.25
                 position = 1
-            # Enter short when RSI > 70 (overbought), price below EMA50 (downtrend), and volume confirmation
-            elif rsi_val > 70 and price < ema_50_val and volume_confirmed:
-                signals[i] = -0.20
+            # Enter short: TK cross down, price below cloud, and below weekly EMA200
+            elif tk_cross_down and price_below_cloud and price < weekly_ema:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when RSI > 50 (mean reversion complete) or price crosses below EMA50
-            if rsi_val > 50 or price < ema_50_val:
+            # Exit long: TK cross down or price drops below cloud
+            if tk_cross_down or price < cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when RSI < 50 (mean reversion complete) or price crosses above EMA50
-            if rsi_val < 50 or price > ema_50_val:
+            # Exit short: TK cross up or price rises above cloud
+            if tk_cross_up or price > cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
