@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1-day volume confirmation and ADX trend filter.
-# Long when: price closes above Donchian upper band (20-day high), ADX(1d) > 20, volume > 1.5x 20-period average
-# Short when: price closes below Donchian lower band (20-day low), ADX(1d) > 20, volume > 1.5x 20-period average
-# Exit when price returns to the 20-period SMA or reverses to opposite Donchian band.
-# Designed for ~15-25 trades/year per symbol. Works in both bull and bear markets by only taking trades in trending conditions.
-name = "12h_Donchian20_Volume_ADX"
+# Hypothesis: 12h 1-day Bollinger Bands squeeze + 1-week volume surge breakout.
+# Long when: price closes above upper Bollinger Band, BB width at 1-year low, volume > 3x 20-period average
+# Short when: price closes below lower Bollinger Band, BB width at 1-year low, volume > 3x 20-period average
+# Exit when price returns to the 20-period SMA.
+# Designed to catch volatility breakouts after low volatility periods in both bull and bear markets.
+# Target: 15-25 trades/year per symbol.
+name = "12h_BollingerSqueeze_VolumeSurge"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,110 +23,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for ADX trend filter and Donchian calculation
+    # 1-day data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate ADX on daily data
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Bollinger Bands (20, 2) on daily data
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + 2 * std_20_1d
+    lower_bb_1d = sma_20_1d - 2 * std_20_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # 1-year low of BB width (252 trading days)
+    bb_width_min_252 = pd.Series(bb_width_1d).rolling(window=252, min_periods=252).min().values
+    bb_squeeze = bb_width_1d <= bb_width_min_252 * 1.1  # within 10% of yearly low
     
-    # Wilder's smoothing function
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[1:period]) 
-        # Subsequent values
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align BB squeeze and bands to 12h timeframe
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    atr_period = 14
-    atr = wilders_smoothing(tr, atr_period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
+    # 1-week data for volume surge filter
+    df_1w = get_htf_data(prices, '1w')
+    volume_1w = df_1w['volume'].values
     
-    # Directional Indicators
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    # 20-week average volume for surge detection
+    vol_avg_20w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_surge = volume_1w > 3 * vol_avg_20w  # 3x surge
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, atr_period)
+    # Align volume surge to 12h timeframe
+    vol_surge_aligned = align_htf_to_ltf(prices, df_1w, vol_surge)
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Donchian channels from previous day (20-period high/low)
-    # Using previous 20 days to avoid look-ahead
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Align Donchian levels to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    
-    # 20-period SMA on 12h data
+    # 20-period SMA on 12h data for exit
     sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # Volume average (20-period) for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or np.isnan(sma_20[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(bb_squeeze_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or np.isnan(vol_surge_aligned[i]) or 
+            np.isnan(sma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_aligned[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long breakout: price closes above Donchian upper band with ADX > 20 and volume confirmation
-            if price > high_20_aligned[i] and adx_val > 20 and vol > 1.5 * vol_ma:
+            # Long breakout: price closes above upper BB, BB squeeze, volume surge
+            if price > upper_bb_aligned[i] and bb_squeeze_aligned[i] and vol_surge_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price closes below Donchian lower band with ADX > 20 and volume confirmation
-            elif price < low_20_aligned[i] and adx_val > 20 and vol > 1.5 * vol_ma:
+            # Short breakdown: price closes below lower BB, BB squeeze, volume surge
+            elif price < lower_bb_aligned[i] and bb_squeeze_aligned[i] and vol_surge_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to 20-period SMA or breaks below Donchian lower band
-            if price <= sma_20[i] or price < low_20_aligned[i]:
+            # Long exit: price returns to 20-period SMA
+            if price <= sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to 20-period SMA or breaks above Donchian upper band
-            if price >= sma_20[i] or price > high_20_aligned[i]:
+            # Short exit: price returns to 20-period SMA
+            if price >= sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
