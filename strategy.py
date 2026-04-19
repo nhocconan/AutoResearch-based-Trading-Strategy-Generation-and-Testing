@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band width regime filter + Bollinger Band breakout with volume confirmation
-# Uses Bollinger Band width percentile to identify low volatility (squeeze) conditions
-# Then enters on breakout of Bollinger Bands with volume confirmation
-# Works in both bull and bear markets by trading volatility breakouts
-# Target: 20-30 trades/year per symbol
-name = "12h_BB_Width_Squeeze_Breakout_Volume"
+# Hypothesis: 12h price breaks above/below 1d Donchian(10) channels with volume confirmation.
+# Uses 1-day high/low channels to capture medium-term breakouts, filtered by volume > 1.5x 20-period average.
+# Works in bull markets (breakouts up) and bear markets (breakdowns down). Target: 25-35 trades/year per symbol.
+name = "12h_Donchian10_1d_Volume_Breakout"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,74 +20,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_length = 20
-    bb_mult = 2.0
+    # Get 1d data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate Bollinger Bands
-    sma = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
-    std = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
-    upper_band = sma + bb_mult * std
-    lower_band = sma - bb_mult * std
+    # Calculate 10-period Donchian channels on daily
+    donch_high_10 = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
+    donch_low_10 = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
     
-    # Bollinger Band Width
-    bb_width = (upper_band - lower_band) / sma
+    # Align 1d Donchian channels to 12h
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_10)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_10)
     
-    # Bollinger Band Width Percentile (50-period lookback)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).apply(
-        lambda x: np.percentile(x, 50) if len(x) == 50 else np.nan, raw=True
-    ).values
-    
-    # Squeeze condition: BB width below 50th percentile (low volatility)
-    squeeze_condition = bb_width < bb_width_percentile
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_length, 50)  # Ensure indicators are ready
+    start_idx = max(20, 20)  # Ensure Donchian and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(squeeze_condition[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
+        upper_channel = donch_high_aligned[i]
+        lower_channel = donch_low_aligned[i]
         vol_ma = vol_ma_20[i]
+        vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.8 * vol_ma
-        
-        # Bollinger Band breakout conditions
-        breakout_up = price > upper_band[i]
-        breakout_down = price < lower_band[i]
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter long on upward breakout during squeeze with volume confirmation
-            if breakout_up and squeeze_condition[i] and volume_confirmed:
+            # Enter long if price breaks above upper channel with volume
+            if price > upper_channel and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short on downward breakout during squeeze with volume confirmation
-            elif breakout_down and squeeze_condition[i] and volume_confirmed:
+            # Enter short if price breaks below lower channel with volume
+            elif price < lower_channel and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns to middle band (mean reversion) or volatility expands
-            if price < sma[i] or not squeeze_condition[i]:
+            # Exit long when price crosses below lower channel
+            if price < lower_channel:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns to middle band or volatility expands
-            if price > sma[i] or not squeeze_condition[i]:
+            # Exit short when price crosses above upper channel
+            if price > upper_channel:
                 signals[i] = 0.0
                 position = 0
             else:
