@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R (14) + 1d ADX filter for trend strength + volume confirmation.
-# Williams %R identifies overbought/oversold conditions (< -80 for long, > -20 for short).
-# ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranging markets.
-# Volume confirmation (current > 1.5x 20-period average) validates breakout strength.
-# This combination should work in both bull and bear markets by capturing trend
-# continuations from extreme levels with proper filtering.
-name = "12h_WilliamsR_ADX25_Volume_Filter"
+# Hypothesis: 12h ADX + volume filter for trend strength, with 1d EMA200 as trend filter.
+# ADX > 25 indicates strong trend, we enter long/short based on EMA200 direction.
+# Volume confirmation ensures breakout validity. Works in bull/bear markets by
+# filtering weak trends and choppy markets. Target: 20-40 trades/year per symbol.
+name = "12h_ADX25_EMA200_Volume_Filter"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,13 +21,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX on daily (14-period)
+    # Calculate EMA200 on daily
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -73,13 +72,10 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx = calculate_adx(high, low, close, 14)
     
-    # Calculate Williams %R on 12h data (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Align 1d EMA200 to 12h
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -87,47 +83,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20, 28)  # Ensure Williams %R, volume MA, and ADX are ready
+    start_idx = max(200, 28)  # Ensure EMA200 and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        wr = williams_r[i]
-        adx_val = adx_1d_aligned[i]
+        price = close[i]
+        ema_200_val = ema_200_aligned[i]
+        adx_val = adx[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # ADX trend strength filter (strong trend)
+        # ADX trend strength filter
         strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long when Williams %R < -80 (oversold) in strong trend with volume
-            if wr < -80 and strong_trend and volume_confirmed:
+            # Enter long if price above EMA200, strong trend, and volume confirmation
+            if price > ema_200_val and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short when Williams %R > -20 (overbought) in strong trend with volume
-            elif wr > -20 and strong_trend and volume_confirmed:
+            # Enter short if price below EMA200, strong trend, and volume confirmation
+            elif price < ema_200_val and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when Williams %R > -50 (recovery from oversold) or trend weakens
-            if wr > -50 or adx_val < 20:
+            # Exit long when price crosses below EMA200 or trend weakens
+            if price < ema_200_val or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when Williams %R < -50 (decline from overbought) or trend weakens
-            if wr < -50 or adx_val < 20:
+            # Exit short when price crosses above EMA200 or trend weakens
+            if price > ema_200_val or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
