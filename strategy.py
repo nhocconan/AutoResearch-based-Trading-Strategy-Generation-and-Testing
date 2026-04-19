@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Choppiness Index with 1-week EMA20 trend filter and volume confirmation
-# Choppiness Index > 61.8 indicates ranging market (mean reversion opportunity)
-# Choppiness Index < 38.2 indicates trending market (trend following)
-# Combined with 1-week EMA20 to filter trades in direction of higher timeframe trend
-# Volume confirmation ensures institutional participation
-# Target: 30-100 total trades over 4 years (7-25/year)
-name = "1d_Choppiness_1wEMA20_Volume"
-timeframe = "1d"
+# Hypothesis: 12h RSI(14) with 1d trend filter (EMA50) and volume confirmation
+# RSI(14) identifies overbought/oversold conditions (<30 long, >70 short)
+# 1d EMA50 provides higher timeframe trend bias: only long when price > EMA50, short when price < EMA50
+# Volume confirmation: volume > 1.5 * 20-period average to filter weak signals
+# Designed for 12h timeframe to limit trades (target: 50-150 total over 4 years)
+# Works in both bull and bear markets by combining mean reversion (RSI) with trend filter
+name = "12h_RSI14_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,28 +23,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week EMA20 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Choppiness Index (14-period)
-    atr_list = []
-    for i in range(n):
-        tr = max(high[i] - low[i], abs(high[i] - close[i-1]) if i > 0 else 0, abs(low[i] - close[i-1]) if i > 0 else 0)
-        atr_list.append(tr)
-    atr = np.array(atr_list)
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    range_hl = hh - ll
-    chop = np.where(range_hl != 0, -100 * np.log10(atr_sum / range_hl) / np.log10(14), 50)
+    # RSI(14) on 12h
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,50 +47,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(chop[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # In ranging market (CHOP > 61.8): mean reversion at extremes
-            if (chop[i] > 61.8 and 
-                close[i] < ll[i] and  # Near low of range - look for bounce
+            # Long: RSI < 30 (oversold) + price > 1d EMA50 + volume confirmation
+            if (rsi[i] < 30 and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            elif (chop[i] > 61.8 and 
-                  close[i] > hh[i] and  # Near high of range - look for reversal
-                  volume_confirm[i]):
-                signals[i] = -0.25
-                position = -1
-            # In trending market (CHOP < 38.2): follow trend with 1-week EMA
-            elif (chop[i] < 38.2 and 
-                  close[i] > ema_20_1w_aligned[i] and  # Uptrend
-                  volume_confirm[i]):
-                signals[i] = 0.25
-                position = 1
-            elif (chop[i] < 38.2 and 
-                  close[i] < ema_20_1w_aligned[i] and  # Downtrend
+            # Short: RSI > 70 (overbought) + price < 1d EMA50 + volume confirmation
+            elif (rsi[i] > 70 and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long exit: chop shifts to trending down OR price crosses below weekly EMA
-            if (chop[i] < 38.2 and close[i] < ema_20_1w_aligned[i]):
+            # Long: exit if RSI > 50 (momentum fading) or breaks below 1d EMA50
+            if (rsi[i] > 50) or (close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short exit: chop shifts to trending up OR price crosses above weekly EMA
-            if (chop[i] < 38.2 and close[i] > ema_20_1w_aligned[i]):
+            # Short: exit if RSI < 50 (momentum fading) or breaks above 1d EMA50
+            if (rsi[i] < 50) or (close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
