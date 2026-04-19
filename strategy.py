@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_PowerTrend_v1"
-timeframe = "6h"
+name = "4h_Camillo_Trend_Exhaustion_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,32 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation
+    # Get 1d data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
+    
+    # 1d ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr_1d = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)), np.absolute(low_1d - np.roll(close_1d, 1)))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Get 1w data for weekly bias
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 1d EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate Elder Ray Power (Bull/Bear Power) on 1d
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # 1d 10-period RSI for exhaustion signal
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_10 = 100 - (100 / (1 + rs))
+    rsi_10_aligned = align_htf_to_ltf(prices, df_1d, rsi_10)
     
-    # Align Elder Ray to 6h timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Calculate 13-period EMA of close for trend filter
-    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Weekly trend filter: price above/below weekly EMA26
-    ema26_1w = pd.Series(close_1w).ewm(span=26, adjust=False, min_periods=26).mean().values
-    ema26_1w_aligned = align_htf_to_ltf(prices, df_1w, ema26_1w)
+    # 4h 20-period RSI for entry confirmation
+    delta_4h = pd.Series(close).diff()
+    gain_4h = delta_4h.clip(lower=0)
+    loss_4h = -delta_4h.clip(upper=0)
+    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
+    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
+    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
+    rsi_20_4h = 100 - (100 / (1 + rs_4h))
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,50 +58,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # Ensure enough data for indicators
+    start_idx = max(100, 200, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or \
-           np.isnan(ema13_6h[i]) or np.isnan(ema26_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(atr_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or \
+           np.isnan(rsi_10_aligned[i]) or np.isnan(rsi_20_4h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        bull_power = bull_power_1d_aligned[i]
-        bear_power = bear_power_1d_aligned[i]
+        rsi_4h = rsi_20_4h[i]
+        rsi_1d = rsi_10_aligned[i]
         
         # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
-        # Trend filters
-        price_above_ema13 = price > ema13_6h[i]
-        price_below_ema13 = price < ema13_6h[i]
-        weekly_uptrend = price > ema26_1w_aligned[i]
-        weekly_downtrend = price < ema26_1w_aligned[i]
+        # Exhaustion: RSI > 70 in 1d indicates overextended long; RSI < 30 indicates oversold short
+        long_exhaustion = rsi_1d > 70
+        short_exhaustion = rsi_1d < 30
         
+        # Entry conditions: look for reversal from exhaustion
         if position == 0:
-            # Long: Bull Power positive AND price above EMA13 AND weekly uptrend AND volume
-            if bull_power > 0 and price_above_ema13 and weekly_uptrend and volume_ok:
+            # Long: price above EMA200, RSI coming down from overbought, volume confirmation
+            if price > ema200_1d_aligned[i] and rsi_4h < 50 and long_exhaustion and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power negative AND price below EMA13 AND weekly downtrend AND volume
-            elif bear_power < 0 and price_below_ema13 and weekly_downtrend and volume_ok:
+            # Short: price below EMA200, RSI coming up from oversold, volume confirmation
+            elif price < ema200_1d_aligned[i] and rsi_4h > 50 and short_exhaustion and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Bull Power turns negative OR price breaks below EMA13
-            if bull_power <= 0 or price <= ema13_6h[i]:
+            # Exit: price drops below EMA200 or RSI shows new exhaustion
+            if price < ema200_1d_aligned[i] or rsi_1d > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Bear Power turns positive OR price breaks above EMA13
-            if bear_power >= 0 or price >= ema13_6h[i]:
+            # Exit: price rises above EMA200 or RSI shows new exhaustion
+            if price > ema200_1d_aligned[i] or rsi_1d < 25:
                 signals[i] = 0.0
                 position = 0
             else:
