@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla Pivot R1/S1 Breakout with Volume Confirmation and 12h EMA34 Trend Filter
-# Uses 6h as primary timeframe with 12h trend filter and volume confirmation
-# Long when: price breaks above R1 with volume > 1.5x 20-period average and above 12h EMA34
-# Short when: price breaks below S1 with volume > 1.5x 20-period average and below 12h EMA34
-# Camarilla levels calculated from prior 12h bar: 
-#   R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+# Hypothesis: 4h Keltner Channel + Momentum + Volume Confirmation
+# Uses 4h as primary timeframe with 1d trend filter (EMA34) and volume spike (>1.5x average)
+# Long when: price > upper Keltner channel, positive momentum, above 1d EMA34, volume confirmed
+# Short when: price < lower Keltner channel, negative momentum, below 1d EMA34, volume confirmed
+# Keltner Channel: EMA20 ± (ATR10 * 2)
+# Momentum: ROC10 (Rate of Change over 10 periods)
 # Volume confirmation ensures institutional participation in breakouts
-# Target: 15-30 trades/year per symbol (~60-120 total over 4 years)
+# Target: 20-40 trades/year per symbol (~80-160 total over 4 years)
 
-name = "6h_Camarilla_R1_S1_Breakout_Volume"
-timeframe = "6h"
+name = "4h_Keltner_Momentum_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,25 +26,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculation and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get daily data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla R1 and S1 from prior 12h bar
-    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_range = high_12h - low_12h
-    r1_level = close_12h + 1.1 * camarilla_range / 12.0
-    s1_level = close_12h - 1.1 * camarilla_range / 12.0
+    # Calculate EMA20 for Keltner middle line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align R1/S1 to 6h timeframe (values from prior completed 12h bar)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_level)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_level)
+    # Calculate ATR10 for Keltner width
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate Keltner Channel bands
+    upper_keltner = ema20 + (2 * atr10)
+    lower_keltner = ema20 - (2 * atr10)
+    
+    # Calculate ROC10 momentum
+    roc10 = np.zeros(n)
+    for i in range(10, n):
+        roc10[i] = ((close[i] - close[i-10]) / close[i-10]) * 100
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,18 +60,20 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need volume MA and EMA data
+    start_idx = max(20, 10)  # Need EMA20 and ROC10 data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema20[i]) or np.isnan(atr10[i]) or 
+            np.isnan(roc10[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
+        upper = upper_keltner[i]
+        lower = lower_keltner[i]
+        momentum = roc10[i]
         ema_trend = ema_34_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
@@ -72,26 +82,26 @@ def generate_signals(prices):
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter long: price breaks above R1 with volume confirmation and above 12h EMA34
-            if price > r1 and volume_confirmed and price > ema_trend:
+            # Enter long: price > upper Keltner, positive momentum, above 1d EMA34
+            if price > upper and momentum > 0 and price > ema_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 with volume confirmation and below 12h EMA34
-            elif price < s1 and volume_confirmed and price < ema_trend:
+            # Enter short: price < lower Keltner, negative momentum, below 1d EMA34
+            elif price < lower and momentum < 0 and price < ema_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price falls back below R1 or below 12h EMA34
-            if price < r1 or price < ema_trend:
+            # Exit long when price < EMA20 OR momentum <= 0 OR below 1d EMA34
+            if price < ema20[i] or momentum <= 0 or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price rises back above S1 or above 12h EMA34
-            if price > s1 or price > ema_trend:
+            # Exit short when price > EMA20 OR momentum >= 0 OR above 1d EMA34
+            if price > ema20[i] or momentum >= 0 or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
