@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Pivot_R1S1_Breakout_VolumeATR_v3"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_VolumeATR_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -14,7 +14,7 @@ def generate_signals(prices):
     
     close = prices['close'].values
     high = prices['high'].values
-    low = prices['low'].volume = prices['volume'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
     # Get daily data for Camarilla pivot calculation (once before loop)
@@ -31,7 +31,7 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily pivot levels to 4h timeframe
+    # Align daily pivot levels to 1h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -43,11 +43,14 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 2.0x 24-period average (4h) - slightly stricter to reduce trades
+    # Hourly volume confirmation: current volume > 2.0x 24-period average (1h)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # Additional filter: only trade when price is away from extremes (avoid chop)
-    price_ma_60 = pd.Series(close).rolling(window=60, min_periods=60).mean().values
+    # Hourly price away from extremes filter: avoid chop
+    price_ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,7 +60,12 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
             np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_24[i]) or np.isnan(price_ma_60[i])):
+            np.isnan(vol_ma_24[i]) or np.isnan(price_ma_20[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        if hours[i] < 8 or hours[i] > 20:
             signals[i] = 0.0
             continue
         
@@ -68,10 +76,10 @@ def generate_signals(prices):
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
-        price_ma = price_ma_60[i]
+        price_ma = price_ma_20[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
-        # Only trade when price is not too far from MA (avoid extreme moves)
+        # Only trade when price is not too far from MA (avoid extreme moves/chop)
         price_not_extreme = abs(price - price_ma) < 2.5 * atr
         
         if position == 0:
