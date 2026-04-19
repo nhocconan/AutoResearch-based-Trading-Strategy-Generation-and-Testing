@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-week EMA50 trend filter, 1-day ATR volatility filter,
-# and 4-hour RSI mean-reversion with volume confirmation. Weekly EMA50 establishes
-# longer-term trend bias, daily ATR sets volatility regime for RSI thresholds,
-# and 4h RSI extremes with volume spikes capture mean-reversion opportunities.
-# Works in bull/bear by requiring alignment with weekly trend and volatility-adjusted entries.
-# Target: 20-40 trades/year per symbol.
-name = "4h_EMA50_1w_ATR1d_RSI4h_Volume"
-timeframe = "4h"
+# Hypothesis: 1d strategy using weekly price channels (Donchian) with volume confirmation and RSI filter.
+# Buys when price breaks above weekly Donchian high with volume spike and RSI < 70 (avoid overextended buys).
+# Sells when price breaks below weekly Donchian low with volume spike and RSI > 30 (avoid panic sells).
+# Uses weekly trend filter to reduce false signals in choppy markets.
+# Designed for low trade frequency (~15-25 trades/year) to minimize fee drag.
+# Works in both bull and bear markets by requiring alignment with weekly trend.
+name = "1d_WeeklyDonchian20_VolumeRSI"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,84 +23,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly EMA50 for trend bias
+    # Weekly Donchian channels (20-period)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    donchian_high_1w = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low_1w = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    # Daily ATR(14) for volatility regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
     
-    tr1 = np.maximum(df_1d['high'].values[1:] - df_1d['low'].values[1:],
-                     np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1]))
-    tr2 = np.maximum(np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1]),
-                     np.zeros(len(tr1)))
-    tr = np.concatenate([[np.inf], np.maximum(tr1, tr2)])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # 4-hour RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.maximum(delta, 0)
-    loss = np.maximum(-delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume spike: volume > 1.8 * 20-period average
+    # Volume spike: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.8)
+    volume_spike = volume > (volume_ma * 2.0)
+    
+    # RSI (14-period) to avoid overextended entries
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral RSI when no data
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Dynamic RSI thresholds based on volatility (ATR)
-        # Higher volatility -> wider RSI bands (more extreme readings needed)
-        vol_factor = atr_14_1d_aligned[i] / np.mean(atr_14_1d_aligned[max(0, i-50):i+1])
-        vol_factor = np.clip(vol_factor, 0.5, 2.0)
-        rsi_overbought = 70 + (vol_factor - 1) * 10  # 60-80 range
-        rsi_oversold = 30 - (vol_factor - 1) * 10    # 20-40 range
-        
         if position == 0:
-            # Long: RSI oversold, above weekly EMA50, with volume spike
-            if (rsi[i] < rsi_oversold and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_spike[i]):
+            # Long: price breaks above weekly Donchian high, with volume spike, and RSI not overbought
+            if (close[i] > donchian_high_aligned[i] and 
+                volume_spike[i] and 
+                rsi[i] < 70):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought, below weekly EMA50, with volume spike
-            elif (rsi[i] > rsi_overbought and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_spike[i]):
+            # Short: price breaks below weekly Donchian low, with volume spike, and RSI not oversold
+            elif (close[i] < donchian_low_aligned[i] and 
+                  volume_spike[i] and 
+                  rsi[i] > 30):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if RSI returns to neutral (50) or below weekly EMA50
-            if (rsi[i] >= 50) or (close[i] < ema_50_1w_aligned[i]):
+            # Long: exit if price breaks below weekly Donchian low
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if RSI returns to neutral (50) or above weekly EMA50
-            if (rsi[i] <= 50) or (close[i] > ema_50_1w_aligned[i]):
+            # Short: exit if price breaks above weekly Donchian high
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
