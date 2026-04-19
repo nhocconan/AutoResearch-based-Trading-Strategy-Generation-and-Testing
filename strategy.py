@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_WickReversal_SuperTrend_Filter
-Hypothesis: 4-hour wick reversals (long lower wick for longs, long upper wick for shorts) 
-combined with SuperTrend filter to trade with higher timeframe trend. 
-Wick reversals signal exhaustion moves; SuperTrend filters for trend direction to 
-avoid counter-trend trades. Works in bull/bear via trend filter.
-Target: 20-50 trades/year via strict wick + trend requirements.
+1d_WeeklyPivot_MeanReversion
+Hypothesis: Daily mean reversion at weekly pivot points with volume confirmation and RSI filter.
+Weekly pivots act as strong support/resistance in BTC/ETH due to institutional order flow.
+RSI < 30 for long, > 70 for short ensures oversold/overbought conditions.
+Volume confirmation filters for institutional participation.
+Works in both bull/bear via mean reversion at key weekly levels.
+Target: 15-25 trades/year to minimize fee drag.
 """
 
-name = "4h_WickReversal_SuperTrend_Filter"
-timeframe = "4h"
+name = "1d_WeeklyPivot_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -26,101 +27,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # SuperTrend calculation (ATR=10, multiplier=3.0)
-    def calculate_supertrend(high, low, close, atr_period=10, multiplier=3.0):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        
-        # ATR using Wilder's smoothing
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            if len(data) >= period:
-                result[period-1] = np.nanmean(data[:period])
-                for i in range(period, len(data)):
-                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-                    else:
-                        result[i] = np.nan
-            return result
-        
-        atr = WilderSmooth(tr, atr_period)
-        
-        # Basic upper and lower bands
-        hl2 = (high + low) / 2
-        upper_band = hl2 + multiplier * atr
-        lower_band = hl2 - multiplier * atr
-        
-        # Final bands
-        final_upper = np.full_like(close, np.nan)
-        final_lower = np.full_like(close, np.nan)
-        
-        for i in range(len(close)):
-            if i == 0:
-                final_upper[i] = upper_band[i]
-                final_lower[i] = lower_band[i]
-            else:
-                if upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
-                    final_upper[i] = upper_band[i]
-                else:
-                    final_upper[i] = final_upper[i-1]
-                
-                if lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
-                    final_lower[i] = lower_band[i]
-                else:
-                    final_lower[i] = final_lower[i-1]
-        
-        # SuperTrend
-        supertrend = np.full_like(close, np.nan)
-        for i in range(len(close)):
-            if i == 0:
-                supertrend[i] = final_upper[i]
-            else:
-                if supertrend[i-1] == final_upper[i-1] and close[i] <= final_upper[i]:
-                    supertrend[i] = final_upper[i]
-                elif supertrend[i-1] == final_upper[i-1] and close[i] > final_upper[i]:
-                    supertrend[i] = final_lower[i]
-                elif supertrend[i-1] == final_lower[i-1] and close[i] >= final_lower[i]:
-                    supertrend[i] = final_lower[i]
-                elif supertrend[i-1] == final_lower[i-1] and close[i] < final_lower[i]:
-                    supertrend[i] = final_upper[i]
-        
-        return supertrend
-    
-    # 4h data for SuperTrend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    supertrend_4h = calculate_supertrend(
-        df_4h['high'].values, 
-        df_4h['low'].values, 
-        df_4h['close'].values, 
-        10, 3.0
-    )
-    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h)
+    # Previous week's OHLC for pivot calculation
+    ph = df_1w['high'].shift(1).values   # Previous week high
+    pl = df_1w['low'].shift(1).values    # Previous week low
+    pc = df_1w['close'].shift(1).values  # Previous week close
     
-    # Wick calculations for reversal signals
-    body_size = np.abs(close - open_)
-    upper_wick = high - np.maximum(close, open_)
-    lower_wick = np.minimum(close, open_) - low
-    total_range = high - low
+    # Standard pivot point calculation
+    pp = (ph + pl + pc) / 3.0           # Pivot point
+    r1 = 2 * pp - pl                    # Resistance 1
+    s1 = 2 * pp - ph                    # Support 1
+    r2 = pp + (ph - pl)                 # Resistance 2
+    s2 = pp - (ph - pl)                 # Support 2
     
-    # Avoid division by zero
-    range_safe = np.where(total_range == 0, 1, total_range)
-    upper_wick_ratio = upper_wick / range_safe
-    lower_wick_ratio = lower_wick / range_safe
+    # Align weekly pivots to daily timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Strong wick rejection: wick > 60% of range and body < 40% of range
-    strong_upper_wick = upper_wick_ratio > 0.6
-    strong_lower_wick = lower_wick_ratio > 0.6
-    small_body = body_size < (0.4 * range_safe)
+    # RSI(14) for overbought/oversold conditions
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Wilder's smoothing
+        avg_gain = np.full_like(prices, np.nan)
+        avg_loss = np.full_like(prices, np.nan)
+        
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        for i in range(period + 1, len(prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Volume confirmation: volume > 1.3 * 20-period average
+    rsi = calculate_rsi(close, 14)
+    
+    # Volume confirmation: volume > 1.3 * 20-day average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.3)
     
@@ -130,229 +84,38 @@ def generate_signals(prices):
     start_idx = max(30, 20)  # Ensure enough data
     
     for i in range(start_idx, n):
-        # Skip if required data is NaN
-        if (np.isnan(supertrend_4h_aligned[i]) or 
-            np.isnan(volume_ma[i]) or
-            np.isnan(upper_wick_ratio[i]) or
-            np.isnan(lower_wick_ratio[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from SuperTrend
-        # SuperTrend acts as support in uptrend, resistance in downtrend
-        is_uptrend = close[i] > supertrend_4h_aligned[i]
-        
         if position == 0:
-            # Long: strong lower wick rejection + uptrend + volume
-            if (strong_lower_wick[i] and 
-                small_body[i] and 
-                is_uptrend and 
+            # Long: price at or below S1 with RSI oversold and volume
+            if (close[i] <= s1_aligned[i] and 
+                rsi[i] < 30 and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: strong upper wick rejection + downtrend + volume
-            elif (strong_upper_wick[i] and 
-                  small_body[i] and 
-                  not is_uptrend and 
+            # Short: price at or above R1 with RSI overbought and volume
+            elif (close[i] >= r1_aligned[i] and 
+                  rsi[i] > 70 and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below SuperTrend (trend change) or opposite wick
-            if (close[i] < supertrend_4h_aligned[i]) or (strong_upper_wick[i] and small_body[i]):
+            # Long: exit at pivot point or RSI overbought
+            if (close[i] >= pp_aligned[i]) or (rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above SuperTrend or opposite wick
-            if (close[i] > supertrend_4h_aligned[i]) or (strong_lower_wick[i] and small_body[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-    
-    return signals
-
-# Open variable fix
-open_ = prices['open'].values if 'prices' in locals() else np.array([])  # This line will be removed/replaced
-# Actually, let's properly define it:
-# Re-defining the function with proper open variable handling
-
-#!/usr/bin/env python3
-"""
-4h_WickReversal_SuperTrend_Filter
-Hypothesis: 4-hour wick reversals (long lower wick for longs, long upper wick for shorts) 
-combined with SuperTrend filter to trade with higher timeframe trend. 
-Wick reversals signal exhaustion moves; SuperTrend filters for trend direction to 
-avoid counter-trend trades. Works in bull/bear via trend filter.
-Target: 20-50 trades/year via strict wick + trend requirements.
-"""
-
-name = "4h_WickReversal_SuperTrend_Filter"
-timeframe = "4h"
-leverage = 1.0
-
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    close = prices['close'].values
-    open_ = prices['open'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # SuperTrend calculation (ATR=10, multiplier=3.0)
-    def calculate_supertrend(high, low, close, atr_period=10, multiplier=3.0):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        
-        # ATR using Wilder's smoothing
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            if len(data) >= period:
-                result[period-1] = np.nanmean(data[:period])
-                for i in range(period, len(data)):
-                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-                    else:
-                        result[i] = np.nan
-            return result
-        
-        atr = WilderSmooth(tr, atr_period)
-        
-        # Basic upper and lower bands
-        hl2 = (high + low) / 2
-        upper_band = hl2 + multiplier * atr
-        lower_band = hl2 - multiplier * atr
-        
-        # Final bands
-        final_upper = np.full_like(close, np.nan)
-        final_lower = np.full_like(close, np.nan)
-        
-        for i in range(len(close)):
-            if i == 0:
-                final_upper[i] = upper_band[i]
-                final_lower[i] = lower_band[i]
-            else:
-                if upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
-                    final_upper[i] = upper_band[i]
-                else:
-                    final_upper[i] = final_upper[i-1]
-                
-                if lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
-                    final_lower[i] = lower_band[i]
-                else:
-                    final_lower[i] = final_lower[i-1]
-        
-        # SuperTrend
-        supertrend = np.full_like(close, np.nan)
-        for i in range(len(close)):
-            if i == 0:
-                supertrend[i] = final_upper[i]
-            else:
-                if supertrend[i-1] == final_upper[i-1] and close[i] <= final_upper[i]:
-                    supertrend[i] = final_upper[i]
-                elif supertrend[i-1] == final_upper[i-1] and close[i] > final_upper[i]:
-                    supertrend[i] = final_lower[i]
-                elif supertrend[i-1] == final_lower[i-1] and close[i] >= final_lower[i]:
-                    supertrend[i] = final_lower[i]
-                elif supertrend[i-1] == final_lower[i-1] and close[i] < final_lower[i]:
-                    supertrend[i] = final_upper[i]
-        
-        return supertrend
-    
-    # 4h data for SuperTrend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    supertrend_4h = calculate_supertrend(
-        df_4h['high'].values, 
-        df_4h['low'].values, 
-        df_4h['close'].values, 
-        10, 3.0
-    )
-    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h)
-    
-    # Wick calculations for reversal signals
-    body_size = np.abs(close - open_)
-    upper_wick = high - np.maximum(close, open_)
-    lower_wick = np.minimum(close, open_) - low
-    total_range = high - low
-    
-    # Avoid division by zero
-    range_safe = np.where(total_range == 0, 1, total_range)
-    upper_wick_ratio = upper_wick / range_safe
-    lower_wick_ratio = lower_wick / range_safe
-    
-    # Strong wick rejection: wick > 60% of range and body < 40% of range
-    strong_upper_wick = upper_wick_ratio > 0.6
-    strong_lower_wick = lower_wick_ratio > 0.6
-    small_body = body_size < (0.4 * range_safe)
-    
-    # Volume confirmation: volume > 1.3 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    start_idx = max(30, 20)  # Ensure enough data
-    
-    for i in range(start_idx, n):
-        # Skip if required data is NaN
-        if (np.isnan(supertrend_4h_aligned[i]) or 
-            np.isnan(volume_ma[i]) or
-            np.isnan(upper_wick_ratio[i]) or
-            np.isnan(lower_wick_ratio[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Trend filter from SuperTrend
-        # SuperTrend acts as support in uptrend, resistance in downtrend
-        is_uptrend = close[i] > supertrend_4h_aligned[i]
-        
-        if position == 0:
-            # Long: strong lower wick rejection + uptrend + volume
-            if (strong_lower_wick[i] and 
-                small_body[i] and 
-                is_uptrend and 
-                volume_confirm[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: strong upper wick rejection + downtrend + volume
-            elif (strong_upper_wick[i] and 
-                  small_body[i] and 
-                  not is_uptrend and 
-                  volume_confirm[i]):
-                signals[i] = -0.25
-                position = -1
-                
-        elif position == 1:
-            # Long: exit if price breaks below SuperTrend (trend change) or opposite wick
-            if (close[i] < supertrend_4h_aligned[i]) or (strong_upper_wick[i] and small_body[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-                
-        elif position == -1:
-            # Short: exit if price breaks above SuperTrend or opposite wick
-            if (close[i] > supertrend_4h_aligned[i]) or (strong_lower_wick[i] and small_body[i]):
+            # Short: exit at pivot point or RSI oversold
+            if (close[i] <= pp_aligned[i]) or (rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
