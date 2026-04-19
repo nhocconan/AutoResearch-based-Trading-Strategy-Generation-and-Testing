@@ -1,130 +1,98 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kijun_Cross_Cloud_Filter
-Hypothesis: Ichimoku Kijun/Tenkan cross with daily cloud filter provides trend signals
-that work in both bull and bear markets. The cloud acts as dynamic support/resistance,
-reducing whipsaw. Target 12-37 trades/year on 6h timeframe.
+12h_WickReversal_Trend_Filter
+Hypothesis: On 12h timeframe, long wicks indicate rejection of higher/lower prices and potential reversals.
+Combined with 1d trend filter (EMA34) and volume confirmation to avoid false signals.
+Designed to work in both bull and bear markets by focusing on rejection signals with trend alignment.
+Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
-name = "6h_Ichimoku_Kijun_Cross_Cloud_Filter"
-timeframe = "6h"
+name = "12h_WickReversal_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku components: Tenkan, Kijun, Senkou A/B, Chikou"""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    chikou = np.roll(close, 26)
-    
-    return tenkan, kijun, senkou_a, senkou_b, chikou
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku cloud filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate Ichimoku on daily data
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d, chikou_1d = calculate_ichimoku(
-        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
-    )
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # Calculate 6h Tenkan/Kijun for crossover signals
-    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_6h = (period9_high_6h + period9_low_6h) / 2
-    
-    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_6h = (period26_high_6h + period26_low_6h) / 2
+    # Calculate EMA34 on 1d close for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
     
+    # Calculate upper and lower wick ratios
+    body_size = np.abs(close - open_prices) if 'open' in prices else np.abs(close - np.roll(close, 1))
+    upper_wick = high - np.maximum(close, open_prices) if 'open' in prices else high - np.maximum(close, np.roll(close, 1))
+    lower_wick = np.minimum(close, open_prices) - low if 'open' in prices else np.minimum(close, np.roll(close, 1)) - low
+    
+    # Handle case where open column might not exist
+    if 'open' not in prices:
+        open_prices = np.roll(close, 1)
+        open_prices[0] = close[0]
+        body_size = np.abs(close - open_prices)
+        upper_wick = high - np.maximum(close, open_prices)
+        lower_wick = np.minimum(close, open_prices) - low
+    
+    # Avoid division by zero
+    body_size_safe = np.where(body_size == 0, 1, body_size)
+    upper_wick_ratio = upper_wick / body_size_safe
+    lower_wick_ratio = lower_wick / body_size_safe
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 26)
+    start_idx = max(40, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma[i]) or 
+            np.isnan(upper_wick_ratio[i]) or np.isnan(lower_wick_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries (Senkou Span A/B)
-        cloud_top = np.maximum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        cloud_bottom = np.minimum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        
-        # Price relative to cloud
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
         if position == 0:
-            # Long: Tenkan crosses above Kijun AND price above cloud (bullish)
-            if (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1] and 
-                price_above_cloud and volume_confirm[i]):
+            # Long: long lower wick (rejection of lower prices) in uptrend
+            if (lower_wick_ratio[i] > 2.0 and  # Significant lower wick
+                close[i] > ema34_1d_aligned[i] and  # Price above 1d EMA34 (uptrend)
+                volume_confirm[i]):  # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Tenkan crosses below Kijun AND price below cloud (bearish)
-            elif (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1] and 
-                  price_below_cloud and volume_confirm[i]):
+            # Short: long upper wick (rejection of higher prices) in downtrend
+            elif (upper_wick_ratio[i] > 2.0 and  # Significant upper wick
+                  close[i] < ema34_1d_aligned[i] and  # Price below 1d EMA34 (downtrend)
+                  volume_confirm[i]):  # Volume confirmation
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Tenkan crosses below Kijun OR price falls below cloud
-            if (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]) or \
-               close[i] < cloud_top:
+            # Long: exit if price breaks below EMA34 or wick signal reverses
+            if (close[i] < ema34_1d_aligned[i]) or (upper_wick_ratio[i] > 2.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Tenkan crosses above Kijun OR price rises above cloud
-            if (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]) or \
-               close[i] > cloud_bottom:
+            # Short: exit if price breaks above EMA34 or wick signal reverses
+            if (close[i] > ema34_1d_aligned[i]) or (lower_wick_ratio[i] > 2.0):
                 signals[i] = 0.0
                 position = 0
             else:
