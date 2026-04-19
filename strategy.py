@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and Choppiness regime filter
-# - 4h Donchian(20) upper/lower bands define breakout levels
-# - 1d volume > 1.5x 20-period average for conviction
-# - 1d Choppiness Index > 61.8 for range regime (mean reversion at bands), < 38.2 for trend (follow breakout)
-# - In trend regime (CHOP < 38.2): long on upper band breakout, short on lower band breakdown
-# - In range regime (CHOP > 61.8): long at lower band, short at upper band (mean reversion)
-# - Exit on opposite band touch or regime change
-# - Position size: 0.25 (25%) to manage drawdown
-# - Designed to work in both bull and bear markets by adapting to regime
-# - Target: 20-50 trades/year to avoid excessive fee drag
+# Hypothesis: 4h Williams Alligator + 1d volume confirmation + 1d trend filter
+# - Williams Alligator (Jaw=13, Teeth=8, Lips=5) defines trend on 4h: 
+#   * Lips > Teeth > Jaw = bullish alignment (long bias)
+#   * Lips < Teeth < Jaw = bearish alignment (short bias)
+# - 1d volume > 1.3x 20-period average for conviction (avoid low-volume false signals)
+# - 1d close > 1d EMA50 for long bias, < EMA50 for short bias (trend filter)
+# - Entry: Alligator alignment + 1d volume + 1d trend in same direction
+# - Exit: Opposite Alligator alignment or volume drops below average
+# - Position size: 0.25 (25%) to balance return and drawdown
+# - Designed for both bull and bear markets by following higher timeframe trend
+# - Target: ~25 trades/year to minimize fee drag (<2.5% annual)
 
-name = "4h_Donchian20_1dVolume_Chop_v2"
+name = "4h_WilliamsAlligator_1dVolume_Trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,113 +29,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and Choppiness Index
+    # Get 4h data for Williams Alligator
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Williams Alligator components (Smoothed SMAs)
+    # Jaw: 13-period SMMA, shifted 8 bars
+    jaw_raw = pd.Series(close_4h).rolling(window=13, min_periods=13).mean()
+    jaw = jaw_raw.shift(8)
+    
+    # Teeth: 8-period SMMA, shifted 5 bars
+    teeth_raw = pd.Series(close_4h).rolling(window=8, min_periods=8).mean()
+    teeth = teeth_raw.shift(5)
+    
+    # Lips: 5-period SMMA, shifted 3 bars
+    lips_raw = pd.Series(close_4h).rolling(window=5, min_periods=5).mean()
+    lips = lips_raw.shift(3)
+    
+    # Align Alligator lines to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw.values)
+    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth.values)
+    lips_aligned = align_htf_to_ltf(prices, df_4h, lips.values)
+    
+    # Get 1d data for volume and trend filters
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # 1d Choppiness Index (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with close_1d
-    
-    # ATR(14)
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # +DM and -DM
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed +DM and -DM
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / atr_1d
-    minus_di = 100 * minus_dm_smooth / atr_1d
-    
-    # DX and Choppiness Index
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    chop = 100 * np.log10(pd.Series(atr_1d).rolling(window=14, min_periods=14).sum() / 
-                          (np.abs(high_1d - low_1d).rolling(window=14, min_periods=14).sum())) / np.log10(14)
-    chop = chop.values
-    
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # 4h Donchian channels (20-period)
-    donch_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 60  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_h[i]) or np.isnan(donch_l[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
-            
-        # Volume filter: current 1d volume > 1.5x average
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * vol_ma_1d_aligned[i]
         
-        if not volume_filter:
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-            
+        # Williams Alligator alignment signals
+        lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
+        
+        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
+        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
+        
+        # 1d volume filter: current volume > 1.3x average
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.3 * vol_ma_1d_aligned[i]
+        
+        # 1d trend filter
+        above_ema = close[i] > ema_50_1d_aligned[i]
+        below_ema = close[i] < ema_50_1d_aligned[i]
+        
         if position == 0:
-            # Determine regime: chop > 61.8 = range, chop < 38.2 = trend
-            if chop_aligned[i] > 61.8:  # Range regime - mean reversion
-                # Long at lower band, short at upper band
-                if close[i] <= donch_l[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] >= donch_h[i]:
-                    signals[i] = -0.25
-                    position = -1
-            elif chop_aligned[i] < 38.2:  # Trend regime - follow breakout
-                # Long on upper band breakout, short on lower band breakdown
-                if close[i] > donch_h[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < donch_l[i]:
-                    signals[i] = -0.25
-                    position = -1
-            else:  # Neutral regime - no action
-                signals[i] = 0.0
+            # Long entry: bullish alignment + volume + above EMA50
+            if bullish_alignment and volume_filter and above_ema:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: bearish alignment + volume + below EMA50
+            elif bearish_alignment and volume_filter and below_ema:
+                signals[i] = -0.25
+                position = -1
+                
         elif position == 1:
-            # Long position: exit at opposite band or regime change to strong trend against position
-            if chop_aligned[i] < 38.2 and close[i] < donch_l[i]:  # Trend regime break down
-                signals[i] = 0.0
-                position = 0
-            elif chop_aligned[i] > 61.8 and close[i] >= donch_h[i]:  # Range regime reached upper band
+            # Long position: exit on bearish alignment or volume drops
+            if bearish_alignment or not volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+                
         elif position == -1:
-            # Short position: exit at opposite band or regime change to strong trend against position
-            if chop_aligned[i] < 38.2 and close[i] > donch_h[i]:  # Trend regime break up
-                signals[i] = 0.0
-                position = 0
-            elif chop_aligned[i] > 61.8 and close[i] <= donch_l[i]:  # Range regime reached lower band
+            # Short position: exit on bullish alignment or volume drops
+            if bullish_alignment or not volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
