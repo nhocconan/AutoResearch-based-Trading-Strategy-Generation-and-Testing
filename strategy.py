@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with jaw/teeth/lips crossover + volume confirmation + ADX filter.
-# The Alligator identifies trend direction (lips above teeth above jaw = bullish, reverse = bearish).
-# We enter on bullish/bearish alignment with volume confirmation and ADX > 20 to filter chop.
-# Works in trending markets (bull/bear) and avoids sideways chop via ADX filter.
-# Target: 20-30 trades/year per symbol to avoid fee drag.
-name = "4h_WilliamsAlligator_ADX20_Volume"
-timeframe = "4h"
+# Hypothesis: 1d ADX + volume filter for trend strength, with 1w EMA200 as trend filter.
+# ADX > 25 indicates strong trend, we enter long/short based on EMA200 direction.
+# Volume confirmation ensures breakout validity. Works in bull/bear markets by
+# filtering weak trends and choppy markets. Target: 10-25 trades/year per symbol.
+name = "1d_ADX25_EMA200w_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,20 +21,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: 3 SMAs (Jaw=13, Teeth=8, Lips=5) shifted forward
-    def sma(arr, period):
-        return pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+    # Get weekly data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    jaw = sma(close, 13)  # Blue line
-    teeth = sma(close, 8)  # Red line
-    lips = sma(close, 5)   # Green line
+    # Calculate EMA200 on weekly
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Shift forward as per Williams Alligator definition
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
-    
-    # ADX calculation (14-period) for trend strength filter
+    # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -81,60 +74,56 @@ def generate_signals(prices):
     
     adx = calculate_adx(high, low, close, 14)
     
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Align weekly EMA200 to daily
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 28)  # Ensure Alligator and ADX are ready
+    start_idx = max(200, 28)  # Ensure EMA200 and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        ema_200_val = ema_200_aligned[i]
         adx_val = adx[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.3 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
         # ADX trend strength filter
-        trending = adx_val > 20
-        
-        # Alligator alignment: bullish when lips > teeth > jaw, bearish when lips < teeth < jaw
-        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
-        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long on bullish alignment with volume and trend confirmation
-            if bullish_alignment and volume_confirmed and trending:
+            # Enter long if price above EMA200, strong trend, and volume confirmation
+            if price > ema_200_val and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short on bearish alignment with volume and trend confirmation
-            elif bearish_alignment and volume_confirmed and trending:
+            # Enter short if price below EMA200, strong trend, and volume confirmation
+            elif price < ema_200_val and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when bullish alignment breaks or trend weakens
-            if not bullish_alignment or adx_val < 15:  # Trend weakening
+            # Exit long when price crosses below EMA200 or trend weakens
+            if price < ema_200_val or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when bearish alignment breaks or trend weakens
-            if not bearish_alignment or adx_val < 15:  # Trend weakening
+            # Exit short when price crosses above EMA200 or trend weakens
+            if price > ema_200_val or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
