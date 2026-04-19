@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_KAMA_RSI_ChopFilter_v1"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_Breakout_VolumeATR_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,51 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA and chop filter (once before loop)
+    # Get daily data for ATR and pivot calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate KAMA on daily close
+    # Daily high, low, close for ATR and pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly
-    # Proper ER calculation
-    price_change = np.abs(np.diff(close_1d, k=10, prepend=close_1d[:10]))
-    volatility_sum = np.convolve(np.abs(np.diff(close_1d)), np.ones(10), 'same')
-    volatility_sum[:9] = np.cumsum(np.abs(np.diff(close_1d))[:9])[::-1]
-    volatility_sum[-9:] = np.cumsum(np.abs(np.diff(close_1d))[-9:])
-    er = np.where(volatility_sum != 0, price_change / volatility_sum, 0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Daily RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate daily ATR (14-period)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Choppiness Index (14-period) on daily
-    atr1 = np.abs(high_1d - low_1d)
-    atr2 = np.abs(np.roll(high_1d, 1) - np.roll(close_1d, 1))
-    atr3 = np.abs(np.roll(low_1d, 1) - np.roll(close_1d, 1))
-    tr = np.maximum(atr1, np.maximum(atr2, atr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    chop = np.where((hh - ll) != 0, chop, 50)
+    # Calculate daily pivot point (standard)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate R1 and S1 using standard pivot formula
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily values to 4h timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align daily values to 12h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average (4h)
+    # Volume confirmation: current volume > 2.0x 20-period average (12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -70,43 +54,44 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        kama_val = kama_1d_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
-        chop_val = chop_1d_aligned[i]
+        atr = atr_14_aligned[i]
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
         
-        volume_confirmed = vol > 1.5 * vol_ma
-        trending = chop_val < 38.2  # Trending regime
-        ranging = chop_val > 61.8   # Ranging regime
+        volume_confirmed = vol > 2.0 * vol_ma
+        atr_threshold = 0.5 * atr  # Minimum price move for breakout
         
         if position == 0:
-            # Long: price > KAMA, RSI > 50, trending market, volume confirmation
-            if price > kama_val and rsi_val > 50 and trending and volume_confirmed:
+            # Long: break above R1 with volume and sufficient momentum
+            if price > r1 + atr_threshold and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA, RSI < 50, trending market, volume confirmation
-            elif price < kama_val and rsi_val < 50 and trending and volume_confirmed:
+            # Short: break below S1 with volume and sufficient momentum
+            elif price < s1 - atr_threshold and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price < KAMA or RSI < 40 or chop > 61.8 (range)
-            if price < kama_val or rsi_val < 40 or chop_val > 61.8:
+            # Exit: price below pivot or ATR-based trailing stop
+            if price < pivot or price < (high[i] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price > KAMA or RSI > 60 or chop > 61.8 (range)
-            if price > kama_val or rsi_val > 60 or chop_val > 61.8:
+            # Exit: price above pivot or ATR-based trailing stop
+            if price > pivot or price > (low[i] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
