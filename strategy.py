@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1w trend filter and volume confirmation
-# Uses weekly trend to avoid counter-trend trades, reducing false breakouts
-# Camarilla levels provide precise support/resistance for entries
-# Volume confirmation ensures institutional participation
-# Target: 20-40 trades/year to minimize fee drag
-# Works in bull (long breakouts) and bear (short breakdowns) via trend filter
-name = "4h_Camarilla_Pivot_WeeklyTrend_Volume_v1"
+# Hypothesis: 4h Donchian breakout with volume confirmation and 12h trend filter
+# Uses tight entry conditions to limit trades (target: 20-50/year) and avoid fee drag
+# Works in bull markets via breakouts and in bear via short breakdowns
+# Only trades when volume confirms breakout and higher timeframe trend aligns
+name = "4h_DonchianBreakout_VolumeTrend_12h_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,43 +21,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for multi-timeframe analysis (ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Weekly EMA200 for long-term trend
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # 12h EMA34 for trend filter
+    close_12h = df_12h['close'].values
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # 4h Donchian channels (20-period)
+    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from previous day's range
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Previous day's values (shifted by 1)
-    ph = np.roll(high_1d, 1)
-    pl = np.roll(low_1d, 1)
-    pc = np.roll(close_1d, 1)
-    ph[0] = high_1d[0]
-    pl[0] = low_1d[0]
-    pc[0] = close_1d[0]
-    
-    # Camarilla levels
-    R4 = pc + ((ph - pl) * 1.1 / 2)  # Resistance 4
-    R3 = pc + ((ph - pl) * 1.1 / 4)  # Resistance 3
-    S3 = pc - ((ph - pl) * 1.1 / 4)  # Support 3
-    S4 = pc - ((ph - pl) * 1.1 / 2)  # Support 4
-    
-    # Align Camarilla levels to 4h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # 4h ATR for stop loss
+    # 4h ATR for position sizing and stops
     tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
     tr[0] = high[0] - low[0]
     atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
@@ -67,46 +41,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Need enough data for weekly EMA200
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(ema200_1w_aligned[i]) or \
-           np.isnan(R4_aligned[i]) or np.isnan(R3_aligned[i]) or \
-           np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or np.isnan(atr_4h[i]):
+        if np.isnan(ema34_12h_aligned[i]) or \
+           np.isnan(donch_high_20[i]) or np.isnan(donch_low_20[i]) or np.isnan(atr_4h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         atr = atr_4h[i]
         
-        # Volume filter: current volume > 1.8x average volume (30-period)
-        if i >= 30:
-            avg_volume = np.mean(volume[i-30:i])
+        # Volume filter: current volume > 1.5x average volume (20-period)
+        if i >= 20:
+            avg_volume = np.mean(volume[i-20:i])
         else:
             avg_volume = volume[i]
-        volume_filter = volume[i] > 1.8 * avg_volume
+        volume_filter = volume[i] > 1.5 * avg_volume
         
         if position == 0:
-            # Long: break above R3 with weekly uptrend and volume
-            if high[i] > R3_aligned[i-1] and volume_filter and ema200_1w_aligned[i] < close[i]:
+            # Long: breakout above Donchian high + volume + 12h uptrend
+            if high[i] > donch_high_20[i-1] and volume_filter and price > ema34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with weekly downtrend and volume
-            elif low[i] < S3_aligned[i-1] and volume_filter and ema200_1w_aligned[i] > close[i]:
+            # Short: breakdown below Donchian low + volume + 12h downtrend
+            elif low[i] < donch_low_20[i-1] and volume_filter and price < ema34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below S3 or ATR stop
-            if close[i] < S3_aligned[i] or close[i] < close[i-1] - 2.0 * atr:
+            # Exit: price closes below Donchian low or ATR-based stop
+            if close[i] < donch_low_20[i] or close[i] < close[i-1] - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above R3 or ATR stop
-            if close[i] > R3_aligned[i] or close[i] > close[i-1] + 2.0 * atr:
+            # Exit: price closes above Donchian high or ATR-based stop
+            if close[i] > donch_high_20[i] or close[i] > close[i-1] + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
