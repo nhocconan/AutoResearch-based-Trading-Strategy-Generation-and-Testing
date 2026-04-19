@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WeeklyPivotBreakout_V1"
-timeframe = "6h"
+name = "12h_1w_1d_PriceActionConfluence_V1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,34 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop
+    # Get weekly data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Get daily data once before loop
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot points from daily data
-    # Weekly high/low/close from Friday's data (using prior 5 days)
-    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
+    # Weekly trend: EMA21 of weekly close
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate weekly pivot levels
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
+    # Daily ATR for volatility filter
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Daily volume average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly EMA and daily ATR/volume to 12h timeframe
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,39 +54,41 @@ def generate_signals(prices):
     start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema21_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or \
+           np.isnan(vol_ma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
         
-        # Volume filter
-        volume_ok = vol > 1.5 * vol_ma
+        # Conditions
+        weekly_uptrend = price > ema21_1w_aligned[i]
+        weekly_downtrend = price < ema21_1w_aligned[i]
+        low_volatility = atr_1d_aligned[i] < np.nanmedian(atr_1d_aligned[max(0, i-50):i+1])
+        high_volume = vol > 1.5 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume
-            if price > r1_aligned[i] and volume_ok:
+            # Long: weekly uptrend + low volatility + high volume
+            if weekly_uptrend and low_volatility and high_volume:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume
-            elif price < s1_aligned[i] and volume_ok:
+            # Short: weekly downtrend + low volatility + high volume
+            elif weekly_downtrend and low_volatility and high_volume:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below R1
-            if price < r1_aligned[i]:
+            # Exit: weekly trend turns down OR volatility spikes
+            if not weekly_uptrend or atr_1d_aligned[i] > 1.5 * np.nanmedian(atr_1d_aligned[max(0, i-50):i+1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above S1
-            if price > s1_aligned[i]:
+            # Exit: weekly trend turns up OR volatility spikes
+            if not weekly_downtrend or atr_1d_aligned[i] > 1.5 * np.nanmedian(atr_1d_aligned[max(0, i-50):i+1]):
                 signals[i] = 0.0
                 position = 0
             else:
