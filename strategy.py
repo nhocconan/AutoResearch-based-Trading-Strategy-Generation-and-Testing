@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Pivot_R1S1_Breakout_VolumeTrend_v3"
-timeframe = "12h"
+name = "4h_Pivot_R1S1_Breakout_VolumeTrend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,7 +31,7 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily pivot levels to 12h timeframe
+    # Align daily pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -43,22 +43,22 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 2.5x 20-period average (12h) - higher threshold to reduce trades
+    # Volume confirmation: current volume > 1.5x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Trend filter: price above/below 34-period EMA (faster than 50)
+    # Trend filter: price above/below 50-period EMA (slower than 34)
     close_series = pd.Series(close)
-    ema_34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60
+    start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
             np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_34[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
         
@@ -69,9 +69,9 @@ def generate_signals(prices):
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
-        ema = ema_34[i]
+        ema = ema_50[i]
         
-        volume_confirmed = vol > 2.5 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
             # Long: break above R1 with volume and above EMA
