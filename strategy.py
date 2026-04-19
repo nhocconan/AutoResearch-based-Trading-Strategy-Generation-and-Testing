@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + volume confirmation + 1w EMA trend filter
-# Williams Alligator identifies trend alignment (Lips > Teeth > Jaws for uptrend)
-# Weekly EMA filter ensures we only trade with the higher timeframe trend
-# Volume confirmation reduces false signals
-# Target: 15-25 trades/year per symbol with disciplined entries to minimize fee drag
-name = "12h_WilliamsAlligator_1wEMA_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Bollinger Band squeeze with 1d RSI trend filter and volume confirmation
+# Bollinger Band squeeze (low volatility) precedes breakouts. Direction determined by 1d RSI:
+# RSI > 50 = bullish bias, RSI < 50 = bearish bias. Volume confirmation avoids false breakouts.
+# Works in both bull and bear markets as squeeze-breakout captures volatility expansion.
+# Target: 20-30 trades/year per symbol with disciplined entries
+name = "4h_BollingerSqueeze_1dRSI_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,31 +22,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly EMA34 for trend bias (higher timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Daily RSI14 for trend bias
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate RSI on daily data
+    delta = np.diff(df_1d['close'])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Williams Alligator components (SMMA = Smoothed Moving Average)
-    def smoothed_moving_average(data, period):
-        sma = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            sma[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
-        return sma
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Calculate Alligator lines on 12h data
-    jaw = smoothed_moving_average(close, 13)  # Blue line (13-period)
-    teeth = smoothed_moving_average(close, 8)   # Red line (8-period)
-    lips = smoothed_moving_average(close, 5)    # Green line (5-period)
+    # Bollinger Bands (20, 2) on 4h data
+    bb_length = 20
+    bb_mult = 2.0
+    bb_basis = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
+    bb_dev = bb_mult * pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
+    bb_upper = bb_basis + bb_dev
+    bb_lower = bb_basis - bb_dev
     
-    # Volume spike: volume > 1.5 * 30-period average
-    volume_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Bollinger Band width (normalized)
+    bb_width = (bb_upper - bb_lower) / bb_basis
+    # Squeeze condition: BB width below 20-period average (low volatility)
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze_condition = bb_width < bb_width_ma
+    
+    # Volume confirmation: volume > 1.3 * 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,36 +63,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(rsi_14_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) + above weekly EMA + volume spike
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
-                close[i] > ema_34_1w_aligned[i] and 
-                volume_spike[i]):
+            # Long: BB squeeze + price breaks above upper band + RSI > 50 (bullish) + volume confirmation
+            if (squeeze_condition[i] and 
+                close[i] > bb_upper[i] and 
+                rsi_14_1d_aligned[i] > 50 and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaw > Teeth > Lips (bearish alignment) + below weekly EMA + volume spike
-            elif (jaw[i] > teeth[i] and teeth[i] > lips[i] and 
-                  close[i] < ema_34_1w_aligned[i] and 
-                  volume_spike[i]):
+            # Short: BB squeeze + price breaks below lower band + RSI < 50 (bearish) + volume confirmation
+            elif (squeeze_condition[i] and 
+                  close[i] < bb_lower[i] and 
+                  rsi_14_1d_aligned[i] < 50 and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Alligator lines intertwine (Lips < Teeth) or price breaks below weekly EMA
-            if (lips[i] < teeth[i]) or (close[i] < ema_34_1w_aligned[i]):
+            # Long: exit if price returns to middle band or volatility expands (width > MA)
+            if (close[i] < bb_basis[i]) or (bb_width[i] > bb_width_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Alligator lines intertwine (Jaw < Teeth) or price breaks above weekly EMA
-            if (jaw[i] < teeth[i]) or (close[i] > ema_34_1w_aligned[i]):
+            # Short: exit if price returns to middle band or volatility expands (width > MA)
+            if (close[i] > bb_basis[i]) or (bb_width[i] > bb_width_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
