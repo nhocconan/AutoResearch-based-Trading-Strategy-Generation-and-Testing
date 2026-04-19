@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h 4h/1d EMA crossover with volume and session filter.
-# Use 4h EMA(21) and 1d EMA(50) for trend direction: long when 4h EMA > 1d EMA, short when opposite.
-# Entry on 1h: price crosses above/below 1h EMA(13) with volume > 1.5x 20-period average.
-# Session filter: only trade 08-20 UTC to avoid low-volume Asian session.
-# Target: 15-30 trades/year to stay within frequency limits.
-name = "1h_EMA_Crossover_Volume_Session"
-timeframe = "1h"
+# Hypothesis: 12h RSI + Volume + Volume Spike filter for mean reversion.
+# RSI(14) < 30 for long, > 70 for short, with volume > 1.5x 20-period average and volume spike > 2x average volume.
+# Uses 1-day RSI for confirmation to avoid false signals in strong trends.
+# Target: 20-30 trades/year per symbol to stay within frequency limits.
+name = "12h_RSI_Volume_Spike_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,81 +21,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h EMA(21) for intermediate trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Get 1d EMA(50) for long-term trend
+    # Get daily data for RSI calculation
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 1h EMA(13) for entry trigger
-    ema_1h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate RSI (14-period)
+    def calculate_rsi(data, period=14):
+        if len(data) < period + 1:
+            return np.full_like(data, np.nan)
+        delta = np.diff(data)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(data)
+        avg_loss = np.zeros_like(data)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period + 1, len(data)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+        rs = np.where(avg_loss == 0, np.inf, avg_gain / avg_loss)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # 1h volume MA(20) for confirmation
+    rsi_1d = calculate_rsi(close_1d, 14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Get 12h average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    vol_ma_5 = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 21, 13, 20)  # Ensure all indicators are ready
+    start_idx = max(30, 20)  # Ensure RSI (14*2+2) and volume MA are ready
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available or outside session
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(ema_1h[i]) or np.isnan(vol_ma_20[i]) or not in_session[i]):
+        # Skip if any required data is not available
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(vol_ma_5[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_4h_val = ema_4h_aligned[i]
-        ema_1d_val = ema_1d_aligned[i]
-        ema_1h_val = ema_1h[i]
+        rsi_val = rsi_1d_aligned[i]
         vol_ma = vol_ma_20[i]
+        vol_ma_short = vol_ma_5[i]
         vol = volume[i]
         
-        # Volume confirmation threshold
+        # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = vol > 1.5 * vol_ma
-        
-        # Trend determination: 4h EMA vs 1d EMA
-        uptrend = ema_4h_val > ema_1d_val
-        downtrend = ema_4h_val < ema_1d_val
+        # Volume spike: current volume > 2x 5-period average
+        volume_spike = vol > 2.0 * vol_ma_short
         
         if position == 0:
-            # Look for entries aligned with higher timeframe trend
-            if uptrend and volume_confirmed:
-                # Long when price crosses above 1h EMA in uptrend
-                if price > ema_1h_val and close[i-1] <= ema_1h[i-1]:
-                    signals[i] = 0.20
-                    position = 1
-            elif downtrend and volume_confirmed:
-                # Short when price crosses below 1h EMA in downtrend
-                if price < ema_1h_val and close[i-1] >= ema_1h[i-1]:
-                    signals[i] = -0.20
-                    position = -1
+            # Enter long when RSI oversold with volume confirmation and spike
+            if rsi_val < 30 and volume_confirmed and volume_spike:
+                signals[i] = 0.25
+                position = 1
+            # Enter short when RSI overbought with volume confirmation and spike
+            elif rsi_val > 70 and volume_confirmed and volume_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 1h EMA or trend changes
-            if price < ema_1h_val or not uptrend:
+            # Exit long when RSI returns to neutral (50) or overbought
+            if rsi_val >= 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 1h EMA or trend changes
-            if price > ema_1h_val or not downtrend:
+            # Exit short when RSI returns to neutral (50) or oversold
+            if rsi_val <= 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
