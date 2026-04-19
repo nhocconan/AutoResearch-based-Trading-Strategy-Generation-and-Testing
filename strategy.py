@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Camarilla_R1_S1_Breakout_Volume_V1"
-timeframe = "12h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_Volume_V1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,13 +17,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get 1d data for Camarilla calculation (already daily)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get weekly data for trend filter
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
@@ -51,18 +51,18 @@ def generate_signals(prices):
     
     R1, S1 = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align Camarilla levels to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align Camarilla levels to daily timeframe (no shift needed as 1d data aligns with 1d prices)
+    R1_aligned = R1  # Already aligned since both are daily
+    S1_aligned = S1
     
-    # Calculate volume spike indicator (volume > 2.0 * 50-period average)
+    # Calculate volume spike indicator (volume > 2.0 * 50-period average for fewer trades)
     volume_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 60  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
