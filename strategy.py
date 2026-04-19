@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d trend alignment (EMA50) and 1w mean reversion (RSI14).
-# Enters long when price is above 1d EMA50 and 1w RSI < 30 (oversold).
-# Enters short when price is below 1d EMA50 and 1w RSI > 70 (overbought).
-# Uses volume confirmation (volume > 1.5x 20-period average) to filter noise.
-# Designed for low-frequency, high-conviction trades targeting 12-37 trades/year.
-# Works in bull markets via trend following and in bear markets via mean reversion oversold bounces.
-name = "12h_1dEMA50_1wRSI_MeanReversion_Volume"
-timeframe = "12h"
+# Hypothesis: 4h timeframe with 12h EMA34 trend and 1d Donchian breakout for momentum.
+# Enters only during 08-20 UTC session to avoid low-volume noise.
+# Uses volume confirmation (volume > 1.5x 20-period average) to filter breakouts.
+# Targets 20-50 trades/year (80-200 total over 4 years) with strict entry conditions.
+# Works in bull/bear by following 12h trend and using 1d breakouts for momentum.
+name = "4h_12h1d_EMA34_Donchian20_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,29 +23,25 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time']
     
-    # Pre-compute session filter (00-23 UTC - all hours for 12h timeframe)
+    # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
-    session_filter = np.ones(n, dtype=bool)  # No session filter for 12h
+    session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA50 trend (called ONCE before loop)
+    # Get 12h data for EMA34 trend (called ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Get 1d data for Donchian20 breakout (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Get 1w data for RSI14 mean reversion (called ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Calculate RSI(14) on weekly data
-    delta = pd.Series(close_1w).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14_1w = 100 - (100 / (1 + rs))
-    rsi_14_1w_values = rsi_14_1w.values
-    rsi_14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w_values)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    # Donchian channels: 20-period high/low
+    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
+    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
     
     # Volume filter: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,40 +50,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_14_1w_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(high_20_1d_aligned[i]) or 
+            np.isnan(low_20_1d_aligned[i]) or np.isnan(volume_ma[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above 1d EMA50 AND 1w RSI < 30 (oversold) with volume
-            if (close[i] > ema_50_1d_aligned[i] and 
-                rsi_14_1w_aligned[i] < 30 and 
+            # Long: price above 12h EMA34 AND breaks 1d Donchian high with volume
+            if (close[i] > ema_34_12h_aligned[i] and 
+                close[i] > high_20_1d_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA50 AND 1w RSI > 70 (overbought) with volume
-            elif (close[i] < ema_50_1d_aligned[i] and 
-                  rsi_14_1w_aligned[i] > 70 and 
+            # Short: price below 12h EMA34 AND breaks 1d Donchian low with volume
+            elif (close[i] < ema_34_12h_aligned[i] and 
+                  close[i] < low_20_1d_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below 1d EMA50 or 1w RSI > 70 (overbought)
-            if close[i] < ema_50_1d_aligned[i] or rsi_14_1w_aligned[i] > 70:
+            # Long: exit if price breaks below 12h EMA34 or 1d Donchian low
+            if close[i] < ema_34_12h_aligned[i] or close[i] < low_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above 1d EMA50 or 1w RSI < 30 (oversold)
-            if close[i] > ema_50_1d_aligned[i] or rsi_14_1w_aligned[i] < 30:
+            # Short: exit if price breaks above 12h EMA34 or 1d Donchian high
+            if close[i] > ema_34_12h_aligned[i] or close[i] > high_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
