@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1-day Donchian channel breakout (20-day high/low) + volume confirmation + ATR volatility filter.
-# Long when price breaks above 1d Donchian high with above-average volume; short when breaks below 1d Donchian low with above-average volume.
-# Uses 1d ATR(14) for volatility filtering to avoid choppy markets. Works in both bull and bear markets by capturing breakouts with volume confirmation.
-# Target: 20-50 trades per year (80-200 over 4 years).
-name = "4h_1d_Donchian20_Volume_ATRFilter"
-timeframe = "4h"
+# Hypothesis: 12h timeframe with 1-day pivot levels (R1/S1, R2/S2, R3/S3) and volume confirmation.
+# Fade at middle pivots (R2/S2) for mean reversion, breakout at outer pivots (R1/S1) for trend following.
+# Uses daily pivot points calculated from prior day's OHLC. Works in both bull and bear markets by 
+# fading extremes and catching continuations. Target: 50-150 total trades over 4 years.
+name = "12h_1d_Pivot_R1S1_R2S2_Strategy"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,28 +21,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian and ATR (called ONCE before loop)
+    # Get daily data for pivot calculation (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channel (20-period high/low)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate daily pivot points (using prior day's OHLC)
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Support and resistance levels
+    s1_1d = (2 * pivot_1d) - high_1d
+    r1_1d = (2 * pivot_1d) - low_1d
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1d indicators to 4h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align daily pivot levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     
     # Volume filter: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,47 +54,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for indicators
+    start_idx = 20  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or
+            np.isnan(s2_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(r3_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid trading when ATR is too low (choppy markets)
-        if atr_14_aligned[i] < 0.01 * close[i]:  # Less than 1% of price
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long breakout above 1d Donchian high with volume confirmation
-            if close[i] > high_20_aligned[i] and volume_filter[i]:
+            # Fade at middle pivots (R2/S2) - mean reversion
+            if close[i] <= s2_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout below 1d Donchian low with volume confirmation
-            elif close[i] < low_20_aligned[i] and volume_filter[i]:
+            elif close[i] >= r2_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
+            # Breakout at outer pivots (R1/S1) - trend following
+            elif close[i] > r1_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            elif close[i] < s1_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price returns to midpoint or breaks below low
-            midpoint = (high_20_aligned[i] + low_20_aligned[i]) / 2.0
-            if close[i] < midpoint:
+            # Long position: exit at R2 (take profit) or S3 (stop reversal)
+            if close[i] >= r2_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] <= s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price returns to midpoint or breaks above high
-            midpoint = (high_20_aligned[i] + low_20_aligned[i]) / 2.0
-            if close[i] > midpoint:
+            # Short position: exit at S2 (take profit) or R3 (stop reversal)
+            if close[i] <= s2_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] >= r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
