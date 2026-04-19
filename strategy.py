@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 12h volume confirmation and 1d EMA34 trend filter.
-# Camarilla pivot levels (R3/S3 for reversal, R4/S4 for breakout) identify key intraday support/resistance.
-# Trade breakouts beyond R4/S4 in direction of daily trend (EMA34) with volume confirmation.
-# Works in bull/bear markets: avoids false breakouts in ranges, captures true momentum moves.
-# Target: 15-35 trades/year per symbol.
-name = "6h_Camarilla_R4_S4_Breakout_Volume_EMA34"
-timeframe = "6h"
+# Hypothesis: 12h Williams Alligator + daily VWAP + volume confirmation.
+# Williams Alligator (Jaw/Teeth/Lips) identifies trends via SMAs with future offsets.
+# Price > Lips and Lips > Teeth > Jaw = uptrend; Price < Lips and Lips < Teeth < Jaw = downtrend.
+# Daily VWAP acts as dynamic support/resistance: price above VWAP supports longs, below supports shorts.
+# Volume confirmation ensures breakouts have conviction.
+# Works in bull/bear markets: Alligator catches trends, VWAP filters mean reversion, volume avoids false signals.
+# Target: 20-40 trades/year per symbol.
+name = "12h_WilliamsAlligator_DailyVWAP_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,82 +24,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA34
+    # Get 1d data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + (Range * 1.1/2)
-    # S4 = C - (Range * 1.1/2)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + (range_1d * 1.1 / 2.0)
-    s4_1d = close_1d - (range_1d * 1.1 / 2.0)
+    # Calculate VWAP on daily
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    vwap_num = np.cumsum(typical_price_1d * volume_1d)
+    vwap_den = np.cumsum(volume_1d)
+    vwap_1d = vwap_num / vwap_den
     
-    # Calculate EMA34 on daily for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Williams Alligator on 12h: SMAs with future offsets
+    # Jaw: 13-period SMMA shifted 8 bars forward
+    # Teeth: 8-period SMMA shifted 5 bars forward  
+    # Lips: 5-period SMMA shifted 3 bars forward
+    jaw_period, jaw_shift = 13, 8
+    teeth_period, teeth_shift = 8, 5
+    lips_period, lips_shift = 5, 3
     
-    # Get 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
+    # Calculate SMMA (smoothed moving average) = EMA with alpha = 1/period
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=float)
+        alpha = 1.0 / period
+        result = np.full_like(arr, np.nan, dtype=float)
+        result[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = (arr[i] * alpha) + (result[i-1] * (1 - alpha))
+        return result
     
-    # Align 1d data to 6h
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    jaw = smma(close, jaw_period)
+    teeth = smma(close, teeth_period)
+    lips = smma(close, lips_period)
     
-    # Align 12h volume to 6h (use last known 12h volume)
-    volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+    # Shift forward (to avoid look-ahead, we use values that would be known at bar close)
+    jaw_shifted = np.roll(jaw, -jaw_shift)
+    teeth_shifted = np.roll(teeth, -teeth_shift)
+    lips_shifted = np.roll(lips, -lips_shift)
+    # Set shifted-out values to NaN
+    jaw_shifted[-jaw_shift:] = np.nan
+    teeth_shifted[-teeth_shift:] = np.nan
+    lips_shifted[-lips_shift:] = np.nan
     
-    # Volume confirmation: current volume > 1.5x 12-period average of 12h volume
-    vol_ma_12 = pd.Series(volume_12h_aligned).rolling(window=12, min_periods=12).mean().values
+    # Align 1d VWAP to 12h
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 12)  # Ensure EMA34 and volume MA are ready
+    start_idx = max(jaw_period + jaw_shift, teeth_period + teeth_shift, lips_period + lips_shift, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_12[i])):
+        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r4 = r4_aligned[i]
-        s4 = s4_aligned[i]
-        ema_34_val = ema_34_aligned[i]
-        vol_ma = vol_ma_12[i]
+        jaw_val = jaw_shifted[i]
+        teeth_val = teeth_shifted[i]
+        lips_val = lips_shifted[i]
+        vwap_val = vwap_1d_aligned[i]
+        vol_ma = vol_ma_20[i]
         vol = volume[i]
         
-        # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        # Williams Alligator conditions
+        # Uptrend: Lips > Teeth > Jaw and price > Lips
+        # Downtrend: Lips < Teeth < Jaw and price < Lips
+        lips_above_teeth = lips_val > teeth_val
+        teeth_above_jaw = teeth_val > jaw_val
+        lips_below_teeth = lips_val < teeth_val
+        teeth_below_jaw = teeth_val < jaw_val
+        
+        uptrend = lips_above_teeth and teeth_above_jaw and (price > lips_val)
+        downtrend = lips_below_teeth and teeth_below_jaw and (price < lips_val)
+        
+        # VWAP filter: price above VWAP longs bias, below shorts bias
+        price_above_vwap = price > vwap_val
+        price_below_vwap = price < vwap_val
+        
+        # Volume confirmation
+        volume_confirmed = vol > 1.3 * vol_ma
         
         if position == 0:
-            # Look for breakout beyond R4/S4 in direction of daily trend
-            if price > r4 and price > ema_34_val and volume_confirmed:
+            # Enter long: uptrend + price above VWAP + volume
+            if uptrend and price_above_vwap and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            elif price < s4 and price < ema_34_val and volume_confirmed:
+            # Enter short: downtrend + price below VWAP + volume
+            elif downtrend and price_below_vwap and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns to EMA34 or breaks below S4 (failed breakout)
-            if price < ema_34_val or price < s4:
+            # Exit long when trend changes or price crosses below VWAP
+            if not uptrend or price < vwap_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns to EMA34 or breaks above R4 (failed breakout)
-            if price > ema_34_val or price > r4:
+            # Exit short when trend changes or price crosses above VWAP
+            if not downtrend or price > vwap_val:
                 signals[i] = 0.0
                 position = 0
             else:
