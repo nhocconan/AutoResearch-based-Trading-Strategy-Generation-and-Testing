@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 14-period + 1d ADX trend filter.
-# Williams %R identifies overbought/oversold conditions (mean reversion).
-# ADX > 25 filters for trending markets to avoid false reversals in chop.
-# Works in bull/bear markets by only taking mean-reversion trades when trend is strong.
-# Target: 20-40 trades/year per symbol.
-name = "6h_WilliamsR_ADX25_TrendFilter"
-timeframe = "6h"
+# Hypothesis: 12h Pivot Point (from 1d) breakout with volume confirmation and 1w ADX filter.
+# Uses Camarilla pivot levels from daily timeframe for entry signals.
+# Only trades when weekly ADX > 25 (strong trend) and volume > 1.5x 20-period average.
+# Targets 20-30 trades/year per symbol to minimize fee drag.
+# Works in bull/bear markets by filtering weak trends and requiring volume confirmation.
+name = "12h_Camarilla_Pivot_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,13 +22,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for pivot points
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX on daily (14-period)
+    # Calculate Camarilla pivot levels (R1, S1)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    
+    # Align pivot levels to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -63,79 +79,69 @@ def generate_signals(prices):
         plus_di = 100 * plus_dm_smooth / atr
         minus_di = 100 * minus_dm_smooth / atr
         dx = np.zeros_like(close)
-        dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
+        valid = (plus_di[period:] + minus_di[period:]) != 0
+        dx[period:] = np.where(valid, 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:]), 0)
         
         adx = np.zeros_like(close)
-        adx[2*period] = np.mean(dx[period:2*period+1])
-        for i in range(2*period+1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        if len(dx) >= 2*period+1:
+            adx[2*period] = np.mean(dx[period:2*period+1])
+            for i in range(2*period+1, len(dx)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
         
         return adx
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Calculate Williams %R on 6h data (14-period)
-    def williams_r(high, low, close, period=14):
-        highest_high = np.full_like(high, np.nan)
-        lowest_low = np.full_like(low, np.nan)
-        
-        for i in range(period-1, len(high)):
-            highest_high[i] = np.max(high[i-(period-1):i+1])
-            lowest_low[i] = np.min(low[i-(period-1):i+1])
-        
-        wr = np.full_like(close, np.nan)
-        wr[period-1:] = -100 * (highest_high[period-1:] - close[period-1:]) / (highest_high[period-1:] - lowest_low[period-1:])
-        return wr
-    
-    wr = williams_r(high, low, close, 14)
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20)  # Ensure Williams %R and volume MA are ready
+    start_idx = max(20, 28)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(wr[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        wr_val = wr[i]
-        adx_val = adx_1d_aligned[i]
+        price = close[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        adx_val = adx_1w_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.3 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
         # ADX trend strength filter
         strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long when Williams %R is oversold (< -80) in strong trend with volume
-            if wr_val < -80 and strong_trend and volume_confirmed:
+            # Enter long if price breaks above R1, strong trend, and volume confirmation
+            if price > r1_val and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short when Williams %R is overbought (> -20) in strong trend with volume
-            elif wr_val > -20 and strong_trend and volume_confirmed:
+            # Enter short if price breaks below S1, strong trend, and volume confirmation
+            elif price < s1_val and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when Williams %R returns to neutral (> -50) or trend weakens
-            if wr_val > -50 or adx_val < 20:
+            # Exit long when price crosses below S1 or trend weakens
+            if price < s1_val or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when Williams %R returns to neutral (< -50) or trend weakens
-            if wr_val < -50 or adx_val < 20:
+            # Exit short when price crosses above R1 or trend weakens
+            if price > r1_val or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
