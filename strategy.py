@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_Reverse_v1"
-timeframe = "1h"
+name = "12h_1d_DonchianBreakout_VolumeATR_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,8 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for multi-timeframe analysis
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
     
     # 1d ATR for volatility filter
@@ -30,108 +29,65 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 4h Camarilla pivot levels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # 12h Donchian channels (20-period)
+    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate previous day's Camarilla levels
-    prev_close_4h = np.concatenate([[np.nan], close_4h[:-1]])
-    prev_high_4h = np.concatenate([[np.nan], high_4h[:-1]])
-    prev_low_4h = np.concatenate([[np.nan], low_4h[:-1]])
-    
-    pivot_4h = (prev_high_4h + prev_low_4h + prev_close_4h) / 3
-    range_4h = prev_high_4h - prev_low_4h
-    
-    # Camarilla levels: R1, R2, S1, S2
-    r1_4h = pivot_4h + range_4h * 1.1 / 12
-    r2_4h = pivot_4h + range_4h * 1.1 / 6
-    s1_4h = pivot_4h - range_4h * 1.1 / 12
-    s2_4h = pivot_4h - range_4h * 1.1 / 6
-    
-    # Align to 1h timeframe
-    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    r2_4h_aligned = align_htf_to_ltf(prices, df_4h, r2_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    s2_4h_aligned = align_htf_to_ltf(prices, df_4h, s2_4h)
-    
-    # 1h RSI for overbought/oversold
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Session filter: 8-20 UTC
-    hours = prices.index.hour
+    # 12h ATR for position sizing and stops
+    tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
+    tr[0] = high[0] - low[0]
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(atr_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or \
-           np.isnan(pivot_4h_aligned[i]) or np.isnan(r1_4h_aligned[i]) or \
-           np.isnan(r2_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or \
-           np.isnan(s2_4h_aligned[i]) or np.isnan(rsi[i]):
+        if np.isnan(atr_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or \
+           np.isnan(donch_high_20[i]) or np.isnan(donch_low_20[i]) or np.isnan(atr_12h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        hour = hours[i]
+        atr = atr_12h[i]
         
-        # Session filter: only trade 8-20 UTC
-        if not (8 <= hour <= 20):
-            signals[i] = 0.0
-            continue
+        # Entry conditions: Donchian breakout with volume and trend filter
+        # Long: price breaks above 20-period high with volume confirmation and 1d uptrend
+        # Short: price breaks below 20-period low with volume confirmation and 1d downtrend
         
-        # Volatility filter: avoid low volatility periods
-        if atr_1d_aligned[i] < 0.01 * price:  # Less than 1% ATR
-            signals[i] = 0.0
-            continue
-        
-        # Trend bias from 1d EMA200
-        long_bias = price > ema200_1d_aligned[i]
-        short_bias = price < ema200_1d_aligned[i]
+        # Volume filter: current volume > 1.5x average volume
+        avg_volume = np.mean(volume[max(0, i-20):i]) if i >= 20 else volume[i]
+        volume_filter = volume[i] > 1.5 * avg_volume
         
         if position == 0:
-            # Long: price rejects S1/S2 support with RSI oversold
-            if (price > s1_4h_aligned[i] and 
-                low[i] <= s2_4h_aligned[i] and 
-                rsi[i] < 30 and 
-                long_bias):
-                signals[i] = 0.20
+            # Long: breakout above Donchian high + volume + 1d uptrend
+            if high[i] > donch_high_20[i-1] and volume_filter and price > ema50_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price rejects R1/R2 resistance with RSI overbought
-            elif (price < r1_4h_aligned[i] and 
-                  high[i] >= r2_4h_aligned[i] and 
-                  rsi[i] > 70 and 
-                  short_bias):
-                signals[i] = -0.20
+            # Short: breakdown below Donchian low + volume + 1d downtrend
+            elif low[i] < donch_low_20[i-1] and volume_filter and price < ema50_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price reaches pivot or RSI overbought
-            if price >= pivot_4h_aligned[i] or rsi[i] > 70:
+            # Exit: price closes below Donchian low or ATR-based stop
+            if close[i] < donch_low_20[i] or close[i] < close[i-1] - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches pivot or RSI oversold
-            if price <= pivot_4h_aligned[i] or rsi[i] < 30:
+            # Exit: price closes above Donchian high or ATR-based stop
+            if close[i] > donch_high_20[i] or close[i] > close[i-1] + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
