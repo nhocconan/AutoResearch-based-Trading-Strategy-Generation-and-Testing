@@ -1,16 +1,18 @@
+# 12h_4hEMA34_Trend_Filter_With_1d_Volume_Spike
+# Hypothesis: Use 1d volume spike as entry trigger with 4h EMA34 trend filter on 12h timeframe.
+# Enter long when: 4h EMA34 trending up AND 1d volume > 2x 20-day average AND price > 4h EMA34.
+# Enter short when: 4h EMA34 trending down AND 1d volume > 2x 20-day average AND price < 4h EMA34.
+# Exit when trend reverses. Volume spike ensures momentum, EMA34 filters whipsaw.
+# Designed for 5-15 trades/year per symbol to avoid fee drag.
+# Works in bull/bear: volume spikes occur in both regimes, trend filter avoids counter-trend trades.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly RSI filter and volume confirmation.
-# Use weekly RSI to determine trend strength: RSI > 60 = bullish, RSI < 40 = bearish, neutral zone = no trades.
-# In bullish regime: long when price breaks above Donchian(20) high.
-# In bearish regime: short when price breaks below Donchian(20) low.
-# Volume confirmation: volume > 1.5x 20-period average.
-# Target: 15-30 trades/year per symbol to stay within frequency limits.
-name = "1d_Donchian_RSI_Volume"
-timeframe = "1d"
+name = "12h_4hEMA34_Trend_Filter_With_1d_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,110 +25,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
+    # Get 4h data for EMA34 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate RSI (14-period)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate EMA34 on 4h
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # Wilder's smoothing for RSI
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    avg_gain = wilder_smooth(gain, 14)
-    avg_loss = wilder_smooth(loss, 14)
-    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get daily data for Donchian channels
+    # Get 1d data for volume spike
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Donchian channels (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    donch_high = rolling_max(high_1d, 20)
-    donch_low = rolling_min(low_1d, 20)
-    
-    # Align indicators to daily timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    
-    # Get daily average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-day average volume on 1d
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2.0 * vol_ma_20_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure RSI (14*2+6), Donchian (20), and volume MA are ready
+    start_idx = 34  # Wait for EMA34 to be ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi_val = rsi_aligned[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
-        vol_ma = vol_ma_20[i]
-        vol = volume[i]
+        ema34 = ema34_4h_aligned[i]
+        vol_spike = vol_spike_1d_aligned[i] > 0.5  # Convert back to boolean
         
-        # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
-        
-        # Regime determination based on weekly RSI
-        is_bullish = rsi_val > 60
-        is_bearish = rsi_val < 40
-        # Neutral zone (40-60) - no trades
+        # Determine trend direction from EMA34 slope (using 3-period change)
+        if i >= 37:  # Need 3 periods for slope
+            ema34_prev = ema34_4h_aligned[i-3]
+            ema34_slope = ema34 - ema34_prev
+            is_uptrend = ema34_slope > 0
+            is_downtrend = ema34_slope < 0
+        else:
+            is_uptrend = False
+            is_downtrend = False
         
         if position == 0:
-            # Determine entry based on regime
-            if is_bullish and volume_confirmed:
-                # Bullish regime: long breakout
-                if price > donch_high_val:
+            # Look for volume spike with trend alignment
+            if vol_spike:
+                if is_uptrend and price > ema34:
                     signals[i] = 0.25
                     position = 1
-            elif is_bearish and volume_confirmed:
-                # Bearish regime: short breakdown
-                if price < donch_low_val:
+                elif is_downtrend and price < ema34:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low
-            if price < donch_low_val:
+            # Long exit: trend turns down or price crosses below EMA34
+            if is_downtrend or price < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high
-            if price > donch_high_val:
+            # Short exit: trend turns up or price crosses above EMA34
+            if is_uptrend or price > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
