@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_4h_Pivot_R1S1_Breakout_VolumeFilter
-Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation on 1h timeframe
-4h Camarilla levels provide stronger support/resistance than 1d for intraday trading
-Volume filter ensures institutional participation to reduce false breakouts
-1h timeframe used only for entry timing to avoid overtrading
-Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee impact
-Works in bull/bear via volatility-adjusted breakouts and volume confirmation
+6h_WeeklyPivot_Breakout_Volume_ATR
+Hypothesis: 6s breakout of weekly pivot levels (R1/S1) with volume confirmation and ATR volatility filter
+Weekly pivots provide significant weekly support/resistance. Breakouts with volume indicate
+institutional participation. ATR filter ensures sufficient volatility to avoid false breakouts in low-volatility periods.
+Works in both bull and bear markets by capturing breakouts in the direction of the weekly pivot bias.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "1h_4h_Pivot_R1S1_Breakout_VolumeFilter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_Volume_ATR"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,70 +26,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels (primary signal direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # ATR(14) for volatility filter
+    def calculate_atr(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
+        
+        atr = np.full_like(high, np.nan, dtype=np.float64)
+        if len(tr) >= period:
+            atr[period-1] = np.nanmean(tr[:period])
+            for i in range(period, len(tr)):
+                if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
+                    atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                else:
+                    atr[i] = np.nan
+        return atr
+    
+    atr = calculate_atr(high, low, close, 14)
+    
+    # Weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 4h bar
-    ph_4h = df_4h['high'].shift(1).values  # Previous 4h high
-    pl_4h = df_4h['low'].shift(1).values   # Previous 4h low
-    pc_4h = df_4h['close'].shift(1).values # Previous 4h close
+    # Weekly high, low, close for pivot calculation (using previous week)
+    wh = df_1w['high'].shift(1).values  # Previous week high
+    wl = df_1w['low'].shift(1).values   # Previous week low
+    wc = df_1w['close'].shift(1).values # Previous week close
     
-    # Camarilla calculations for 4h
-    rang_4h = ph_4h - pl_4h
-    r1_4h = pc_4h + (rang_4h * 1.1 / 12)
-    s1_4h = pc_4h - (rang_4h * 1.1 / 12)
-    r4_4h = pc_4h + (rang_4h * 1.1 / 2)
-    s4_4h = pc_4h - (rang_4h * 1.1 / 2)
+    # Weekly pivot point and support/resistance levels
+    pp = (wh + wl + wc) / 3.0
+    r1 = (2 * pp) - wl
+    s1 = (2 * pp) - wh
+    r2 = pp + (wh - wl)
+    s2 = pp - (wh - wl)
     
-    # Align 4h Camarilla levels to 1h timeframe
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    r4_4h_aligned = align_htf_to_ltf(prices, df_4h, r4_4h)
-    s4_4h_aligned = align_htf_to_ltf(prices, df_4h, s4_4h)
+    # Align weekly pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
     
+    # ATR filter: ATR > 0.5 * 50-period average of ATR (avoid low volatility)
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_filter = atr > (atr_ma * 0.5)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for volume MA
+    start_idx = max(50, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
-            np.isnan(r4_4h_aligned[i]) or np.isnan(s4_4h_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation
-            if (close[i] > r1_4h_aligned[i] and volume_confirm[i]):
-                signals[i] = 0.20
+            # Long: price breaks above R1 with volume and sufficient volatility
+            if (close[i] > r1_aligned[i] and 
+                volume_confirm[i] and 
+                atr_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation
-            elif (close[i] < s1_4h_aligned[i] and volume_confirm[i]):
-                signals[i] = -0.20
+            # Short: price breaks below S1 with volume and sufficient volatility
+            elif (close[i] < s1_aligned[i] and 
+                  volume_confirm[i] and 
+                  atr_filter[i]):
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1
-            if close[i] < s1_4h_aligned[i]:
+            # Long: exit if price breaks below S1 or volatility drops
+            if (close[i] < s1_aligned[i]) or (not atr_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1
-            if close[i] > r1_4h_aligned[i]:
+            # Short: exit if price breaks above R1 or volatility drops
+            if (close[i] > r1_aligned[i]) or (not atr_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
