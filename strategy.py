@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses 1d EMA50 to filter trades in strong trend direction, reducing false signals in chop
-# Donchian(20) identifies key support/resistance from 4h price action
-# Breakout with volume confirmation signals momentum
-# EMA50 filter ensures trades align with higher timeframe trend
-# Target: 20-50 trades/year per symbol with disciplined entries
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Uses 1d EMA50 to filter trades in the direction of higher timeframe trend, reducing false signals in chop and bear markets.
+# Breakout above upper band or below lower band with volume confirmation signals momentum.
+# Designed for low trade frequency (~20-30 trades/year) to minimize fee drag and improve generalization.
 name = "4h_Donchian20_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
