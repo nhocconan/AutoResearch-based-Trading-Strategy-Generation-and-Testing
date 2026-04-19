@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,141 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + range_1d * 1.1 / 12.0
-    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    # Calculate weekly KAMA for trend direction
+    er = np.abs(close_weekly[1:] - close_weekly[:-1]) / (np.abs(close_weekly[1:] - close_weekly[:-10]) + 1e-10)
+    er = np.concatenate([[0], er])
+    er = np.where(np.isnan(er), 0, er)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    sc = np.where(np.isnan(sc), 0, sc)
+    kama = np.zeros_like(close_weekly)
+    kama[0] = close_weekly[0]
+    for i in range(1, len(close_weekly)):
+        kama[i] = kama[i-1] + sc[i] * (close_weekly[i] - kama[i-1])
+    kama_trend = align_htf_to_ltf(prices, df_weekly, kama)
     
-    # Align Camarilla levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Daily KAMA for entry signal
+    close_series = pd.Series(close)
+    change = abs(close_series.diff())
+    volatility = change.rolling(10).sum()
+    er_daily = change / (volatility + 1e-10)
+    er_daily = er_daily.fillna(0)
+    sc_daily = (er_daily * (2/2 - 2/30) + 2/30) ** 2
+    sc_daily = sc_daily.fillna(0)
+    kama_daily = np.zeros(n)
+    kama_daily[0] = close[0]
+    for i in range(1, n):
+        kama_daily[i] = kama_daily[i-1] + sc_daily[i] * (close[i] - kama_daily[i-1])
     
-    # 4h ADX for trend strength (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Daily RSI for overbought/oversold
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Choppiness index for regime detection
+    atr1 = high - low
+    atr2 = np.abs(high - np.roll(close, 1))
+    atr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(atr1, np.maximum(atr2, atr3))
+    tr[0] = atr1[0]
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = chop.fillna(50).values
     
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    di_plus = 100 * dm_plus14 / tr14
-    di_minus = 100 * dm_minus14 / tr14
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
     start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
-           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(kama_trend[i]) or np.isnan(kama_daily[i]) or np.isnan(rsi[i]) or \
+           np.isnan(chop[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        kama_t = kama_trend[i]
+        kama_d = kama_daily[i]
+        rsi_val = rsi[i]
+        chop_val = chop[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx[i]
-        pivot = pivot_4h[i]
-        r1 = r1_4h[i]
-        s1 = s1_4h[i]
         
-        volume_confirmed = vol > 2.0 * vol_ma
-        trending = adx_val > 25  # Strong trend filter
+        volume_confirmed = vol > 1.5 * vol_ma
+        trending_market = chop_val < 38.2  # Trending regime
+        ranging_market = chop_val > 61.8   # Ranging regime
+        
+        # Determine market regime
+        if trending_market:
+            regime = "trend"
+        elif ranging_market:
+            regime = "range"
+        else:
+            regime = "transition"
         
         if position == 0:
-            # Long: Price breaks above R1 + volume + trending
-            if price > r1 and volume_confirmed and trending:
+            # Long conditions
+            long_condition = False
+            if regime == "trend":
+                # Trend following: price above KAMA and weekly trend up
+                long_condition = price > kama_d and close_weekly[-1] > kama_trend[i]
+            elif regime == "range":
+                # Mean reversion: RSI oversold in range
+                long_condition = rsi_val < 30
+            
+            if long_condition and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume + trending
-            elif price < s1 and volume_confirmed and trending:
+            
+            # Short conditions
+            short_condition = False
+            if regime == "trend":
+                # Trend following: price below KAMA and weekly trend down
+                short_condition = price < kama_d and close_weekly[-1] < kama_trend[i]
+            elif regime == "range":
+                # Mean reversion: RSI overbought in range
+                short_condition = rsi_val > 70
+            
+            if short_condition and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below pivot
-            if price < pivot:
+            # Exit long
+            exit_condition = False
+            if regime == "trend":
+                exit_condition = price < kama_d
+            elif regime == "range":
+                exit_condition = rsi_val > 70
+            
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above pivot
-            if price > pivot:
+            # Exit short
+            exit_condition = False
+            if regime == "trend":
+                exit_condition = price > kama_d
+            elif regime == "range":
+                exit_condition = rsi_val < 30
+            
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
