@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with daily volume confirmation and weekly trend filter.
-# Long when price breaks above Donchian(20) high AND daily volume > 1.5x average daily volume AND price > weekly EMA(50)
-# Short when price breaks below Donchian(20) low AND daily volume > 1.5x average daily volume AND price < weekly EMA(50)
-# Exit when price crosses back below/above Donchian midline (10-period average of high/low)
-# Uses Donchian for trend/breakout structure, volume for confirmation, weekly EMA for higher timeframe trend filter.
-# Target: 20-40 trades/year per symbol.
-name = "4h_Donchian_Breakout_Volume_WeeklyTrend"
-timeframe = "4h"
+# Hypothesis: 6h 34-period EMA with 12h volatility regime filter and volume confirmation.
+# Long when price > EMA34 AND 12h Bollinger Bands width > 60th percentile AND volume > 1.3x 6sma volume
+# Short when price < EMA34 AND 12h Bollinger Bands width > 60th percentile AND volume > 1.3x 6sma volume
+# Exit when price crosses back below/above EMA34
+# Uses EMA34 for trend, BBW regime to avoid chop, volume for conviction. Works in trends and avoids false breakouts in low volatility.
+# Target: 12-25 trades/year per symbol.
+name = "6h_EMA34_VolRegime_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,69 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume average
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for Bollinger Band width regime filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # 12h Bollinger Bands (20, 2)
+    close_12h = pd.Series(df_12h['close'])
+    bb_mid = close_12h.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_12h.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # Daily average volume (20-period)
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Percentile rank of BB width (60th percentile threshold)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    bb_width_regime = bb_width_percentile > 0.6  # True when volatility is high (top 40%)
     
-    # Weekly EMA (50-period)
-    weekly_ema50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    # Align BB width regime to 6h
+    bb_width_regime_aligned = align_htf_to_ltf(prices, df_12h, bb_width_regime.astype(float))
     
-    # Donchian channels (20-period high/low) - calculated on 4h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2
+    # EMA34 on 6h close
+    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume confirmation: volume > 1.3x 6-period SMA volume
+    vol_ma6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    volume_confirmed = volume > 1.3 * vol_ma6
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Ensure Donchian and weekly EMA are ready
+    start_idx = max(34, 20, 50, 6)  # EMA34, BB, percentile, vol ma
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(weekly_ema50_aligned[i])):
+        if (np.isnan(ema34[i]) or np.isnan(bb_width_regime_aligned[i]) or 
+            np.isnan(vol_ma6[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper_channel = high_20[i]
-        lower_channel = low_20[i]
-        midline = donchian_mid[i]
-        vol_ma = vol_ma_1d_aligned[i]
-        weekly_ema = weekly_ema50_aligned[i]
+        ema = ema34[i]
+        vol_regime = bb_width_regime_aligned[i] > 0.5  # boolean from aligned
+        vol_conf = volume_confirmed[i]
         vol = volume[i]
-        
-        # Volume confirmation
-        volume_confirmed = vol > 1.5 * vol_ma
+        vol_ma = vol_ma6[i]
         
         if position == 0:
-            # Long entry: break above upper channel + volume confirmation + above weekly EMA
-            if price > upper_channel and volume_confirmed and price > weekly_ema:
+            # Long entry: price > EMA34 AND high volatility regime AND volume confirmation
+            if price > ema and vol_regime and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below lower channel + volume confirmation + below weekly EMA
-            elif price < lower_channel and volume_confirmed and price < weekly_ema:
+            # Short entry: price < EMA34 AND high volatility regime AND volume confirmation
+            elif price < ema and vol_regime and vol_conf:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below midline
-            if price < midline:
+            # Long exit: price crosses back below EMA34
+            if price < ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above midline
-            if price > midline:
+            # Short exit: price crosses back above EMA34
+            if price > ema:
                 signals[i] = 0.0
                 position = 0
             else:
