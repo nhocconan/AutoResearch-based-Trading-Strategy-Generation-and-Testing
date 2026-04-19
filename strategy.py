@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d weekly Ichimoku Cloud breakout with volume confirmation.
-# Long when price breaks above Kumo (cloud) top AND weekly Kijun-sen > weekly Tenkan-sen with volume spike (>2x average).
-# Short when price breaks below Kumo (cloud) bottom AND weekly Kijun-sen < weekly Tenkan-sen with volume spike.
-# Uses weekly Ichimoku as trend filter to avoid counter-trend trades, reducing whipsaw in sideways markets.
-# Volume confirmation ensures breakouts have institutional participation.
-# Target: 10-25 trades/year per symbol (~40-100 total over 4 years).
-name = "1d_IchimokuCloud_WeeklyTrend_Volume"
-timeframe = "1d"
+# Hypothesis: 12h Camarilla pivot level touch (R1/S1) with 1d volume confirmation and chop filter.
+# Long when price touches S1 support with volume spike (>1.8x average) and chop > 61.8 (range).
+# Short when price touches R1 resistance with volume spike and chop > 61.8.
+# Uses 1d Camarilla levels from prior day (no look-ahead) and 1d chop regime filter.
+# Volume confirmation ensures institutional participation at key levels.
+# Target: 15-25 trades/year per symbol (~60-100 total over 4 years).
+name = "12h_Camarilla_R1S1_Touch_Volume_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,89 +23,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Ichimoku calculation
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # Get 1d data for Camarilla pivot and chop calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Ichimoku components on weekly data
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = pd.Series(high_weekly).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_weekly).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate previous day's Camarilla levels (H, L, C from prior day)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = pd.Series(high_weekly).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_weekly).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    for i in range(1, len(high_1d)):
+        H = high_1d[i-1]  # Previous day high
+        L = low_1d[i-1]   # Previous day low
+        C = close_1d[i-1] # Previous day close
+        camarilla_r1[i] = C + (H - L) * 1.1 / 12
+        camarilla_s1[i] = C - (H - L) * 1.1 / 12
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Align Camarilla levels to 12h timeframe (wait for 1d close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period52_high = pd.Series(high_weekly).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_weekly).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
+    # Calculate 1d chopiness index (EHLERS) - needs high/low/close
+    # Chop = 100 * log10(sum(ATR1)/ (n * (max(high)-min(low)))) / log10(n)
+    # Simplified: use rolling ATR and range
+    def calculate_chop(high_arr, low_arr, close_arr, window=14):
+        tr1 = np.abs(high_arr[1:] - low_arr[1:])
+        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
+        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
+        tr = np.maximum(np.maximum(tr1, tr2), tr3)
+        tr = np.concatenate([[np.nan], tr])  # Align with original index
+        
+        atr = pd.Series(tr).rolling(window=window, min_periods=window).mean().values
+        max_high = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
+        min_low = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
+        range_max_min = max_high - min_low
+        
+        chop = np.full_like(close_arr, np.nan)
+        mask = (atr > 0) & (range_max_min > 0) & ~np.isnan(atr) & ~np.isnan(range_max_min)
+        chop[mask] = 100 * np.log10(np.sum(atr[mask]) / (window * range_max_min[mask])) / np.log10(window)
+        return chop
     
-    # Align Ichimoku components to daily timeframe (wait for weekly close)
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_weekly, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_weekly, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_weekly, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_weekly, senkou_span_b)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, window=14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate daily Kumo (cloud) top and bottom
-    kumo_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
-    kumo_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
-    
-    # Volume confirmation: current volume > 2x 20-period average
+    # Volume confirmation: current 12h volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 20)  # Need both Ichimoku and volume data
+    start_idx = 20  # Need volume MA and Camarilla data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or 
-            np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kumo_top_val = kumo_top[i]
-        kumo_bottom_val = kumo_bottom[i]
-        tenkan_val = tenkan_sen_aligned[i]
-        kijun_val = kijun_sen_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        chop = chop_1d_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 2.0 * vol_ma
+        volume_confirmed = vol > 1.8 * vol_ma
+        # Chop filter: range-bound market (chop > 61.8)
+        chop_filter = chop > 61.8
         
         if position == 0:
-            # Enter long: price breaks above Kumo top AND weekly Kijun > Tenkan
-            if price > kumo_top_val and kijun_val > tenkan_val and volume_confirmed:
+            # Enter long: price touches S1 support with volume and chop confirmation
+            if abs(price - s1) < 0.001 * s1 and volume_confirmed and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Kumo bottom AND weekly Kijun < Tenkan
-            elif price < kumo_bottom_val and kijun_val < tenkan_val and volume_confirmed:
+            # Enter short: price touches R1 resistance with volume and chop confirmation
+            elif abs(price - r1) < 0.001 * r1 and volume_confirmed and chop_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price breaks below Kumo bottom or weekly Kijun < Tenkan
-            if price < kumo_bottom_val or kijun_val < tenkan_val:
+            # Exit long when price moves above midpoint between S1 and R1 or touches R1
+            midpoint = (s1 + r1) / 2
+            if price > midpoint or abs(price - r1) < 0.001 * r1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price breaks above Kumo top or weekly Kijun > Tenkan
-            if price > kumo_top_val or kijun_val > tenkan_val:
+            # Exit short when price moves below midpoint or touches S1
+            midpoint = (s1 + r1) / 2
+            if price < midpoint or abs(price - s1) < 0.001 * s1:
                 signals[i] = 0.0
                 position = 0
             else:
