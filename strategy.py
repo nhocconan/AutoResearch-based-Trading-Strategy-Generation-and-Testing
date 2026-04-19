@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1w EMA34 trend and 1d Donchian(20) breakout.
-# Uses weekly EMA34 for trend direction and daily Donchian breakout for momentum.
-# Adds volume confirmation to filter false breakouts.
-# Trades only in high-liquidity 08-20 UTC session.
-# Targets 15-37 trades/year (60-150 total over 4 years) to avoid fee drag.
-# Works in bull/bear by following higher timeframe trend (1w EMA34).
-name = "12h_1wEMA34_1dDonchian20_Volume"
-timeframe = "12h"
+# Hypothesis: 1d timeframe with 1w EMA trend and volume confirmation.
+# Uses 1w EMA34 for trend direction and 1d Donchian breakout for momentum.
+# Enters only during 08-20 UTC session to avoid low-volume noise.
+# Targets 10-25 trades/year (40-100 total over 4 years) with strict entry conditions.
+# Works in bull/bear by following higher timeframe trends.
+name = "1d_1w_EMA34_Donchian20_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
