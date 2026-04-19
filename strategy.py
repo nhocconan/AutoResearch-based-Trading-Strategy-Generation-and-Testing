@@ -3,15 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily RSI + Weekly Trend Filter for 1d timeframe.
-# Use weekly EMA(34) to determine trend: price > EMA34 = bullish, price < EMA34 = bearish.
-# In bullish trend: long when RSI(14) crosses above 30, short when RSI crosses below 70.
-# In bearish trend: short when RSI crosses below 70, long when RSI crosses above 30.
+# Hypothesis: 12h Williams Alligator + Volume + ADX filter for trend following.
+# Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA).
+# Trend: Lips > Teeth > Jaw (uptrend), Lips < Teeth < Jaw (downtrend).
+# Use daily ADX > 25 to filter strong trends.
 # Volume confirmation: volume > 1.2x 20-period average.
-# Target: 15-25 trades/year per symbol to stay within frequency limits.
-name = "1d_RSI_WeeklyEMA34_Trend_Volume"
-timeframe = "1d"
+# Target: 15-30 trades/year per symbol to stay within frequency limits.
+name = "12h_WilliamsAlligator_ADX_Volume"
+timeframe = "12h"
 leverage = 1.0
+
+def smma(data, period):
+    """Smoothed Moving Average (SMMA)"""
+    result = np.full_like(data, np.nan)
+    if len(data) < period:
+        return result
+    result[period-1] = np.mean(data[:period])
+    for i in range(period, len(data)):
+        result[i] = (result[i-1] * (period-1) + data[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,94 +33,127 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA34 trend
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA(34)
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Get daily data for RSI
+    # Get daily data for Williams Alligator and ADX
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Williams Alligator components
+    jaw = smma(close_1d, 13)  # Blue line (13-period)
+    teeth = smma(close_1d, 8)  # Red line (8-period)
+    lips = smma(close_1d, 5)   # Green line (5-period)
     
-    # Wilder's smoothing for RSI
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    for i in range(1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # ADX calculation (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        # Directional Movement
+        plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        plus_dm[0] = 0
+        minus_dm[0] = 0
+        
+        # Smoothed TR, +DM, -DM
+        def smooth(data, period):
+            result = np.full_like(data, np.nan)
+            if len(data) < period:
+                return result
+            result[period-1] = np.sum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+            return result
+        
+        atr = smooth(tr, period)
+        plus_dm_smooth = smooth(plus_dm, period)
+        minus_dm_smooth = smooth(minus_dm, period)
+        
+        # Directional Indicators
+        plus_di = 100 * plus_dm_smooth / atr
+        minus_di = 100 * minus_dm_smooth / atr
+        
+        # DX and ADX
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        dx = np.where((plus_di + minus_di) == 0, 0, dx)
+        
+        adx = smooth(dx, period)
+        return adx
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    adx = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align RSI to 1d timeframe (already aligned, but using for consistency)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Get 1d average volume for confirmation
+    # Get 12h average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure EMA34 and RSI are ready
+    start_idx = max(28, 20)  # Ensure Alligator (13*2+2) and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema34 = ema34_1w_aligned[i]
-        rsi_val = rsi_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        adx_val = adx_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.2 * vol_ma
         
-        # Trend determination
-        is_bullish = price > ema34
-        is_bearish = price < ema34
+        # Trend strength filter
+        strong_trend = adx_val > 25
+        
+        # Williams Alligator signals
+        lips_above_teeth = lips_val > teeth_val
+        teeth_above_jaw = teeth_val > jaw_val
+        lips_below_teeth = lips_val < teeth_val
+        teeth_below_jaw = teeth_val < jaw_val
+        
+        bullish_alignment = lips_above_teeth and teeth_above_jaw
+        bearish_alignment = lips_below_teeth and teeth_below_jaw
         
         if position == 0:
-            # Determine entry based on trend
-            if is_bullish and volume_confirmed:
-                # Bullish trend: long on RSI > 30, short on RSI < 70
-                if rsi_val > 30 and (i == start_idx or rsi_aligned[i-1] <= 30):
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi_val < 70 and (i == start_idx or rsi_aligned[i-1] >= 70):
-                    signals[i] = -0.25
-                    position = -1
-            elif is_bearish and volume_confirmed:
-                # Bearish trend: short on RSI < 70, long on RSI > 30
-                if rsi_val < 70 and (i == start_idx or rsi_aligned[i-1] >= 70):
-                    signals[i] = -0.25
-                    position = -1
-                elif rsi_val > 30 and (i == start_idx or rsi_aligned[i-1] <= 30):
-                    signals[i] = 0.25
-                    position = 1
+            # Enter long: bullish alignment + strong trend + volume
+            if bullish_alignment and strong_trend and volume_confirmed:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: bearish alignment + strong trend + volume
+            elif bearish_alignment and strong_trend and volume_confirmed:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: RSI crosses below 50 or opposite extreme
-            if rsi_val < 50 and (i == start_idx or rsi_aligned[i-1] >= 50):
+            # Exit long: Alligator lines cross (lips crosses below teeth) or trend weakens
+            if lips_val < teeth_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI crosses above 50 or opposite extreme
-            if rsi_val > 50 and (i == start_idx or rsi_aligned[i-1] <= 50):
+            # Exit short: Alligator lines cross (lips crosses above teeth) or trend weakens
+            if lips_val > teeth_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
