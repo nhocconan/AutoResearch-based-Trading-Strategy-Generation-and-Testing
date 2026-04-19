@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1-day VWAP deviation and 1-week trend filter.
-# Enters when price deviates significantly from 1-day VWAP (>1.5*ATR) in direction of weekly trend.
-# Uses VWAP mean reversion in ranging markets and trend alignment to avoid counter-trend trades.
-# Targets 15-25 trades/year (60-100 over 4 years) to minimize fee drag.
-name = "6h_1d_VWAP_Deviation_1w_Trend"
-timeframe = "6h"
+# Hypothesis: 4h timeframe with 1d ATR-based volatility filter and 1d Williams %R mean-reversion.
+# Enters only during 08-20 UTC session. Uses tight conditions to limit trades (~20-40/year).
+# Williams %R (14) < -80 for long, > -20 for short, with 1d ATR(14) > 1.5 * ATR(50) for volatility filter.
+# Trend filter: price > 1d EMA50 for long, price < 1d EMA50 for short.
+# Designed to work in both bull (trend + mean reversion) and bear (mean reversion in range) markets.
+name = "4h_1d_WilliamsR_ATR_Volatility"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,65 +27,75 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for VWAP calculation (called ONCE before loop)
+    # Get 1d data for Williams %R, ATR, and EMA50 (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    volume_1d = df_1d['volume'].values
-    vwap_1d = (np.cumsum(typical_price_1d * volume_1d) / np.cumsum(volume_1d))
-    vwap_1d = np.where(np.cumsum(volume_1d) == 0, np.nan, vwap_1d)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 1w data for EMA34 trend (called ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Williams %R (14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)  # avoid division by zero
     
-    # ATR for volatility normalization (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # ATR (14) and ATR (50) for volatility filter
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
+    tr = np.concatenate([[np.inf], tr2])  # first TR is undefined
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # VWAP deviation in ATR units
-    vwap_dev = (close - vwap_1d_aligned) / atr
+    # EMA50 for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Volatility filter: ATR(14) > 1.5 * ATR(50)
+    volatility_filter = atr_14_aligned > (atr_50_aligned * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 60  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(vwap_dev[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vwap_1d_aligned[i]) or not session_filter[i]):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(atr_50_aligned[i]) or np.isnan(ema_50_aligned[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price below VWAP (oversold) AND above weekly EMA34 (uptrend)
-            if (vwap_dev[i] < -1.5 and 
-                close[i] > ema_34_1w_aligned[i]):
+            # Long: Williams %R < -80 (oversold), volatility filter, price > EMA50
+            if (williams_r_aligned[i] < -80 and 
+                volatility_filter[i] and 
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price above VWAP (overbought) AND below weekly EMA34 (downtrend)
-            elif (vwap_dev[i] > 1.5 and 
-                  close[i] < ema_34_1w_aligned[i]):
+            # Short: Williams %R > -20 (overbought), volatility filter, price < EMA50
+            elif (williams_r_aligned[i] > -20 and 
+                  volatility_filter[i] and 
+                  close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price returns to VWAP or breaks below weekly EMA34
-            if vwap_dev[i] > -0.5 or close[i] < ema_34_1w_aligned[i]:
+            # Long: exit if Williams %R > -20 (overbought) or price < EMA50
+            if williams_r_aligned[i] > -20 or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price returns to VWAP or breaks above weekly EMA34
-            if vwap_dev[i] < 0.5 or close[i] > ema_34_1w_aligned[i]:
+            # Short: exit if Williams %R < -80 (oversold) or price > EMA50
+            if williams_r_aligned[i] < -80 or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
