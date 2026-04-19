@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Pivot_R1S1_Breakout_VolumeATR_Filter_v1"
-timeframe = "4h"
+name = "1h_Pivot_R1S1_Breakout_VolumeATR_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,7 +31,7 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily pivot levels to 4h timeframe
+    # Align daily pivot levels to 1h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -43,10 +43,10 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (4h)
+    # Volume confirmation: current volume > 2.0x 20-period average (1h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Additional filter: only trade when price is away from extremes (avoid chop)
+    # Price away from extremes filter (avoid chop): price within 2x ATR of 50-period MA
     price_ma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
@@ -71,33 +71,33 @@ def generate_signals(prices):
         price_ma = price_ma_50[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
-        # Only trade when price is not too far from MA (avoid extreme moves)
-        price_not_extreme = abs(price - price_ma) < 3 * atr
+        # Only trade when price is not too far from MA (avoid extreme moves/chop)
+        price_not_extreme = abs(price - price_ma) < 2.0 * atr
         
         if position == 0:
             # Long: break above R1 with volume and not extreme
             if price > r1 and volume_confirmed and price_not_extreme:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: break below S1 with volume and not extreme
             elif price < s1 and volume_confirmed and price_not_extreme:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Exit: price below pivot or ATR-based stop
-            if price < pivot or price < close[i-1] - 2.0 * atr:
+            if price < pivot or price < close[i-1] - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit: price above pivot or ATR-based stop
-            if price > pivot or price > close[i-1] + 2.0 * atr:
+            if price > pivot or price > close[i-1] + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
