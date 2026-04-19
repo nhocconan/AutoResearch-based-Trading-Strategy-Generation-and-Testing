@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining daily Donchian channel breakouts with volume confirmation and ADX trend filter.
-# Uses daily Donchian(20) breakouts for trend signals, confirmed by volume spike (>1.5x 20-period MA),
-# and filtered by 12h ADX > 25 to ensure trending markets.
-# Designed to work in both bull and bear markets by requiring ADX confirmation to avoid false breakouts in ranging conditions.
-# Target: 15-25 trades/year per symbol with disciplined entries.
-name = "12h_Donchian20_Volume_ADXFilter"
-timeframe = "12h"
+# Hypothesis: 6h strategy using 1-day Parabolic SAR to capture trend direction,
+# confirmed by 6-hour Bollinger Band breakout with volume spike.
+# Parabolic SAR provides clear trend signals with built-in acceleration.
+# Bollinger Band breakouts with volume capture momentum bursts.
+# Works in both bull/bear markets by requiring alignment between daily trend
+# and 6h momentum breakout direction.
+# Target: 20-30 trades/year per symbol.
+name = "6h_PSAR_1d_BB20_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,85 +24,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channel (20-period high/low)
+    # Daily Parabolic SAR for trend direction
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Parabolic SAR calculation
+    psar = np.zeros(len(high_1d))
+    psar[0] = low_1d[0]
+    bull = True  # Start with bullish assumption
+    af = 0.02    # Acceleration factor
+    max_af = 0.2
+    ep = high_1d[0] if bull else low_1d[0]  # Extreme point
     
-    # 12h ADX for trend strength filter
-    # Calculate +DI, -DI, and DX
-    up_move = np.diff(high, prepend=high[0])
-    down_move = np.diff(low, prepend=low[0])
+    for i in range(1, len(high_1d)):
+        if bull:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            if low_1d[i] < psar[i]:
+                bull = False
+                psar[i] = ep
+                af = 0.02
+                ep = low_1d[i]
+            else:
+                if high_1d[i] > ep:
+                    ep = high_1d[i]
+                    af = min(af + 0.02, max_af)
+        else:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            if high_1d[i] > psar[i]:
+                bull = True
+                psar[i] = ep
+                af = 0.02
+                ep = high_1d[i]
+            else:
+                if low_1d[i] < ep:
+                    ep = low_1d[i]
+                    af = min(af + 0.02, max_af)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    psar_aligned = align_htf_to_ltf(prices, df_1d, psar)
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 6-hour Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (std_dev * bb_std)
+    lower_band = sma - (std_dev * bb_std)
     
-    # Smoothed values
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_14 = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / atr_14)
-    minus_di_14 = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / atr_14)
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume spike: volume > 1.5 * 20-period average
+    # Volume spike: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = max(bb_period, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(psar_aligned[i]) or np.isnan(sma[i]) or 
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when trending (ADX > 25)
-        if adx[i] <= 25:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: price breaks above Donchian high with volume spike
-            if (close[i] > donchian_high_aligned[i] and volume_spike[i]):
+            # Long: price breaks above upper BB, above daily PSAR (bullish trend), with volume spike
+            if (close[i] > upper_band[i] and 
+                close[i] > psar_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume spike
-            elif (close[i] < donchian_low_aligned[i] and volume_spike[i]):
+            # Short: price breaks below lower BB, below daily PSAR (bearish trend), with volume spike
+            elif (close[i] < lower_band[i] and 
+                  close[i] < psar_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below Donchian low (reversal) or loses volume momentum
-            if (close[i] < donchian_low_aligned[i]) or (not volume_spike[i]):
+            # Long: exit if price breaks below lower BB or below daily PSAR
+            if (close[i] < lower_band[i]) or (close[i] < psar_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above Donchian high (reversal) or loses volume momentum
-            if (close[i] > donchian_high_aligned[i]) or (not volume_spike[i]):
+            # Short: exit if price breaks above upper BB or above daily PSAR
+            if (close[i] > upper_band[i]) or (close[i] > psar_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
