@@ -1,16 +1,17 @@
-# 1d_WeeklyPivot_Trend_Follow
-# Hypothesis: 1d strategy using weekly pivot levels with trend following. Weekly pivots provide strong support/resistance from weekly price action.
-# Trend filter (ADX > 20) ensures we only trade in trending markets to avoid false breakouts in chop.
-# Works in bull/bear via trend filter and pivot-based breakouts.
-# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
+#!/usr/bin/env python3
+# 12h_Camarilla_Touch_Reversal
+# Hypothesis: Price often reverses at Camarilla S3/R3 levels with volume exhaustion and overbought/oversold RSI.
+# Uses mean reversion at strong support/resistance in ranging markets (Chop > 61.8).
+# Works in bull/bear via regime filter - avoids trending markets (Chop < 38.2).
+# Target: 50-150 total trades over 4 years by requiring confluence of 3+ conditions.
 
-name = "1d_WeeklyPivot_Trend_Follow"
-timeframe = "1d"
+name = "12h_Camarilla_Touch_Reversal"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,131 +23,126 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX(14) for trend strength filter - calculated on 1d data
-    def calculate_adx(high, low, close, period=14):
+    # Calculate RSI(14) for overbought/oversold
+    def calculate_rsi(close, period=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        
+        # Wilder's smoothing
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        for i in range(period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    # Calculate Choppiness Index
+    def calculate_chop(high, low, close, period=14):
         # True Range
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First period
+        tr[0] = tr1[0]
         
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
+        # Sum of True Range over period
+        tr_sum = np.zeros_like(close)
+        for i in range(len(close)):
+            if i < period:
+                tr_sum[i] = np.nan
+            else:
+                tr_sum[i] = np.nansum(tr[i-period+1:i+1])
         
-        # Smoothed values using Wilder's smoothing (EMA-like)
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            if len(data) >= period:
-                result[period-1] = np.nanmean(data[:period])
-                for i in range(period, len(data)):
-                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-                    else:
-                        result[i] = np.nan
-            return result
+        # Highest high and lowest low over period
+        max_high = np.zeros_like(high)
+        min_low = np.zeros_like(low)
+        for i in range(len(close)):
+            if i < period:
+                max_high[i] = np.nan
+                min_low[i] = np.nan
+            else:
+                max_high[i] = np.nanmax(high[i-period+1:i+1])
+                min_low[i] = np.nanmin(low[i-period+1:i+1])
         
-        atr = WilderSmooth(tr, period)
-        dm_plus_smooth = WilderSmooth(dm_plus, period)
-        dm_minus_smooth = WilderSmooth(dm_minus, period)
-        
-        # Avoid division by zero
-        dx = np.full_like(close, np.nan)
-        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
-        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
-        
-        adx = WilderSmooth(dx, period)
-        return adx
+        # Chop calculation
+        chop = np.full_like(close, np.nan)
+        for i in range(len(close)):
+            if (not np.isnan(tr_sum[i]) and tr_sum[i] > 0 and 
+                not np.isnan(max_high[i]) and not np.isnan(min_low[i]) and
+                max_high[i] != min_low[i]):
+                chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
+        return chop
     
-    # 1d data for ADX and other indicators
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ADX on 1d data
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Previous day's OHLC for Camarilla calculation
+    ph = df_1d['high'].shift(1).values
+    pl = df_1d['low'].shift(1).values
+    pc = df_1d['close'].shift(1).values
     
-    # Weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate Camarilla levels
+    rang = ph - pl
+    # Avoid division by zero in case of zero range
+    rang = np.where(rang == 0, 1e-10, rang)
     
-    # Calculate weekly pivot levels (using previous week)
-    ph = df_1w['high'].shift(1).values  # Previous week high
-    pl = df_1w['low'].shift(1).values   # Previous week low
-    pc = df_1w['close'].shift(1).values # Previous week close
+    # S3 and R3 levels (more extreme than S1/R1)
+    s3 = pc - (rang * 1.1 / 6)
+    r3 = pc + (rang * 1.1 / 6)
     
-    # Standard pivot point calculation
-    pp = (ph + pl + pc) / 3.0
-    r1 = 2 * pp - pl
-    s1 = 2 * pp - ph
-    r2 = pp + (ph - pl)
-    s2 = pp - (ph - pl)
+    # Align to 12h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     
-    # Align weekly pivot levels to 1d timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Calculate indicators on 12h data
+    rsi = calculate_rsi(close, 14)
+    chop = calculate_chop(high, low, close, 14)
     
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume exhaustion: current volume < 0.7 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    volume_exhaustion = volume < (volume_ma * 0.7)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure enough data for all indicators
+    # Start after enough data for all indicators
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+        # Skip if any data is NaN
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(chop[i]) or 
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when ADX > 20 (trending market)
-        strong_trend = adx_1d_aligned[i] > 20
+        # Regime filter: only trade in ranging markets (Chop > 61.8)
+        ranging_market = chop[i] > 61.8
         
-        if position == 0:
-            # Long: price breaks above R1 with volume and strong trend
-            if (close[i] > r1_aligned[i] and 
-                volume_confirm[i] and 
-                strong_trend):
+        if ranging_market:
+            # Long setup: price at or below S3 with RSI oversold and volume exhaustion
+            if (low[i] <= s3_aligned[i] and 
+                rsi[i] < 30 and 
+                volume_exhaustion[i]):
                 signals[i] = 0.25
-                position = 1
-            # Short: price breaks below S1 with volume and strong trend
-            elif (close[i] < s1_aligned[i] and 
-                  volume_confirm[i] and 
-                  strong_trend):
+            # Short setup: price at or above R3 with RSI overbought and volume exhaustion
+            elif (high[i] >= r3_aligned[i] and 
+                  rsi[i] > 70 and 
+                  volume_exhaustion[i]):
                 signals[i] = -0.25
-                position = -1
-                
-        elif position == 1:
-            # Long: exit if price breaks below S1 or trend weakens (ADX < 15)
-            if (close[i] < s1_aligned[i]) or (adx_1d_aligned[i] < 15):
-                signals[i] = 0.0
-                position = 0
             else:
-                signals[i] = 0.25
-                
-        elif position == -1:
-            # Short: exit if price breaks above R1 or trend weakens (ADX < 15)
-            if (close[i] > r1_aligned[i]) or (adx_1d_aligned[i] < 15):
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        else:
+            # In trending markets, stay flat
+            signals[i] = 0.0
     
     return signals
