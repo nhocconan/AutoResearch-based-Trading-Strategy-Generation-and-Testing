@@ -1,12 +1,16 @@
-# 12h_1dPivot_S1R1_Breakout_VolumeATR_Simple
-# 12h timeframe using daily pivot points (S1/R1) for breakout signals.
-# Breakouts with volume confirmation indicate strong directional moves.
-# ATR-based stop loss manages risk. Works in both bull and bear markets
-# by capturing breakouts from key daily support/resistance levels.
-# Target: 20-50 trades over 4 years to minimize fee drag.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_S1R1_Breakout_VolumeATR_Simple"
-timeframe = "12h"
+# Hypothesis: 4h 1d Pivot R1/S1 breakout with volume confirmation and ATR stop.
+# Uses daily pivot points as key support/resistance levels. Breakouts with volume
+# indicate institutional participation. ATR stop manages risk. Works in bull/bear:
+# in bull, breaks above R1 capture uptrends; in bear, breaks below S1 capture downtrends.
+# Target: 20-40 trades over 4 years to minimize fee drag.
+
+name = "4h_1dPivot_R1S1_Breakout_VolumeATR"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +42,7 @@ def generate_signals(prices):
     s1_1d = 2 * pivot_1d - high_1d
     r1_1d = 2 * pivot_1d - low_1d
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
