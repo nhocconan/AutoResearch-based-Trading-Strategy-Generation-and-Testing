@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_EMA200_Trend"
-timeframe = "6h"
+name = "1d_WeeklyPivot_R1S1_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,79 +17,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for pivot calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 13-period EMA for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate weekly pivot levels
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r1_1w = close_1w + range_1w * 1.1 / 12.0
+    s1_1w = close_1w - range_1w * 1.1 / 12.0
     
-    # Bull Power = High - EMA13
-    bull_power_1d = high_1d - ema13_1d
-    # Bear Power = Low - EMA13
-    bear_power_1d = low_1d - ema13_1d
+    # Align weekly pivot levels to daily timeframe
+    pivot_1d = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1d = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1d = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Align Elder Ray components to 6h timeframe
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Daily ADX for trend strength (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # 6-day (approx 48-period) EMA200 equivalent for 6h timeframe
-    # Using 48-period EMA as proxy for longer-term trend on 6h chart
-    ema48_6h = pd.Series(close).ewm(span=48, adjust=False, min_periods=48).mean().values
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    di_plus = 100 * dm_plus14 / tr14
+    di_minus = 100 * dm_minus14 / tr14
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 48
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or \
-           np.isnan(ema48_6h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_1d[i]) or np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or \
+           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        bull_power = bull_power_6h[i]
-        bear_power = bear_power_6h[i]
-        ema48 = ema48_6h[i]
+        adx_val = adx[i]
+        pivot = pivot_1d[i]
+        r1 = r1_1d[i]
+        s1 = s1_1d[i]
         
-        volume_confirmed = vol > 1.5 * vol_ma
-        bullish_momentum = bull_power > 0 and bull_power > abs(bear_power)
-        bearish_momentum = bear_power < 0 and abs(bear_power) > bull_power
-        above_trend = price > ema48
-        below_trend = price < ema48
+        volume_confirmed = vol > 2.0 * vol_ma
+        trending = adx_val > 25  # Strong trend filter
         
         if position == 0:
-            # Long: Bullish momentum + above trend EMA + volume
-            if bullish_momentum and above_trend and volume_confirmed:
-                signals[i] = 0.25
+            # Long: Price breaks above R1 + volume + trending
+            if price > r1 and volume_confirmed and trending:
+                signals[i] = 0.30
                 position = 1
-            # Short: Bearish momentum + below trend EMA + volume
-            elif bearish_momentum and below_trend and volume_confirmed:
-                signals[i] = -0.25
+            # Short: Price breaks below S1 + volume + trending
+            elif price < s1 and volume_confirmed and trending:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit: Bearish momentum appears or price crosses below EMA
-            if bearish_momentum or price < ema48:
+            # Exit: Price returns below pivot
+            if price < pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit: Bullish momentum appears or price crosses above EMA
-            if bullish_momentum or price > ema48:
+            # Exit: Price returns above pivot
+            if price > pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
