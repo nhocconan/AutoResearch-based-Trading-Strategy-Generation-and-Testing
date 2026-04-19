@@ -3,18 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Weekly Pivot Point Breakout with Volume Confirmation
-# Long when: Price breaks above weekly R1 with volume > 2x 20-period average
-# Short when: Price breaks below weekly S1 with volume > 2x 20-period average
-# Exit when: Price returns to weekly pivot point
-# Weekly Pivot = (Prior week High + Low + Close) / 3
-# R1 = (2 * Pivot) - Prior week Low
-# S1 = (2 * Pivot) - Prior week High
-# Weekly pivot provides institutional support/resistance; breakouts with volume
-# indicate institutional participation. Works in all regimes as it captures
-# institutional breakouts rather than retail noise.
-name = "6h_WeeklyPivot_Breakout_Volume"
-timeframe = "6h"
+# Hypothesis: 12-hour Donchian channel breakout with 1-day ATR filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high, ATR(14) > 1.5x ATR(50), volume > 1.5x 20-period average.
+# Short when price breaks below 20-period Donchian low, ATR(14) > 1.5x ATR(50), volume > 1.5x 20-period average.
+# Exit when price crosses the 10-period moving average in the opposite direction.
+# Uses Donchian channels for breakout signals, ATR for volatility filter, volume for confirmation.
+# Works in trending markets (both bull and bear) by capturing breakouts with volatility and volume filters.
+# Target: 15-25 trades/year per symbol.
+name = "12h_Donchian20_ATR_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,69 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) == 0:
-        return np.zeros(n)
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly pivot points using prior week's data
-    # Pivot = (H + L + C) / 3
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = (2 * weekly_pivot) - weekly_low  # Resistance 1
-    weekly_s1 = (2 * weekly_pivot) - weekly_high  # Support 1
-    
-    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    # Calculate ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # 10-period moving average for exit
+    ma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for volume MA calculation
+    start_idx = 50  # Wait for ATR(50) calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ma_10[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        pivot = pivot_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        
         if position == 0:
-            # Long entry: Price breaks above weekly R1 with volume spike
-            if price > r1 and vol > 2.0 * vol_ma:
+            # Long entry: price breaks above Donchian high, volatility filter, volume confirmation
+            if (close[i] > donchian_high[i] and 
+                atr_14[i] > 1.5 * atr_50[i] and 
+                volume[i] > 1.5 * vol_ma_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below weekly S1 with volume spike
-            elif price < s1 and vol > 2.0 * vol_ma:
+            # Short entry: price breaks below Donchian low, volatility filter, volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  atr_14[i] > 1.5 * atr_50[i] and 
+                  volume[i] > 1.5 * vol_ma_20[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to weekly pivot
-            if price <= pivot:
+            # Long exit: price crosses below 10-period MA
+            if close[i] < ma_10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to weekly pivot
-            if price >= pivot:
+            # Short exit: price crosses above 10-period MA
+            if close[i] > ma_10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
