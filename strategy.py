@@ -1,23 +1,22 @@
-# 6h Pivot Reversal with Volume and Trend Filter
-# Long when: Price breaks above daily R1 with volume > 1.5x average and price > 200 EMA
-# Short when: Price breaks below daily S1 with volume > 1.5x average and price < 200 EMA
-# Exit when: Price returns to daily pivot point
-# Uses daily pivot levels for key support/resistance, volume for confirmation, and 200 EMA for trend filter
-# Designed to work in both bull (buy dips above S1) and bear (sell rallies below R1) markets
-# Target: 20-40 trades/year per symbol
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Pivot_Reversal_Volume_Trend"
-timeframe = "6h"
+# Hypothesis: 4h Donchian(20) breakout with 12h trend filter (EMA34) and volume confirmation.
+# Long when: price breaks above Donchian high(20), price > EMA34(12h), volume > 1.5x 20-period average
+# Short when: price breaks below Donchian low(20), price < EMA34(12h), volume > 1.5x 20-period average
+# Exit when price returns to Donchian midpoint (mean reversion within the channel)
+# Donchian captures breakouts, EMA34 filters trend direction, volume confirms breakout strength.
+# Target: 20-40 trades/year per symbol. Works in bull (buy breakouts) and bear (sell breakdowns).
+
+name = "4h_Donchian20_EMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,75 +24,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for pivot points and 200 EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h data for EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate daily pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    # Calculate EMA34 on 12h data
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Align daily pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Donchian channels (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Calculate 200 EMA on daily data for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Volume average for confirmation
+    # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for EMA200 calculation
+    start_idx = 34  # Wait for EMA34 calculation (longest indicator)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        pivot = pivot_1d_aligned[i]
-        ema200 = ema200_1d_aligned[i]
+        high_price = high[i]
+        low_price = low[i]
+        ema34 = ema34_12h_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        mid_channel = donchian_mid[i]
         
         if position == 0:
-            # Long entry: Price breaks above R1 with volume confirmation and uptrend
-            if (price > r1 and close[i-1] <= r1 and  # Break above R1
-                vol > 1.5 * vol_ma and              # Volume confirmation
-                price > ema200):                    # Uptrend filter
+            # Long entry: price breaks above upper Donchian band, above EMA34, volume spike
+            if (high_price > upper_channel and price > ema34 and vol > 1.5 * vol_ma):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below S1 with volume confirmation and downtrend
-            elif (price < s1 and close[i-1] >= s1 and  # Break below S1
-                  vol > 1.5 * vol_ma and               # Volume confirmation
-                  price < ema200):                     # Downtrend filter
+            # Short entry: price breaks below lower Donchian band, below EMA34, volume spike
+            elif (low_price < lower_channel and price < ema34 and vol > 1.5 * vol_ma):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below pivot point
-            if price <= pivot:
+            # Long exit: price returns to Donchian midpoint (mean reversion)
+            if price <= mid_channel:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above pivot point
-            if price >= pivot:
+            # Short exit: price returns to Donchian midpoint (mean reversion)
+            if price >= mid_channel:
                 signals[i] = 0.0
                 position = 0
             else:
