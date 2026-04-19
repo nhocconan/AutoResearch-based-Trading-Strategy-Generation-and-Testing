@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1-day EMA50 trend filter + volume spike confirmation.
-# Long when: price breaks above Donchian high(20), price > EMA50(1d), volume > 2x 20-period average
-# Short when: price breaks below Donchian low(20), price < EMA50(1d), volume > 2x 20-period average
-# Exit when price crosses back through the opposite Donchian boundary (long exit below low(20), short exit above high(20))
-# Uses price channel breakouts for trend following, EMA50 for trend filter, volume for conviction.
-# Target: 20-40 trades/year per symbol. Works in bull (buy breakouts) and bear (sell breakdowns).
-name = "4h_Donchian20_EMA50_VolumeSpike"
+# Hypothesis: 4-hour Camarilla R1/S1 breakout with daily EMA34 filter and volume spike confirmation.
+# Long when: Price breaks above R1, daily EMA34 upward, volume > 1.5x 20-period average
+# Short when: Price breaks below S1, daily EMA34 downward, volume > 1.5x 20-period average
+# Exit when: Price crosses back through the pivot point (PP)
+# Camarilla levels provide institutional support/resistance, EMA34 filters trend, volume confirms breakout strength.
+# Target: 20-30 trades/year per symbol. Works in bull (buy breakouts) and bear (sell breakdowns).
+name = "4h_Camarilla_R1_S1_Breakout_Volume_EMA34Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,17 +23,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for EMA50 trend filter
+    # 1-day data for Camarilla pivot levels and EMA34
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on daily data
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate daily pivot point (PP) and Camarilla levels
+    # PP = (H + L + C) / 3
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Calculate Donchian channels on 4h data (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA34 on daily data for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1D data to 4H timeframe
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -41,43 +52,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 34  # Wait for EMA34 calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        ema50 = ema50_1d_aligned[i]
+        pp = pp_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        ema34 = ema34_1d_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long entry: price breaks above Donchian high, price > EMA50, volume spike
-            if (price > upper and price > ema50 and vol > 2.0 * vol_ma):
+            # Long entry: Price breaks above R1, EMA34 upward, volume spike
+            if (price > r1 and close[i-1] <= r1 and 
+                ema34 > ema34_1d_aligned[i-1] and vol > 1.5 * vol_ma):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low, price < EMA50, volume spike
-            elif (price < lower and price < ema50 and vol > 2.0 * vol_ma):
+            # Short entry: Price breaks below S1, EMA34 downward, volume spike
+            elif (price < s1 and close[i-1] >= s1 and 
+                  ema34 < ema34_1d_aligned[i-1] and vol > 1.5 * vol_ma):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below Donchian low
-            if price < lower:
+            # Long exit: Price crosses back below pivot point
+            if price < pp:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above Donchian high
-            if price > upper:
+            # Short exit: Price crosses back above pivot point
+            if price > pp:
                 signals[i] = 0.0
                 position = 0
             else:
