@@ -3,8 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_Pivot_R1S1_Breakout_VolumeATR"
-timeframe = "1h"
+# Hypothesis: 6h timeframe with weekly Donchian breakout + weekly trend filter + volume confirmation
+# Uses weekly price channels for trend direction and breakout signals, avoiding noise of lower timeframes
+# Weekly trend filter ensures alignment with higher timeframe momentum, reducing whipsaws
+# Volume confirmation ensures breakouts have participation, improving reliability in both bull and bear markets
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined risk control
+
+name = "6h_1wDonchian20_TrendFilter_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,85 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for pivot points and ATR
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get weekly data for Donchian channels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h ATR(14)
-    tr1 = np.maximum(high_4h[1:], close_4h[:-1]) - np.minimum(low_4h[1:], close_4h[:-1])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Calculate weekly Donchian channels (20-period)
+    # Donchian Upper = highest high over past 20 weekly periods
+    # Donchian Lower = lowest low over past 20 weekly periods
+    highest_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # 4h pivot points: P = (H+L+C)/3
-    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
-    s1_4h = 2 * pivot_4h - high_4h
-    r1_4h = 2 * pivot_4h - low_4h
+    # Weekly trend filter: price above/below 50-week EMA
+    # Using 50-week EMA as trend filter to ensure we only trade in direction of higher timeframe trend
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 1h timeframe
-    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    # Align weekly indicators to 6h timeframe
+    highest_20_aligned = align_htf_to_ltf(prices, df_1w, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1w, lowest_20)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume confirmation: current volume > 1.5x 24-period average (1 day)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: current volume > 1.5x 20-period average (on 6t timeframe)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24
+    start_idx = 20  # Need at least 20 periods for Donchian calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
-            np.isnan(r1_4h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_24[i]
-        atr = atr_4h_aligned[i]
-        ema = ema_1d_aligned[i]
+        vol_ma = vol_ma_20[i]
+        highest_20 = highest_20_aligned[i]
+        lowest_20 = lowest_20_aligned[i]
+        ema_50 = ema_50_aligned[i]
         
         volume_confirmed = vol > 1.5 * vol_ma
-        s1 = s1_4h_aligned[i]
-        r1 = r1_4h_aligned[i]
         
         if position == 0:
-            # Long: Break above R1 with volume and above 1d EMA50
-            if price > r1 and volume_confirmed and price > ema:
-                signals[i] = 0.20
+            # Long: Price breaks above weekly Donchian upper band AND price above weekly EMA50 (uptrend) AND volume confirmation
+            if price > highest_20 and price > ema_50 and volume_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume and below 1d EMA50
-            elif price < s1 and volume_confirmed and price < ema:
-                signals[i] = -0.20
+            # Short: Price breaks below weekly Donchian lower band AND price below weekly EMA50 (downtrend) AND volume confirmation
+            elif price < lowest_20 and price < ema_50 and volume_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below S1 or ATR stop (2.0x ATR)
-            if price < s1 or price < (high[i] - 2.0 * atr):
+            # Exit: Price closes below weekly Donchian lower band OR price below weekly EMA50 (trend change)
+            if price < lowest_20 or price < ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above R1 or ATR stop (2.0x ATR)
-            if price > r1 or price > (low[i] + 2.0 * atr):
+            # Exit: Price closes above weekly Donchian upper band OR price above weekly EMA50 (trend change)
+            if price > highest_20 or price > ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
