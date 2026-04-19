@@ -3,11 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and ADX trend filter.
-# Works in bull/bear by capturing breakouts in trending markets (ADX > 25) and avoiding chop.
-# Volume filter ensures institutional participation. Position size 0.25 to manage drawdown.
-name = "4h_Donchian20_Volume_ADXFilter"
-timeframe = "4h"
+name = "12h_1d_Pivot_R1_S1_Breakout_Volume_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,19 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1d data for Pivot points (daily pivot levels)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate previous day's Pivot, R1, S1
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    
+    # Align daily pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # ADX for trend strength (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    minus_dm = np.concatenate([[0], minus_dm])
+    plus_dm = np.diff(high, prepend=high[0])
+    minus_dm = np.diff(low[::-1])[::-1]
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
     
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.concatenate([[close[0]], closed[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr1 = np.abs(np.diff(high, prepend=high[0]))
+    tr2 = np.abs(np.diff(low, prepend=low[0]))
+    tr3 = np.abs(np.diff(close, prepend=close[0]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / 
@@ -48,10 +61,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = max(50, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -62,32 +75,30 @@ def generate_signals(prices):
         # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
-        # Trend filter: ADX > 25 for strong trending market
-        trending = adx[i] > 25
+        # Trend filter: ADX > 20 for trending market
+        trending = adx[i] > 20
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and trend
-            if price > donchian_high[i] and volume_ok and trending:
+            # Long: price breaks above R1 with volume and trending market
+            if price > r1_aligned[i] and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and trend
-            elif price < donchian_low[i] and volume_ok and trending:
+            # Short: price breaks below S1 with volume and trending market
+            elif price < s1_aligned[i] and volume_ok and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to midpoint of Donchian channel
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
-            if price < midpoint:
+            # Exit: price returns below S1 (mean reversion to opposite level)
+            if price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to midpoint of Donchian channel
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
-            if price > midpoint:
+            # Exit: price returns above R1 (mean reversion to opposite level)
+            if price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
