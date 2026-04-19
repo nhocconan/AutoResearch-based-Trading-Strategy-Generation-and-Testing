@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Pivot_R1S1_Breakout_VolumeATR_v2"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_Breakout_Volume_ATR_Filter_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,21 +31,27 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily values to 12h timeframe
+    # Align daily values to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (12h)
+    # Volume confirmation: current volume > 2.0x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR-based volatility filter (12h ATR)
+    # ATR-based volatility filter (4h ATR)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 12h trend filter: EMA34
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,7 +61,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
             np.isnan(s1_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr_14[i])):
+            np.isnan(atr_14[i]) or np.isnan(ema_34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -66,17 +72,18 @@ def generate_signals(prices):
         pivot = pivot_1d_aligned[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
+        ema_12h = ema_34_12h_aligned[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
         atr_threshold = 0.3 * atr  # Minimum price move for breakout
         
         if position == 0:
-            # Long: break above R1 with volume and sufficient momentum
-            if price > r1 + atr_threshold and volume_confirmed:
+            # Long: break above R1 with volume, sufficient momentum, and 12h uptrend
+            if price > r1 + atr_threshold and volume_confirmed and price > ema_12h:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume and sufficient momentum
-            elif price < s1 - atr_threshold and volume_confirmed:
+            # Short: break below S1 with volume, sufficient momentum, and 12h downtrend
+            elif price < s1 - atr_threshold and volume_confirmed and price < ema_12h:
                 signals[i] = -0.25
                 position = -1
         
