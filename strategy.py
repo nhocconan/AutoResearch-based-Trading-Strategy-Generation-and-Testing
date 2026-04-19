@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian_VolumeTrend_v2"
+name = "4h_1d_1w_Camarilla_R1S1_Breakout_Volume_Filter_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,50 +17,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for multi-timeframe analysis
+    # Get 1d and 1w data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d ADX for trend strength filter (avoid ranging markets)
+    # 1d ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)), np.absolute(low_1d - np.roll(close_1d, 1)))
     tr_1d[0] = high_1d[0] - low_1d[0]
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    # Smooth TR, +DM, -DM
-    tr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    # DI and DX
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 1d ATR for volatility filter
-    atr_1d = tr_smooth  # already smoothed TR
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 4h Donchian channels (20-period)
-    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
+    # 1w pivot levels for directional bias
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    prev_high_1w = np.concatenate([[np.nan], high_1w[:-1]])
+    prev_low_1w = np.concatenate([[np.nan], low_1w[:-1]])
+    prev_close_1w = np.concatenate([[np.nan], close_1w[:-1]])
+    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
+    r1_1w = 2 * pivot_1w - prev_low_1w
+    s1_1w = 2 * pivot_1w - prev_high_1w
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     # 4h ATR for position sizing and stops
     tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
     tr[0] = high[0] - low[0]
     atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h Volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla levels from previous day
+    prev_close = np.concatenate([[np.nan], close[:-1]])
+    prev_high = np.concatenate([[np.nan], high[:-1]])
+    prev_low = np.concatenate([[np.nan], low[:-1]])
+    
+    # Camarilla levels: R4, R3, R2, R1, S1, S2, S3, S4
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    # R4 = close + (high - low) * 1.1/2
+    # S4 = close - (high - low) * 1.1/2
+    cam_multiplier = 1.1 / 12
+    r1 = prev_close + (prev_high - prev_low) * cam_multiplier
+    s1 = prev_close - (prev_high - prev_low) * cam_multiplier
+    r4 = prev_close + (prev_high - prev_low) * (1.1 / 2)
+    s4 = prev_close - (prev_high - prev_low) * (1.1 / 2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,43 +75,44 @@ def generate_signals(prices):
     start_idx = 200
     
     for i in range(start_idx, n):
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or \
-           np.isnan(donch_high_20[i]) or np.isnan(donch_low_20[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or \
+           np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or \
+           np.isnan(s1_1w_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or \
+           np.isnan(r4[i]) or np.isnan(s4[i]) or np.isnan(atr_4h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_4h[i]
         vol = volume[i]
+        avg_vol = np.mean(volume[max(0, i-20):i+1])  # 20-period average volume
+        vol_filter = vol > 1.5 * avg_vol  # Volume spike filter
         
-        # Trend filter: only trade when 1d ADX > 25 (trending market)
-        trending = adx_1d_aligned[i] > 25
+        # Entry conditions
+        # Long: price breaks above R1 with volume and trend bias
+        # Short: price breaks below S1 with volume and trend bias
         
-        # Volume filter: current volume > 1.5x 20-period average
-        vol_filter = vol > 1.5 * vol_ma[i]
+        long_breakout = price > r1[i-1] and vol_filter and price > ema200_1d_aligned[i] and price > pivot_1w_aligned[i]
+        short_breakout = price < s1[i-1] and vol_filter and price < ema200_1d_aligned[i] and price < pivot_1w_aligned[i]
         
-        # Entry conditions: Donchian breakout with trend and volume confirmation
         if position == 0:
-            # Long: price breaks above 20-period high + trend up + volume
-            if price > donch_high_20[i] and trending and vol_filter:
+            if long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low + trend down + volume
-            elif price < donch_low_20[i] and trending and vol_filter:
+            elif short_breakout:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below 20-period low or ATR-based trailing stop
-            if price < donch_low_20[i] or price < high[i-1] - 2.0 * atr:
+            # Exit: price reaches R4 or stops below S1
+            if price >= r4[i] or price < s1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above 20-period high or ATR-based trailing stop
-            if price > donch_high_20[i] or price > low[i-1] + 2.0 * atr:
+            # Exit: price reaches S4 or stops above R1
+            if price <= s4[i] or price > r1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
