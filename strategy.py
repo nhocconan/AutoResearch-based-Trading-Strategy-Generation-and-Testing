@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams Alligator with 13/8/5 SMAs (Jaws/Teeth/Lips) and volume confirmation.
-# Long when: Lips > Teeth > Jaws (bullish alignment) and volume > 1.5x 20-period average
-# Short when: Lips < Teeth < Jaws (bearish alignment) and volume > 1.5x 20-period average
-# Exit when: alignment breaks (Lips crosses Teeth) or volume drops below average
-# Alligator identifies trend direction and strength; SMAs filter noise; volume confirms conviction.
-# Works in bull (buy alignment) and bear (sell alignment). Target: 12-37 trades/year per symbol.
-name = "12h_WilliamsAlligator_SMAs_Volume"
-timeframe = "12h"
+# Hypothesis: 4-hour Williams %R with 1-day RSI filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions, RSI filters for trend strength,
+# volume confirms the strength of the reversal. Works in both bull and bear markets
+# by capturing mean reversion within the dominant trend. Target: 20-40 trades/year per symbol.
+name = "4h_WilliamsR_RSI1D_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,10 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator SMAs (13, 8, 5 periods)
-    jaws = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # 13-period SMA
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values    # 8-period SMA
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values     # 5-period SMA
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    
+    # Get 1-day RSI (14-period) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    rsi_1d = np.full_like(close, np.nan, dtype=np.float64)
+    if len(df_1d) >= 14:
+        rsi_14 = pd.Series(df_1d['close']).ewm(span=14, adjust=False, min_periods=14).mean()
+        rsi_down = pd.Series(df_1d['close']).ewm(span=14, adjust=False, min_periods=14).mean()
+        # Actually compute RSI properly
+        delta = pd.Series(df_1d['close']).diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+        avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+        rs = avg_gain / avg_loss
+        rsi_1d_raw = 100 - (100 / (1 + rs))
+        rsi_1d = align_htf_to_ltf(prices, df_1d, rsi_1d_raw.values)
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -38,38 +52,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(rsi_1d[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        jaw = jaws[i]
-        tooth = teeth[i]
-        lip = lips[i]
+        wr = williams_r[i]
+        rsi = rsi_1d[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long entry: Bullish alignment (Lips > Teeth > Jaws) and volume spike
-            if (lip > tooth > jaw) and (vol > 1.5 * vol_ma):
+            # Long entry: Williams %R oversold (< -80), RSI > 50 (bullish bias), volume spike
+            if (wr < -80 and rsi > 50 and vol > 1.5 * vol_ma):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Bearish alignment (Lips < Teeth < Jaws) and volume spike
-            elif (lip < tooth < jaw) and (vol > 1.5 * vol_ma):
+            # Short entry: Williams %R overbought (> -20), RSI < 50 (bearish bias), volume spike
+            elif (wr > -20 and rsi < 50 and vol > 1.5 * vol_ma):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bullish alignment breaks (Lips crosses below Teeth)
-            if lip <= tooth:
+            # Long exit: Williams %R returns to overbought (> -20) or RSI < 40
+            if wr > -20 or rsi < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bearish alignment breaks (Lips crosses above Teeth)
-            if lip >= tooth:
+            # Short exit: Williams %R returns to oversold (< -80) or RSI > 60
+            if wr < -80 or rsi > 60:
                 signals[i] = 0.0
                 position = 0
             else:
