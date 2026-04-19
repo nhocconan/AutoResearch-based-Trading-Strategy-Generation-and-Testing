@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Fade_Volume_Trend"
-timeframe = "6h"
+name = "12h_1d_KAMA_RSI_Trend_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,48 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation (once before loop)
+    # Get 1d data for KAMA and RSI (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + range_1d * 1.1 / 4.0  # R3 = C + 1.1*(H-L)/4
-    s3_1d = close_1d - range_1d * 1.1 / 4.0  # S3 = C - 1.1*(H-L)/4
-    r4_1d = close_1d + range_1d * 1.1 / 2.0  # R4 = C + 1.1*(H-L)/2
-    s4_1d = close_1d - range_1d * 1.1 / 2.0  # S4 = C - 1.1*(H-L)/2
+    # Calculate KAMA on 1d (ER=10, Fast=2, Slow=30)
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Align Camarilla levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Calculate RSI(14) on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(loss_ma != 0, gain_ma / loss_ma, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 6h ADX for trend strength (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    di_plus = 100 * dm_plus14 / tr14
-    di_minus = 100 * dm_minus14 / tr14
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align KAMA and RSI to 12h timeframe
+    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi)
     
     # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,43 +53,39 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or \
-           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(kama_12h[i]) or np.isnan(rsi_12h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx[i]
-        r3 = r3_6h[i]
-        s3 = s3_6h[i]
-        r4 = r4_6h[i]
-        s4 = s4_6h[i]
+        kama_val = kama_12h[i]
+        rsi_val = rsi_12h[i]
         
         volume_confirmed = vol > 1.8 * vol_ma
-        trending = adx_val > 20  # Moderate trend filter
         
         if position == 0:
-            # Fade at R3/S3: Short at R3, Long at S3 with volume and trend
-            if price > r3 and volume_confirmed and trending:
-                signals[i] = -0.25
-                position = -1
-            elif price < s3 and volume_confirmed and trending:
+            # Long: Price above KAMA + RSI > 50 + volume confirmation
+            if price > kama_val and rsi_val > 50 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
+            # Short: Price below KAMA + RSI < 50 + volume confirmation
+            elif price < kama_val and rsi_val < 50 and volume_confirmed:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: Price reaches S4 (strong support) or reverses below R3
-            if price < s4 or price < r3:
+            # Exit: Price crosses below KAMA
+            if price < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price reaches R4 (strong resistance) or reverses above S3
-            if price > r4 or price > s3:
+            # Exit: Price crosses above KAMA
+            if price > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
