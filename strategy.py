@@ -3,15 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with weekly pivot point resistance/support breakouts,
-# filtered by weekly ADX trend strength and volume confirmation.
-# Weekly pivots provide robust support/resistance levels that work in both bull and bear markets.
-# ADX filter ensures we only trade in trending conditions, reducing whipsaws.
-# Volume confirmation adds conviction to breakouts.
-# Target: 20-40 trades/year to avoid fee drag.
-
-name = "12h_1w_PivotPoint_R1S1_Breakout_ADX_Volume_v1"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume confirmation.
+# In bull markets, breakouts capture momentum; in bear markets, 1d ATR filter avoids
+# false breakouts during low volatility, reducing whipsaw. Volume confirms institutional interest.
+# Target: 20-40 trades/year per symbol, low turnover, high edge.
+name = "4h_Donchian20_1dATR_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,94 +21,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Weekly ADX(14) for trend strength
-    # TR
-    tr1 = np.maximum(high_1w[1:], close_1w[:-1]) - np.minimum(low_1w[1:], close_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # Calculate 1d ATR(14)
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    # +DM and -DM
-    up_move = np.concatenate([[0], high_1w[1:] - high_1w[:-1]])
-    down_move = np.concatenate([[0], low_1w[:-1] - low_1w[1:]])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    # Smoothed values
-    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm_ma = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_ma = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    # DI and DX
-    plus_di = 100 * plus_dm_ma / tr_ma
-    minus_di = 100 * minus_dm_ma / tr_ma
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Weekly Pivot Points (using prior week's OHLC)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    prev_high = np.concatenate([[np.nan], high_1w[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1w[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1w[:-1]])
+    # Use previous day's ATR to avoid look-ahead
+    atr_14_prev = np.concatenate([[np.nan], atr_14[:-1]])
+    atr_14_prev_aligned = align_htf_to_ltf(prices, df_1d, atr_14_prev)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    # 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Align weekly data to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Volume filter: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False).mean().values
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Allow warmup for indicators
+    start_idx = max(50, lookback, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(adx_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(vol_ma_20[i]):
+        if np.isnan(atr_14_prev_aligned[i]) or np.isnan(highest_high[i]) or \
+           np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        atr_val = atr_14_prev_aligned[i]
         
         # Volume filter
-        volume_ok = vol > 1.8 * vol_ma
-        
-        # Trend filter: ADX > 20 indicates trending market
-        trending = adx_aligned[i] > 20
+        volume_ok = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above R1 with volume and trending market
-            if price > r1_aligned[i] and volume_ok and trending:
+            # Long: price breaks above Donchian high with volume and ATR filter
+            if price > highest_high[i] and volume_ok and atr_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and trending market
-            elif price < s1_aligned[i] and volume_ok and trending:
+            # Short: price breaks below Donchian low with volume and ATR filter
+            elif price < lowest_low[i] and volume_ok and atr_val > 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below pivot or ADX weakens
-            if price < pivot[i] or adx_aligned[i] < 18:
+            # Exit: price returns below Donchian low or volatility drops
+            if price < lowest_low[i] or atr_val < 0.5 * atr_14_prev_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above pivot or ADX weakens
-            if price > pivot[i] or adx_aligned[i] < 18:
+            # Exit: price returns above Donchian high or volatility drops
+            if price > highest_high[i] or atr_val < 0.5 * atr_14_prev_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
