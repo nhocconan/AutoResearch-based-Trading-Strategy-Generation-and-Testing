@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot R1/S1 breakout with volume confirmation and ATR filter
-# In trending markets, price breaks through pivot R1/S1 with volume (continuation)
-# In ranging markets, price reverts from R1/S1 with volume (mean reversion)
-# Uses 1d pivots as dynamic support/resistance with volume filter to distinguish
-# between breakouts and reversals. Works in both bull and bear markets by
-# adapting to volatility regime via ATR filter.
-# Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
+# Hypothesis: 4h Donchian breakout with volume confirmation and ATR filter
+# In trending markets, price breaks Donchian channels with volume (trend continuation)
+# In ranging markets, price reverts from Donchian extremes with volume (mean reversion)
+# Uses volume to distinguish breakouts from fakeouts and ATR to filter low volatility
+# Works in both bull and bear markets by adapting to volatility regime
+# Target: 25-40 trades/year per symbol (~100-160 total over 4 years)
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ATR"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeATR_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,107 +24,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot points and ATR calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR(14) on 1d
-    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate ATR(14) for volatility filter
+    tr1 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily pivot points: P = (H+L+C)/3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla levels
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
-    r2_1d = close_1d + (high_1d - low_1d) * 1.1 / 6
-    s2_1d = close_1d - (high_1d - low_1d) * 1.1 / 6
-    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4
-    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4
-    r4_1d = close_1d + (high_1d - low_1d) * 1.1 / 2
-    s4_1d = close_1d - (high_1d - low_1d) * 1.1 / 2
-    
-    # Align pivot levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need volume MA and ATR data
+    start_idx = 20  # Need Donchian and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(s2_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_1d_aligned[i]
+        atr_val = atr[i]
         
         # Volume and volatility filters
-        volume_confirmed = vol > 1.5 * vol_ma
-        volatility_filter = atr > 0  # Always true but keeps structure
+        volume_confirmed = vol > 1.8 * vol_ma
+        volatility_filter = atr_val > np.percentile(atr[max(0, i-100):i+1], 30) if i >= 30 else atr_val > 0
         
-        # Pivot levels
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        r4 = r4_1d_aligned[i]
-        s4 = s4_1d_aligned[i]
-        pivot = pivot_1d_aligned[i]
+        # Donchian levels
+        upper = high_max[i]
+        lower = low_min[i]
         
         if position == 0:
             # Long conditions:
-            # 1. Breakout above R1 with volume (bullish continuation)
-            # 2. Mean reversion from S1 with volume (bullish bounce)
-            if ((price > r1 and volume_confirmed) or 
-                (price < s1 and price > s2 and volume_confirmed)):
+            # 1. Breakout above upper band with volume and volatility
+            # 2. Mean reversion from lower band with volume (oversold bounce)
+            if ((price > upper and volume_confirmed and volatility_filter) or 
+                (price < lower * 1.02 and price > lower and volume_confirmed and volatility_filter)):
                 signals[i] = 0.25
                 position = 1
             # Short conditions:
-            # 1. Breakdown below S1 with volume (bearish continuation)
-            # 2. Mean reversion from R1 with volume (bearish rejection)
-            elif ((price < s1 and volume_confirmed) or 
-                  (price > r1 and price < r2 and volume_confirmed)):
+            # 1. Breakdown below lower band with volume and volatility
+            # 2. Mean reversion from upper band with volume (overbought rejection)
+            elif ((price < lower and volume_confirmed and volatility_filter) or 
+                  (price > upper * 0.98 and price < upper and volume_confirmed and volatility_filter)):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: breakdown below S1 or reversal at R1
-            if price < s1 or (price > r1 and price < r2):
+            # Exit long: breakdown below lower band or reversal at upper band
+            if price < lower or (price > upper * 0.95 and price < upper):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: breakout above S1 or reversal at S1
-            if price > s1 or (price < r1 and price > s2):
+            # Exit short: breakout above upper band or reversal at lower band
+            if price > upper or (price < lower * 1.05 and price > lower):
                 signals[i] = 0.0
                 position = 0
             else:
