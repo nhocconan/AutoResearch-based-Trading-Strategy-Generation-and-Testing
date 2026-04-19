@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Uses 1d EMA50 for trend direction and 4h Donchian breakout for entry.
-# Filters trades with volume > 1.5x 20-period average to avoid low-quality breakouts.
-# Works in both bull and bear by following higher timeframe trend (1d EMA50).
-# Targets 20-50 trades/year (80-200 total over 4 years) with strict entry conditions.
-name = "4h_1d_EMA50_Donchian20_Volume"
-timeframe = "4h"
+# Hypothesis: 6h Williams Alligator + Elder Ray with volume confirmation
+# Uses 1d Williams Alligator (Jaw/Teeth/Lips) for trend direction and 6h Elder Ray (Bull/Bear power) for momentum
+# Enters only when Bull Power > 0 and Bear Power < 0 with volume confirmation
+# Targets 50-150 total trades over 4 years (12-37/year) with strict entry conditions
+# Works in bull/bear by following 1d Alligator trend and using Elder Ray for entry timing
+name = "6h_1dWilliamsAlligator_ElderRay_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,25 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend (called ONCE before loop)
+    # Get 1d data for Williams Alligator (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 4h data for Donchian20 breakout (called ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    # Donchian channels: 20-period high/low
-    high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    high_20_4h_aligned = align_htf_to_ltf(prices, df_4h, high_20_4h)
-    low_20_4h_aligned = align_htf_to_ltf(prices, df_4h, low_20_4h)
+    # Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
+    # SMMA = Smoothed Moving Average (similar to Wilder's smoothing)
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Volume filter: volume > 1.5 * 20-period average
+    jaw = smma(close_1d, 13)  # Jaw (Blue)
+    teeth = smma(close_1d, 8)  # Teeth (Red)
+    lips = smma(close_1d, 5)   # Lips (Green)
+    
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Get 6d data for Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    df_6d = get_htf_data(prices, '6d')
+    close_6d = df_6d['close'].values
+    # Calculate EMA13 on 6d close
+    ema_13_6d = pd.Series(close_6d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_6d_aligned = align_htf_to_ltf(prices, df_6d, ema_13_6d)
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13_6d_aligned
+    bear_power = low - ema_13_6d_aligned
+    
+    # Volume filter: volume > 1.3 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    volume_filter = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,36 +72,44 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20_4h_aligned[i]) or 
-            np.isnan(low_20_4h_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend based on Alligator alignment
+        # Bullish trend: Lips > Teeth > Jaw
+        # Bearish trend: Jaw > Teeth > Lips
+        bullish_trend = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        bearish_trend = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
+        
         if position == 0:
-            # Long: price above 1d EMA50 AND breaks 4h Donchian high with volume
-            if (close[i] > ema_50_1d_aligned[i] and 
-                close[i] > high_20_4h_aligned[i] and 
+            # Long: Bullish trend AND Bull Power > 0 AND Bear Power < 0 with volume
+            if (bullish_trend and 
+                bull_power[i] > 0 and 
+                bear_power[i] < 0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA50 AND breaks 4h Donchian low with volume
-            elif (close[i] < ema_50_1d_aligned[i] and 
-                  close[i] < low_20_4h_aligned[i] and 
+            # Short: Bearish trend AND Bull Power < 0 AND Bear Power > 0 with volume
+            elif (bearish_trend and 
+                  bull_power[i] < 0 and 
+                  bear_power[i] > 0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below 4h Donchian low
-            if close[i] < low_20_4h_aligned[i]:
+            # Long: exit if trend turns bearish or Elder Ray signals weaken
+            if not bullish_trend or bull_power[i] <= 0 or bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above 4h Donchian high
-            if close[i] > high_20_4h_aligned[i]:
+            # Short: exit if trend turns bullish or Elder Ray signals weaken
+            if not bearish_trend or bull_power[i] >= 0 or bear_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
