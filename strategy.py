@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1w_Donchian20_VolumeTrend_V1"
-timeframe = "4h"
+name = "1d_1w_RangeReversion_Volume_V1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,72 +19,63 @@ def generate_signals(prices):
     
     # Get weekly data once before loop
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Weekly high and low for range
+    weekly_high = np.concatenate([[np.nan], high_1w[:-1]])
+    weekly_low = np.concatenate([[np.nan], low_1w[:-1]])
     
-    # Daily Donchian(20) for breakout levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    weekly_range = weekly_high - weekly_low
     
-    # Calculate Donchian channels using previous 20 days
-    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Weekly midline (mean reversion target)
+    weekly_mid = weekly_low + weekly_range * 0.5
     
-    # Previous day's levels (shift by 1)
-    prev_high_max_20 = np.concatenate([[np.nan], high_max_20[:-1]])
-    prev_low_min_20 = np.concatenate([[np.nan], low_min_20[:-1]])
+    # Align weekly midline to daily timeframe
+    weekly_mid_aligned = align_htf_to_ltf(prices, df_1w, weekly_mid)
     
-    # Align to 4h timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1d, prev_high_max_20)
-    donchian_low = align_htf_to_ltf(prices, df_1d, prev_low_min_20)
-    
-    # Volume filter: current volume > 2.0x 20-period average (20 * 4h = ~3.3 days)
+    # Volume filter: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(weekly_mid_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        trend = ema_34_1w_aligned[i]
         
         # Volume filter
-        volume_ok = vol > 2.0 * vol_ma
+        volume_ok = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and weekly uptrend
-            if price > donchian_high[i] and volume_ok and price > trend:
+            # Long: price below weekly low with volume (oversold bounce)
+            if price < weekly_low[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and weekly downtrend
-            elif price < donchian_low[i] and volume_ok and price < trend:
+            # Short: price above weekly high with volume (overbought rejection)
+            elif price > weekly_high[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below Donchian low (mean reversion)
-            if price < donchian_low[i]:
+            # Exit: price returns to weekly midline (mean reversion)
+            if price >= weekly_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above Donchian high (mean reversion)
-            if price > donchian_high[i]:
+            # Exit: price returns to weekly midline (mean reversion)
+            if price <= weekly_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
