@@ -1,36 +1,21 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and 1w trend filter
-# - Long when price breaks above 4h Donchian upper (20-bar high) with volume confirmation and 1w uptrend
-# - Short when price breaks below 4h Donchian lower (20-bar low) with volume confirmation and 1w downtrend
-# - Exit on opposite Donchian break or trend reversal
-# - Designed to capture trends in both bull and bear markets by following higher timeframe trend
-# - Target: 20-40 trades/year to avoid excessive fee drift
-
-name = "4h_DonchianBreakout_1dVolume_1wTrend_v2"
-timeframe = "4h"
+name = "1d_7K_Pivot_Breakout_1wTrend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    
-    # 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -39,9 +24,17 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 4h Donchian channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 7K pivot levels (1d)
+    pivot = (high + low + close) / 3
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    
+    # Calculate 7-period ATR for position sizing and volatility filter
+    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
+    tr2 = np.absolute(np.roll(close, 1) - low)
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]  # First bar
+    atr = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,39 +43,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or \
-           np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 4h volume > 1.3x 1d average volume (scaled)
-        # Scale 1d average to 4h: 1d has 6x 4h bars, so divide by 6
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.3 * (vol_ma_1d_aligned[i] / 6.0)
-        
         if position == 0:
-            # Look for long entry: uptrend (price > 1w EMA50) + Donchian breakout + volume
-            if close[i] > highest_high[i] and close[i] > ema_50_1w_aligned[i] and volume_filter:
-                signals[i] = 0.25
+            # Long entry: price breaks above R1 + uptrend (price > 1w EMA50) + volatility filter
+            if high[i] > r1[i] and close[i] > ema_50_1w_aligned[i] and atr[i] > 0:
+                # Size based on volatility (inverse ATR) with cap
+                size = min(0.30, 0.05 * (np.median(atr) / atr[i])) if np.median(atr) > 0 else 0.25
+                signals[i] = size
                 position = 1
-            # Look for short entry: downtrend (price < 1w EMA50) + Donchian breakdown + volume
-            elif close[i] < lowest_low[i] and close[i] < ema_50_1w_aligned[i] and volume_filter:
-                signals[i] = -0.25
+            # Short entry: price breaks below S1 + downtrend (price < 1w EMA50) + volatility filter
+            elif low[i] < s1[i] and close[i] < ema_50_1w_aligned[i] and atr[i] > 0:
+                size = min(0.30, 0.05 * (np.median(atr) / atr[i])) if np.median(atr) > 0 else 0.25
+                signals[i] = -size
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on Donchian breakdown or trend reversal
-            if close[i] < lowest_low[i] or close[i] < ema_50_1w_aligned[i]:
+            # Long position: exit on breakdown below S1 or trend reversal
+            if low[i] < s1[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Maintain position
                 
         elif position == -1:
-            # Short position: exit on Donchian breakout or trend reversal
-            if close[i] > highest_high[i] or close[i] > ema_50_1w_aligned[i]:
+            # Short position: exit on breakout above R1 or trend reversal
+            if high[i] > r1[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Maintain position
     
     return signals
