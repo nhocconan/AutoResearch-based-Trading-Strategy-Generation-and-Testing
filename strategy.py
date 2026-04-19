@@ -1,125 +1,87 @@
-# 6h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v2
-# Strategy: Breakout of Camarilla R1/S1 levels with volume confirmation and ATR volatility filter
-# Hypothesis: Camarilla pivot levels act as intraday support/resistance. Breakouts above R1 or below S1
-# with above-average volume and sufficient volatility (ATR > 20-period mean) indicate institutional
-# participation and trend continuation. Works in both bull/bear markets by following price action
-# and volume confirmation rather than directional bias.
-# Timeframe: 6h (balances signal frequency and noise reduction)
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v2"
-timeframe = "6h"
+# Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above 20-period Donchian upper band + volume > 1.5x 1d average + price > 1w EMA50
+# - Short when price breaks below 20-period Donchian lower band + volume > 1.5x 1d average + price < 1w EMA50
+# - Exit when price crosses back through the opposite Donchian band or trend reverses
+# - Designed to capture strong trends while avoiding choppy markets
+# - Target: 15-30 trades/year to minimize fee drag on 12h timeframe
+
+name = "12h_Donchian20_1dVolume_1wTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Extract price arrays
-    open_prices = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using previous day's OHLC (not current day to avoid look-ahead)
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_open = np.roll(open_prices, 1)
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
     
-    # First bar: use current values as fallback (no look-ahead)
-    prev_close[0] = close[0]
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_open[0] = open_prices[0]
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Camarilla levels
-    R1 = pivot + (range_hl * 1.1 / 12)
-    S1 = pivot - (range_hl * 1.1 / 12)
-    R4 = pivot + (range_hl * 1.1 / 2)
-    S4 = pivot - (range_hl * 1.1 / 2)
+    # 1w EMA(50) for trend direction
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = np.zeros(n)
-    vol_sum = 0.0
-    vol_count = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        vol_count += 1
-        if vol_count >= 20:
-            vol_sum -= volume[i - 20]
-            vol_count -= 1
-        if vol_count > 0:
-            vol_ma[i] = vol_sum / vol_count
-        else:
-            vol_ma[i] = 0.0
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    volume_filter = volume > 1.5 * vol_ma
-    
-    # ATR filter: current ATR > 20-period average ATR (volatility filter)
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # First bar: no previous close
-    tr2[0] = 0.0
-    tr3[0] = 0.0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Calculate ATR using Wilder's smoothing (smoothed moving average)
-    atr = np.zeros(n)
-    if n >= 1:
-        atr[0] = tr[0]
-        for i in range(1, n):
-            atr[i] = (atr[i-1] * 19 + tr[i]) / 20  # 20-period smoothed
-    
-    # ATR 20-period average for comparison
-    atr_ma = np.zeros(n)
-    atr_sum = 0.0
-    atr_count = 0
-    for i in range(n):
-        atr_sum += atr[i]
-        atr_count += 1
-        if atr_count >= 20:
-            atr_sum -= atr[i - 20]
-            atr_count -= 1
-        if atr_count > 0:
-            atr_ma[i] = atr_sum / atr_count
-        else:
-            atr_ma[i] = 0.0
-    
-    atr_filter = atr > atr_ma
-    
-    # Generate signals
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from index 20 to ensure indicators are ready
-    start_idx = 20
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(atr_filter[i])):
+        # Skip if any required data is NaN
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             signals[i] = 0.0
             continue
+            
+        # Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d average to 12h: 1d has 2x 12h bars, so divide by 2
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 2.0)
         
-        # Long breakout: price closes above R1 with volume and volatility confirmation
-        if (close[i] > R1[i] and 
-            volume_filter[i] and 
-            atr_filter[i]):
-            signals[i] = 0.25
-        
-        # Short breakdown: price closes below S1 with volume and volatility confirmation
-        elif (close[i] < S1[i] and 
-              volume_filter[i] and 
-              atr_filter[i]):
-            signals[i] = -0.25
+        if position == 0:
+            # Look for long entry: price above Donchian upper + uptrend + volume
+            if close[i] > highest_high[i] and close[i] > ema_50_1w_aligned[i] and volume_filter:
+                signals[i] = 0.25
+                position = 1
+            # Look for short entry: price below Donchian lower + downtrend + volume
+            elif close[i] < lowest_low[i] and close[i] < ema_50_1w_aligned[i] and volume_filter:
+                signals[i] = -0.25
+                position = -1
+                
+        elif position == 1:
+            # Long position: exit when price crosses below Donchian lower or trend reverses
+            if close[i] < lowest_low[i] or close[i] < ema_50_1w_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:
+            # Short position: exit when price crosses above Donchian upper or trend reverses
+            if close[i] > highest_high[i] or close[i] > ema_50_1w_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
