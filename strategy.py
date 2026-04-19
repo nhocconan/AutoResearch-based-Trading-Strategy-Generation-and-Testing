@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# 12h_RSI_MeanReversion_With_Volume_and_Trend_Filter
-# Hypothesis: 12h RSI mean reversion with volume confirmation and ADX trend filter
-# RSI < 30 for long, > 70 for short with volume > 1.5x 20-period average
-# ADX > 25 ensures trading in trending markets to avoid false signals in chop
-# Designed for 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-# Works in bull/bear via ADX trend filter and RSI mean reversion logic
+"""
+1d_Consolidation_Breakout_With_Trend_Filter
+Hypothesis: Daily consolidation breakouts with weekly trend filter work in both bull and bear markets.
+Consolidation is identified by low ATR volatility, breakouts by price moving outside Bollinger Bands.
+Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
+Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
+Works in bull/bear via weekly trend filter and volatility-based entry conditions.
+"""
 
-name = "12h_RSI_MeanReversion_With_Volume_and_Trend_Filter"
-timeframe = "12h"
+name = "1d_Consolidation_Breakout_With_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,128 +26,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX(14) for trend strength filter - calculated on 12h data
-    def calculate_adx(high, low, close, period=14):
-        # True Range
+    # 1d indicators
+    # ATR for volatility measurement and consolidation detection
+    def calculate_atr(high, low, close, period=14):
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First period
+        tr[0] = tr1[0]
         
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smoothed values using Wilder's smoothing (EMA-like)
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            if len(data) >= period:
-                result[period-1] = np.nanmean(data[:period])
-                for i in range(period, len(data)):
-                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-                    else:
-                        result[i] = np.nan
-            return result
-        
-        atr = WilderSmooth(tr, period)
-        dm_plus_smooth = WilderSmooth(dm_plus, period)
-        dm_minus_smooth = WilderSmooth(dm_minus, period)
-        
-        # Avoid division by zero
-        dx = np.full_like(close, np.nan)
-        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
-        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
-        
-        adx = WilderSmooth(dx, period)
-        return adx
+        atr = np.zeros_like(high)
+        atr[:period-1] = np.nan
+        if len(high) >= period:
+            atr[period-1] = np.nanmean(tr[:period])
+            for i in range(period, len(high)):
+                if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
+                    atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                else:
+                    atr[i] = np.nan
+        return atr
     
-    # 12h data for ADX and other indicators
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough for ADX calculation
+    # Bollinger Bands
+    def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+        sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+        std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+        upper = sma + (std_dev * std)
+        lower = sma - (std_dev * std)
+        return upper, lower, sma
+    
+    # Calculate 1d ATR and Bollinger Bands
+    atr_1d = calculate_atr(high, low, close, 14)
+    bb_upper, bb_lower, bb_middle = calculate_bollinger_bands(close, 20, 2.0)
+    
+    # Consolidation condition: low volatility (ATR below its 50-period average)
+    atr_ma = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    consolidation = atr_1d < (atr_ma * 0.7)  # ATR significantly below average
+    
+    # 1w trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate ADX on 12h data
-    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # RSI(14) on 12h data
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close)
-        delta = np.insert(delta, 0, 0)  # Insert 0 at beginning for same length
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        # Wilder's smoothing
-        avg_gain = np.full_like(close, np.nan)
-        avg_loss = np.full_like(close, np.nan)
-        
-        if len(close) >= period:
-            avg_gain[period-1] = np.mean(gain[:period])
-            avg_loss[period-1] = np.mean(loss[:period])
-            
-            for i in range(period, len(close)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi_12h = calculate_rsi(df_12h['close'].values, 14)
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    # Weekly EMA34 for trend direction
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure enough data for all indicators
+    start_idx = max(50, 34)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(atr_1d[i]) or np.isnan(atr_ma[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_12h_aligned[i] > 25
+        # Consolidation breakout conditions
+        is_consolidating = consolidation[i]
+        price_above_upper = close[i] > bb_upper[i]
+        price_below_lower = close[i] < bb_lower[i]
+        
+        # Weekly trend direction
+        weekly_uptrend = close[i] > ema_34_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: RSI < 30 (oversold) with volume and strong trend
-            if (rsi_12h_aligned[i] < 30 and 
-                volume_confirm[i] and 
-                strong_trend):
+            # Long: consolidation breakout above upper BB in weekly uptrend
+            if (is_consolidating and price_above_upper and weekly_uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) with volume and strong trend
-            elif (rsi_12h_aligned[i] > 70 and 
-                  volume_confirm[i] and 
-                  strong_trend):
+            # Short: consolidation breakout below lower BB in weekly downtrend
+            elif (is_consolidating and price_below_lower and weekly_downtrend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if RSI > 50 (mean reversion complete) or trend weakens (ADX < 20)
-            if (rsi_12h_aligned[i] > 50) or (adx_12h_aligned[i] < 20):
+            # Long: exit if price breaks below middle BB or consolidation ends
+            if (close[i] < bb_middle[i]) or (not consolidation[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if RSI < 50 (mean reversion complete) or trend weakens (ADX < 20)
-            if (rsi_12h_aligned[i] < 50) or (adx_12h_aligned[i] < 20):
+            # Short: exit if price breaks above middle BB or consolidation ends
+            if (close[i] > bb_middle[i]) or (not consolidation[i]):
                 signals[i] = 0.0
                 position = 0
             else:
