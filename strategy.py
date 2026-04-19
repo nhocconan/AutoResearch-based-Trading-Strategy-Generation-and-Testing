@@ -3,39 +3,44 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Donchian20_Volume_Trend_1d1w_v1"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_Support_Resistance_Volume_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 80:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w data for trend filter (once before loop)
+    # Get 1d data for Camarilla pivots (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 and 1w EMA34 for trend
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Camarilla pivot levels (using previous day's data)
+    # Pivot = (H + L + C) / 3
+    # Support 1 = C - (H - L) * 1.1 / 12
+    # Resistance 1 = C + (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    s1_1d = close_1d - (range_1d * 1.1 / 12.0)
+    r1_1d = close_1d + (range_1d * 1.1 / 12.0)
     
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     
-    # Donchian channel (20-period) on 12h
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for exit conditions
+    # ATR for stop management
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -46,10 +51,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 40  # enough for 20-period MA and daily alignment
     
     for i in range(start_idx, n):
-        if np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(atr_10[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr_10[i]):
             signals[i] = 0.0
             continue
         
@@ -57,32 +62,30 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         atr = atr_10[i]
-        ema_trend_1d = ema34_1d_aligned[i]
-        ema_trend_1w = ema34_1w_aligned[i]
         
-        volume_confirmed = vol > 1.8 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above upper Donchian + uptrend on both 1d and 1w + volume
-            if price > high_max_20[i] and price > ema_trend_1d and price > ema_trend_1w and volume_confirmed:
+            # Long: price breaks above R1 with volume
+            if price > r1_aligned[i] and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + downtrend on both 1d and 1w + volume
-            elif price < low_min_20[i] and price < ema_trend_1d and price < ema_trend_1w and volume_confirmed:
+            # Short: price breaks below S1 with volume
+            elif price < s1_aligned[i] and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below EMA34 on either 1d or 1w or ATR trailing stop
-            if price < ema_trend_1d or price < ema_trend_1w or price < (high[i] - 2.5 * atr):
+            # Exit: price crosses below S1 or ATR trailing stop
+            if price < s1_aligned[i] or price < (high[i] - 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above EMA34 on either 1d or 1w or ATR trailing stop
-            if price > ema_trend_1d or price > ema_trend_1w or price > (low[i] + 2.5 * atr):
+            # Exit: price crosses above R1 or ATR trailing stop
+            if price > r1_aligned[i] or price > (low[i] + 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
