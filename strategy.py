@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_PivotBreakout_TrendFilter"
-timeframe = "6h"
+name = "12h_1d_Donchian_Breakout_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,97 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w data for multi-timeframe analysis
+    # Get 1d data for trend and ATR
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    
-    # 1d ATR for volatility filter
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr_1d = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)), np.absolute(low_1d - np.roll(close_1d, 1)))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # Fix first value
+    
+    # 1d ATR (14)
+    tr_1d = np.maximum(high_1d - low_1d, 
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1w pivot levels for directional bias
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    prev_high_1w = np.concatenate([[np.nan], high_1w[:-1]])
-    prev_low_1w = np.concatenate([[np.nan], low_1w[:-1]])
-    prev_close_1w = np.concatenate([[np.nan], close_1w[:-1]])
-    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    r1_1w = 2 * pivot_1w - prev_low_1w
-    s1_1w = 2 * pivot_1w - prev_high_1w
-    r2_1w = pivot_1w + (r1_1w - s1_1w)
-    s2_1w = pivot_1w - (r1_1w - s1_1w)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    # 12h Donchian channel (20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6h volatility filter: current ATR > 1.5x 20-period average ATR
-    tr_6h = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
-    tr_6h[0] = high[0] - low[0]
-    atr_6h = pd.Series(tr_6h).rolling(window=20, min_periods=20).mean().values
-    atr_ma_6h = pd.Series(atr_6h).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr_6h > (1.5 * atr_ma_6h)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # Ensure enough data for EMA200 and ATR
+    start_idx = max(20, 50, 14, 20)  # Donchian20, EMA50, ATR14, VolMA20
     
     for i in range(start_idx, n):
-        if np.isnan(atr_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or \
-           np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or \
-           np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or \
-           np.isnan(s2_1w_aligned[i]) or np.isnan(vol_filter[i]):
+        if np.isnan(atr_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or \
+           np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr_val = atr_1d_aligned[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
         
-        # Volatility filter
-        if not vol_filter[i]:
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
+        # Volume filter
+        volume_ok = vol > 1.5 * vol_ma
         
-        # Trend bias from EMA200
-        long_bias = price > ema200_1d_aligned[i]
-        short_bias = price < ema200_1d_aligned[i]
+        # Trend bias: long if price > EMA50, short if price < EMA50
+        long_bias = price > ema50_1d_aligned[i]
+        short_bias = price < ema50_1d_aligned[i]
         
-        # Weekly pivot breakout levels
         if position == 0:
-            # Long breakout: price closes above R2 with bullish bias
-            if price > r2_1w_aligned[i] and long_bias:
+            # Long: breakout above Donchian high + long bias + volume
+            if price > donch_high[i] and long_bias and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price closes below S2 with bearish bias
-            elif price < s2_1w_aligned[i] and short_bias:
+            # Short: breakdown below Donchian low + short bias + volume
+            elif price < donch_low[i] and short_bias and volume_ok:
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price closes below R1 or trend turns bearish
-            if price < r1_1w_aligned[i] or price < ema200_1d_aligned[i]:
+            # Exit: price crosses below Donchian low or trend reverses
+            if price < donch_low[i] or price < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above S1 or trend turns bullish
-            if price > s1_1w_aligned[i] or price > ema200_1d_aligned[i]:
+            # Exit: price crosses above Donchian high or trend reverses
+            if price > donch_high[i] or price > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
