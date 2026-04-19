@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Adaptive_RSI_Filter_v1"
+name = "4h_Keltner_Trend_Volume_Entry_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,103 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for regime filter (once before loop)
+    # Get daily data for ATR-based trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate KAMA (Adaptive Moving Average) - 4h
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    change[0:10] = change[10]  # avoid NaN for first 10
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # placeholder for correct calc
-    # Recalculate volatility properly
-    volatility = np.zeros_like(close)
-    for i in range(1, len(close)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    volatility = np.concatenate([[0], np.abs(np.diff(close))])  # volatility per bar
-    # Sum volatility over 10 periods
-    vol_sum = np.zeros_like(close)
-    for i in range(10, len(close)):
-        vol_sum[i] = np.sum(volatility[i-9:i+1])
-    vol_sum[0:10] = vol_sum[10]
-    er = np.where(vol_sum != 0, change / vol_sum, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI (14) - 4h
-    delta = np.diff(close)
-    delta = np.concatenate([[0], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Daily ATR for regime filter (chop detection)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Daily ATR for trend filter
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    # Normalize ATR by price to get churn
-    atr_norm = atr_1d / close_1d
-    # Choppiness-like: high ATR_norm = choppy, low = trending
-    atr_norm_ma = pd.Series(atr_norm).rolling(window=10, min_periods=10).mean().values
-    atr_norm_aligned = align_htf_to_ltf(prices, df_1d, atr_norm_ma)
+    tr_1d.iloc[0] = tr1.iloc[0]  # first value
+    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Align KAMA and RSI to 4h (they are already 4h, but for consistency)
-    kama_aligned = kama  # already 4h
-    rsi_aligned = rsi    # already 4h
+    # 4h EMA for trend direction (short-term)
+    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    
+    # 4h Keltner Channel components
+    tr_4h1 = high - low
+    tr_4h2 = np.abs(high - np.roll(close, 1))
+    tr_4h3 = np.abs(low - np.roll(close, 1))
+    tr_4h = np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))
+    tr_4h[0] = tr_4h1[0]  # first value
+    atr_4h = pd.Series(tr_4h).rolling(window=10, min_periods=10).mean().values
+    ema_10 = pd.Series(close).ewm(span=10, min_periods=10, adjust=False).mean().values
+    keltner_upper = ema_10 + 1.5 * atr_4h
+    keltner_lower = ema_10 - 1.5 * atr_4h
+    
+    # Volume confirmation: current volume > 1.8x 20-period average (4h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # enough for indicators
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_norm_aligned[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(keltner_upper[i]) or 
+            np.isnan(keltner_lower[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(atr_4h[i]) or np.isnan(atr_1d[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = atr_norm_aligned[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        atr_4h_val = atr_4h[i]
+        ema_val = ema_20[i]
+        keltner_up = keltner_upper[i]
+        keltner_low = keltner_lower[i]
+        atr_1d_val = atr_1d[i]
         
-        # Regime filter: only trade when trending (low churn)
-        trending = chop_val < 0.02  # threshold for trending regime
+        volume_confirmed = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: price above KAMA and RSI > 50 in trending market
-            if price > kama_val and rsi_val > 50 and trending:
+            # Long: price above EMA20 and breaks above Keltner upper with volume
+            if price > ema_val and price > keltner_up and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and RSI < 50 in trending market
-            elif price < kama_val and rsi_val < 50 and trending:
+            # Short: price below EMA20 and breaks below Keltner lower with volume
+            elif price < ema_val and price < keltner_low and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price below KAMA or RSI < 40
-            if price < kama_val or rsi_val < 40:
+            # Exit: price below EMA20 or below Keltner lower
+            if price < ema_val or price < keltner_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above KAMA or RSI > 60
-            if price > kama_val or rsi_val > 60:
+            # Exit: price above EMA20 or above Keltner upper
+            if price > ema_val or price > keltner_up:
                 signals[i] = 0.0
                 position = 0
             else:
