@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_KAMA_RSI_Chop_Filter_V1"
+name = "12h_1d_Donchian20_1wTrend_Volume_V1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -17,70 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for indicators
+    # Get 1d and 1w data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate KAMA on 1d close
-    close_1d = df_1d['close'].values
-    er_period = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
+    # Calculate Donchian Channel (20) on 1d high/low
+    period = 20
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
+    # Vectorized Donchian calculation
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_high = high_series.rolling(window=period, min_periods=period).max().values
+    donchian_low = low_series.rolling(window=period, min_periods=period).min().values
     
-    # Efficiency Ratio
-    er = np.zeros_like(close_1d)
-    for i in range(er_period, len(close_1d)):
-        dir_change = np.abs(close_1d[i] - close_1d[i - er_period])
-        total_ch = np.sum(np.abs(np.diff(close_1d[i - er_period:i + 1])))
-        if total_ch > 0:
-            er[i] = dir_change / total_ch
-        else:
-            er[i] = 0
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Calculate RSI on 1d close
-    rsi_period = 14
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=rsi_period, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=rsi_period, min_periods=rsi_period).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index on 1d
-    chop_period = 14
-    atr = np.zeros(len(high))
-    for i in range(1, len(high)):
-        atr[i] = max(
-            high[i] - low[i],
-            np.abs(high[i] - close[i-1]),
-            np.abs(low[i] - close[i-1])
-        )
-    
-    tr_sum = pd.Series(atr).rolling(window=chop_period, min_periods=chop_period).sum().values
-    max_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
-    min_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
-    
-    chop = np.zeros(len(close_1d))
-    for i in range(chop_period-1, len(close_1d)):
-        if tr_sum[i] > 0 and (max_high[i] - min_low[i]) > 0:
-            chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(chop_period)
-        else:
-            chop[i] = 50
+    # Calculate volume spike indicator (volume > 2.0 * 20-period average)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 2.0)
     
     # Align indicators to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -89,42 +52,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(ema_34_1w_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # KAMA direction: price > KAMA = uptrend, price < KAMA = downtrend
-        kama_trend = 1 if close[i] > kama_aligned[i] else -1
-        
-        # RSI levels: oversold < 30, overbought > 70
-        rsi_oversold = rsi_aligned[i] < 30
-        rsi_overbought = rsi_aligned[i] > 70
-        
-        # Chop regime: chop > 61.8 = range (mean revert), chop < 38.2 = trending
-        chop_range = chop_aligned[i] > 61.8
-        chop_trend = chop_aligned[i] < 38.2
+        # Volume confirmation required
+        vol_confirm = volume_spike[i]
         
         if position == 0:
-            # Long when: uptrend + oversold + ranging market (mean reversion setup)
-            if kama_trend == 1 and rsi_oversold and chop_range:
+            # Long when price breaks above Donchian high + uptrend + volume spike
+            if close[i] > donchian_high_aligned[i] and close[i] > ema_34_1w_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short when: downtrend + overbought + ranging market (mean reversion setup)
-            elif kama_trend == -1 and rsi_overbought and chop_range:
+            # Short when price breaks below Donchian low + downtrend + volume spike
+            elif close[i] < donchian_low_aligned[i] and close[i] < ema_34_1w_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when trend changes or overbought
-            if kama_trend == -1 or rsi_aligned[i] > 70:
+            # Long position: exit when price breaks below Donchian low or trend turns
+            if close[i] < donchian_low_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when trend changes or oversold
-            if kama_trend == 1 or rsi_aligned[i] < 30:
+            # Short position: exit when price breaks above Donchian high or trend turns
+            if close[i] > donchian_high_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
