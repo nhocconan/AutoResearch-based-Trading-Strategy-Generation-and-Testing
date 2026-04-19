@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Pivot_R1S1_Breakout_Volume_Spike_v3"
-timeframe = "1d"
+name = "12h_1w_1d_Pivot_R1S1_Breakout_Volume_Spice_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -59,15 +59,15 @@ def generate_signals(prices):
     # S1 = C - (H - L) * 1.1 / 12
     s1_d = prev_close_d - (prev_high_d - prev_low_d) * 1.1 / 12.0
     
-    # Align to daily timeframe (1d)
-    pivot_w_1d = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r1_w_1d = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_1d = align_htf_to_ltf(prices, df_1w, s1_w)
-    pivot_d_1d = align_htf_to_ltf(prices, df_1d, pivot_d)
-    r1_d_1d = align_htf_to_ltf(prices, df_1d, r1_d)
-    s1_d_1d = align_htf_to_ltf(prices, df_1d, s1_d)
+    # Align to 12h timeframe
+    pivot_w_12h = align_htf_to_ltf(prices, df_1w, pivot_w)
+    r1_w_12h = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_w_12h = align_htf_to_ltf(prices, df_1w, s1_w)
+    pivot_d_12h = align_htf_to_ltf(prices, df_1d, pivot_d)
+    r1_d_12h = align_htf_to_ltf(prices, df_1d, r1_d)
+    s1_d_12h = align_htf_to_ltf(prices, df_1d, s1_d)
     
-    # Volume confirmation: current volume > 2.5x 20-period average (stricter to reduce trades)
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -76,8 +76,8 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_w_1d[i]) or np.isnan(r1_w_1d[i]) or np.isnan(s1_w_1d[i]) or \
-           np.isnan(pivot_d_1d[i]) or np.isnan(r1_d_1d[i]) or np.isnan(s1_d_1d[i]) or \
+        if np.isnan(pivot_w_12h[i]) or np.isnan(r1_w_12h[i]) or np.isnan(s1_w_12h[i]) or \
+           np.isnan(pivot_d_12h[i]) or np.isnan(r1_d_12h[i]) or np.isnan(s1_d_12h[i]) or \
            np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
@@ -86,23 +86,23 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 2.5x average (stricter threshold)
-        volume_spike = vol > 2.5 * vol_ma
+        # Volume spike: current volume > 2.0x average
+        volume_spike = vol > 2.0 * vol_ma
         
-        # Use weekly R1/S1 as primary levels, daily pivot as filter
+        # Use weekly R1/S1 as primary levels, daily as secondary filter
         if position == 0:
             # Long: Price breaks above weekly R1 with volume spike and above daily pivot
-            if price > r1_w_1d[i] and volume_spike and price > pivot_d_1d[i]:
+            if price > r1_w_12h[i] and volume_spike and price > pivot_d_12h[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below weekly S1 with volume spike and below daily pivot
-            elif price < s1_w_1d[i] and volume_spike and price < pivot_d_1d[i]:
+            elif price < s1_w_12h[i] and volume_spike and price < pivot_d_12h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below weekly S1 (reversal signal)
-            if price < s1_w_1d[i]:
+            if price < s1_w_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,7 +110,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: Price returns above weekly R1 (reversal signal)
-            if price > r1_w_1d[i]:
+            if price > r1_w_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
