@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index regime filter + 12h Donchian breakout + 1d volume confirmation
-# - Choppiness Index (14) determines market regime: >61.8 = range (mean-revert), <38.2 = trend (follow breakout)
-# - In trending regime (CHOP < 38.2): long on Donchian(20) breakout above, short on breakdown below
-# - In ranging regime (CHOP > 61.8): long at Donchian(20) lower band, short at upper band (mean reversion)
-# - Volume confirmation: current 12h volume > 1.5x 1d average volume (scaled to 12h) for conviction
-# - Designed to work in both bull and bear markets by adapting to regime
-# - Target: 15-30 trades/year to minimize fee drag on 12h timeframe
+# Hypothesis: 4h TRIX + volume spike with 12h/1d regime filter
+# - TRIX(15) for momentum: long when TRIX crosses above zero, short when crosses below zero
+# - Volume spike: current 4h volume > 2.0x 20-period 4h average for conviction
+# - Regime filter: use 12h ADX(14) > 25 to confirm trending market, avoid ranging
+# - Exit on opposite TRIX cross or ADX drop below 20
+# - Designed to capture momentum in trending markets while avoiding chop
+# - Target: 25-40 trades/year to minimize fee drag
 
-name = "12h_Chop_Donchian_1dVolume_v1"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ADXFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,113 +25,114 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation (using daily volume as reference)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for ADX regime filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d volume average (20-period) - represents normal daily volume
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate ADX(14) on 12h data
+    def calculate_adx(high_arr, low_arr, close_arr, period=14):
+        plus_dm = np.zeros_like(high_arr)
+        minus_dm = np.zeros_like(high_arr)
+        tr = np.zeros_like(high_arr)
+        
+        for i in range(1, len(high_arr)):
+            plus_dm[i] = max(0, high_arr[i] - high_arr[i-1])
+            minus_dm[i] = max(0, low_arr[i-1] - low_arr[i])
+            if plus_dm[i] > minus_dm[i]:
+                minus_dm[i] = 0
+            elif minus_dm[i] > plus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+                
+            tr[i] = max(high_arr[i] - low_arr[i], 
+                       abs(high_arr[i] - close_arr[i-1]),
+                       abs(low_arr[i] - close_arr[i-1]))
+        
+        # Smooth using Wilder's smoothing (equivalent to alpha=1/period)
+        atr = np.zeros_like(high_arr)
+        plus_di = np.zeros_like(high_arr)
+        minus_di = np.zeros_like(high_arr)
+        dx = np.zeros_like(high_arr)
+        
+        # Initial values
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_sum = np.sum(plus_dm[1:period+1])
+        minus_dm_sum = np.sum(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(high_arr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sum = plus_dm_sum - (plus_dm_sum/period) + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - (minus_dm_sum/period) + minus_dm[i]
+            plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
+            dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100) if (plus_di[i] + minus_di[i]) != 0 else 0
+        
+        # ADX is smoothed DX
+        adx = np.zeros_like(high_arr)
+        adx[2*period] = np.mean(dx[period+1:2*period+1])
+        for i in range(2*period+1, len(high_arr)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        return adx
     
-    # Choppiness Index (14) on 12h data
-    # CHOP = 100 * log10(sum(TR(14)) / (max(HH,14) - min(LL,14))) / log10(14)
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    # TRIX(15) on 4h close
+    def calculate_trix(close_arr, period=15):
+        # Triple EMA
+        ema1 = pd.Series(close_arr).ewm(span=period, adjust=False).values
+        ema2 = pd.Series(ema1).ewm(span=period, adjust=False).values
+        ema3 = pd.Series(ema2).ewm(span=period, adjust=False).values
+        # TRIX = percent change of ema3
+        trix = np.zeros_like(close_arr)
+        trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+        return trix
     
-    # Avoid division by zero
-    range_hl = highest_high - lowest_low
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    trix = calculate_trix(close, 15)
     
-    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
-    chop = chop.fillna(50).values  # neutral when undefined
-    
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_spike = volume > (vol_ma.values * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators (max of 20,14)
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if np.isnan(chop[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma_1d_aligned[i]):
+        # Skip if any required data is invalid
+        if np.isnan(adx_12h_aligned[i]) or np.isnan(trix[i]) or np.isnan(vol_ma.iloc[i]):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d average to 12h: 1d = 2x 12h bars, so multiply by 2
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] * 2.0)
-        
         if position == 0:
-            # Determine regime based on Choppiness Index
-            if chop[i] < 38.2:  # Trending regime
-                # Long on breakout above Donchian high
-                if close[i] > donchian_high[i] and volume_filter:
-                    signals[i] = 0.25
-                    position = 1
-                # Short on breakdown below Donchian low
-                elif close[i] < donchian_low[i] and volume_filter:
-                    signals[i] = -0.25
-                    position = -1
-            elif chop[i] > 61.8:  # Ranging regime
-                # Mean reversion: long at support (Donchian low)
-                if close[i] <= donchian_low[i] and volume_filter:
-                    signals[i] = 0.25
-                    position = 1
-                # Short at resistance (Donchian high)
-                elif close[i] >= donchian_high[i] and volume_filter:
-                    signals[i] = -0.25
-                    position = -1
-            # In between 38.2-61.8: neutral/choppy, no new entries
-            
+            # Look for long entry: TRIX crosses above zero + volume spike + ADX > 25 (trending)
+            if i > 0 and trix[i-1] <= 0 and trix[i] > 0 and volume_spike[i] and adx_12h_aligned[i] > 25:
+                signals[i] = 0.25
+                position = 1
+            # Look for short entry: TRIX crosses below zero + volume spike + ADX > 25 (trending)
+            elif i > 0 and trix[i-1] >= 0 and trix[i] < 0 and volume_spike[i] and adx_12h_aligned[i] > 25:
+                signals[i] = -0.25
+                position = -1
+                
         elif position == 1:
-            # Long position management
-            if chop[i] < 38.2:  # Trending: exit on breakdown
-                if close[i] < donchian_low[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif chop[i] > 61.8:  # Ranging: exit at resistance or opposite signal
-                if close[i] >= donchian_high[i] or (chop[i] < 38.2 and close[i] > donchian_low[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # Neutral zone: exit on opposite Donchian touch
-                if close[i] <= donchian_low[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-                    
+            # Long position: exit on TRIX cross below zero or ADX drop below 20 (ranging)
+            if trix[i] < 0 or adx_12h_aligned[i] < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+                
         elif position == -1:
-            # Short position management
-            if chop[i] < 38.2:  # Trending: exit on breakout
-                if close[i] > donchian_high[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            elif chop[i] > 61.8:  # Ranging: exit at support or opposite signal
-                if close[i] <= donchian_low[i] or (chop[i] > 61.8 and close[i] < donchian_high[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # Neutral zone: exit on opposite Donchian touch
-                if close[i] >= donchian_high[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short position: exit on TRIX cross above zero or ADX drop below 20 (ranging)
+            if trix[i] > 0 or adx_12h_aligned[i] < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
