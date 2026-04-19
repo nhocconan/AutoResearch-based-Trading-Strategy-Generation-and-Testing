@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with weekly trend filter.
-# Tenkan/Kijun cross above/below cloud provides momentum signals.
-# Weekly EMA200 determines long-term trend direction: only take longs above weekly EMA200, shorts below.
-# This avoids counter-trend trades in strong trends and works in both bull/bear markets by
-# following the higher timeframe trend. Target: 15-30 trades/year per symbol.
-name = "6h_Ichimoku_TK_Cross_WeeklyTrend"
-timeframe = "6h"
+# Hypothesis: 12h Williams %R with 1d ADX trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions. ADX > 25 filters for strong trends.
+# Volume confirms breakout strength. Works in bull/bear markets by combining mean reversion
+# in extremes with trend following. Target: 25-35 trades/year per symbol.
+name = "12h_WilliamsR_ADX25_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,95 +16,115 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    displacement = 26  # kijun period
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
-                  pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
+    # Calculate ADX on daily (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+                
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_dm_smooth = np.zeros_like(plus_dm)
+        minus_dm_smooth = np.zeros_like(minus_dm)
+        
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
+        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        plus_di = 100 * plus_dm_smooth / atr
+        minus_di = 100 * minus_dm_smooth / atr
+        dx = np.zeros_like(close)
+        dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
+        
+        adx = np.zeros_like(close)
+        adx[2*period] = np.mean(dx[period:2*period+1])
+        for i in range(2*period+1, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Calculate Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max() + 
-                 pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Williams %R on 12h (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    senkou_span_b = (pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
-                     pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA200 for long-term trend
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Volume confirmation: current volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after all indicators are ready: max(52, 200) + displacement for cloud
-    start_idx = max(senkou_span_b_period, 200) + displacement
+    start_idx = max(14, 28, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or
-            np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate cloud boundaries (shifted forward by displacement)
-        senkou_span_a_lead = senkou_span_a[i - displacement] if i >= displacement else senkou_span_a[i]
-        senkou_span_b_lead = senkou_span_b[i - displacement] if i >= displacement else senkou_span_b[i]
+        wr = williams_r[i]
+        adx_val = adx_1d_aligned[i]
+        vol_ma = vol_ma_20[i]
+        vol = volume[i]
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_span_a_lead, senkou_span_b_lead)
-        cloud_bottom = min(senkou_span_a_lead, senkou_span_b_lead)
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.3 * vol_ma
         
-        price = close[i]
-        tenkan = tenkan_sen[i]
-        kijun = kijun_sen[i]
-        weekly_ema = ema_200_1w_aligned[i]
-        
-        # Determine if price is above or below cloud
-        price_above_cloud = price > cloud_top
-        price_below_cloud = price < cloud_bottom
-        
-        # TK cross signals
-        tk_cross_up = tenkan > kijun
-        tk_cross_down = tenkan < kijun
+        # ADX trend strength filter
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long: TK cross up, price above cloud, and above weekly EMA200
-            if tk_cross_up and price_above_cloud and price > weekly_ema:
+            # Enter long when oversold (-80 or below) with strong trend and volume
+            if wr <= -80 and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TK cross down, price below cloud, and below weekly EMA200
-            elif tk_cross_down and price_below_cloud and price < weekly_ema:
+            # Enter short when overbought (-20 or above) with strong trend and volume
+            elif wr >= -20 and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TK cross down or price drops below cloud
-            if tk_cross_down or price < cloud_top:
+            # Exit long when Williams %R crosses above -50 (momentum fading)
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TK cross up or price rises above cloud
-            if tk_cross_up or price > cloud_bottom:
+            # Exit short when Williams %R crosses below -50 (momentum fading)
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
