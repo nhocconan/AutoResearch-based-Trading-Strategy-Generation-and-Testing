@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian channel breakout with weekly trend filter and volume confirmation.
-# Long when: Price breaks above 20-day high, weekly close > weekly open (bullish week), volume > 1.5x 20-day average
-# Short when: Price breaks below 20-day low, weekly close < weekly open (bearish week), volume > 1.5x 20-day average
-# Exit when: Price crosses back through the 20-day midpoint
-# Donchian provides clear breakout levels, weekly trend filters counter-trend noise, volume confirms conviction.
-# Target: 15-25 trades/year per symbol. Works in bull (buy strength) and bear (sell weakness).
-name = "1d_Donchian20_WeeklyTrend_Volume"
-timeframe = "1d"
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day ATR filter and volume confirmation.
+# Long when: Price breaks above Donchian upper channel, 1D ATR > 1.5x 20-period average, volume spike
+# Short when: Price breaks below Donchian lower channel, 1D ATR > 1.5x 20-period average, volume spike
+# Exit when: Price crosses back through the 20-period middle band
+# Donchian provides trend-following structure, ATR filters for volatility expansion, volume confirms breakout.
+# Target: 20-30 trades/year per symbol. Works in trending markets (bull/bear) by capturing breakouts.
+name = "4h_Donchian20_ATR_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,63 +23,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    weekly_close = df_1w['close'].values
-    weekly_open = df_1w['open'].values
+    # 1-day data for ATR filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-day Donchian channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2.0
+    # Calculate 20-period ATR on daily data
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Weekly trend: bullish if weekly close > open, bearish if close < open
-    weekly_bullish = weekly_close > weekly_open
-    weekly_bearish = weekly_close < weekly_open
+    # Calculate 20-period ATR average for filter
+    atr_ma_20 = pd.Series(atr_20).rolling(window=20, min_periods=20).mean().values
     
-    # Align weekly data to daily timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Align 1D ATR data to 4H timeframe
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
+    atr_ma_20_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
     
-    # 20-day volume average for confirmation
+    # 20-period Donchian channels on 4H data
+    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_roll_max + low_roll_min) / 2.0
+    
+    # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for Donchian calculation
+    start_idx = 40  # Wait for ATR and Donchian calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
+        if (np.isnan(high_roll_max[i]) or np.isnan(low_roll_min[i]) or 
+            np.isnan(atr_20_aligned[i]) or np.isnan(atr_ma_20_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        high_20_val = high_20[i]
-        low_20_val = low_20[i]
+        upper = high_roll_max[i]
+        lower = low_roll_min[i]
         mid = donchian_mid[i]
-        weekly_bull = weekly_bullish_aligned[i]
-        weekly_bear = weekly_bearish_aligned[i]
+        atr = atr_20_aligned[i]
+        atr_ma = atr_ma_20_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long entry: Price breaks above 20-day high, weekly bullish, volume spike
-            if (price > high_20_val and close[i-1] <= high_20_val and 
-                weekly_bull > 0.5 and vol > 1.5 * vol_ma):
+            # Long entry: Price breaks above upper channel, ATR expansion, volume spike
+            if (price > upper and close[i-1] <= upper and 
+                atr > 1.5 * atr_ma and vol > 1.5 * vol_ma):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below 20-day low, weekly bearish, volume spike
-            elif (price < low_20_val and close[i-1] >= low_20_val and 
-                  weekly_bear > 0.5 and vol > 1.5 * vol_ma):
+            # Short entry: Price breaks below lower channel, ATR expansion, volume spike
+            elif (price < lower and close[i-1] >= lower and 
+                  atr > 1.5 * atr_ma and vol > 1.5 * vol_ma):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses back below 20-day midpoint
+            # Long exit: Price crosses back below middle band
             if price < mid:
                 signals[i] = 0.0
                 position = 0
@@ -87,7 +95,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses back above 20-day midpoint
+            # Short exit: Price crosses back above middle band
             if price > mid:
                 signals[i] = 0.0
                 position = 0
