@@ -1,12 +1,15 @@
-# 6h_WeeklyPivot_Breakout_Volume_ATR
-# Hypothesis: 6h breakouts from weekly pivot levels (R1/S1) with volume confirmation and ATR volatility filter
-# Weekly pivots provide strong support/resistance that holds across market regimes
-# Volume confirms institutional participation, ATR filter avoids low-volatility false breakouts
-# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year)
-# Works in bull/bear via volatility-adjusted breakouts and volume confirmation
+#!/usr/bin/env python3
+"""
+4h_1d_Donchian20_Breakout_Volume_Confirm
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d trend filter
+Donchian channels capture breakout momentum, volume confirms institutional participation,
+and 1d EMA50 filter ensures alignment with higher-timeframe trend to avoid false breakouts.
+Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year).
+Works in bull/bear via trend filter and volatility-adjusted breakouts.
+"""
 
-name = "6h_WeeklyPivot_Breakout_Volume_ATR"
-timeframe = "6h"
+name = "4h_1d_Donchian20_Breakout_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,45 +26,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from previous week
-    ph = df_1w['high'].shift(1).values  # Previous week high
-    pl = df_1w['low'].shift(1).values   # Previous week low
-    pc = df_1w['close'].shift(1).values # Previous week close
+    # Calculate EMA50 on 1d close
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Weekly pivot calculations (standard floor trader pivots)
-    pivot = (ph + pl + pc) / 3.0
-    r1 = 2 * pivot - pl
-    s1 = 2 * pivot - ph
-    r2 = pivot + (ph - pl)
-    s2 = pivot - (ph - pl)
-    
-    # Align weekly pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # ATR(14) for volatility filter - calculated on 6h data
-    def calculate_atr(high, low, close, period=14):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First period
-        
-        atr = np.full_like(close, np.nan)
-        if len(close) >= period:
-            atr[period-1] = np.mean(tr[:period])
-            for i in range(period, len(close)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
-    
-    atr = calculate_atr(high, low, close, 14)
+    # 4h Donchian(20) channels
+    # Upper band: 20-period high
+    # Lower band: 20-period low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,45 +50,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Ensure enough data for all indicators
+    start_idx = 20  # Need enough for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ATR filter: only trade when ATR > 50% of its 50-period average (avoid low volatility)
-        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr[i] > (atr_ma[i] * 0.5) if not np.isnan(atr_ma[i]) else False
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema_50_aligned[i]
+        price_below_ema = close[i] < ema_50_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume and volatility
-            if (close[i] > r1_aligned[i] and 
+            # Long: break above Donchian high with volume and uptrend
+            if (close[i] > donchian_high[i] and 
                 volume_confirm[i] and 
-                vol_filter):
+                price_above_ema):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and volatility
-            elif (close[i] < s1_aligned[i] and 
+            # Short: break below Donchian low with volume and downtrend
+            elif (close[i] < donchian_low[i] and 
                   volume_confirm[i] and 
-                  vol_filter):
+                  price_below_ema):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 or volatility drops
-            if (close[i] < s1_aligned[i]) or (not vol_filter):
+            # Long: exit if price breaks below Donchian low or trend reverses
+            if (close[i] < donchian_low[i]) or (not price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 or volatility drops
-            if (close[i] > r1_aligned[i]) or (not vol_filter):
+            # Short: exit if price breaks above Donchian high or trend reverses
+            if (close[i] > donchian_high[i]) or (not price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
