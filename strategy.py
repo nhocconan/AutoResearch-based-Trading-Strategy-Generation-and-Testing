@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Bollinger Band reversal with 1w trend filter and volume confirmation
-# Long when: price touches lower BB(20,2) AND closes back inside + 1w EMA50 uptrend + volume spike
-# Short when: price touches upper BB(20,2) AND closes back inside + 1w EMA50 downtrend + volume spike
-# Bollinger Bands capture mean reversion extremes, 1w EMA50 filters for higher timeframe trend
-# Volume confirmation ensures institutional participation in reversals
-# Target: 15-30 trades/year per symbol (~60-120 total over 4 years)
+# Hypothesis: 12h Camarilla Pivot (R1/S1) Breakout + Volume + Daily Trend Filter
+# Uses 12h timeframe with 1d trend filter (EMA34) and volume confirmation (>1.5x average)
+# Long when: price breaks above R1, volume confirmed, above daily EMA34
+# Short when: price breaks below S1, volume confirmed, below daily EMA34
+# Camarilla pivots calculated from previous 1d OHLC
+# Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
 
-name = "1d_BollingerReversal_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,70 +24,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get daily data for Camarilla pivots and EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    hl_range = high_1d - low_1d
+    r1 = close_1d + 1.1 * hl_range / 12
+    s1 = close_1d - 1.1 * hl_range / 12
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align to 12h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Need BB and EMA data
+    start_idx = 20  # Need volume MA data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        ema_trend = ema_50_1w_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 2.0 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter long: price touched lower band today AND closed back inside + uptrend + volume
-            touched_lower = low[i] <= lower
-            closed_inside = close[i] > lower
-            if touched_lower and closed_inside and price > ema_trend and volume_confirmed:
+            # Enter long: price breaks above R1, volume confirmed, above daily EMA34
+            if price > r1_val and volume_confirmed and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price touched upper band today AND closed back inside + downtrend + volume
-            touched_upper = high[i] >= upper
-            closed_inside_short = close[i] < upper
-            if touched_upper and closed_inside_short and price < ema_trend and volume_confirmed:
+            # Enter short: price breaks below S1, volume confirmed, below daily EMA34
+            elif price < s1_val and volume_confirmed and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price touches upper band OR trend changes
-            if high[i] >= upper_band[i] or price < ema_trend:
+            # Exit long when price falls below S1 or below daily EMA34
+            if price < s1_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price touches lower band OR trend changes
-            if low[i] <= lower_band[i] or price > ema_trend:
+            # Exit short when price rises above R1 or above daily EMA34
+            if price > r1_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
