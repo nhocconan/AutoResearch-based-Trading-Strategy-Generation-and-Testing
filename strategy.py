@@ -1,16 +1,15 @@
-# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_RM_1D_breakout"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeTrend_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,77 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for multi-timeframe analysis
+    # Get 1d data for regime filter
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d rolling max/min for breakout levels (20-period)
+    # Donchian channel (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 1d ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Rolling max and min with proper min_periods
-    roll_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    roll_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align to 12h timeframe
-    roll_max_20_aligned = align_htf_to_ltf(prices, df_1d, roll_max_20)
-    roll_min_20_aligned = align_htf_to_ltf(prices, df_1d, roll_min_20)
-    
-    # 1d ATR for volatility filter (14-period)
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
     tr_1d[0] = high_1d[0] - low_1d[0]
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average (12h timeframe)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d ADX for trend strength
+    plus_dm = np.maximum(high_1d - np.roll(high_1d, 1), 0)
+    minus_dm = np.maximum(np.roll(low_1d, 1) - low_1d, 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(200, 20, 14)  # Ensure enough data for all indicators
+    start_idx = 200
     
     for i in range(start_idx, n):
-        if np.isnan(roll_max_20_aligned[i]) or np.isnan(roll_min_20_aligned[i]) or \
-           np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(atr_1d_aligned[i]) or np.isnan(adx_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
         
-        # Volume filter
-        volume_ok = vol > 1.5 * vol_ma
+        # Volatility filter: only trade when volatility is above average
+        vol_filter = atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[max(0, i-100):i+1])
+        
+        # Trend filter: only trade when ADX indicates strong trend
+        trend_filter = adx_aligned[i] > 25
         
         if position == 0:
-            # Long breakout: price breaks above 20-period high
-            if price > roll_max_20_aligned[i] and volume_ok:
+            # Long breakout: price breaks above upper Donchian + volatility + trend
+            if price > high_20[i] and vol_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below 20-period low
-            elif price < roll_min_20_aligned[i] and volume_ok:
+            # Short breakdown: price breaks below lower Donchian + volatility + trend
+            elif price < low_20[i] and vol_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price drops below 20-period low or ATR-based stop
-            if price < roll_min_20_aligned[i] or price < np.max(high[i-4:i+1]) - 2.0 * atr_1d_aligned[i]:
+            # Exit long: price breaks below lower Donchian or trend weakens
+            if price < low_20[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above 20-period high or ATR-based stop
-            if price > roll_max_20_aligned[i] or price > np.min(low[i-4:i+1]) + 2.0 * atr_1d_aligned[i]:
+            # Exit short: price breaks above upper Donchian or trend weakens
+            if price > high_20[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-# %%
