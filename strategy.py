@@ -3,13 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Volume_Trend_v4"
-timeframe = "4h"
+# Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance on daily chart.
+# Price breaking these levels with volume confirmation indicates institutional interest.
+# Mean reversion to opposite pivot level provides defined exit. Works in both bull/bear
+# as pivots adapt to weekly price action. Target: 20-50 trades/year on daily timeframe.
+name = "1d_1w_Pivot_R1_S1_Breakout_Volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,17 +21,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for Pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Daily EMA(50) for trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate previous week's Pivot, R1, S1
+    prev_high = np.concatenate([[np.nan], high_1w[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1w[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1w[:-1]])
     
-    # Donchian channels (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    
+    # Align weekly pivot levels to daily timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
     # Volume filter: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -35,42 +47,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure enough data for indicators
+    start_idx = max(30, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        ema_50 = ema_50_1d_aligned[i]
         
         # Volume filter
         volume_ok = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: price breaks above upper Donchian + above daily EMA50 + volume
-            if price > high_max_20[i] and price > ema_50 and volume_ok:
+            # Long: price breaks above R1 with volume
+            if price > r1_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + below daily EMA50 + volume
-            elif price < low_min_20[i] and price < ema_50 and volume_ok:
+            # Short: price breaks below S1 with volume
+            elif price < s1_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below lower Donchian (mean reversion)
-            if price < low_min_20[i]:
+            # Exit: price returns below S1 (mean reversion to opposite level)
+            if price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above upper Donchian (mean reversion)
-            if price > high_max_20[i]:
+            # Exit: price returns above R1 (mean reversion to opposite level)
+            if price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
