@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_LiquidityPool_Reversion
-Hypothesis: In BTC/ETH, price tends to revert from liquidity pools (equal highs/lows) on 6h timeframe.
-- Identifies equal highs/lows (within 0.2%) as liquidity pools
-- Enters mean reversion when price touches these pools with RSI < 30 (long) or > 70 (short)
-- Uses 12h trend filter (EMA50) to avoid counter-trend traps
-- Works in bull/bear via trend alignment and mean reversion at institutional levels
-- Target: 50-150 trades over 4 years (12-37/year) with strict entry conditions
+4h_Breakout_Volume_ADX_Filter
+Hypothesis: 4-hour price breakouts with volume confirmation and ADX trend filter capture
+institutional moves in both bull and bear markets. Uses 4h Donchian breakout (20) for
+structure, volume > 1.5x 20-period average for confirmation, and ADX(14) > 25 to filter
+for trending conditions, reducing false breakouts in chop. Designed for 4h timeframe to
+target 75-200 total trades over 4 years (19-50/year). Stops when price reverses or trend weakens.
 """
 
-name = "6h_LiquidityPool_Reversion"
-timeframe = "6h"
+name = "4h_Breakout_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,114 +18,116 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # RSI(14) for mean reversion signals
-    def calculate_rsi(prices, period=14):
-        delta = np.diff(prices, prepend=prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
+    # ADX(14) for trend strength filter - calculated on 4h data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
         
-        # Wilder's smoothing
-        avg_gain = np.zeros_like(prices)
-        avg_loss = np.zeros_like(prices)
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
         
-        for i in range(period+1, len(prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        # Smoothed values using Wilder's smoothing (EMA-like)
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
         
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+        atr = WilderSmooth(tr, period)
+        dm_plus_smooth = WilderSmooth(dm_plus, period)
+        dm_minus_smooth = WilderSmooth(dm_minus, period)
+        
+        # Avoid division by zero
+        dx = np.full_like(close, np.nan)
+        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+        
+        adx = WilderSmooth(dx, period)
+        return adx
     
-    rsi = calculate_rsi(close, 14)
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # 4h data for ADX and Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:  # Need enough for ADX and Donchian calculation
         return np.zeros(n)
     
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate ADX on 4h data
+    adx_4h = calculate_adx(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 14)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
     
-    # Identify liquidity pools (equal highs/lows within 0.2%)
-    def find_liquidity_pools(high, low, lookback=20, threshold=0.002):
-        """Find equal highs/lows within threshold percentage"""
-        n = len(high)
-        liquidity_high = np.full(n, np.nan)
-        liquidity_low = np.full(n, np.nan)
-        
-        for i in range(lookback, n):
-            # Check for equal highs in lookback window
-            window_high = high[i-lookback:i]
-            max_high = np.max(window_high)
-            # Find if current high or recent high is within threshold of max
-            if high[i] >= max_high * (1 - threshold) or max_high >= high[i] * (1 - threshold):
-                liquidity_high[i] = max_high
-            
-            # Check for equal lows in lookback window
-            window_low = low[i-lookback:i]
-            min_low = np.min(window_low)
-            # Find if current low or recent low is within threshold of min
-            if low[i] <= min_low * (1 + threshold) or min_low <= low[i] * (1 + threshold):
-                liquidity_low[i] = min_low
-        
-        return liquidity_high, liquidity_low
+    # Donchian channels (20-period) on 4h data
+    donchian_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    liq_high, liq_low = find_liquidity_pools(high, low, lookback=20, threshold=0.002)
-    
-    # Align liquidity pools to current timeframe (they're already on 6h)
-    # No alignment needed as we calculated on the same timeframe
+    # Volume confirmation: volume > 1.5 * 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 20)  # Ensure enough data
+    start_idx = max(30, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(adx_4h_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above EMA50 = uptrend, below = downtrend
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # ADX filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_4h_aligned[i] > 25
         
         if position == 0:
-            # Long: price at liquidity low (support) + oversold RSI + uptrend
-            if (not np.isnan(liq_low[i]) and 
-                abs(low[i] - liq_low[i]) / liq_low[i] < 0.005 and  # Within 0.5% of liquidity low
-                rsi[i] < 30 and 
-                uptrend):
+            # Long: price breaks above Donchian high with volume and strong trend
+            if (close[i] > donchian_high_aligned[i] and 
+                volume_confirm[i] and 
+                strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price at liquidity high (resistance) + overbought RSI + downtrend
-            elif (not np.isnan(liq_high[i]) and 
-                  abs(high[i] - liq_high[i]) / liq_high[i] < 0.005 and  # Within 0.5% of liquidity high
-                  rsi[i] > 70 and 
-                  downtrend):
+            # Short: price breaks below Donchian low with volume and strong trend
+            elif (close[i] < donchian_low_aligned[i] and 
+                  volume_confirm[i] and 
+                  strong_trend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit when RSI reaches neutral (50) or breaks below liquidity low
-            if rsi[i] >= 50 or (not np.isnan(liq_low[i]) and low[i] < liq_low[i] * 0.995):
+            # Long: exit if price breaks below Donchian low or trend weakens (ADX < 20)
+            if (close[i] < donchian_low_aligned[i]) or (adx_4h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit when RSI reaches neutral (50) or breaks above liquidity high
-            if rsi[i] <= 50 or (not np.isnan(liq_high[i]) and high[i] > liq_high[i] * 1.005):
+            # Short: exit if price breaks above Donchian high or trend weakens (ADX < 20)
+            if (close[i] > donchian_high_aligned[i]) or (adx_4h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
