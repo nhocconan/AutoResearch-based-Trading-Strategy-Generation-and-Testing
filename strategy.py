@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_TRIX_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_1d_Weekly_Pivot_R1S1_Breakout_VolumeATR_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,72 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for TRIX calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for weekly pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # TRIX (15-period) - Triple Exponential Average derivative
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) then rate of change
-    close_series = pd.Series(df_1w['close'])
-    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix_raw = ema3.pct_change() * 100  # percentage change
-    trix = trix_raw.values
+    # Calculate weekly high, low, close from daily data (7 days per week)
+    week_high = pd.Series(high).rolling(window=7, min_periods=7).max().values
+    week_low = pd.Series(low).rolling(window=7, min_periods=7).min().values
+    week_close = pd.Series(close).rolling(window=7, min_periods=7).last().values
     
-    # Align TRIX to daily timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1w, trix)
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    pivot = (week_high + week_low + week_close) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1 = 2 * pivot - week_low
+    s1 = 2 * pivot - week_high
     
-    # Volume spike: current volume > 2.5x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly pivot levels to 12h timeframe (weekly bars align with 12h)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # ATR for volatility filter (14-period weekly)
-    tr = np.maximum(df_1w['high'].values[1:] - df_1w['low'].values[1:], 
-                    np.abs(df_1w['high'].values[1:] - df_1w['close'].values[:-1]))
-    tr = np.maximum(tr, np.abs(df_1w['low'].values[1:] - df_1w['close'].values[:-1]))
+    # Weekly ATR for volatility filter (14-period)
+    tr = np.maximum(week_high[1:] - week_low[1:], np.absolute(week_high[1:] - week_close[:-1]))
+    tr = np.maximum(tr, np.absolute(week_low[1:] - week_close[:-1]))
     tr = np.concatenate([[np.nan], tr])
-    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average (12h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trix_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr_14_1w_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        trix_val = trix_aligned[i]
-        atr = atr_14_1w_aligned[i]
+        piv = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        atr = atr_14_aligned[i]
         
-        volume_spike = vol > 2.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume spike
-            if trix_val > 0 and volume_spike:
+            # Long: break above R1 with volume
+            if price > r1_val and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume spike
-            elif trix_val < 0 and volume_spike:
+            # Short: break below S1 with volume
+            elif price < s1_val and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: TRIX crosses below zero or volatility drop
-            if trix_val < 0 or vol < vol_ma * 1.5:
+            # Exit: price below pivot or ATR-based stop
+            if price < piv or price < close[i-1] - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: TRIX crosses above zero or volatility drop
-            if trix_val > 0 or vol < vol_ma * 1.5:
+            # Exit: price above pivot or ATR-based stop
+            if price > piv or price > close[i-1] + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
