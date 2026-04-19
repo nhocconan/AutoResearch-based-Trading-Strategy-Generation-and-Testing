@@ -1,24 +1,63 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_20_Breakout_WeeklyTrend_Filter
-Hypothesis: Donchian channel breakouts on 12h with weekly trend filter (price > weekly SMA50 for longs, < for shorts) 
-and volume confirmation capture medium-term trends while avoiding counter-trend whipsaws. 
-Weekly trend filter ensures alignment with higher-timeframe momentum, reducing false breakouts in chop.
-Designed for 12h timeframe targeting 50-150 total trades over 4 years (12-37/year).
-Works in bull/bear via trend-filtered breakouts and volume confirmation.
+1d_WeeklyPivot_Momentum_Breakout
+Hypothesis: Weekly pivot levels (calculated from prior week's OHLC) act as strong support/resistance.
+Breakout above weekly R1 or below weekly S1 with volume confirmation and ADX trend filter
+captures momentum moves. Works in bull/bear via breakout logic and ADX filter to avoid whipsaw.
+Designed for 1d timeframe targeting 30-100 total trades over 4 years (7-25/year).
 """
 
-name = "12h_Donchian_20_Breakout_WeeklyTrend_Filter"
-timeframe = "12h"
+name = "1d_WeeklyPivot_Momentum_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index"""
+    plus_dm = np.zeros_like(high)
+    minus_dm = np.zeros_like(high)
+    tr = np.zeros_like(high)
+    
+    for i in range(1, len(high)):
+        plus_dm[i] = max(high[i] - high[i-1], 0)
+        minus_dm[i] = max(low[i-1] - low[i], 0)
+        if plus_dm[i] < minus_dm[i]:
+            plus_dm[i] = 0
+        if minus_dm[i] < plus_dm[i]:
+            minus_dm[i] = 0
+            
+        tr[i] = max(high[i] - low[i], 
+                   abs(high[i] - close[i-1]), 
+                   abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values / atr
+    
+    dx = np.zeros_like(high)
+    dx_sum = plus_di + minus_di
+    mask = dx_sum > 0
+    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / dx_sum[mask]
+    
+    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+    return adx
+
+def calculate_pivot_points(high, low, close):
+    """Calculate standard pivot points: P, R1, S1, R2, S2"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    return pivot, r1, s1, r2, s2
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,67 +65,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for weekly trend filter (SMA50 on daily)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data once
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Weekly trend filter: SMA50 on daily data
-    sma50_1d = pd.Series(df_1d['close']).rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    # Calculate weekly pivot points
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    _, weekly_r1, weekly_s1, _, _ = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
-    high_20_aligned = align_htf_to_ltf(prices, df_12h, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_12h, low_20)
+    # Align weekly pivot levels to daily
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-day average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
+    
+    # ADX trend filter: only trade when ADX > 25
+    adx = calculate_adx(high, low, close, 14)
+    trend_filter = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma50_1d_aligned[i]) or np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high, above weekly SMA50, with volume
-            if (close[i] > high_20_aligned[i] and 
-                close[i] > sma50_1d_aligned[i] and 
-                volume_confirm[i]):
+            # Long: break above weekly R1 with volume and trend
+            if (close[i] > weekly_r1_aligned[i] and volume_confirm[i] and trend_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low, below weekly SMA50, with volume
-            elif (close[i] < low_20_aligned[i] and 
-                  close[i] < sma50_1d_aligned[i] and 
-                  volume_confirm[i]):
+            # Short: break below weekly S1 with volume and trend
+            elif (close[i] < weekly_s1_aligned[i] and volume_confirm[i] and trend_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below Donchian low or closes below weekly SMA50
-            if (close[i] < low_20_aligned[i]) or (close[i] < sma50_1d_aligned[i]):
+            # Long: exit if price crosses below weekly S1 or trend weakens
+            if (close[i] < weekly_s1_aligned[i]) or (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above Donchian high or closes above weekly SMA50
-            if (close[i] > high_20_aligned[i]) or (close[i] > sma50_1d_aligned[i]):
+            # Short: exit if price crosses above weekly R1 or trend weakens
+            if (close[i] > weekly_r1_aligned[i]) or (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
