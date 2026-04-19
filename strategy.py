@@ -3,138 +3,109 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d Choppiness Index regime filter and 1d Donchian breakout.
-# Uses 1d Choppiness Index to identify ranging markets (CHOP > 61.8) for mean reversion
-# and trending markets (CHOP < 38.2) for trend following. In ranging markets, we mean
-# revert at Donchian channel extremes; in trending markets, we follow breakouts.
-# Volume confirmation ensures signal strength. Works in both bull and bear markets
-# by adapting to market regime.
-# Target: 75-200 total trades over 4 years (19-50/year).
-name = "4h_1d_Chop_Donchian_Adaptive"
-timeframe = "4h"
+# Hypothesis: 6h timeframe with 1d Ichimoku Cloud filter + 6h Tenkan-Kijun cross.
+# Uses 1d Ichimoku Cloud (Senkou Span A/B) to determine trend direction.
+# Entry on 6h Tenkan-Kijun cross in direction of cloud color (green=bullish, red=bearish).
+# Works in bull markets via bullish crosses in bullish cloud, and in bear markets via
+# bearish crosses in bearish cloud. Avoids chop via cloud thickness filter.
+# Target: 50-150 total trades over 4 years (12-37/year).
+
+name = "6h_1d_Ichimoku_TK_Cross_CloudFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get 1d data for regime and Donchian calculation (called ONCE before loop)
+    # Get 1d data for Ichimoku calculation (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 1d Choppiness Index (14-period)
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Ichimoku components on 1d timeframe
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max()
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min()
+    tenkan = (period9_high + period9_low) / 2
     
-    # Avoid division by zero
-    atr_safe = np.where(atr == 0, 1e-10, atr)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max()
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min()
+    kijun = (period26_high + period26_low) / 2
     
-    # True range sum over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = ((tenkan + kijun) / 2).shift(2)
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max()
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min()
+    senkou_b = ((period52_high + period52_low) / 2).shift(2)
     
-    # Avoid division by zero in chop calculation
-    range_hl = hh - ll
-    range_hl_safe = np.where(range_hl == 0, 1e-10, range_hl)
+    # Cloud color: green if Senkou A > Senkou B (bullish), red otherwise (bearish)
+    cloud_green = senkou_a > senkou_b
     
-    # Choppiness Index: 100 * log10(tr_sum / range_hl) / log10(14)
-    chop = 100 * np.log10(tr_sum / range_hl_safe) / np.log10(14)
-    
-    # Calculate 1d Donchian channels (20-period)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align 1d indicators to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    
-    # Volume filter: volume > 1.3 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.3)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan.values)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun.values)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a.values)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b.values)
+    cloud_green_aligned = align_htf_to_ltf(prices, df_1d, cloud_green.values.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = 52  # Ensure enough data for Ichimoku calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(chop_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(cloud_green_aligned[i])):
             signals[i] = 0.0
             continue
-            
-        chop_val = chop_aligned[i]
-        dh = donch_high_aligned[i]
-        dl = donch_low_aligned[i]
+        
+        # Previous values for crossover detection
+        tenkan_prev = tenkan_aligned[i-1]
+        kijun_prev = kijun_aligned[i-1]
+        tenkan_curr = tenkan_aligned[i]
+        kijun_curr = kijun_aligned[i]
+        
+        bullish_cross = tenkan_prev <= kijun_prev and tenkan_curr > kijun_curr
+        bearish_cross = tenkan_prev >= kijun_prev and tenkan_curr < kijun_curr
+        
+        cloud_bullish = cloud_green_aligned[i] > 0.5
+        cloud_bearish = cloud_green_aligned[i] <= 0.5
         
         if position == 0:
-            # In ranging market (CHOP > 61.8): mean reversion at Donchian extremes
-            if chop_val > 61.8:
-                if close[i] <= dl and volume_filter[i]:  # Near lower band -> long
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] >= dh and volume_filter[i]:  # Near upper band -> short
-                    signals[i] = -0.25
-                    position = -1
-            # In trending market (CHOP < 38.2): follow breakouts
-            elif chop_val < 38.2:
-                if close[i] > dh and volume_filter[i]:  # Break above -> long
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < dl and volume_filter[i]:  # Break below -> short
-                    signals[i] = -0.25
-                    position = -1
-            # In neutral market (38.2 <= CHOP <= 61.8): no action
-            
+            # Long when bullish TK cross in bullish cloud
+            if bullish_cross and cloud_bullish:
+                signals[i] = 0.25
+                position = 1
+            # Short when bearish TK cross in bearish cloud
+            elif bearish_cross and cloud_bearish:
+                signals[i] = -0.25
+                position = -1
+                
         elif position == 1:
-            # Long position management
-            if chop_val > 61.8:
-                # In ranging market: exit at upper band
-                if close[i] >= dh:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long position: exit on bearish TK cross or cloud turns bearish
+            if bearish_cross or cloud_bearish:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In trending/neutral: exit on breakdown
-                if close[i] < dl:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-                    
+                signals[i] = 0.25
+                
         elif position == -1:
-            # Short position management
-            if chop_val > 61.8:
-                # In ranging market: exit at lower band
-                if close[i] <= dl:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short position: exit on bullish TK cross or cloud turns bullish
+            if bullish_cross or cloud_bullish:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In trending/neutral: exit on breakout
-                if close[i] > dh:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
