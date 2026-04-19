@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Exponential Moving Average (EMA) Crossover with 1d Volume Confirmation and 1w Trend Filter
-# - EMA(9) and EMA(21) crossover for trend momentum
-# - 1d volume > 1.5x 20-period average for confirmation
+# Hypothesis: 12h Donchian breakout with 1d volume confirmation and 1w trend filter
+# - Donchian breakout (20-period): long on break above upper band, short on break below lower band
+# - 1d volume > 1.5x 30-period average for conviction (filters weak breakouts)
 # - 1w EMA(50) trend filter: only take longs when price > weekly EMA50, shorts when price < weekly EMA50
-# - Designed to capture trending moves with volume confirmation while avoiding choppy markets
-# - Target: 20-40 trades/year to minimize fee drag
+# - Exit on opposite Donchian band touch (mean reversion) or trend reversal
+# - Designed to work in both bull and bear markets by following higher timeframe trend
+# - Target: 12-37 trades/year on 12h timeframe to avoid excessive fee drag
 
-name = "4h_EMACross_1dVolume_1wTrend_v1"
-timeframe = "4h"
+name = "12h_DonchianBreakout_1dVolume_1wTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,9 +28,9 @@ def generate_signals(prices):
     # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d volume average (20-period)
+    # 1d volume average (30-period)
     vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=30, min_periods=30).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     # Get 1w data for trend filter
@@ -39,9 +40,9 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # EMA crossover: EMA(9) and EMA(21)
-    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Donchian channels (20-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,35 +51,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema_9[i]) or np.isnan(ema_21[i]):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 4h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d average to 4h: 1d has 6x 4h bars, so divide by 6
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 6.0)
+        # Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d average to 12h: 1d has 2x 12h bars, so divide by 2
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 2.0)
         
         if position == 0:
-            # Look for long entry: uptrend (price > 1w EMA50) + EMA bullish crossover + volume
-            if close[i] > ema_50_1w_aligned[i] and ema_9[i] > ema_21[i] and volume_filter:
+            # Look for long entry: uptrend (price > 1w EMA50) + break above upper Donchian + volume
+            if close[i] > ema_50_1w_aligned[i] and close[i] > highest_high[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: downtrend (price < 1w EMA50) + EMA bearish crossover + volume
-            elif close[i] < ema_50_1w_aligned[i] and ema_9[i] < ema_21[i] and volume_filter:
+            # Look for short entry: downtrend (price < 1w EMA50) + break below lower Donchian + volume
+            elif close[i] < ema_50_1w_aligned[i] and close[i] < lowest_low[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on EMA bearish crossover or trend reversal
-            if ema_9[i] < ema_21[i] or close[i] < ema_50_1w_aligned[i]:
+            # Long position: exit on touch of lower Donchian band or trend reversal
+            if close[i] < lowest_low[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on EMA bullish crossover or trend reversal
-            if ema_9[i] > ema_21[i] or close[i] > ema_50_1w_aligned[i]:
+            # Short position: exit on touch of upper Donchian band or trend reversal
+            if close[i] > highest_high[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
