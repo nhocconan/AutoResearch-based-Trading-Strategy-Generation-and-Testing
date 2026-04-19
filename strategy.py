@@ -3,21 +3,26 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly trend filter with daily price action for entries
-# - Weekly EMA(21) defines long-term trend (long when price > weekly EMA21, short when price < weekly EMA21)
-# - Daily RSI(14) for mean reversion entries: long when RSI < 30 in uptrend, short when RSI > 70 in downtrend
-# - Daily volume > 1.5x 20-day average for confirmation
-# - Exit on opposite RSI extreme or trend reversal
-# - Designed to work in both bull and bear markets by following weekly trend
-# - Target: 10-25 trades/year to minimize fee drag
+# Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation
+# - Williams Alligator (13,8,5 SMAs) on 6h defines market state: 
+#   * Alligator asleep (JAW > TEETH > LIPS or JAW < TEETH < LIPS) = ranging market
+#   * Alligator awake (JAW < TEETH < LIPS) = uptrend
+#   * Alligator awake (JAW > TEETH > LIPS) = downtrend
+# - 1d EMA(50) as trend filter: only take Alligator signals in direction of higher timeframe trend
+# - 1d volume > 1.5x 20-period average for conviction
+# - Entry: Alligator awake + 1d trend alignment + volume confirmation
+# - Exit: Alligator returns to sleep (JAW crosses TEETH or LIPS) or trend reversal
+# - Position size: 0.25 to manage drawdown in volatile 6h markets
+# - Designed to catch trends while avoiding whipsaws in ranging markets
+# - Target: 20-40 trades/year to avoid excessive fee drag
 
-name = "1d_EMA21_RSI_Volume_1wTrend_v1"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_1dTrend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,61 +30,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 6h data for Williams Alligator
+    df_6h = get_htf_data(prices, '6h')
     
-    # Weekly EMA(21) for trend direction
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Williams Alligator: Jaw (13-period SMA), Teeth (8-period SMA), Lips (5-period SMA)
+    # All SMAs are calculated on median price (high+low)/2 with future shift
+    median_price = (df_6h['high'] + df_6h['low']) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Daily RSI(14) for entry timing
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align Alligator components to 6s timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_6h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_6h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_6h, lips)
     
-    # Daily volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get 1d data for trend filter and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    
+    # 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Pre-compute session filter (00:00-23:00 UTC - trade all hours for 6h)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Always true for 6h - trade all sessions
+    in_session = np.ones(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 60  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_21_1w_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-day average
-        volume_filter = vol_ma[i] > 0 and volume[i] > 1.5 * vol_ma[i]
+        # Williams Alligator conditions
+        # Alligator asleep: JAW > TEETH > LIPS (downtrend) or JAW < TEETH < LIPS (uptrend but weak)
+        # Actually, sleeping is when intertwined: not (JAW > TEETH > LIPS) and not (JAW < TEETH < LIPS)
+        # Awake is when JAW, TEETH, LIPS are properly aligned
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        
+        # Alligator awake and aligned: JAW < TEETH < LIPS = uptrend
+        alligator_awake_up = jaw_val < teeth_val < lips_val
+        # Alligator awake and aligned: JAW > TEETH > LIPS = downtrend
+        alligator_awake_down = jaw_val > teeth_val > lips_val
+        # Alligator sleeping/intertwined: otherwise
+        alligator_asleep = not (alligator_awake_up or alligator_awake_down)
+        
+        # Volume filter: current volume > 1.5x 1d average
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * vol_ma_1d_aligned[i]
+        
+        # 1d trend filter
+        uptrend_1d = close[i] > ema_50_1d_aligned[i]
+        downtrend_1d = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Look for long entry: weekly uptrend (price > weekly EMA21) + oversold RSI + volume
-            if close[i] > ema_21_1w_aligned[i] and rsi_values[i] < 30 and volume_filter:
+            # Look for long entry: alligator awake up + 1d uptrend + volume
+            if alligator_awake_up and uptrend_1d and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: weekly downtrend (price < weekly EMA21) + overbought RSI + volume
-            elif close[i] < ema_21_1w_aligned[i] and rsi_values[i] > 70 and volume_filter:
+            # Look for short entry: alligator awake down + 1d downtrend + volume
+            elif alligator_awake_down and downtrend_1d and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on overbought RSI or trend reversal
-            if rsi_values[i] > 70 or close[i] < ema_21_1w_aligned[i]:
+            # Long position: exit on alligator sleeping or 1d trend reversal
+            if alligator_asleep or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on oversold RSI or trend reversal
-            if rsi_values[i] < 30 or close[i] > ema_21_1w_aligned[i]:
+            # Short position: exit on alligator sleeping or 1d trend reversal
+            if alligator_asleep or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
