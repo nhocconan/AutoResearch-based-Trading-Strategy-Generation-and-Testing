@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_MultiTimeframe_Momentum_Volume_V1"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_1dVolumeSpike_CloseAboveVWAP"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,35 +12,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Get 1d data for momentum and volume calculations
+    # Get 1d data for Camarilla and VWAP
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d momentum (close - close 10 days ago)
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    momentum_1d = np.full(len(close_1d), np.nan)
-    for i in range(10, len(close_1d)):
-        momentum_1d[i] = close_1d[i] - close_1d[i-10]
     
-    # Calculate 1d volume average
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        volume_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    # Pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
     
-    # Calculate 6h volume spike (volume > 1.5 * 20-period average)
-    volume_ma_6h = np.full(n, np.nan)
-    for i in range(20, n):
-        volume_ma_6h[i] = np.mean(volume[i-20:i])
-    volume_spike_6h = volume > (volume_ma_6h * 1.5)
+    # Calculate VWAP for 4h data
+    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
+    vwap = (typical_price * prices['volume']).cumsum() / prices['volume'].cumsum()
+    vwap_values = vwap.values
     
-    # Align 1d indicators to 6h timeframe
-    momentum_1d_aligned = align_htf_to_ltf(prices, df_1d, momentum_1d)
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    # Volume spike detection (volume > 2.0 * 20-period average)
+    volume_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_spike = prices['volume'].values > (volume_ma * 2.0)
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,36 +46,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(momentum_1d_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vwap_values[i]):
             signals[i] = 0.0
             continue
             
-        # Momentum signals:
-        # Positive momentum: bullish, Negative momentum: bearish
-        # Volume confirmation required
-        vol_confirm = volume_spike_6h[i]
+        price = prices['close'].iloc[i]
+        vol_confirm = volume_spike[i]
+        price_above_vwap = price > vwap_values[i]
         
         if position == 0:
-            # Long when positive momentum + volume spike
-            if momentum_1d_aligned[i] > 0 and vol_confirm:
+            # Long when price crosses above R1 with volume spike and above VWAP
+            if price > r1_aligned[i] and vol_confirm and price_above_vwap:
                 signals[i] = 0.25
                 position = 1
-            # Short when negative momentum + volume spike
-            elif momentum_1d_aligned[i] < 0 and vol_confirm:
+            # Short when price crosses below S1 with volume spike and below VWAP
+            elif price < s1_aligned[i] and vol_confirm and not price_above_vwap:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when momentum turns negative
-            if momentum_1d_aligned[i] < 0:
+            # Long position: exit when price crosses below S1 or loses VWAP
+            if price < s1_aligned[i] or price < vwap_values[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when momentum turns positive
-            if momentum_1d_aligned[i] > 0:
+            # Short position: exit when price crosses above R1 or regains VWAP
+            if price > r1_aligned[i] or price > vwap_values[i]:
                 signals[i] = 0.0
                 position = 0
             else:
