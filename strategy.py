@@ -1,18 +1,10 @@
-# 6h_1w_Pivot_R4_S4_Breakout_Volume
-# Uses weekly pivot levels (R4/S4) from 1w timeframe for breakout signals
-# In bull markets: breakout above R4 with volume continuation
-# In bear markets: breakdown below S4 with volume continuation
-# Weekly pivots provide strong support/resistance that works across market regimes
-# Volume confirmation reduces false breakouts
-# Target: 50-150 total trades over 4 years (12-37/year)
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_Pivot_R4_S4_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,64 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 12h data for price action (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly pivot points (standard formula)
-    def calculate_pivot_points(high_arr, low_arr, close_arr):
+    # Get 1d data for higher timeframe trend and context
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 12h OHLC for Camarilla calculation
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate EMA34 on 1d for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Camarilla pivot levels (R1, S1) on 12h timeframe
+    def calculate_camarilla(high_arr, low_arr, close_arr):
         n_periods = len(close_arr)
-        P = np.full(n_periods, np.nan)
         R1 = np.full(n_periods, np.nan)
-        R2 = np.full(n_periods, np.nan)
-        R3 = np.full(n_periods, np.nan)
-        R4 = np.full(n_periods, np.nan)
         S1 = np.full(n_periods, np.nan)
-        S2 = np.full(n_periods, np.nan)
-        S3 = np.full(n_periods, np.nan)
-        S4 = np.full(n_periods, np.nan)
         
         for i in range(1, n_periods):
-            # Use previous week's OHLC
+            # Use previous period's OHLC
             high_prev = high_arr[i-1]
             low_prev = low_arr[i-1]
             close_prev = close_arr[i-1]
             
-            # Standard pivot point calculation
-            P[i] = (high_prev + low_prev + close_prev) / 3.0
-            
-            # Support and resistance levels
-            R1[i] = 2.0 * P[i] - low_prev
-            S1[i] = 2.0 * P[i] - high_prev
-            R2[i] = P[i] + (high_prev - low_prev)
-            S2[i] = P[i] - (high_prev - low_prev)
-            R3[i] = high_prev + 2.0 * (P[i] - low_prev)
-            S3[i] = low_prev - 2.0 * (high_prev - P[i])
-            R4[i] = R3[i] + (high_prev - low_prev)
-            S4[i] = S3[i] - (high_prev - low_prev)
+            # Camarilla formulas
+            R1[i] = close_prev + (high_prev - low_prev) * 1.1 / 12
+            S1[i] = close_prev - (high_prev - low_prev) * 1.1 / 12
         
-        return P, R1, R2, R3, R4, S1, S2, S3, S4
+        return R1, S1
     
-    _, _, _, _, R4_1w, _, _, _, S4_1w = calculate_pivot_points(high_1w, low_1w, close_1w)
+    R1_12h, S1_12h = calculate_camarilla(high_12h, low_12h, close_12h)
     
-    # Align weekly pivot levels to 6h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1w, R4_1w)
-    S4_aligned = align_htf_to_ltf(prices, df_1w, S4_1w)
+    # Align Camarilla levels to 12h timeframe (already aligned as we're using 12h as primary)
+    # But we need to align to the 12h candles as they close
+    R1_aligned = align_htf_to_ltf(prices, df_12h, R1_12h)
+    S1_aligned = align_htf_to_ltf(prices, df_12h, S1_12h)
     
-    # Volume spike detection (volume > 2.0 * 20-period average)
+    # Calculate volume spike indicator (volume > 2.0 * 20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 25  # Ensure enough data for volume MA (20) + buffer
+    start_idx = 35  # Ensure enough data for EMA34 (34) + 1 buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]):
             signals[i] = 0.0
             continue
             
@@ -90,26 +76,26 @@ def generate_signals(prices):
         vol_confirm = volume_spike[i]
         
         if position == 0:
-            # Long when price breaks above weekly R4 with volume confirmation
-            if close[i] > R4_aligned[i] and vol_confirm:
+            # Long when price breaks above R1 with volume AND 1d trend is up (price > EMA34)
+            if close[i] > R1_aligned[i] and vol_confirm and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below weekly S4 with volume confirmation
-            elif close[i] < S4_aligned[i] and vol_confirm:
+            # Short when price breaks below S1 with volume AND 1d trend is down (price < EMA34)
+            elif close[i] < S1_aligned[i] and vol_confirm and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price falls back below weekly R4 (failure)
-            if close[i] < R4_aligned[i]:
+            # Long position: exit when price falls below S1 (reversal) or 1d trend turns down
+            if close[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price rises back above weekly S4 (failure)
-            if close[i] > S4_aligned[i]:
+            # Short position: exit when price rises above R1 (reversal) or 1d trend turns up
+            if close[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
