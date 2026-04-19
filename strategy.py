@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1-day volume confirmation and ADX trend filter.
-# Long when: price closes above Donchian upper band (20-period), ADX(1d) > 20, volume > 1.5x 20-period average
-# Short when: price closes below Donchian lower band (20-period), ADX(1d) > 20, volume > 1.5x 20-period average
-# Exit when price returns to the 20-period SMA or reverses to opposite Donchian band.
-# Designed for ~15-25 trades/year per symbol. Works in both bull and bear markets by only taking trades in trending conditions.
-name = "12h_Donchian20_Volume_ADX_v2"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1-day volume confirmation and ADX trend filter.
+# Long when: price closes above Donchian high(20), ADX(1d) > 20, volume > 1.5x 20-period average
+# Short when: price closes below Donchian low(20), ADX(1d) > 20, volume > 1.5x 20-period average
+# Exit when price returns to the 20-period SMA or reverses to opposite Donchian level.
+# Designed for ~20-30 trades/year per symbol. Works in both bull and bear markets by only taking trades in trending conditions.
+name = "4h_Donchian20_Volume_ADX_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +28,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX on daily data
+    # Calculate ADX on daily data using Wilder's smoothing
     # True Range
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
@@ -69,14 +69,14 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, atr_period)
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate Donchian channels on 12h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels on 4h data (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 20-period SMA on 12h data for exit
+    # 20-period SMA on 4h data for exit
     sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     # Volume average (20-period) for confirmation
@@ -89,8 +89,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(sma_20[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(sma_20[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -101,26 +101,26 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long breakout: price closes above upper Donchian band with ADX > 20 and volume confirmation
-            if price > high_20[i] and adx_val > 20 and vol > 1.5 * vol_ma:
+            # Long breakout: price closes above Donchian high with ADX > 20 and volume confirmation
+            if price > donchian_high[i] and adx_val > 20 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price closes below lower Donchian band with ADX > 20 and volume confirmation
-            elif price < low_20[i] and adx_val > 20 and vol > 1.5 * vol_ma:
+            # Short breakdown: price closes below Donchian low with ADX > 20 and volume confirmation
+            elif price < donchian_low[i] and adx_val > 20 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to 20-period SMA or breaks below lower Donchian band
-            if price <= sma_20[i] or price < low_20[i]:
+            # Long exit: price returns to 20-period SMA or breaks below Donchian low
+            if price <= sma_20[i] or price < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to 20-period SMA or breaks above upper Donchian band
-            if price >= sma_20[i] or price > high_20[i]:
+            # Short exit: price returns to 20-period SMA or breaks above Donchian high
+            if price >= sma_20[i] or price > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
