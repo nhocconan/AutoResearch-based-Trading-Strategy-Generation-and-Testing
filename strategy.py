@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band breakout with volume confirmation and 1d ADX trend filter.
-# BB breakout captures momentum, volume confirms validity, 1d ADX>25 ensures strong daily trend.
-# Works in bull/bear markets by only taking trades aligned with higher-timeframe trend.
-# Target: 20-30 trades/year per symbol.
-name = "12h_BB_Breakout_Volume_ADX"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 12h ADX trend filter and volume confirmation.
+# Enter long when price breaks above Donchian(20) high, ADX>25 (strong trend), and volume > 1.5x 20-period average.
+# Enter short when price breaks below Donchian(20) low under same conditions.
+# Exit on opposite Donchian breakout or when ADX<20 (trend weakening).
+# Uses discrete position sizing (0.25) to minimize churn. Target: 20-40 trades/year per symbol.
+name = "4h_Donchian20_ADX25_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,13 +22,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian(20) channels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ADX on daily (14-period)
+    # Get 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -62,29 +67,19 @@ def generate_signals(prices):
         plus_di = 100 * plus_dm_smooth / atr
         minus_di = 100 * minus_dm_smooth / atr
         dx = np.zeros_like(close)
-        valid = (plus_di[period:] + minus_di[period:]) > 0
-        dx[period:] = np.where(valid, 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:]), 0)
+        dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
         
         adx = np.zeros_like(close)
-        if len(dx) >= 2*period+1:
-            adx[2*period] = np.mean(dx[period:2*period+1])
-            for i in range(2*period+1, len(dx)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        adx[2*period] = np.mean(dx[period:2*period+1])
+        for i in range(2*period+1, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
         
         return adx
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
     
-    # Align 1d ADX to 12h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Bollinger Bands (20, 2) on 12h
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + bb_std * std
-    lower = sma - bb_std * std
+    # Align 12h ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -92,49 +87,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 28)  # Ensure BB and ADX are ready
+    start_idx = max(20, 34)  # Ensure Donchian and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        sma_val = sma[i]
-        upper_val = upper[i]
-        lower_val = lower[i]
-        adx_val = adx_1d_aligned[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
+        adx_val = adx_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # ADX trend strength filter (daily)
+        # ADX trend strength filter
         strong_trend = adx_val > 25
+        weak_trend = adx_val < 20
         
         if position == 0:
-            # Enter long if price breaks above upper BB, strong trend, and volume confirmation
-            if price > upper_val and strong_trend and volume_confirmed:
+            # Enter long on Donchian breakout above, strong trend, volume confirmation
+            if price > donch_high_val and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price breaks below lower BB, strong trend, and volume confirmation
-            elif price < lower_val and strong_trend and volume_confirmed:
+            # Enter short on Donchian breakdown below, strong trend, volume confirmation
+            elif price < donch_low_val and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below middle BB (SMA) or trend weakens
-            if price < sma_val or adx_val < 20:  # Trend weakening
+            # Exit long on Donchian breakdown below or trend weakening
+            if price < donch_low_val or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above middle BB (SMA) or trend weakens
-            if price > sma_val or adx_val < 20:  # Trend weakening
+            # Exit short on Donchian breakout above or trend weakening
+            if price > donch_high_val or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
