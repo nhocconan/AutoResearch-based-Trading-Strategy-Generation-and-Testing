@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1w trend filter and volume confirmation
-# Bollinger Band width < 20th percentile indicates low volatility (squeeze)
-# Breakout occurs when price closes outside Bollinger Bands after squeeze
-# 1w EMA50 provides higher timeframe trend bias to avoid counter-trend trades
-# Volume confirmation (>1.5x average) filters weak breakouts
+# Hypothesis: 12h Ichimoku Cloud with 1d ADX trend filter and volume confirmation
+# Ichimoku Cloud provides dynamic support/resistance and trend direction via Senkou Span A/B
+# Tenkan/Kijun cross signals momentum shifts
+# 1d ADX > 25 filters for trending markets only, avoiding whipsaws in ranges
+# Volume confirmation ensures breakouts have conviction
 # Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
-name = "6h_BollingerSqueeze_1wEMA50_Volume"
-timeframe = "6h"
+name = "12h_Ichimoku_1dADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,35 +23,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d ADX for trend strength filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate ADX components on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bollinger Bands (20, 2) on 6h
-    bb_period = 20
-    bb_std = 2
-    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = sma_bb + (std_bb * bb_std)
-    bb_lower = sma_bb - (std_bb * bb_std)
-    bb_width = bb_upper - bb_lower
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    # Bollinger Band width percentile (lookback 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=1).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50, raw=False
-    ).values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Squeeze condition: BB width < 20th percentile
-    squeeze = bb_width_percentile < 20
+    # Smooth TR, DM+ and DM- with Welles Wilder's smoothing (14-period)
+    def WilderSmooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+        return result
     
-    # Breakout conditions
-    breakout_up = close > bb_upper
-    breakout_down = close < bb_lower
+    atr = WilderSmooth(tr, 14)
+    dm_plus_smooth = WilderSmooth(dm_plus, 14)
+    dm_minus_smooth = WilderSmooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = WilderSmooth(dx, 14)  # 14-period ADX
+    
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Ichimoku Cloud on 12h
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_sen = (max_high_tenkan + min_low_tenkan) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_sen = (max_high_kijun + min_low_kijun) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods back
+    # Not used for signals to avoid look-ahead
+    
+    # Current cloud: Senkou A/B from 26 periods ago
+    senkou_a_shifted = np.roll(senkou_a, 26)
+    senkou_b_shifted = np.roll(senkou_b, 26)
+    # First 26 values are invalid due to roll
+    senkou_a_shifted[:26] = np.nan
+    senkou_b_shifted[:26] = np.nan
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_shifted, senkou_b_shifted)
+    cloud_bottom = np.minimum(senkou_a_shifted, senkou_b_shifted)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,41 +117,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 70  # Ensure enough data for all indicators
+    start_idx = max(60, 52 + 26)  # Ensure enough data for Ichimoku
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(sma_bb[i]) or 
-            np.isnan(std_bb[i]) or np.isnan(volume_ma[i]) or 
-            np.isnan(bb_width_percentile[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: squeeze breakout up + above 1w EMA50 + volume confirmation
-            if (squeeze[i-1] and breakout_up[i] and  # squeeze in previous bar, breakout now
-                close[i] > ema_50_1w_aligned[i] and 
+            # Long: Price above cloud + Tenkan > Kijun + ADX > 25 + volume confirmation
+            if (close[i] > cloud_top[i] and 
+                tenkan_sen[i] > kijun_sen[i] and 
+                adx_1d_aligned[i] > 25 and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: squeeze breakout down + below 1w EMA50 + volume confirmation
-            elif (squeeze[i-1] and breakout_down[i] and  # squeeze in previous bar, breakout now
-                  close[i] < ema_50_1w_aligned[i] and 
+            # Short: Price below cloud + Tenkan < Kijun + ADX > 25 + volume confirmation
+            elif (close[i] < cloud_bottom[i] and 
+                  tenkan_sen[i] < kijun_sen[i] and 
+                  adx_1d_aligned[i] > 25 and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price returns to middle Bollinger Band or breaks below 1w EMA50
-            if (close[i] <= sma_bb[i]) or (close[i] < ema_50_1w_aligned[i]):
+            # Long: exit if price falls below cloud base OR Tenkan < Kijun
+            if (close[i] < cloud_bottom[i]) or (tenkan_sen[i] < kijun_sen[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price returns to middle Bollinger Band or breaks above 1w EMA50
-            if (close[i] >= sma_bb[i]) or (close[i] > ema_50_1w_aligned[i]):
+            # Short: exit if price rises above cloud top OR Tenkan > Kijun
+            if (close[i] > cloud_top[i]) or (tenkan_sen[i] > kijun_sen[i]):
                 signals[i] = 0.0
                 position = 0
             else:
