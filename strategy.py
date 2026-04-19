@@ -3,13 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h trend (EMA21) and 1d momentum (ROC10) with volume confirmation
-# Uses 4h for trend direction, 1d for momentum strength, 1h for entry timing with volume filter
-# Designed to work in both bull (trend following) and bear (momentum reversals) markets
-# Target: 15-30 trades/year to minimize fee drag while capturing meaningful moves
-
-name = "1h_4hEMA_1dROC_VolumeFilter_V1"
-timeframe = "1h"
+name = "6h_1d_Williams_Fractal_Trend_Volume_V1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,34 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Get 1d data for momentum
+    # Get 1d data for Williams Fractal calculation
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA21 for trend
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # Calculate Williams Fractals on 1d high/low
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1d ROC10 for momentum
-    roc_period = 10
-    roc_1d = np.full_like(close_1d, np.nan)
-    for i in range(roc_period, len(close_1d)):
-        if close_1d[i - roc_period] != 0:
-            roc_1d[i] = ((close_1d[i] - close_1d[i - roc_period]) / close_1d[i - roc_period]) * 100
+    def calculate_williams_fractals(high_arr, low_arr):
+        n_days = len(high_arr)
+        bearish_fractal = np.zeros(n_days, dtype=bool)
+        bullish_fractal = np.zeros(n_days, dtype=bool)
+        
+        for i in range(2, n_days - 2):
+            # Bearish fractal: high[i] is highest among high[i-2], high[i-1], high[i], high[i+1], high[i+2]
+            if (high_arr[i] > high_arr[i-2] and high_arr[i] > high_arr[i-1] and 
+                high_arr[i] > high_arr[i+1] and high_arr[i] > high_arr[i+2]):
+                bearish_fractal[i] = True
+            
+            # Bullish fractal: low[i] is lowest among low[i-2], low[i-1], low[i], low[i+1], low[i+2]
+            if (low_arr[i] < low_arr[i-2] and low_arr[i] < low_arr[i-1] and 
+                low_arr[i] < low_arr[i+1] and low_arr[i] < low_arr[i+2]):
+                bullish_fractal[i] = True
+        
+        return bearish_fractal, bullish_fractal
     
-    roc_1d_aligned = align_htf_to_ltf(prices, df_1d, roc_1d)
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_1d, low_1d)
     
-    # Calculate 1h volume spike (volume > 1.5 * 20-period average)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Williams Fractals require 2 additional bars for confirmation (Williams rule)
+    # Align with 2-bar delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2)
     
-    # Session filter: 08-20 UTC (reduce noise outside active hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate volume spike indicator (volume > 1.8 * 30-period average)
+    volume_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,46 +59,40 @@ def generate_signals(prices):
     start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_21_4h_aligned[i]) or 
-            np.isnan(roc_1d_aligned[i]) or 
-            not in_session[i]):
+        # Skip if any required data is NaN
+        if np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # Entry conditions:
-        # Long: 4h uptrend (price > EMA21) + positive 1d momentum + volume spike
-        # Short: 4h downtrend (price < EMA21) + negative 1d momentum + volume spike
-        trend_up = close[i] > ema_21_4h_aligned[i]
-        trend_down = close[i] < ema_21_4h_aligned[i]
-        mom_up = roc_1d_aligned[i] > 0
-        mom_down = roc_1d_aligned[i] < 0
+        # Williams Fractal signals with volume confirmation
+        bullish_fractal_signal = bullish_fractal_aligned[i] > 0.5
+        bearish_fractal_signal = bearish_fractal_aligned[i] > 0.5
         vol_confirm = volume_spike[i]
         
         if position == 0:
-            # Long entry
-            if trend_up and mom_up and vol_confirm:
-                signals[i] = 0.20
+            # Long when bullish fractal confirmed + volume spike
+            if bullish_fractal_signal and vol_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short entry
-            elif trend_down and mom_down and vol_confirm:
-                signals[i] = -0.20
+            # Short when bearish fractal confirmed + volume spike
+            elif bearish_fractal_signal and vol_confirm:
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long exit: trend breaks down or momentum turns negative
-            if not trend_up or not mom_up:
+            # Long position: exit when bearish fractal appears (trend weakness)
+            if bearish_fractal_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short exit: trend breaks up or momentum turns positive
-            if not trend_down or not mom_down:
+            # Short position: exit when bullish fractal appears (trend weakness)
+            if bullish_fractal_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
