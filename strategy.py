@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
-# Uses 1d ADX to filter trend strength and 1d volume ratio for breakout validation.
-# Long when price breaks above upper band with bullish trend, short when breaks below lower band with bearish trend.
-# Designed for 4h timeframe to balance trade frequency and signal quality.
-name = "4h_Donchian20_Volume_ADX_Trend"
-timeframe = "4h"
+# Hypothesis: 6h strategy using 1d Ichimoku Cloud with Kumo twist + Tenkan-Kijun cross + volume confirmation.
+# Ichimoku Cloud acts as dynamic support/resistance. Kumo twist (Senkou A/B cross) signals trend change.
+# Tenkan-Kijun cross provides entry signals in direction of Kumo twist and price relative to cloud.
+# Volume confirms momentum. Works in bull/bear by adapting to cloud color and twist.
+# Target: 15-30 trades/year per symbol (45-120 total over 4 years).
+name = "6h_Ichimoku_KumoTwist_TK_Cross_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,133 +22,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX and volume average
+    # Get 1d data for Ichimoku
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate ADX on daily (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-                
-            tr[i] = max(high[i] - low[i], 
-                       abs(high[i] - close[i-1]), 
-                       abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        
-        atr[period] = np.mean(tr[1:period+1])
-        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        dx = np.zeros_like(close)
-        valid = (plus_di[period:] + minus_di[period:]) > 0
-        dx[period:] = np.where(valid, 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:]), 0)
-        
-        adx = np.zeros_like(close)
-        if len(dx) >= 2*period+1:
-            adx[2*period] = np.mean(dx[period:2*period+1])
-            for i in range(2*period+1, len(dx)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
+    displacement = 26  # Kumo cloud displacement
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Calculate 20-period average volume on daily
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
     
-    # Align 1d indicators to 4h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Calculate Donchian channels on 4h (20-period)
-    def calculate_donchian(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(high, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-(period-1):i+1])
-            lower[i] = np.min(low[i-(period-1):i+1])
-        return upper, lower
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
     
-    upper_channel, lower_channel = calculate_donchian(high, low, 20)
+    # Chikou Span (Lagging Span): not needed for this strategy
     
-    # Volume confirmation: current volume > 1.5x 20-period average volume on 4h
+    # Align Ichimoku components to 6h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # Kumo twist: Senkou A/B cross (trend change signal)
+    # We use the previous value to detect cross (avoiding look-ahead)
+    senkou_a_prev = senkou_span_a_aligned[:-1]
+    senkou_b_prev = senkou_span_b_aligned[:-1]
+    senkou_a_curr = senkou_span_a_aligned[1:]
+    senkou_b_curr = senkou_span_b_aligned[1:]
+    
+    # Bullish twist: Senkou A crosses above Senkou B
+    bullish_twist = np.zeros(n, dtype=bool)
+    bearish_twist = np.zeros(n, dtype=bool)
+    bullish_twist[1:] = (senkou_a_prev < senkou_b_prev) & (senkou_a_curr > senkou_b_curr)
+    bearish_twist[1:] = (senkou_a_prev > senkou_b_prev) & (senkou_a_curr < senkou_b_curr)
+    
+    # Kumo cloud color: Senkou A > Senkou B = bullish cloud
+    bullish_cloud = senkou_span_a_aligned > senkou_span_b_aligned
+    bearish_cloud = senkou_span_a_aligned < senkou_span_b_aligned
+    
+    # Tenkan-Kijun cross
+    tk_cross_up = np.zeros(n, dtype=bool)
+    tk_cross_down = np.zeros(n, dtype=bool)
+    tk_cross_up[1:] = (tenkan_sen_aligned[:-1] < kijun_sen_aligned[:-1]) & (tenkan_sen_aligned[1:] > kijun_sen_aligned[1:])
+    tk_cross_down[1:] = (tenkan_sen_aligned[:-1] > kijun_sen_aligned[:-1]) & (tenkan_sen_aligned[1:] < kijun_sen_aligned[1:])
+    
+    # Price relative to cloud
+    price_above_cloud = (close > senkou_span_a_aligned) & (close > senkou_span_b_aligned)
+    price_below_cloud = (close < senkou_span_a_aligned) & (close < senkou_span_b_aligned)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 1.8 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure Donchian and ADX are ready
+    start_idx = max(52 + displacement, 20)  # Ensure Ichimoku and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        upper = upper_channel[i]
-        lower = lower_channel[i]
-        adx_val = adx_1d_aligned[i]
-        vol_ma_1d = vol_ma_20_1d_aligned[i]
-        vol_ma_4h = vol_ma_20[i]
-        vol = volume[i]
-        
-        # Volume confirmation: current 4h volume > 1.5x 20-period average AND 
-        # current 1d volume > 1.5x 20-period average (strong volume confirmation)
-        volume_confirmed_4h = vol > 1.5 * vol_ma_4h
-        volume_confirmed_1d = vol_1d[i] > 1.5 * vol_ma_1d if not np.isnan(vol_1d[i]) else False
-        volume_confirmed = volume_confirmed_4h and volume_confirmed_1d
-        
-        # ADX trend strength filter
-        strong_trend = adx_val > 25
-        
+        # Entry conditions
         if position == 0:
-            # Enter long if price breaks above upper channel, strong trend, and volume confirmation
-            if price > upper and strong_trend and volume_confirmed:
+            # Long: bullish Kumo twist OR (bullish cloud AND Tenkan-Kijun cross up) with price above cloud and volume
+            if ((bullish_twist[i] or 
+                 (bullish_cloud[i] and tk_cross_up[i] and price_above_cloud[i])) and 
+                volume_confirmed[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price breaks below lower channel, strong trend, and volume confirmation
-            elif price < lower and strong_trend and volume_confirmed:
+            # Short: bearish Kumo twist OR (bearish cloud AND Tenkan-Kijun cross down) with price below cloud and volume
+            elif ((bearish_twist[i] or 
+                   (bearish_cloud[i] and tk_cross_down[i] and price_below_cloud[i])) and 
+                  volume_confirmed[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below lower channel or trend weakens
-            if price < lower or adx_val < 20:  # Trend weakening
+            # Exit long: bearish Kumo twist OR price closes below cloud OR Tenkan-Kijun cross down
+            if bearish_twist[i] or (close[i] < senkou_span_a_aligned[i] and close[i] < senkou_span_b_aligned[i]) or tk_cross_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above upper channel or trend weakens
-            if price > upper or adx_val < 20:  # Trend weakening
+            # Exit short: bullish Kumo twist OR price closes above cloud OR Tenkan-Kijun cross up
+            if bullish_twist[i] or (close[i] > senkou_span_a_aligned[i] and close[i] > senkou_span_b_aligned[i]) or tk_cross_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
