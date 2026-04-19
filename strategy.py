@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d trend filter (EMA34) + volume confirmation.
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# Long when Bull Power > 0, Bear Power < 0 (bullish divergence), price > 1d EMA34, volume > 1.5x daily average.
-# Short when Bull Power < 0, Bear Power > 0 (bearish divergence), price < 1d EMA34, volume > 1.5x daily average.
-# Exit when Elder Ray signals reverse or volume drops below average.
-# Uses Elder Ray for momentum, 1d EMA for trend filter, volume for confirmation.
-# Target: 12-37 trades/year per symbol.
-name = "6h_ElderRay_EMA34_Volume"
-timeframe = "6h"
+# Hypothesis: 12h Williams %R with daily volume confirmation and 1d ATR regime filter.
+# Long when Williams %R < -80 (oversold) AND volume > 1.5x daily average volume AND ATR(14) < ATR(50) (low volatility regime)
+# Short when Williams %R > -20 (overbought) AND volume > 1.5x daily average volume AND ATR(14) < ATR(50)
+# Exit when Williams %R crosses back above -50 for longs or below -50 for shorts
+# Williams %R identifies mean-reversion extremes, volume confirms institutional interest, ATR filter avoids choppy markets.
+# Target: 12-30 trades/year per symbol on 12h timeframe.
+name = "12h_WilliamsR_Volume_ATRRegime"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,65 +23,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d EMA34 for trend filter
+    # Get 1d Williams %R (14-period)
     df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low)
+    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(50).values  # Handle division by zero
+    
+    # Get 1d ATR for regime filter (14 and 50 periods)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     # Get 1d average volume for confirmation
     vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all 1d indicators to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Calculate 6-day EMA13 for Elder Ray (using 6h data)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 13)  # Ensure indicators are ready
+    start_idx = max(14, 50, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr14_aligned[i]) or 
+            np.isnan(atr50_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema34 = ema34_1d_aligned[i]
+        williams_r_val = williams_r_aligned[i]
+        atr14_val = atr14_aligned[i]
+        atr50_val = atr50_aligned[i]
         vol_ma = vol_ma_1d_aligned[i]
         vol = volume[i]
-        bp = bull_power[i]
-        br = bear_power[i]
         
-        # Volume confirmation
-        vol_confirmed = vol > 1.5 * vol_ma
+        # Regime filter: only trade in low volatility (ATR14 < ATR50)
+        vol_regime = atr14_val < atr50_val
         
         if position == 0:
-            # Long entry: bullish Elder Ray (BP>0, BR<0), price above 1d EMA34, volume spike
-            if bp > 0 and br < 0 and price > ema34 and vol_confirmed:
+            # Long entry: oversold + volume spike + low vol regime
+            if williams_r_val < -80 and vol > 1.5 * vol_ma and vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish Elder Ray (BP<0, BR>0), price below 1d EMA34, volume spike
-            elif bp < 0 and br > 0 and price < ema34 and vol_confirmed:
+            # Short entry: overbought + volume spike + low vol regime
+            elif williams_r_val > -20 and vol > 1.5 * vol_ma and vol_regime:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Elder Ray turns bearish or volume drops
-            if bp <= 0 or br >= 0 or not vol_confirmed:
+            # Long exit: Williams %R crosses above -50
+            if williams_r_val > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Elder Ray turns bullish or volume drops
-            if bp >= 0 or br <= 0 or not vol_confirmed:
+            # Short exit: Williams %R crosses below -50
+            if williams_r_val < -50:
                 signals[i] = 0.0
                 position = 0
             else:
