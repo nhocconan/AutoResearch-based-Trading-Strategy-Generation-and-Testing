@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h Volume and ADX filter.
-# Use 12h ADX > 25 to filter for trending markets, volume > 1.5x 20-period average for confirmation.
-# Long when price breaks above 4h Donchian(20) high, short when breaks below low.
-# Exit when price crosses the Donchian midline.
-# Designed to work in both bull and bear markets by filtering for strong trends.
-# Target: 20-40 trades/year per symbol to stay within frequency limits.
-name = "4h_Donchian_ADX_Volume"
-timeframe = "4h"
+# Hypothesis: Daily RSI + Weekly Trend Filter for 1d timeframe.
+# Use weekly EMA(34) to determine trend: price > EMA34 = bullish, price < EMA34 = bearish.
+# In bullish trend: long when RSI(14) crosses above 30, short when RSI crosses below 70.
+# In bearish trend: short when RSI crosses below 70, long when RSI crosses above 30.
+# Volume confirmation: volume > 1.2x 20-period average.
+# Target: 15-25 trades/year per symbol to stay within frequency limits.
+name = "1d_RSI_WeeklyEMA34_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,130 +23,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for ADX calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get weekly data for EMA34 trend
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate ADX (14-period)
-    def true_range(high, low, close_prev):
-        tr1 = high - low
-        tr2 = np.abs(high - close_prev)
-        tr3 = np.abs(low - close_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate weekly EMA(34)
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate directional movement
-    up_move = high_12h[1:] - high_12h[:-1]
-    down_move = low_12h[:-1] - low_12h[1:]
+    # Get daily data for RSI
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate daily RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr = np.zeros(len(close_12h))
-    tr[0] = high_12h[0] - low_12h[0]  # First TR
-    for i in range(1, len(close_12h)):
-        tr[i] = true_range(high_12h[i], low_12h[i], close_12h[i-1])
+    # Wilder's smoothing for RSI
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    for i in range(1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Wilder's smoothing (14-period)
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.sum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Smooth TR, +DM, -DM
-    atr_12h = wilders_smoothing(tr, 14)
-    plus_di_12h = wilders_smoothing(plus_dm, 14)
-    minus_di_12h = wilders_smoothing(minus_dm, 14)
+    # Align RSI to 1d timeframe (already aligned, but using for consistency)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Calculate DX and ADX
-    dx = np.zeros_like(close_12h)
-    dx_sum = plus_di_12h + minus_di_12h
-    dx = np.where(dx_sum != 0, 100 * np.abs(plus_di_12h - minus_di_12h) / dx_sum, 0)
-    adx_12h = wilders_smoothing(dx, 14)
-    
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Donchian channels (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    donch_high = rolling_max(high_4h, 20)
-    donch_low = rolling_min(low_4h, 20)
-    
-    # Align indicators to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
-    
-    # Get 4h average volume for confirmation
+    # Get 1d average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure ADX (14*2+6), Donchian (20), and volume MA are ready
+    start_idx = max(34, 20)  # Ensure EMA34 and RSI are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_aligned[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
+        ema34 = ema34_1w_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 1.2 * vol_ma
         
-        # Trend strength filter
-        strong_trend = adx_val > 25
+        # Trend determination
+        is_bullish = price > ema34
+        is_bearish = price < ema34
         
         if position == 0:
-            # Enter on Donchian breakout with volume and trend confirmation
-            if strong_trend and volume_confirmed:
-                if price > donch_high_val:
+            # Determine entry based on trend
+            if is_bullish and volume_confirmed:
+                # Bullish trend: long on RSI > 30, short on RSI < 70
+                if rsi_val > 30 and (i == start_idx or rsi_aligned[i-1] <= 30):
                     signals[i] = 0.25
                     position = 1
-                elif price < donch_low_val:
+                elif rsi_val < 70 and (i == start_idx or rsi_aligned[i-1] >= 70):
                     signals[i] = -0.25
                     position = -1
+            elif is_bearish and volume_confirmed:
+                # Bearish trend: short on RSI < 70, long on RSI > 30
+                if rsi_val < 70 and (i == start_idx or rsi_aligned[i-1] >= 70):
+                    signals[i] = -0.25
+                    position = -1
+                elif rsi_val > 30 and (i == start_idx or rsi_aligned[i-1] <= 30):
+                    signals[i] = 0.25
+                    position = 1
         
         elif position == 1:
-            # Long exit: price crosses Donchian midline
-            midline = (donch_high_val + donch_low_val) / 2
-            if price < midline:
+            # Long exit: RSI crosses below 50 or opposite extreme
+            if rsi_val < 50 and (i == start_idx or rsi_aligned[i-1] >= 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses Donchian midline
-            midline = (donch_high_val + donch_low_val) / 2
-            if price > midline:
+            # Short exit: RSI crosses above 50 or opposite extreme
+            if rsi_val > 50 and (i == start_idx or rsi_aligned[i-1] <= 50):
                 signals[i] = 0.0
                 position = 0
             else:
