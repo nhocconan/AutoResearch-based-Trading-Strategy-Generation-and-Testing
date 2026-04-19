@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_Pivot_R4S4_Breakout_Volume_Filter"
-timeframe = "6h"
+name = "4h_Donchian20_1dVolume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,82 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels from 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1d volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_surge_1d = volume_1d > (volume_ma_1d * 1.5)  # 1d volume surge
     
-    # Typical price for pivot calculation
-    typical_price = (high_12h + low_12h + close_12h) / 3
+    # Align 1d volume surge to 4h timeframe
+    volume_surge_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_surge_1d)
     
-    # Calculate pivot and support/resistance levels
-    pivot = typical_price
-    range_hl = high_12h - low_12h
+    # Donchian channels (20-period) on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels
-    R4 = close_12h + range_hl * 1.1 / 2
-    R3 = close_12h + range_hl * 1.1 / 4
-    R2 = close_12h + range_hl * 1.1 / 6
-    R1 = close_12h + range_hl * 1.1 / 12
-    S1 = close_12h - range_hl * 1.1 / 12
-    S2 = close_12h - range_hl * 1.1 / 6
-    S3 = close_12h - range_hl * 1.1 / 4
-    S4 = close_12h - range_hl * 1.1 / 2
-    
-    # Align levels to 6h timeframe
-    R4_6h = align_htf_to_ltf(prices, df_12h, R4)
-    R3_6h = align_htf_to_ltf(prices, df_12h, R3)
-    S3_6h = align_htf_to_ltf(prices, df_12h, S3)
-    S4_6h = align_htf_to_ltf(prices, df_12h, S4)
-    
-    # Volume spike filter: volume > 1.8 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.8)
+    # Trend filter: price above/below 50-period EMA
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data for volume MA
+    start_idx = 50  # Ensure enough data for EMA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(R4_6h[i]) or np.isnan(S4_6h[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(ema_50[i]) or np.isnan(volume_surge_1d_aligned[i]):
             signals[i] = 0.0
             continue
             
-        vol_confirm = volume_spike[i]
+        volume_surge = volume_surge_1d_aligned[i]
         
         if position == 0:
-            # Long breakout above R4 with volume spike
-            if close[i] > R4_6h[i] and vol_confirm:
+            # Long when price breaks above upper Donchian + volume surge + above EMA50
+            if close[i] > high_max[i] and volume_surge and close[i] > ema_50[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown below S4 with volume spike
-            elif close[i] < S4_6h[i] and vol_confirm:
+            # Short when price breaks below lower Donchian + volume surge + below EMA50
+            elif close[i] < low_min[i] and volume_surge and close[i] < ema_50[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price falls below R3 (take profit) or reverses below S4 (stop)
-            if close[i] < R3_6h[i]:
-                signals[i] = 0.0  # Take profit at R3
-                position = 0
-            elif close[i] < S4_6h[i]:
-                signals[i] = 0.0  # Stop loss at S4
+            # Long position: exit when price breaks below lower Donchian
+            if close[i] < low_min[i]:
+                signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price rises above S3 (take profit) or reverses above R4 (stop)
-            if close[i] > S3_6h[i]:
-                signals[i] = 0.0  # Take profit at S3
-                position = 0
-            elif close[i] > R4_6h[i]:
-                signals[i] = 0.0  # Stop loss at R4
+            # Short position: exit when price breaks above upper Donchian
+            if close[i] > high_max[i]:
+                signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
