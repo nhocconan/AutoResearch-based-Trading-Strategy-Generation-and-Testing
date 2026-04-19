@@ -3,17 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance on daily chart.
-# Price breaking these levels with volume confirmation indicates institutional interest.
-# Mean reversion to opposite pivot level provides defined exit. Works in both bull/bear
-# as pivots adapt to weekly price action. Target: 20-50 trades/year on daily timeframe.
-name = "1d_1w_Pivot_R1_S1_Breakout_Volume_v2"
-timeframe = "1d"
+name = "12h_1d_Pivot_R1_S1_Breakout_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,27 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Pivot points
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data for Pivot points
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate previous week's Pivot, R1, S1
-    prev_high = np.concatenate([[np.nan], high_1w[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1w[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1w[:-1]])
+    # Calculate previous day's Pivot, R1, S1
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
     
     pivot = (prev_high + prev_low + prev_close) / 3
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align weekly pivot levels to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align daily pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,7 +55,7 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         
         # Volume filter
-        volume_ok = vol > 1.8 * vol_ma
+        volume_ok = vol > 1.3 * vol_ma
         
         if position == 0:
             # Long: price breaks above R1 with volume
