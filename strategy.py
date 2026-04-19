@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian channel breakout with weekly trend filter and volume confirmation
-# Uses weekly Donchian channels to establish long-term trend direction
-# Enters on daily breakouts in the direction of the weekly trend with volume confirmation
-# Weekly trend filter reduces false breakouts in choppy markets
-# Target: 10-25 trades/year to minimize fee drag while capturing major moves
-name = "1d_DonchianBreakout_WeeklyTrend_Volume_v1"
-timeframe = "1d"
+# Hypothesis: 4h volume-weighted RSI with 1d trend filter
+# Uses volume-weighted RSI to identify overextended moves with volume confirmation
+# Trades mean reversion when VW-RSI < 30 (oversold) or > 70 (overbought) in direction of 1d trend
+# Volume-weighted RSI gives more weight to price moves on high volume, filtering weak moves
+# Target: 20-40 trades/year to avoid fee drag
+name = "4h_VolWeightedRSI_1dTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,73 +22,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (ONCE before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data for multi-timeframe analysis (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly Donchian channels for trend determination (20-period)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    weekly_high = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
-    weekly_low = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
-    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low)
+    # 1d EMA100 for trend filter (strong trend filter)
+    close_1d = df_1d['close'].values
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Daily Donchian channels for entry signals (20-period)
-    daily_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    daily_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume-weighted RSI (14-period)
+    # Calculate price changes
+    delta = np.diff(close, prepend=close[0])
     
-    # Daily ATR for position sizing and volatility filter
-    tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
-    tr[0] = high[0] - low[0]
-    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Separate gains and losses
+    gains = np.where(delta > 0, delta, 0)
+    losses = np.where(delta < 0, -delta, 0)
     
-    # Volume filter: current volume > 1.3x average volume (20-period)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume-weighted gains and losses
+    vol_gains = gains * volume
+    vol_losses = losses * volume
+    
+    # Calculate average volume-weighted gains and losses
+    avg_vol_gain = pd.Series(vol_gains).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_vol_loss = pd.Series(vol_losses).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate VW-RSI
+    rs = avg_vol_gain / (avg_vol_loss + 1e-10)
+    vw_rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = 30  # Ensure enough data for VW-RSI
     
     for i in range(start_idx, n):
-        if np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or \
-           np.isnan(daily_high[i]) or np.isnan(daily_low[i]) or np.isnan(atr_daily[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema100_1d_aligned[i]) or np.isnan(vw_rsi[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_daily[i]
         
-        # Volume confirmation
-        volume_filter = volume[i] > 1.3 * volume_ma[i]
-        
-        # Weekly trend determination
-        # Uptrend: price above weekly midpoint, Downtrend: price below weekly midpoint
-        weekly_mid = (weekly_high_aligned[i] + weekly_low_aligned[i]) / 2
-        weekly_uptrend = price > weekly_mid
-        weekly_downtrend = price < weekly_mid
+        # Volume filter: current volume > 1.3x average volume (20-period)
+        if i >= 20:
+            avg_volume = np.mean(volume[i-20:i])
+        else:
+            avg_volume = volume[i]
+        volume_filter = volume[i] > 1.3 * avg_volume
         
         if position == 0:
-            # Long: Daily breakout above upper band + weekly uptrend + volume
-            if price > daily_high[i] and weekly_uptrend and volume_filter:
+            # Long: VW-RSI oversold (<30) + volume + 1d uptrend
+            if vw_rsi[i] < 30 and volume_filter and price > ema100_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Daily breakout below lower band + weekly downtrend + volume
-            elif price < daily_low[i] and weekly_downtrend and volume_filter:
+            # Short: VW-RSI overbought (>70) + volume + 1d downtrend
+            elif vw_rsi[i] > 70 and volume_filter and price < ema100_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Daily breakdown below lower band OR weekly trend reversal
-            if price < daily_low[i] or not weekly_uptrend:
+            # Exit: VW-RSI overbought (>70) or trend change
+            if vw_rsi[i] > 70 or price < ema100_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Daily breakout above upper band OR weekly trend reversal
-            if price > daily_high[i] or not weekly_downtrend:
+            # Exit: VW-RSI oversold (<30) or trend change
+            if vw_rsi[i] < 30 or price > ema100_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
