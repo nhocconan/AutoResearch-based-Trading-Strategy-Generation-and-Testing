@@ -1,20 +1,15 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-Hypothesis: 4h-based breakout strategy using 12h pivot points (R1/S1) with volume confirmation and ADX trend filter.
-- Uses 12h pivot levels as dynamic support/resistance (more stable than daily/weekly)
-- Enters long on break above R1 with volume > 1.5x 20-period average and ADX > 25 (trending)
-- Enters short on break below S1 with same conditions
-- Exits when price returns to 12h pivot level
-- Designed to work in both bull (breakouts) and bear (breakdowns) markets
-- Target: 20-40 trades/year to avoid fee drag while capturing strong moves
-"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Pivot_R1S1_Breakout_Volume_ADX"
-timeframe = "4h"
+# Hypothesis: 1h timeframe with 4h/1d trend filter and volume confirmation.
+# Uses 4h Supertrend for trend direction, 1d high/low for breakout levels, and volume spike for confirmation.
+# Designed to work in both bull and bear markets by following higher timeframe trends.
+# Target: 15-37 trades/year to avoid fee drag.
+
+name = "1h_4h_1d_Supertrend_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,104 +22,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for pivot points (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 4h data for Supertrend (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h pivot points (standard formula)
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    r1_12h = 2 * pivot_12h - low_12h
-    s1_12h = 2 * pivot_12h - high_12h
+    # Calculate ATR for Supertrend (10-period)
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[0]), np.abs(low_4h[0] - close_4h[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align 12h pivot levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_4h = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_4h = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Calculate Supertrend
+    hl2 = (high_4h + low_4h) / 2
+    upper = hl2 + (3 * atr)
+    lower = hl2 - (3 * atr)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    supertrend = np.zeros_like(close_4h)
+    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
     
-    # ADX trend filter (14-period)
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    supertrend[0] = upper[0]
+    direction[0] = 1
     
-    # Calculate Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
+    for i in range(1, len(close_4h)):
+        if close_4h[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close_4h[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = max(lower[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper[i], supertrend[i-1])
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Align Supertrend and direction to 1h timeframe
+    supertrend_1h = align_htf_to_ltf(prices, df_4h, supertrend)
+    direction_1h = align_htf_to_ltf(prices, df_4h, direction)
     
-    # Smoothed values (using Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        alpha = 1.0 / period
-        result = np.full_like(data, np.nan)
-        result[period-1] = np.nanmean(data[:period])  # Simple average for first value
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
+    # Get 1d data for breakout levels (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    tr14 = wilders_smoothing(tr, 14)
-    plus_dm14 = wilders_smoothing(plus_dm, 14)
-    minus_dm14 = wilders_smoothing(minus_dm, 14)
+    # Use previous day's high/low for breakout levels
+    prev_high_1d = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
     
-    # Avoid division by zero
-    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
-    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
-    dx = np.where((plus_di14 + minus_di14) != 0, 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilders_smoothing(dx, 14)
+    # Align 1d levels to 1h timeframe
+    prev_high_1h = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    prev_low_1h = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    
+    # Volume confirmation: current volume > 2.0x 24-period average
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Enough warmup for indicators
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
-           np.isnan(vol_ma_20[i]) or np.isnan(adx[i]):
+        if np.isnan(supertrend_1h[i]) or np.isnan(direction_1h[i]) or \
+           np.isnan(prev_high_1h[i]) or np.isnan(prev_low_1h[i]) or \
+           np.isnan(vol_ma_24[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        trend_strength = adx[i]
+        vol_ma = vol_ma_24[i]
         
-        volume_confirmed = vol > 1.5 * vol_ma
-        trending = trend_strength > 25  # ADX > 25 indicates trending market
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above R1 with volume and trend
-            if price > r1_4h[i] and volume_confirmed and trending:
-                signals[i] = 0.25
+            # Long: Price breaks above previous day's high with volume and 4h uptrend
+            if price > prev_high_1h[i] and volume_confirmed and direction_1h[i] == 1:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S1 with volume and trend
-            elif price < s1_4h[i] and volume_confirmed and trending:
-                signals[i] = -0.25
+            # Short: Price breaks below previous day's low with volume and 4h downtrend
+            elif price < prev_low_1h[i] and volume_confirmed and direction_1h[i] == -1:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns to pivot level (mean reversion within trend)
-            if price < pivot_4h[i]:
+            # Exit: Price closes below 4h Supertrend
+            if price < supertrend_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: Price returns to pivot level
-            if price > pivot_4h[i]:
+            # Exit: Price closes above 4h Supertrend
+            if price > supertrend_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
