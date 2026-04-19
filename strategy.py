@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_1d_VolumeSpike_V1"
-timeframe = "4h"
+name = "1d_1w_CCI_Momentum_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,77 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get weekly data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 20-period CCI on weekly
+    # Typical Price
+    tp_1w = (high_1w + low_1w + close_1w) / 3.0
     
-    # Calculate 1d ATR ratio (current / 20-period average) for volatility expansion
-    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_1d / atr_ma_20
+    # 20-period SMA of TP
+    tp_sma_20 = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Align ATR ratio to 4h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Mean Deviation
+    tp_dev = np.abs(tp_1w - tp_sma_20)
+    tp_md_20 = pd.Series(tp_dev).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # CCI
+    cci_1w = (tp_1w - tp_sma_20) / (0.015 * tp_md_20)
     
-    # Volume filter: current volume > 2.0 x 20-period average
+    # Align CCI to daily
+    cci_1w_aligned = align_htf_to_ltf(prices, df_1w, cci_1w)
+    
+    # Daily 50-period EMA for trend filter
+    close_s = pd.Series(close)
+    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(100, 50)
     
     for i in range(start_idx, n):
-        if np.isnan(atr_ratio_aligned[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or \
-           np.isnan(vol_ma_20[i]):
+        if np.isnan(cci_1w_aligned[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr_ratio_val = atr_ratio_aligned[i]
-        
-        # Volatility filter: ATR ratio > 1.5 (volatility expansion)
-        vol_expansion = atr_ratio_val > 1.5
+        cci = cci_1w_aligned[i]
         
         # Volume filter
-        volume_ok = vol > 2.0 * vol_ma
+        volume_ok = vol > 1.5 * vol_ma
+        
+        # Trend filter
+        above_ema = price > ema_50[i]
+        below_ema = price < ema_50[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band with volume and volatility expansion
-            if price > high_roll[i] and volume_ok and vol_expansion:
+            # Long: CCI > 100 (strong momentum) + above EMA + volume
+            if cci > 100 and above_ema and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band with volume and volatility expansion
-            elif price < low_roll[i] and volume_ok and vol_expansion:
+            # Short: CCI < -100 (strong bearish momentum) + below EMA + volume
+            elif cci < -100 and below_ema and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to middle of Donchian channel or volatility contracts
-            mid = (high_roll[i] + low_roll[i]) / 2
-            if price < mid or atr_ratio_val < 1.2:
+            # Exit: CCI drops below 0 or price crosses below EMA
+            if cci < 0 or not above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to middle of Donchian channel or volatility contracts
-            mid = (high_roll[i] + low_roll[i]) / 2
-            if price > mid or atr_ratio_val < 1.2:
+            # Exit: CCI rises above 0 or price crosses above EMA
+            if cci > 0 or not below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
