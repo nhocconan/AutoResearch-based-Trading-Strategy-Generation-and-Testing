@@ -1,21 +1,15 @@
-# 6h_1d_WeeklyPivot_R1S1_Breakout_Volume
-# Hypothesis: Weekly pivot points (calculated from weekly OHLC) provide strong institutional support/resistance.
-# Breakouts above weekly R1 or below weekly S1 with volume confirmation capture institutional flow.
-# Works in both bull and bear markets as it follows smart money.
-# Targets 50-150 total trades over 4 years (12-37/year) with size 0.25.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WeeklyPivot_R1S1_Breakout_Volume"
-timeframe = "6h"
+name = "1d_WeeklyPivot_R1S1_Breakout_Volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,41 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for weekly pivot (once before loop)
-    df_w = get_htf_data(prices, '1w')
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Get weekly data for pivot calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
-    r2_w = pivot_w + (high_w - low_w)
-    s2_w = pivot_w - (high_w - low_w)
-    r3_w = high_w + 2 * (pivot_w - low_w)
-    s3_w = low_w - 2 * (high_w - pivot_w)
+    # Calculate weekly pivot points using prior week's data
+    # We need previous week's data, not current week
+    high_prev = np.roll(high_1w, 1)
+    low_prev = np.roll(low_1w, 1)
+    close_prev = np.roll(close_1w, 1)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_w, pivot_w)
-    r1_6h = align_htf_to_ltf(prices, df_w, r1_w)
-    s1_6h = align_htf_to_ltf(prices, df_w, s1_w)
-    r2_6h = align_htf_to_ltf(prices, df_w, r2_w)
-    s2_6h = align_htf_to_ltf(prices, df_w, s2_w)
-    r3_6h = align_htf_to_ltf(prices, df_w, r3_w)
-    s3_6h = align_htf_to_ltf(prices, df_w, s3_w)
+    # First element will be invalid due to roll, we'll handle with isnan check
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    r1 = 2 * pivot - low_prev
+    s1 = 2 * pivot - high_prev
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Align weekly pivot levels to daily timeframe
+    pivot_d = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_d = align_htf_to_ltf(prices, df_1w, r1)
+    s1_d = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 21  # Need 20 for volume MA + 1 for weekly data
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
-           np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or \
+        if np.isnan(pivot_d[i]) or np.isnan(r1_d[i]) or np.isnan(s1_d[i]) or \
            np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
@@ -70,17 +61,17 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R1 with volume
-            if price > r1_6h[i] and volume_confirmed:
+            if price > r1_d[i] and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 with volume
-            elif price < s1_6h[i] and volume_confirmed:
+            elif price < s1_d[i] and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below pivot
-            if price < pivot_6h[i]:
+            if price < pivot_d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,7 +79,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: Price returns above pivot
-            if price > pivot_6h[i]:
+            if price > pivot_d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
