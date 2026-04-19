@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_WeeklyPivot_R1S1_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "6h_1d_WeeklyPivot_R1S1_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,16 +34,16 @@ def generate_signals(prices):
     r1 = 2 * pivot - low_5d
     s1 = 2 * pivot - high_5d
     
-    # Align weekly pivot levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume confirmation: current volume > 1.8x 30-period average
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
-    # Trend filter: EMA(50) on 4h close - only trade in trend direction
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Trend filter: EMA(34) on 6h close - only trade in trend direction
+    ema_34 = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,8 +51,8 @@ def generate_signals(prices):
     start_idx = 30
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
-           np.isnan(vol_ma_30[i]) or np.isnan(ema_50[i]):
+        if np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
+           np.isnan(vol_ma_30[i]) or np.isnan(ema_34[i]):
             signals[i] = 0.0
             continue
         
@@ -61,30 +61,30 @@ def generate_signals(prices):
         vol_ma = vol_ma_30[i]
         
         volume_confirmed = vol > 1.8 * vol_ma
-        price_above_ema = price > ema_50[i]
-        price_below_ema = price < ema_50[i]
+        price_above_ema = price > ema_34[i]
+        price_below_ema = price < ema_34[i]
         
         if position == 0:
-            # Long: Price breaks above R1 with volume and above EMA50
-            if price > r1_4h[i] and volume_confirmed and price_above_ema:
+            # Long: Price breaks above R1 with volume and above EMA34
+            if price > r1_6h[i] and volume_confirmed and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume and below EMA50
-            elif price < s1_4h[i] and volume_confirmed and price_below_ema:
+            # Short: Price breaks below S1 with volume and below EMA34
+            elif price < s1_6h[i] and volume_confirmed and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below pivot OR breaks below EMA50 (trend change)
-            if price < pivot_4h[i] or price < ema_50[i]:
+            # Exit: Price returns below pivot OR breaks below EMA34 (trend change)
+            if price < pivot_6h[i] or price < ema_34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above pivot OR breaks above EMA50 (trend change)
-            if price > pivot_4h[i] or price > ema_50[i]:
+            # Exit: Price returns above pivot OR breaks above EMA34 (trend change)
+            if price > pivot_6h[i] or price > ema_34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
