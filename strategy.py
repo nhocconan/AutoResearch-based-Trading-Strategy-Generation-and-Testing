@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h William's %R with 1d ADX trend filter and volume confirmation.
-# William's %R identifies overbought/oversold conditions (below -80 for long, above -20 for short).
-# 1d ADX > 25 ensures we only trade in strong trends to avoid whipsaws in ranging markets.
-# Volume confirmation (current volume > 1.5x 20-period average) validates the momentum.
-# Works in bull/bear markets by filtering counter-trend signals and focusing on strong momentum.
-# Target: 15-30 trades/year per symbol (60-120 total over 4 years).
-name = "6h_WilliamsR_ADX25_Volume_Filter"
-timeframe = "6h"
+# Hypothesis: 12h Williams %R (14) + 1d ADX filter for trend strength + volume confirmation.
+# Williams %R identifies overbought/oversold conditions (< -80 for long, > -20 for short).
+# ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranging markets.
+# Volume confirmation (current > 1.5x 20-period average) validates breakout strength.
+# This combination should work in both bull and bear markets by capturing trend
+# continuations from extreme levels with proper filtering.
+name = "12h_WilliamsR_ADX25_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -74,32 +74,12 @@ def generate_signals(prices):
         return adx
     
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    
-    # Align 1d ADX to 6h
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # William's %R on 6h (14-period)
-    def calculate_williams_r(high, low, close, period=14):
-        highest_high = np.zeros_like(high)
-        lowest_low = np.zeros_like(low)
-        williams_r = np.zeros_like(close)
-        
-        for i in range(len(high)):
-            if i < period:
-                highest_high[i] = np.nan
-                lowest_low[i] = np.nan
-                williams_r[i] = np.nan
-            else:
-                highest_high[i] = np.max(high[i-period+1:i+1])
-                lowest_low[i] = np.min(low[i-period+1:i+1])
-                if highest_high[i] == lowest_low[i]:
-                    williams_r[i] = -50  # Avoid division by zero
-                else:
-                    williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
-        
-        return williams_r
-    
-    williams_r = calculate_williams_r(high, low, close, 14)
+    # Calculate Williams %R on 12h data (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -107,11 +87,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure Williams %R, ADX, and volume MA are ready
+    start_idx = max(14, 20, 28)  # Ensure Williams %R, volume MA, and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -127,26 +108,26 @@ def generate_signals(prices):
         strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long when William's %R is oversold (< -80), strong trend, and volume confirmation
+            # Enter long when Williams %R < -80 (oversold) in strong trend with volume
             if wr < -80 and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short when William's %R is overbought (> -20), strong trend, and volume confirmation
+            # Enter short when Williams %R > -20 (overbought) in strong trend with volume
             elif wr > -20 and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when William's %R reaches overbought (> -20) or trend weakens
-            if wr > -20 or adx_val < 20:  # Overbought or weakening trend
+            # Exit long when Williams %R > -50 (recovery from oversold) or trend weakens
+            if wr > -50 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when William's %R reaches oversold (< -80) or trend weakens
-            if wr < -80 or adx_val < 20:  # Oversold or weakening trend
+            # Exit short when Williams %R < -50 (decline from overbought) or trend weakens
+            if wr < -50 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
