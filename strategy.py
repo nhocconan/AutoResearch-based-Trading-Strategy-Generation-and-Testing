@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v2"
+name = "4h_1d_Choppiness_Breakout_With_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,77 +23,71 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for Camarilla width
+    # Calculate 1d Choppiness Index (14-day)
     tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate Camarilla levels using previous day's data
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    hh = np.maximum.accumulate(high_1d)
+    ll = np.minimum.accumulate(low_1d)
+    hh_ll = np.concatenate([[np.nan], hh[:-1] - ll[:-1]])
     
-    camarilla_H4 = prev_close + 1.1/2 * (prev_high - prev_low)
-    camarilla_L4 = prev_close - 1.1/2 * (prev_high - prev_low)
+    chop = 100 * np.log10(atr14 / hh_ll) / np.log10(14)
+    chop[0:14] = np.nan
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    # Align Choppiness to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # 4h trend filter: EMA(34) slope
-    close_s = pd.Series(close)
-    ema_34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_slope = ema_34 - np.roll(ema_34, 1)
-    ema_34_slope[0] = 0
+    # Calculate Donchian channel (20-period) on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: current volume > 1.8x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34)
+    start_idx = max(100, 30)
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or \
-           np.isnan(ema_34_slope[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(chop_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(vol_ma_30[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_30[i]
         
         # Volume filter
-        volume_ok = vol > 1.5 * vol_ma
+        volume_ok = vol > 1.8 * vol_ma
         
-        # Trend filter: bullish when EMA slope > 0
-        bullish_trend = ema_34_slope[i] > 0
-        bearish_trend = ema_34_slope[i] < 0
+        # Choppiness filter: trending when CHOP < 38.2
+        trending = chop_aligned[i] < 38.2
         
         if position == 0:
-            # Long: price breaks above H4 with volume and bullish trend
-            if price > camarilla_H4_aligned[i] and volume_ok and bullish_trend:
+            # Long: price breaks above Donchian high in trending market with volume
+            if price > high_max[i] and trending and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below L4 with volume and bearish trend
-            elif price < camarilla_L4_aligned[i] and volume_ok and bearish_trend:
+            # Short: price breaks below Donchian low in trending market with volume
+            elif price < low_min[i] and trending and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below H4 or trend turns bearish
-            if price < camarilla_H4_aligned[i] or not bullish_trend:
+            # Exit: price falls below Donchian low or market becomes choppy
+            if price < low_min[i] or chop_aligned[i] >= 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above L4 or trend turns bullish
-            if price > camarilla_L4_aligned[i] or not bearish_trend:
+            # Exit: price rises above Donchian high or market becomes choppy
+            if price > high_max[i] or chop_aligned[i] >= 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
