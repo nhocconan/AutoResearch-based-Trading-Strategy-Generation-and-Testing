@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with 12-hour volume confirmation and ATR-based volatility filter.
-# Long when price breaks above 4h Donchian upper band (20-period) with 12h volume > 1.8x average and price > 12h EMA50 (uptrend).
-# Short when price breaks below 4h Donchian lower band (20-period) with 12h volume > 1.8x average and price < 12h EMA50 (downtrend).
-# Exit when price returns to the 4h Donchian middle band or reverses to opposite band.
-# Designed for 20-40 trades/year per symbol with clear trend-following logic and volatility filtering to reduce false breakouts.
-
-name = "4h_Donchian20_Breakout_Volume_EMA50Filter"
-timeframe = "4h"
+# Hypothesis: 6h Bollinger Band breakout with 1-week ADX trend filter and volume confirmation.
+# Long when: price closes above BB upper band, ADX(1w) > 25 (trending), volume > 1.5x 20-period average
+# Short when: price closes below BB lower band, ADX(1w) > 25 (trending), volume > 1.5x 20-period average
+# Exit when price returns to the 20-period SMA (middle band) or reverses to opposite band.
+# Designed for ~20-30 trades/year per symbol. Works in both bull and bear markets by only taking trades in strong trends (ADX > 25).
+name = "6h_Bollinger_ADX_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,23 +22,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for volume confirmation and EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
-    close_12h = df_12h['close'].values
+    # 1-week data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h Donchian channel (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (high_max_20 + low_min_20) / 2
+    # Calculate ADX on weekly data
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # 12h volume average (20-period) for confirmation
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period]) 
+        # Subsequent values
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr_period = 14
+    atr = wilders_smoothing(tr, atr_period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
+    
+    # Directional Indicators
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, atr_period)
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Bollinger Bands on 6h data (20-period, 2 std dev)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    
+    # Volume average (20-period) for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,42 +88,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
-            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(sma_20[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        adx_val = adx_aligned[i]
         vol = volume[i]
-        vol_ma = vol_ma_20_12h_aligned[i]
-        
-        # Get current levels
-        upper_band = high_max_20[i]
-        lower_band = low_min_20[i]
-        middle_band = donchian_middle[i]
-        ema_50 = ema_50_12h_aligned[i]
+        vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long breakout: price > upper band with volume confirmation and uptrend
-            if price > upper_band and vol > 1.8 * vol_ma and price > ema_50:
+            # Long breakout: price closes above upper BB with ADX > 25 and volume confirmation
+            if price > bb_upper[i] and adx_val > 25 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price < lower band with volume confirmation and downtrend
-            elif price < lower_band and vol > 1.8 * vol_ma and price < ema_50:
+            # Short breakdown: price closes below lower BB with ADX > 25 and volume confirmation
+            elif price < bb_lower[i] and adx_val > 25 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle band or breaks below lower band (reversal)
-            if price <= middle_band or price < lower_band:
+            # Long exit: price returns to middle band (SMA) or breaks below lower band
+            if price <= sma_20[i] or price < bb_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle band or breaks above upper band (reversal)
-            if price >= middle_band or price > upper_band:
+            # Short exit: price returns to middle band (SMA) or breaks above upper band
+            if price >= sma_20[i] or price > bb_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
