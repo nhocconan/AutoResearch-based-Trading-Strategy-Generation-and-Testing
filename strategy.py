@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly volume confirmation and volatility regime filter.
-# Long when price breaks above 20-day Donchian high AND weekly volume > 1.5x weekly average volume AND weekly ATR(7) < ATR(21) (low volatility regime)
-# Short when price breaks below 20-day Donchian low AND weekly volume > 1.5x weekly average volume AND weekly ATR(7) < ATR(21)
+# Hypothesis: 4h Donchian breakout with daily volume confirmation and 1d ATR filter.
+# Long when price breaks above 20-period Donchian high AND volume > 1.5x daily average volume AND ATR(14) < ATR(50) (low volatility regime)
+# Short when price breaks below 20-period Donchian low AND volume > 1.5x daily average volume AND ATR(14) < ATR(50)
 # Exit when price crosses back through the Donchian midpoint
-# Uses Donchian for trend following structure, weekly volume for confirmation, weekly ATR regime filter to avoid chop.
-# Target: 10-25 trades/year per symbol.
-name = "1d_Donchian_WeeklyVolume_VolatilityRegime"
-timeframe = "1d"
+# Uses Donchian for trend following structure, volume for confirmation, ATR regime filter to avoid chop.
+# Target: 20-30 trades/year per symbol.
+name = "4h_Donchian_Volume_ATRRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for regime filter and volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate True Range components for weekly ATR
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
+    # Get 1d ATR for regime filter (use 14 and 50 periods)
+    df_1d = get_htf_data(prices, '1d')
+    # Calculate True Range components
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr21 = pd.Series(tr).rolling(window=21, min_periods=21).mean().values
-    # Align ATR arrays to daily timeframe
-    atr7_aligned = align_htf_to_ltf(prices, df_1w, atr7)
-    atr21_aligned = align_htf_to_ltf(prices, df_1w, atr21)
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Align ATR arrays to 4h timeframe
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
     
-    # Get weekly average volume for confirmation
-    vol_ma_1w = pd.Series(df_1w['volume']).rolling(window=10, min_periods=10).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # Get 1d average volume for confirmation
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate daily Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_mid = (high_roll + low_roll) / 2
@@ -49,27 +48,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 21)  # Ensure indicators are ready
+    start_idx = max(20, 50)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr7_aligned[i]) or np.isnan(atr21_aligned[i]) or 
-            np.isnan(vol_ma_1w_aligned[i]) or np.isnan(high_roll[i]) or 
+        if (np.isnan(atr14_aligned[i]) or np.isnan(atr50_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(high_roll[i]) or 
             np.isnan(low_roll[i]) or np.isnan(donchian_mid[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr7_val = atr7_aligned[i]
-        atr21_val = atr21_aligned[i]
-        vol_ma = vol_ma_1w_aligned[i]
+        atr14_val = atr14_aligned[i]
+        atr50_val = atr50_aligned[i]
+        vol_ma = vol_ma_1d_aligned[i]
         vol = volume[i]
         upper = high_roll[i]
         lower = low_roll[i]
         mid = donchian_mid[i]
         
-        # Regime filter: only trade in low volatility (weekly ATR7 < ATR21)
-        vol_regime = atr7_val < atr21_val
+        # Regime filter: only trade in low volatility (ATR14 < ATR50)
+        vol_regime = atr14_val < atr50_val
         
         if position == 0:
             # Long entry: break above upper band + volume spike + low vol regime
