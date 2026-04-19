@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1S1_Breakout_Volume_ADX_Trend"
-timeframe = "12h"
+name = "4h_1d_KAMA_RSI_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation (once before loop)
+    # Get 1d data for KAMA and RSI (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + range_1d * 1.1 / 12.0
-    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    # Calculate KAMA (adaptive moving average) on 1d
+    # ER = Efficiency Ratio: |close - close_prev| / sum(|change|) over period
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    direction = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = pd.Series(change).rolling(window=10, min_periods=10).sum().values
+    direction_sum = pd.Series(direction).rolling(window=10, min_periods=10).sum().values
+    er = np.where(volatility > 0, direction_sum / volatility, 0)
+    # Smoothing constants: fast = 2/(2+1), slow = 2/(30+1)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Align Camarilla levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Calculate RSI (14) on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 12h ADX for trend strength (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Align KAMA and RSI to 4h timeframe
+    kama_4h = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi)
     
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    di_plus = 100 * dm_plus14 / tr14
-    di_minus = 100 * dm_minus14 / tr14
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or \
-           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(kama_4h[i]) or np.isnan(rsi_4h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx[i]
-        pivot = pivot_12h[i]
-        r1 = r1_12h[i]
-        s1 = s1_12h[i]
+        kama_val = kama_4h[i]
+        rsi_val = rsi_4h[i]
         
-        volume_confirmed = vol > 2.0 * vol_ma
-        trending = adx_val > 25  # Strong trend filter
+        volume_confirmed = vol > 1.5 * vol_ma
+        kama_trend = price > kama_val  # Price above KAMA = uptrend
         
         if position == 0:
-            # Long: Price breaks above R1 + volume + trending
-            if price > r1 and volume_confirmed and trending:
+            # Long: Price above KAMA + RSI not overbought + volume confirmation
+            if kama_trend and rsi_val < 70 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume + trending
-            elif price < s1 and volume_confirmed and trending:
+            # Short: Price below KAMA + RSI not oversold + volume confirmation
+            elif not kama_trend and rsi_val > 30 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below pivot
-            if price < pivot:
+            # Exit: Price crosses below KAMA
+            if price < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above pivot
-            if price > pivot:
+            # Exit: Price crosses above KAMA
+            if price > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
