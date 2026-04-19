@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Donchian20_RangeBreakout_v1"
-timeframe = "6h"
+name = "1h_4h1d_Pivot_Breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,84 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and ATR
+    # Get 4h and 1d data for multi-timeframe analysis
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d Donchian channels (20-period)
+    # 4h ATR for volatility filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    tr_4h = np.maximum(high_4h - low_4h, np.absolute(high_4h - np.roll(close_4h, 1)), np.absolute(low_4h - np.roll(close_4h, 1)))
+    tr_4h[0] = high_4h[0] - low_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    
+    # 1d pivot levels (daily R1/S1) for structure
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    close_1d = df_1d['close'].values
+    prev_high_1d = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
+    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    r1_1d = 2 * pivot_1d - prev_low_1d
+    s1_1d = 2 * pivot_1d - prev_high_1d
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 1d ATR for volatility filter
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 1h volume filter: current volume > 1.5x 24-period average (24h)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # 1d ADX for trend strength filter (avoid chop)
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = minus_dm[0] = 0
-    tr_1d_smooth = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_1d_smooth
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_1d_smooth
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14) + 1  # Ensure enough data for indicators
+    start_idx = max(30, 24)  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
-           np.isnan(atr_1d_aligned[i]) or np.isnan(adx_aligned[i]):
+        # Skip if outside trading session (08-20 UTC)
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            continue
+            
+        if np.isnan(atr_4h_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or \
+           np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or \
+           np.isnan(vol_ma_24[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
+        vol_ma = vol_ma_24[i]
         
-        # Volatility filter: avoid extremely low volatility (chop)
-        vol_filter = atr_1d_aligned[i] > 0.01 * price  # ATR > 1% of price
-        
-        # Trend strength filter: avoid choppy markets
-        trend_filter = adx_aligned[i] > 20  # ADX > 20 indicates trending
+        # Volume filter
+        volume_ok = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high + volatility + trend
-            if price > donchian_high_aligned[i] and vol_filter and trend_filter:
-                signals[i] = 0.25
+            # Long: break above daily R1 with volume
+            if price > r1_1d_aligned[i] and volume_ok:
+                signals[i] = 0.20
                 position = 1
-            # Short breakdown: price breaks below Donchian low + volatility + trend
-            elif price < donchian_low_aligned[i] and vol_filter and trend_filter:
-                signals[i] = -0.25
+            # Short: break below daily S1 with volume
+            elif price < s1_1d_aligned[i] and volume_ok:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to Donchian midpoint or breakdown signal
-            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
-            if price < midpoint:
+            # Exit: price returns to daily pivot or below
+            if price < pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: price returns to Donchian midpoint or breakout signal
-            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
-            if price > midpoint:
+            # Exit: price returns to daily pivot or above
+            if price > pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
