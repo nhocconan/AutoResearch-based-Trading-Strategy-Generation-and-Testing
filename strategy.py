@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Bollinger Bands for trend direction and 1d ATR for volatility filter.
-# Long when price > 4h BB upper band, ATR ratio > 1.2, and volume > 1.2x 20-period average.
-# Short when price < 4h BB lower band, ATR ratio > 1.2, and volume > 1.2x 20-period average.
-# Uses discrete position size 0.20 to limit risk and reduce churn.
-# Target: 15-35 trades/year per symbol (60-140 total over 4 years).
-# Works in bull/bear by capturing volatility expansion breakouts with volume confirmation.
-name = "1h_BB4h_ATR1d_Volume"
-timeframe = "1h"
+# Hypothesis: 4h Donchian channel breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above 20-period Donchian high, ADX > 25, volume > 1.5x 20-period average.
+# Short when price breaks below 20-period Donchian low, ADX > 25, volume > 1.5x 20-period average.
+# Exit when price crosses the opposite Donchian band or ADX falls below 20.
+# Uses discrete position size (0.25) to minimize churn. Designed for 4h timeframe
+# to capture medium-term trends while avoiding whipsaws in both bull and bear markets.
+# Target: 20-50 trades/year per symbol (~80-200 total over 4 years).
+name = "4h_Donchian20_Volume_ADX_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,105 +24,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Bollinger Bands
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma_4h = pd.Series(close_4h).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_4h = pd.Series(close_4h).rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = sma_4h + (bb_std * std_4h)
-    bb_lower = sma_4h - (bb_std * std_4h)
+    # ADX calculation (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+                
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_dm_smooth = np.zeros_like(plus_dm)
+        minus_dm_smooth = np.zeros_like(minus_dm)
+        
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
+        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        plus_di = 100 * plus_dm_smooth / atr
+        minus_di = 100 * minus_dm_smooth / atr
+        dx = np.zeros_like(close)
+        valid = (plus_di[period:] + minus_di[period:]) > 0
+        dx[period:] = np.where(valid, 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:]), 0)
+        
+        adx = np.zeros_like(close)
+        if len(dx) >= 2*period+1:
+            adx[2*period] = np.mean(dx[period:2*period+1])
+            for i in range(2*period+1, len(dx)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Align 4h Bollinger Bands to 1h
-    bb_upper_aligned = align_htf_to_ltf(prices, df_4h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_4h, bb_lower)
+    adx = calculate_adx(high, low, close, 14)
     
-    # Get 1d data for ATR
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d ATR (14)
-    atr_period = 14
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # first period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # Align 1d ATR to 1h
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # ATR ratio: current 1h ATR / 1d ATR (volatility expansion filter)
-    tr_1h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_1h[0] = 0
-    atr_1h = pd.Series(tr_1h).rolling(window=atr_period, min_periods=atr_period).mean().values
-    atr_ratio = np.where(atr_1d_aligned > 0, atr_1h / atr_1d_aligned, 0)
-    
-    # Volume confirmation: current volume > 1.2x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, atr_period, 20)  # Ensure all indicators are ready
+    start_idx = max(20, 28)  # Ensure Donchian and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(atr_ratio[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        bb_upper_val = bb_upper_aligned[i]
-        bb_lower_val = bb_lower_aligned[i]
-        atr_ratio_val = atr_ratio[i]
+        upper_band = donchian_high[i]
+        lower_band = donchian_low[i]
+        adx_val = adx[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
-        # Volatility expansion filter
-        vol_expansion = atr_ratio_val > 1.2
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.5 * vol_ma
         
-        # Volume confirmation
-        volume_confirmed = vol > 1.2 * vol_ma
+        # ADX trend strength filter
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long if price above 4h BB upper, volatility expansion, and volume confirmation
-            if price > bb_upper_val and vol_expansion and volume_confirmed:
-                signals[i] = 0.20
+            # Enter long if price breaks above upper band, strong trend, and volume confirmation
+            if price > upper_band and strong_trend and volume_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Enter short if price below 4h BB lower, volatility expansion, and volume confirmation
-            elif price < bb_lower_val and vol_expansion and volume_confirmed:
-                signals[i] = -0.20
+            # Enter short if price breaks below lower band, strong trend, and volume confirmation
+            elif price < lower_band and strong_trend and volume_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below 4h BB middle or volatility contracts
-            bb_middle_aligned = sma_4h  # Will align below
-            bb_middle_aligned = align_htf_to_ltf(prices, df_4h, sma_4h)
-            if price < bb_middle_aligned[i] or atr_ratio_val < 0.8:  # Volatility contraction
+            # Exit long when price crosses below lower band or trend weakens
+            if price < lower_band or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above 4h BB middle or volatility contracts
-            bb_middle_aligned = align_htf_to_ltf(prices, df_4h, sma_4h)
-            if price > bb_middle_aligned[i] or atr_ratio_val < 0.8:  # Volatility contraction
+            # Exit short when price crosses above upper band or trend weakens
+            if price > upper_band or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
