@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_Camarilla_R1S1_Breakout_Volume_Spike_v1"
-timeframe = "12h"
+name = "4h_1d_1w_Pivot_R1S1_Breakout_Volume_Spike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -42,14 +42,14 @@ def generate_signals(prices):
     # S4 = C - (H - L) * 1.1 / 2
     s4 = prev_close - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -58,8 +58,8 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or \
-           np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
+           np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -67,22 +67,22 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 1.5x average
-        volume_spike = vol > 1.5 * vol_ma
+        # Volume spike: current volume > 2.0x average
+        volume_spike = vol > 2.0 * vol_ma
         
         if position == 0:
             # Long: Price breaks above R1 with volume spike
-            if price > r1_12h[i] and volume_spike:
+            if price > r1_4h[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 with volume spike
-            elif price < s1_12h[i] and volume_spike:
+            elif price < s1_4h[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below S1 (reversal signal)
-            if price < s1_12h[i]:
+            if price < s1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,7 +90,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: Price returns above R1 (reversal signal)
-            if price > r1_12h[i]:
+            if price > r1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
