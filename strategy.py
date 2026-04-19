@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 12h EMA50 trend filter
-# Long when price breaks above 4h Donchian upper channel, volume > 2x 20-period avg, and 12h EMA50 trending up
-# Short when price breaks below 4h Donchian lower channel, volume > 2x 20-period avg, and 12h EMA50 trending down
-# Uses discrete position size 0.25 to minimize churn. Designed to capture strong trends while filtering weak moves.
-# Target: 20-40 trades/year per symbol (~80-160 total over 4 years)
-name = "4h_DonchianBreakout_Volume_EMA50"
-timeframe = "4h"
+# Hypothesis: 1h strategy using 4h Bollinger Bands for trend direction and 1d ATR for volatility filter.
+# Long when price > 4h BB upper band, ATR ratio > 1.2, and volume > 1.2x 20-period average.
+# Short when price < 4h BB lower band, ATR ratio > 1.2, and volume > 1.2x 20-period average.
+# Uses discrete position size 0.20 to limit risk and reduce churn.
+# Target: 15-35 trades/year per symbol (60-140 total over 4 years).
+# Works in bull/bear by capturing volatility expansion breakouts with volume confirmation.
+name = "1h_BB4h_ATR1d_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,67 +23,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 4h data for Bollinger Bands
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate EMA50 on 12h
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma_4h = pd.Series(close_4h).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_4h = pd.Series(close_4h).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = sma_4h + (bb_std * std_4h)
+    bb_lower = sma_4h - (bb_std * std_4h)
     
-    # Align 12h EMA50 to 4h
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 4h Bollinger Bands to 1h
+    bb_upper_aligned = align_htf_to_ltf(prices, df_4h, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_4h, bb_lower)
     
-    # 4h Donchian channel (20-period)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1d data for ATR
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: current volume > 2x 20-period average
+    # Calculate 1d ATR (14)
+    atr_period = 14
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # first period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Align 1d ATR to 1h
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # ATR ratio: current 1h ATR / 1d ATR (volatility expansion filter)
+    tr_1h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_1h[0] = 0
+    atr_1h = pd.Series(tr_1h).rolling(window=atr_period, min_periods=atr_period).mean().values
+    atr_ratio = np.where(atr_1d_aligned > 0, atr_1h / atr_1d_aligned, 0)
+    
+    # Volume confirmation: current volume > 1.2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure EMA50 and Donchian are ready
+    start_idx = max(bb_period, atr_period, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(atr_ratio[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_50_val = ema_50_12h_aligned[i]
+        bb_upper_val = bb_upper_aligned[i]
+        bb_lower_val = bb_lower_aligned[i]
+        atr_ratio_val = atr_ratio[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
-        # Volume confirmation threshold
-        volume_confirmed = vol > 2.0 * vol_ma
+        # Volatility expansion filter
+        vol_expansion = atr_ratio_val > 1.2
+        
+        # Volume confirmation
+        volume_confirmed = vol > 1.2 * vol_ma
         
         if position == 0:
-            # Enter long if price breaks above Donchian upper, EMA50 trending up, and volume confirmation
-            if price > donchian_upper[i] and price > ema_50_val and volume_confirmed:
-                signals[i] = 0.25
+            # Enter long if price above 4h BB upper, volatility expansion, and volume confirmation
+            if price > bb_upper_val and vol_expansion and volume_confirmed:
+                signals[i] = 0.20
                 position = 1
-            # Enter short if price breaks below Donchian lower, EMA50 trending down, and volume confirmation
-            elif price < donchian_lower[i] and price < ema_50_val and volume_confirmed:
-                signals[i] = -0.25
+            # Enter short if price below 4h BB lower, volatility expansion, and volume confirmation
+            elif price < bb_lower_val and vol_expansion and volume_confirmed:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below Donchian lower or EMA50
-            if price < donchian_lower[i] or price < ema_50_val:
+            # Exit long when price crosses below 4h BB middle or volatility contracts
+            bb_middle_aligned = sma_4h  # Will align below
+            bb_middle_aligned = align_htf_to_ltf(prices, df_4h, sma_4h)
+            if price < bb_middle_aligned[i] or atr_ratio_val < 0.8:  # Volatility contraction
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short when price crosses above Donchian upper or EMA50
-            if price > donchian_upper[i] or price > ema_50_val:
+            # Exit short when price crosses above 4h BB middle or volatility contracts
+            bb_middle_aligned = align_htf_to_ltf(prices, df_4h, sma_4h)
+            if price > bb_middle_aligned[i] or atr_ratio_val < 0.8:  # Volatility contraction
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
