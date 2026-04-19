@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d trend filter and volume confirmation.
-# Williams %R > -20 indicates overbought (short signal), < -80 indicates oversold (long signal).
-# Uses daily EMA200 for trend filter to avoid counter-trend trades.
-# Volume confirmation ensures institutional participation. Designed to work in both bull and bear
-# markets by capturing mean reversion at extremes while respecting the higher timeframe trend.
+# Hypothesis: 4-hour Donchian channel breakout with daily volume confirmation and ATR-based stop-loss.
+# Breakouts above/below 20-period Donchian channels capture trend continuations.
+# Volume confirmation filters false breakouts. Works in bull/bear as breakouts capture trends
+# and reversals at channel boundaries provide mean-reversion opportunities.
+# Target: 50-150 trades over 4 years to balance signal quality and fee drag.
 
-name = "12h_WilliamsR_EMA200_TrendFilter_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeConfirm_ATRStop"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,70 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R and EMA200
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Williams %R(14) on daily data
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Calculate 20-day average volume for confirmation
+    vol_ma_20d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20d)
     
-    # Calculate daily EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 4-hour Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Volume confirmation: current volume > 1.3x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Calculate 4-hour ATR for stop-loss
+    tr1 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_20d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_ma = vol_ma_30[i]
-        wr = williams_r_aligned[i]
-        ema200 = ema200_1d_aligned[i]
+        vol_24h = volume_1d[i] if i < len(volume_1d) else volume_1d[-1]
+        vol_ma = vol_ma_20d_aligned[i]
+        atr_val = atr[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         
-        volume_confirmed = vol > 1.3 * vol_ma
-        uptrend = price > ema200
-        downtrend = price < ema200
+        volume_confirmed = vol_24h > 1.5 * vol_ma
         
         if position == 0:
-            # Long: Oversold (< -80) in uptrend with volume
-            if wr < -80 and uptrend and volume_confirmed:
+            # Long: Break above upper Donchian band with volume confirmation
+            if price > upper and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Overbought (> -20) in downtrend with volume
-            elif wr > -20 and downtrend and volume_confirmed:
+            # Short: Break below lower Donchian band with volume confirmation
+            elif price < lower and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Williams %R returns to neutral (> -50) or trend change
-            if wr > -50 or not uptrend:
+            # Exit: price closes below lower band or ATR stop
+            if price < lower or price < (high[i] - 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Williams %R returns to neutral (< -50) or trend change
-            if wr < -50 or not downtrend:
+            # Exit: price closes above upper band or ATR stop
+            if price > upper or price > (low[i] + 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
