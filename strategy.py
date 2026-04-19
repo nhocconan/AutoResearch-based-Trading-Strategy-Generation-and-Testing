@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R1/S1 breakout with volume confirmation
-# - Weekly pivot sets trend: price > weekly pivot = bullish bias, < = bearish bias
-# - Daily Camarilla R1/S1 levels: break above R1 with volume = long, break below S1 with volume = short
-# - Volume filter: current 6h volume > 1.5x 20-period average for conviction
-# - Exit on opposite Camarilla level (R2/S2) or trend reversal
-# - Position size: 0.25 to manage drawdown
-# - Designed to work in both bull and bear markets by combining weekly trend with daily breakouts
-# - Target: 15-35 trades/year to avoid excessive fee drag
+# Hypothesis: 12h timeframe with 1d trend filter and volume confirmation
+# - 1d EMA(34) defines trend direction (long when close > EMA34, short when close < EMA34)
+# - 1d volume > 1.5x 20-period average for conviction
+# - 12h RSI(14) for entry timing: long when RSI < 30 in uptrend, short when RSI > 70 in downtrend
+# - Exit on opposite RSI extreme (RSI > 70 for long, RSI < 30 for short) or trend reversal
+# - Session filter: only trade 08:00-20:00 UTC to avoid low-volume periods
+# - Position size: 0.25 (25%) to balance return and drawdown
+# - Designed to work in both bull and bear markets by following higher timeframe trend
+# - Target: 12-37 trades/year to avoid excessive fee drag
 
-name = "6h_Camarilla_R1_S1_Breakout_Volume_V1"
-timeframe = "6h"
+name = "12h_EMA34_RSI_1dVolume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +27,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Weekly pivot point (standard calculation)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # Get daily data for Camarilla levels
+    # Get 1d data for trend filter and volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily Camarilla levels
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # 1d EMA(34) for trend direction
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Camarilla formulas
-    daily_range = daily_high - daily_low
-    camarilla_r1 = daily_close + daily_range * 1.1 / 12
-    camarilla_s1 = daily_close - daily_range * 1.1 / 12
-    camarilla_r2 = daily_close + daily_range * 1.1 / 6
-    camarilla_s2 = daily_close - daily_range * 1.1 / 6
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    
-    # Volume filter: current 6h volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 12h RSI(14) for entry timing
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     # Pre-compute session filter (08:00-20:00 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -66,7 +56,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -75,42 +65,34 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is NaN
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(camarilla_r2_aligned[i]) or 
-            np.isnan(camarilla_s2_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(rsi_values[i]):
             signals[i] = 0.0
             continue
             
-        # Volume filter
-        volume_filter = vol_ma[i] > 0 and volume[i] > 1.5 * vol_ma[i]
+        # Volume filter: current 1d volume > 1.5x average
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Look for long entry: bullish weekly trend + price breaks above R1 + volume
-            if (close[i] > weekly_pivot_aligned[i] and 
-                close[i] > camarilla_r1_aligned[i] and 
-                volume_filter):
+            # Look for long entry: uptrend (close > 1d EMA34) + oversold RSI + volume
+            if close[i] > ema_34_1d_aligned[i] and rsi_values[i] < 30 and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: bearish weekly trend + price breaks below S1 + volume
-            elif (close[i] < weekly_pivot_aligned[i] and 
-                  close[i] < camarilla_s1_aligned[i] and 
-                  volume_filter):
+            # Look for short entry: downtrend (close < 1d EMA34) + overbought RSI + volume
+            elif close[i] < ema_34_1d_aligned[i] and rsi_values[i] > 70 and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on R2 break or trend reversal
-            if (close[i] > camarilla_r2_aligned[i] or 
-                close[i] < weekly_pivot_aligned[i]):
+            # Long position: exit on overbought RSI or trend reversal
+            if rsi_values[i] > 70 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on S2 break or trend reversal
-            if (close[i] < camarilla_s2_aligned[i] or 
-                close[i] > weekly_pivot_aligned[i]):
+            # Short position: exit on oversold RSI or trend reversal
+            if rsi_values[i] < 30 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
