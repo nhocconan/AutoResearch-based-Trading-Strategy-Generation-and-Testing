@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index regime filter with Donchian breakout.
-# Use weekly Choppiness Index to determine regime: >61.8 = range (mean revert), <38.2 = trending (breakout).
-# In trending regime: long when price breaks above Donchian(20) high, short when breaks below Donchian(20) low.
-# In ranging regime: long when price touches Donchian low, short when touches Donchian high.
-# Volume confirmation: volume > 1.3x 20-period average.
-# Target: 20-40 trades/year per symbol to stay within frequency limits.
-name = "12h_Chop_Donchian_Breakout_Volume"
+# Hypothesis: 12h Elder Ray Index with weekly trend filter for trend following.
+# Elder Ray = Bull Power (High - EMA13) and Bear Power (Low - EMA13).
+# Weekly EMA34 determines trend: price > EMA34 = bullish, price < EMA34 = bearish.
+# In bullish weekly trend: long when Bull Power > 0 and rising, exit when Bull Power <= 0.
+# In bearish weekly trend: short when Bear Power < 0 and falling, exit when Bear Power >= 0.
+# Volume confirmation: volume > 1.5x 20-period average to avoid chop.
+# Target: 15-30 trades/year per symbol to stay within frequency limits.
+name = "12h_ElderRay_WeeklyTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,82 +24,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Choppiness Index calculation
+    # Get weekly data for trend determination
     df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate Choppiness Index (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Weekly EMA34 for trend
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # ATR (14-period Wilder's smoothing)
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr_1w = wilder_smooth(tr, 14)
-    # Sum of TR over 14 periods
-    tr_sum_14 = wilder_smooth(tr, 14)  # Using same function for sum
-    
-    # Highest high and lowest low over 14 periods
-    def highest_high(arr, period):
-        result = np.full_like(arr, np.nan)
-        for i in range(period-1, len(arr)):
-            result[i] = np.max(arr[i-period+1:i+1])
-        return result
-    
-    def lowest_low(arr, period):
-        result = np.full_like(arr, np.nan)
-        for i in range(period-1, len(arr)):
-            result[i] = np.min(arr[i-period+1:i+1])
-        return result
-    
-    hh_14 = highest_high(high_1w, 14)
-    ll_14 = lowest_low(low_1w, 14)
-    
-    # Avoid division by zero
-    safe_tr_sum = np.where(tr_sum_14 == 0, np.finfo(float).eps, tr_sum_14)
-    chop = 100 * np.log10(safe_tr_sum / (hh_14 - ll_14)) / np.log10(14)
-    # Handle cases where hh_14 == ll_14
-    chop = np.where((hh_14 - ll_14) == 0, 50, chop)  # Neutral when no range
-    
-    # Get daily data for Donchian channels
+    # Get daily data for Elder Ray calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian channels (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
+    # Daily EMA13 for Elder Ray
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    donch_high = rolling_max(high_1d, 20)
-    donch_low = rolling_min(low_1d, 20)
+    # Bull Power = High - EMA13
+    bull_power = high_1d - ema13_1d
+    # Bear Power = Low - EMA13
+    bear_power = low_1d - ema13_1d
     
     # Align indicators to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Get 12h average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -106,83 +56,56 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure Chop (14*2+6), Donchian (20), and volume MA are ready
+    start_idx = max(35, 20)  # Ensure EMA34 (34), EMA13 (13), and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(chop_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        chop_val = chop_aligned[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
+        ema34_val = ema34_1w_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.3 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
-        # Regime determination
-        is_ranging = chop_val > 61.8
-        is_trending = chop_val < 38.2
-        # Neutral zone (38.2-61.8) - no trades
+        # Determine weekly trend
+        is_bullish_trend = price > ema34_val
+        is_bearish_trend = price < ema34_val
         
         if position == 0:
-            # Determine entry based on regime
-            if is_trending and volume_confirmed:
-                # Trending regime: breakout entries
-                if price > donch_high_val:
+            # Look for entries
+            if is_bullish_trend and volume_confirmed:
+                # Bullish trend: look for long when Bull Power is positive and rising
+                if bull_power_val > 0 and bull_power_val > bull_power_aligned[i-1]:
                     signals[i] = 0.25
                     position = 1
-                elif price < donch_low_val:
-                    signals[i] = -0.25
-                    position = -1
-            elif is_ranging and volume_confirmed:
-                # Ranging regime: mean reversion at extremes
-                if price <= donch_low_val:
-                    signals[i] = 0.25
-                    position = 1
-                elif price >= donch_high_val:
+            elif is_bearish_trend and volume_confirmed:
+                # Bearish trend: look for short when Bear Power is negative and falling
+                if bear_power_val < 0 and bear_power_val < bear_power_aligned[i-1]:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: price crosses Donchian midline or opposite extreme based on regime
-            midline = (donch_high_val + donch_low_val) / 2
-            if is_trending:
-                # In trending regime, exit when price crosses below midline
-                if price < midline:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: Bull Power turns negative or trend changes
+            if bull_power_val <= 0 or not is_bullish_trend:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging regime, exit when price reaches opposite extreme
-                if price >= donch_high_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses Donchian midline or opposite extreme based on regime
-            midline = (donch_high_val + donch_low_val) / 2
-            if is_trending:
-                # In trending regime, exit when price crosses above midline
-                if price > midline:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: Bear Power turns positive or trend changes
+            if bear_power_val >= 0 or not is_bearish_trend:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging regime, exit when price reaches opposite extreme
-                if price <= donch_low_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
