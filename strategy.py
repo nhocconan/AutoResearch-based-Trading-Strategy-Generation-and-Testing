@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_ADX_Filter
-Hypothesis: 12h KAMA trend direction combined with ADX filter for strong trends.
-KAMA adapts to market noise, reducing false signals in choppy markets.
-ADX > 25 ensures we only trade in trending conditions, avoiding whipsaws.
-Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
-Works in bull/bear via adaptive trend following and volatility filtering.
+1d_WaveTrend_CCI_Arrows
+Hypothesis: Daily WaveTrend (oscillator) with CCI filter for trend exhaustion.
+WT1 > 60 and rising = bullish momentum, WT1 < -60 and falling = bearish momentum.
+CCI(20) > 100 confirms overbought for short, < -100 confirms oversold for long.
+Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
+Works in bull/bear via momentum exhaustion signals rather than pure trend following.
 """
 
-name = "12h_KAMA_Trend_With_ADX_Filter"
-timeframe = "12h"
+name = "1d_WaveTrend_CCI_Arrows"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -26,136 +26,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) parameters
-    fast_sc = 2 / (2 + 1)  # 2-period EMA smoothing constant
-    slow_sc = 2 / (30 + 1) # 30-period EMA smoothing constant
-    
-    # Efficiency Ratio and KAMA calculation
-    def calculate_kama(close, er_period=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
+    # WaveTrend calculation (similar to TCI)
+    def wtc(high, low, close, channel_length=10, average_length=21):
+        # Typical Price
+        tp = (high + low + close) / 3.0
         
-        # Proper ER calculation
-        price_change = np.abs(close - np.roll(close, er_period))
-        er_period_sum = np.zeros_like(close)
-        for i in range(er_period, len(close)):
-            er_period_sum[i] = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
+        # Exponential Moving Average of TP
+        ema_tp = pd.Series(tp).ewm(span=channel_length, adjust=False).mean().values
+        
+        # Absolute deviation
+        dev = np.abs(tp - ema_tp)
+        
+        # Smoothed deviation
+        avg_dev = pd.Series(dev).ewm(span=channel_length, adjust=False).mean().values
         
         # Avoid division by zero
-        er = np.zeros_like(close)
-        mask = er_period_sum > 0
-        er[mask] = price_change[mask] / er_period_sum[mask]
+        ci = np.where(avg_dev != 0, (tp - ema_tp) / (0.015 * avg_dev), 0)
         
-        # Smoothing constant
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        # TCI (WaveTrend 1)
+        tci = pd.Series(ci).ewm(span=average_length, adjust=False).mean().values
         
-        # KAMA calculation
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+        # WaveTrend 2 (signal line)
+        wt2 = pd.Series(tci).ewm(span=4, adjust=False).mean().values
+        
+        return tci, wt2
     
-    # ADX calculation (Wilder's smoothing)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
+    # CCI calculation
+    def cci(high, low, close, length=20):
+        # Typical Price
+        tp = (high + low + close) / 3.0
         
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
+        # Simple Moving Average of TP
+        sma_tp = pd.Series(tp).rolling(window=length, min_periods=length).mean().values
         
-        # Wilder's smoothing
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            if len(data) >= period:
-                result[period-1] = np.nanmean(data[:period])
-                for i in range(period, len(data)):
-                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-                    else:
-                        result[i] = np.nan
-            return result
+        # Mean Deviation
+        md = np.zeros_like(tp)
+        for i in range(length-1, len(tp)):
+            md[i] = np.mean(np.abs(tp[i-length+1:i+1] - sma_tp[i]))
         
-        atr = WilderSmooth(tr, period)
-        dm_plus_smooth = WilderSmooth(dm_plus, period)
-        dm_minus_smooth = WilderSmooth(dm_minus, period)
-        
-        # DX calculation
-        dx = np.full_like(close, np.nan)
-        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
-        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
-        
-        # ADX
-        adx = WilderSmooth(dx, period)
-        return adx
+        # Avoid division by zero
+        cci_val = np.where(md != 0, (tp - sma_tp) / (0.015 * md), 0)
+        return cci_val
     
-    # Get 12h data for indicators
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Calculate indicators on daily data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate indicators on 12h data
-    kama_12h = calculate_kama(df_12h['close'].values)
-    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
+    # WaveTrend
+    wt1, wt2 = wtc(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 10, 21)
+    wt1_aligned = align_htf_to_ltf(prices, df_1d, wt1)
+    wt2_aligned = align_htf_to_ltf(prices, df_1d, wt2)
     
-    # Align to lower timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # CCI
+    cci_val = cci(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
+    cci_aligned = align_htf_to_ltf(prices, df_1d, cci_val)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-day average (reduced frequency)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(wt1_aligned[i]) or np.isnan(wt2_aligned[i]) or 
+            np.isnan(cci_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when ADX > 25 (strong trend)
-        strong_trend = adx_aligned[i] > 25
+        # WaveTrend conditions
+        wt_bullish = wt1_aligned[i] > -60 and wt1_aligned[i] > wt2_aligned[i]  # WT1 above signal and above -60
+        wt_bearish = wt1_aligned[i] < 60 and wt1_aligned[i] < wt2_aligned[i]   # WT1 below signal and below 60
+        
+        # CCI conditions for exhaustion
+        cci_overbought = cci_aligned[i] > 100
+        cci_oversold = cci_aligned[i] < -100
         
         if position == 0:
-            # Long: price above KAMA with volume and strong trend
-            if (close[i] > kama_aligned[i] and 
-                volume_confirm[i] and 
-                strong_trend):
+            # Long: WT bullish + CCI oversold (momentum turning up from oversold)
+            if wt_bullish and cci_oversold and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA with volume and strong trend
-            elif (close[i] < kama_aligned[i] and 
-                  volume_confirm[i] and 
-                  strong_trend):
+            # Short: WT bearish + CCI overbought (momentum turning down from overbought)
+            elif wt_bearish and cci_overbought and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses below KAMA or trend weakens
-            if (close[i] < kama_aligned[i]) or (adx_aligned[i] < 20):
+            # Long: exit on WT bearish crossover or CCI overbought
+            if (wt1_aligned[i] < wt2_aligned[i]) or cci_overbought:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses above KAMA or trend weakens
-            if (close[i] > kama_aligned[i]) or (adx_aligned[i] < 20):
+            # Short: exit on WT bullish crossover or CCI oversold
+            if (wt1_aligned[i] > wt2_aligned[i]) or cci_oversold:
                 signals[i] = 0.0
                 position = 0
             else:
