@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation
-# Uses RSI(14) on 1h for oversold/overbought entries, filtered by 4h EMA50 trend
-# Adds volume spike confirmation to avoid false signals in low volatility
-# Target: 20-40 trades/year per symbol with disciplined entries
-# Works in bull/bear by aligning with higher timeframe trend
-name = "1h_RSI14_4hEMA50_Volume"
-timeframe = "1h"
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Uses 1d EMA50 to filter trades in strong trend direction, reducing false signals in chop
+# Donchian(20) identifies key support/resistance from 4h price action
+# Breakout with volume confirmation signals momentum
+# EMA50 filter ensures trades align with higher timeframe trend
+# Target: 20-50 trades/year per symbol with disciplined entries
+name = "4h_Donchian20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,76 +23,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # Calculate Donchian channels (20-period) from 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_band = high_series.rolling(window=20, min_periods=20).max().values
+    lower_band = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 60  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_ma[i])):
-            signals[i] = 0.0
-            continue
-        
-        if not session_filter[i]:
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) with volume confirmation and above 4h EMA50
-            if (rsi[i] < 30 and 
+            # Long: break above upper band with volume confirmation and above 1d EMA50
+            if (close[i] > upper_band[i] and 
                 volume_confirm[i] and 
-                close[i] > ema_50_4h_aligned[i]):
-                signals[i] = 0.20
+                close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) with volume confirmation and below 4h EMA50
-            elif (rsi[i] > 70 and 
+            # Short: break below lower band with volume confirmation and below 1d EMA50
+            elif (close[i] < lower_band[i] and 
                   volume_confirm[i] and 
-                  close[i] < ema_50_4h_aligned[i]):
-                signals[i] = -0.20
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if RSI > 50 (mean reversion complete) or breaks below 4h EMA50
-            if (rsi[i] > 50) or (close[i] < ema_50_4h_aligned[i]):
+            # Long: exit if price breaks below lower band or breaks below 1d EMA50
+            if (close[i] < lower_band[i]) or (close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if RSI < 50 (mean reversion complete) or breaks above 4h EMA50
-            if (rsi[i] < 50) or (close[i] > ema_50_4h_aligned[i]):
+            # Short: exit if price breaks above upper band or breaks above 1d EMA50
+            if (close[i] > upper_band[i]) or (close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
