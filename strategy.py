@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d trend following with weekly trend filter, volume confirmation, and RSI mean reversion entries
-# - Weekly EMA(50) defines long-term trend direction (long when price > weekly EMA50, short when price < weekly EMA50)
-# - Daily RSI(14) for entry timing: long when RSI < 30 in uptrend, short when RSI > 70 in downtrend
-# - Daily volume > 1.5x 20-period average for confirmation
+# Hypothesis: 6h timeframe with 12h trend filter and 1d volume confirmation
+# - 12h EMA(20) defines trend direction (long when price > EMA20, short when price < EMA20)
+# - 1d volume > 1.3x 20-period average for conviction
+# - 6h RSI(14) for entry timing: long when RSI < 30 in uptrend, short when RSI > 70 in downtrend
 # - Exit on opposite RSI extreme (RSI > 70 for long, RSI < 30 for short) or trend reversal
-# - Position size: 0.25 (25%) to balance return and drawdown
-# - Designed to work in both bull and bear markets by following weekly trend
-# - Target: 10-25 trades/year to minimize fee drag
+# - Session filter: only trade 08:00-20:00 UTC to avoid low-volume periods
+# - Position size: 0.25 (25%) to manage drawdown
+# - Designed to work in both bull and bear markets by following higher timeframe trend
+# - Target: 15-30 trades/year to avoid excessive fee drag
 
-name = "1d_EMA50_RSI_Volume_WeeklyTrend_v1"
-timeframe = "1d"
+name = "6h_EMA20_RSI_1dVolume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,17 +27,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Weekly EMA(50) for trend direction
-    ema_50_weekly = pd.Series(df_weekly['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    # 12h EMA(20) for trend direction
+    ema_20_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    # Daily volume average (20-period)
-    vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
     
-    # Daily RSI(14) for entry timing
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # 6h RSI(14) for entry timing
     delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -46,33 +52,42 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     rsi_values = rsi.values
     
+    # Pre-compute session filter (08:00-20:00 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if np.isnan(ema_50_weekly_aligned[i]) or np.isnan(vol_20[i]) or np.isnan(rsi_values[i]):
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_20[i]
+        # Skip if any required data is NaN
+        if np.isnan(ema_20_12h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(rsi_values[i]):
+            signals[i] = 0.0
+            continue
+            
+        # Volume filter: current 1d volume > 1.3x average
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.3 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Look for long entry: weekly uptrend (price > weekly EMA50) + oversold RSI + volume
-            if close[i] > ema_50_weekly_aligned[i] and rsi_values[i] < 30 and volume_filter:
+            # Look for long entry: uptrend (price > 12h EMA20) + oversold RSI + volume
+            if close[i] > ema_20_12h_aligned[i] and rsi_values[i] < 30 and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: weekly downtrend (price < weekly EMA50) + overbought RSI + volume
-            elif close[i] < ema_50_weekly_aligned[i] and rsi_values[i] > 70 and volume_filter:
+            # Look for short entry: downtrend (price < 12h EMA20) + overbought RSI + volume
+            elif close[i] < ema_20_12h_aligned[i] and rsi_values[i] > 70 and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
             # Long position: exit on overbought RSI or trend reversal
-            if rsi_values[i] > 70 or close[i] < ema_50_weekly_aligned[i]:
+            if rsi_values[i] > 70 or close[i] < ema_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,7 +95,7 @@ def generate_signals(prices):
                 
         elif position == -1:
             # Short position: exit on oversold RSI or trend reversal
-            if rsi_values[i] < 30 or close[i] > ema_50_weekly_aligned[i]:
+            if rsi_values[i] < 30 or close[i] > ema_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
