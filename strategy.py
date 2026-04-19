@@ -3,17 +3,28 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with 1-week Pivot R1/S1 breakout, volume confirmation, and ATR volatility filter.
-# Uses weekly pivot levels as dynamic support/resistance, enters on breakouts with volume and volatility confirmation.
-# Designed to work in both bull and bear markets by filtering for genuine momentum bursts.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drift.
-name = "1d_1w_Pivot_R1S1_Breakout_VolumeATRFilter"
-timeframe = "1d"
+# Hypothesis: 6h timeframe with 12h RSI divergence filter and volume confirmation.
+# Uses RSI divergence on 12h timeframe to detect weakening momentum before reversals,
+# combined with 6h price action and volume to enter trades in the direction of the higher timeframe trend.
+# Works in both bull and bear markets by filtering for exhaustion signals.
+# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and cost.
+name = "6h_12h_RSIDivergence_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_rsi(prices, period=14):
+    delta = np.diff(prices)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,72 +32,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Pivot calculation (called ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 12h data for RSI calculation (called ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Pivot, R1, S1 on 1w timeframe
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
+    # Calculate RSI on 12h timeframe
+    rsi_12h = calculate_rsi(close_12h, 14)
     
-    # Align to 1d timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Align RSI to 6h timeframe
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
-    # Volume spike (volume > 2.0 * 20-period average)
+    # 6h EMA20 for trend filter
+    ema20 = pd.Series(close).ewm(span=20, adjust=False).mean().values
+    
+    # Volume filter: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
-    
-    # ATR for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for ATR and volume MA
+    start_idx = 30  # Ensure enough data for EMA and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(atr[i]):
+        if np.isnan(rsi_12h_aligned[i]) or np.isnan(ema20[i]) or np.isnan(volume_ma[i]):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation required
-        vol_confirm = volume_spike[i]
-        # Volatility filter: require ATR > 0.5 * 50-period ATR average
-        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr[i] > (0.5 * atr_ma[i]) if not np.isnan(atr_ma[i]) else True
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        bullish_div = False
+        if i >= 3:
+            if (low[i] < low[i-2] and low[i-2] < low[i-4] and 
+                rsi_12h_aligned[i] > rsi_12h_aligned[i-2] and rsi_12h_aligned[i-2] > rsi_12h_aligned[i-4]):
+                bullish_div = True
+        
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        bearish_div = False
+        if i >= 3:
+            if (high[i] > high[i-2] and high[i-2] > high[i-4] and 
+                rsi_12h_aligned[i] < rsi_12h_aligned[i-2] and rsi_12h_aligned[i-2] < rsi_12h_aligned[i-4]):
+                bearish_div = True
         
         if position == 0:
-            # Long when price breaks above R1 with volume and volatility
-            if close[i] > r1_aligned[i] and vol_confirm and vol_filter:
+            # Long when bullish divergence, price above EMA20, and volume confirmation
+            if bullish_div and close[i] > ema20[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S1 with volume and volatility
-            elif close[i] < s1_aligned[i] and vol_confirm and vol_filter:
+            # Short when bearish divergence, price below EMA20, and volume confirmation
+            elif bearish_div and close[i] < ema20[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price falls below S1 (reversal) or volatility drops
-            if close[i] < s1_aligned[i] or not vol_filter:
+            # Long position: exit when bearish divergence or price falls below EMA20
+            if bearish_div or close[i] < ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price rises above R1 (reversal) or volatility drops
-            if close[i] > r1_aligned[i] or not vol_filter:
+            # Short position: exit when bullish divergence or price rises above EMA20
+            if bullish_div or close[i] > ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
