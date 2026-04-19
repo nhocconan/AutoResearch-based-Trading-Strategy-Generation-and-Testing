@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_Pivot_R1S1_Breakout_Volume_ADX_Trend"
-timeframe = "6h"
+name = "4h_WeeklyPivot_R1S1_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,40 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for pivot calculation (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get weekly data for pivot calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h pivot levels
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    r1_12h = close_12h + range_12h * 1.1 / 12.0
-    s1_12h = close_12h - range_12h * 1.1 / 12.0
+    # Calculate weekly pivot levels
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r1_1w = close_1w + range_1w * 1.1 / 12.0
+    s1_1w = close_1w - range_1w * 1.1 / 12.0
     
-    # Align 12h pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_6h = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_6h = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Align weekly pivot levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_4h = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_4h = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Get 1d data for ADX calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d ADX for trend strength (14-period)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # 4h ADX for trend strength (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -61,10 +55,7 @@ def generate_signals(prices):
     di_plus = 100 * dm_plus14 / tr14
     di_minus = 100 * dm_minus14 / tr14
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_6h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -75,46 +66,46 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
-           np.isnan(adx_6h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
+           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx_6h[i]
-        pivot = pivot_6h[i]
-        r1 = r1_6h[i]
-        s1 = s1_6h[i]
+        adx_val = adx[i]
+        pivot = pivot_4h[i]
+        r1 = r1_4h[i]
+        s1 = s1_4h[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
         trending = adx_val > 25  # Strong trend filter
         
         if position == 0:
-            # Long: Price breaks above R1 + volume + trending
+            # Long: Price breaks above weekly R1 + volume + trending
             if price > r1 and volume_confirmed and trending:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below S1 + volume + trending
+            # Short: Price breaks below weekly S1 + volume + trending
             elif price < s1 and volume_confirmed and trending:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below pivot
+            # Exit: Price returns below weekly pivot
             if price < pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit: Price returns above pivot
+            # Exit: Price returns above weekly pivot
             if price > pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
