@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d1w_Pivot_R1S1_Breakout_VolumeATR"
+name = "12h_Pivot_R1S1_Breakout_VolumeATR_v1"
 timeframe = "12h"
 leverage = 1.0
 
