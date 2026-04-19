@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h trading with 4h RSI momentum and 1d volume confirmation
-# - Use 4h RSI(14) for momentum: long when >55, short when <45
-# - Require 1d volume > 1.5x 20-period average for conviction
-# - Only trade during active session (08-20 UTC) to avoid low volatility periods
-# - Fixed position size of 0.20 to manage risk
-# - Designed for 15-30 trades/year to minimize fee drag while capturing trends
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h trend filter and volume confirmation
+# - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# - Bullish: Bull Power > 0 AND Bear Power rising (less negative)
+# - Bearish: Bear Power < 0 AND Bull Power falling (less positive)
+# - 12h EMA34 trend filter: only take longs when price > 12h EMA34, shorts when price < 12h EMA34
+# - Volume confirmation: current 6h volume > 1.5x 20-period average 6h volume
+# - Designed to capture momentum in trending markets while filtering counter-trend moves
+# - Target: 15-30 trades/year to avoid excessive fee drag
 
-name = "1h_RSI4h_Volume1d_Session_v1"
-timeframe = "1h"
+name = "6h_ElderRay_12hTrend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,76 +26,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for RSI momentum
-    df_4h = get_htf_data(prices, '4h')
+    # Elder Ray components: EMA13 of close
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # High - EMA13
+    bear_power = low - ema13   # Low - EMA13
     
-    # 4h RSI(14)
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h = rsi_4h.values
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Slope of Bear Power (for bullish confirmation: bear power rising = less negative)
+    bear_power_series = pd.Series(bear_power)
+    bear_power_slope = bear_power_series.diff().values
     
-    # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
+    # Slope of Bull Power (for bearish confirmation: bull power falling = less positive)
+    bull_power_series = pd.Series(bull_power)
+    bull_power_slope = bull_power_series.diff().values
     
-    # 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Volume confirmation: 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_4h_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(bear_power_slope[i]) or \
+           np.isnan(bull_power_slope[i]) or np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
             
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = vol_ma[i] > 0 and volume[i] > 1.5 * vol_ma[i]
         
-        # Volume filter: current 1h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d average to 1h: 1d has 24x 1h bars, so divide by 24
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 24.0)
-        
-        if position == 0 and in_session and volume_filter:
-            # Look for long entry: bullish momentum (RSI > 55)
-            if rsi_4h_aligned[i] > 55:
-                signals[i] = 0.20
+        if position == 0:
+            # Look for long entry: bull power positive, bear power rising (less negative), uptrend, volume
+            if bull_power[i] > 0 and bear_power_slope[i] > 0 and close[i] > ema34_12h_aligned[i] and volume_filter:
+                signals[i] = 0.25
                 position = 1
-            # Look for short entry: bearish momentum (RSI < 45)
-            elif rsi_4h_aligned[i] < 45:
-                signals[i] = -0.20
+            # Look for short entry: bear power negative, bull power falling (less positive), downtrend, volume
+            elif bear_power[i] < 0 and bull_power_slope[i] < 0 and close[i] < ema34_12h_aligned[i] and volume_filter:
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on bearish momentum or outside session
-            if rsi_4h_aligned[i] < 45 or not in_session:
+            # Long position: exit on bear power turning negative or trend reversal
+            if bear_power[i] < 0 or close[i] < ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on bullish momentum or outside session
-            if rsi_4h_aligned[i] > 55 or not in_session:
+            # Short position: exit on bull power turning positive or trend reversal
+            if bull_power[i] > 0 or close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
