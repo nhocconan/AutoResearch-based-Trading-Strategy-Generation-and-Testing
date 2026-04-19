@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 12h ADX filter + volume confirmation
-# Uses Donchian channels for breakout detection, ADX for trend strength confirmation,
-# and volume to filter false breakouts. Works in both bull and bear markets by
-# trading breakouts in the direction of the 12h trend (ADX > 25). Target: 15-30 trades/year.
-name = "6h_DonchianBreakout_ADX12h_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Trix + 1d Volume Spike + Choppiness Regime
+# Trix (TRIple Exponential Average) filters noise and captures momentum
+# Only trade when Trix crosses signal line with volume confirmation
+# Use 1d choppiness regime to avoid whipsaw in sideways markets
+# Designed to work in bull (momentum continuation) and bear (mean reversion in range)
+# Target: 20-40 trades/year to minimize fee drag
+name = "4h_Trix_Volume_Chop_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,104 +23,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for multi-timeframe analysis (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d data for multi-timeframe analysis (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # 12h ADX for trend strength filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 1d Choppiness Index (CHOP) for regime detection
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1[0] = high_12h[0] - low_12h[0]
-    tr2[0] = high_12h[0] - close_12h[0]
-    tr3[0] = low_12h[0] - close_12h[0]
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    # True Range for CHOP
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h),
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)),
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    sum_high_low = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_high_low / atr_1d) / np.log10(14)
+    chop = np.where(sum_high_low > 0, chop, 50)  # avoid division by zero
+    chop_1d = chop
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Smoothed values
-    def WilderSmooth(arr, period):
-        result = np.zeros_like(arr)
-        result[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Trix indicator (12-period EMA applied 3 times)
+    # First EMA
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Second EMA of first EMA
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Third EMA of second EMA
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Trix = 100 * (ema3 - previous ema3) / previous ema3
+    trix_raw = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix_raw[0] = 0
+    # Signal line: 9-period EMA of Trix
+    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    tr_14 = WilderSmooth(tr_12h, 14)
-    dm_plus_14 = WilderSmooth(dm_plus, 14)
-    dm_minus_14 = WilderSmooth(dm_minus, 14)
-    
-    # DI and DX
-    di_plus = np.where(tr_14 != 0, 100 * dm_plus_14 / tr_14, 0)
-    di_minus = np.where(tr_14 != 0, 100 * dm_minus_14 / tr_14, 0)
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_12h = WilderSmooth(dx, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # 6h Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 6h ATR for position sizing
-    tr_6h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_6h[0] = high[0] - low[0]
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume filter: current volume > 1.3x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    # 4h ATR for position sizing and stops
+    tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
+    tr[0] = high[0] - low[0]
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(adx_12h_aligned[i]) or \
-           np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
-           np.isnan(atr_6h[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(chop_1d_aligned[i]) or \
+           np.isnan(trix_raw[i]) or np.isnan(trix_signal[i]) or np.isnan(atr_4h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_6h[i]
+        atr = atr_4h[i]
         
-        # Volume filter
-        volume_filter = volume[i] > 1.3 * vol_ma[i]
+        # Volume filter: current volume > 2.0x average volume (20-period)
+        if i >= 20:
+            avg_volume = np.mean(volume[i-20:i])
+        else:
+            avg_volume = volume[i]
+        volume_filter = volume[i] > 2.0 * avg_volume
         
-        # ADX filter: trend strength > 25
-        trend_filter = adx_12h_aligned[i] > 25
+        # Chop regime: CHOP > 61.8 = ranging (mean reversion), CHOP < 38.2 = trending
+        chop_val = chop_1d_aligned[i]
+        ranging_market = chop_val > 61.8
+        trending_market = chop_val < 38.2
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume + trend
-            if price > donch_high[i] and volume_filter and trend_filter:
+            # Long: Trix crosses above signal + volume + not in strong ranging market
+            if trix_raw[i] > trix_signal[i] and trix_raw[i-1] <= trix_signal[i-1] and volume_filter and not ranging_market:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + volume + trend
-            elif price < donch_low[i] and volume_filter and trend_filter:
+            # Short: Trix crosses below signal + volume + not in strong ranging market
+            elif trix_raw[i] < trix_signal[i] and trix_raw[i-1] >= trix_signal[i-1] and volume_filter and not ranging_market:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below Donchian low or ADX weakens
-            if price < donch_low[i] or adx_12h_aligned[i] < 20:
+            # Exit: Trix crosses below signal or ATR stop or strong ranging market
+            if (trix_raw[i] < trix_signal[i] and trix_raw[i-1] >= trix_signal[i-1]) or \
+               price < close[i-1] - 2.0 * atr or ranging_market:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above Donchian high or ADX weakens
-            if price > donch_high[i] or adx_12h_aligned[i] < 20:
+            # Exit: Trix crosses above signal or ATR stop or strong ranging market
+            if (trix_raw[i] > trix_signal[i] and trix_raw[i-1] <= trix_signal[i-1]) or \
+               price > close[i-1] + 2.0 * atr or ranging_market:
                 signals[i] = 0.0
                 position = 0
             else:
