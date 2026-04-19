@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla Pivot with 1-week EMA filter and volume confirmation
-# Uses weekly EMA20 for long-term trend bias, reducing false signals in countertrend moves
-# Camarilla pivot levels (R1/S1) from daily data provide intraday support/resistance
-# Long when price breaks above R1 with volume confirmation and above weekly EMA
-# Short when price breaks below S1 with volume confirmation and below weekly EMA
-# Target: 15-25 trades/year per symbol with disciplined entries
-name = "6h_Camarilla_R1S1_WeeklyEMA_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation
+# Uses 1d ADX > 25 to filter for trending markets, reducing false signals in chop
+# Donchian(20) breakout provides clear entry/exit signals
+# Volume spike (>1.5x 20-period average) confirms momentum
+# Target: 20-30 trades/year per symbol with disciplined entries
+name = "4h_Donchian20_1dADX_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,82 +22,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots
+    # 1d ADX for trend strength filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    range_prev = high_prev - low_prev
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with close_1d
     
-    R1 = pivot + (range_prev * 1.0833)
-    S1 = pivot - (range_prev * 1.0833)
-    R4 = pivot + (range_prev * 1.5000)
-    S4 = pivot - (range_prev * 1.5000)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Smoothed TR, DM+ and DM-
+    def wilders_smoothing(data, period):
+        smoothed = np.full_like(data, np.nan, dtype=float)
+        if len(data) >= period:
+            smoothed[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + data[i]
+        return smoothed
     
-    # Weekly EMA20 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    tr_smoothed = wilders_smoothing(tr, 14)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
     
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smoothed / tr_smoothed
+    di_minus = 100 * dm_minus_smoothed / tr_smoothed
     
-    # Volume confirmation: volume > 1.8 * 20-period average
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = wilders_smoothing(dx, 14)
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume spike: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.8)
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation and above weekly EMA
-            if (close[i] > R1_aligned[i] and 
-                close[i-1] <= R1_aligned[i-1] and  # Just broke above
-                volume_confirm[i] and 
-                close[i] > ema_20_1w_aligned[i]):
+            # Long: price breaks above Donchian high + ADX > 25 + volume spike
+            if (close[i] > donchian_high[i] and 
+                adx_aligned[i] > 25 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation and below weekly EMA
-            elif (close[i] < S1_aligned[i] and 
-                  close[i-1] >= S1_aligned[i-1] and  # Just broke below
-                  volume_confirm[i] and 
-                  close[i] < ema_20_1w_aligned[i]):
+            # Short: price breaks below Donchian low + ADX > 25 + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  adx_aligned[i] > 25 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 or drops below weekly EMA
-            if (close[i] < S1_aligned[i]) or (close[i] < ema_20_1w_aligned[i]):
+            # Long: exit if price breaks below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 or rises above weekly EMA
-            if (close[i] > R1_aligned[i]) or (close[i] > ema_20_1w_aligned[i]):
+            # Short: exit if price breaks above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
