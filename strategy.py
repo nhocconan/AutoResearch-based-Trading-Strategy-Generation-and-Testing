@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion using 1d RSI extremes with volume confirmation.
-# Long when 1d RSI < 30 (oversold) and price > VWAP, volume > 1.5x average.
-# Short when 1d RSI > 70 (overbought) and price < VWAP, volume > 1.5x average.
-# Exit when price crosses back to VWAP or RSI returns to neutral zone (40-60).
-# Uses 1d for signal direction (avoid whipsaw), 1h for entry timing.
-# Target: 20-50 trades/year per symbol to stay within frequency limits.
-name = "1h_RSI_VWAP_MeanReversion_Volume"
-timeframe = "1h"
+# Hypothesis: 12h KAMA trend filter with RSI mean reversion and volume spike confirmation.
+# Long when KAMA turns bullish (price > KAMA), RSI < 40, and volume > 2x average.
+# Short when KAMA turns bearish (price < KAMA), RSI > 60, and volume > 2x average.
+# Exit when price crosses back over KAMA.
+# Uses 12h timeframe with daily KAMA and RSI for trend/momentum alignment.
+# Target: 20-40 trades/year per symbol to stay within frequency limits.
+name = "12h_KAMA_RSI_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,87 +23,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI calculation
+    # Get daily data for KAMA and RSI calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 14-period RSI on daily closes
-    rsi_period = 14
-    delta = np.diff(df_1d['close'].values, prepend=np.nan)
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    close_1d = df_1d['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
+    # Correct volatility calculation: sum of absolute changes over window
+    volatility = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i == 0:
+            volatility[i] = 0
+        else:
+            volatility[i] = np.sum(np.abs(np.diff(close_1d[max(0, i-9):i+1])))  # 10-period
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Calculate RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # first 14 periods
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Wilder's smoothing for RSI
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Align KAMA and RSI to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    avg_gain = wilder_smooth(gain, rsi_period)
-    avg_loss = wilder_smooth(loss, rsi_period)
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Align daily RSI to 1h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Calculate VWAP for 1h timeframe
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
-    
-    # Get 1h average volume for confirmation
+    # Get 12h average volume for confirmation (20-period)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure RSI and volume MA are ready
+    start_idx = max(30, 20)  # Ensure KAMA, RSI, and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vwap[i]) or 
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi = rsi_1d_aligned[i]
-        vwap_val = vwap[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long entry: RSI oversold, price above VWAP, volume confirmation
-            if rsi < 30 and price > vwap_val and volume_confirmed:
-                signals[i] = 0.20
+            # Long entry: price > KAMA (bullish trend), RSI < 40 (oversold), volume spike
+            if price > kama_val and rsi_val < 40 and volume_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: RSI overbought, price below VWAP, volume confirmation
-            elif rsi > 70 and price < vwap_val and volume_confirmed:
-                signals[i] = -0.20
+            # Short entry: price < KAMA (bearish trend), RSI > 60 (overbought), volume spike
+            elif price < kama_val and rsi_val > 60 and volume_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below VWAP or RSI returns to neutral
-            if price < vwap_val or rsi > 40:
+            # Long exit: price crosses below KAMA (trend change)
+            if price < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above VWAP or RSI returns to neutral
-            if price > vwap_val or rsi < 60:
+            # Short exit: price crosses above KAMA (trend change)
+            if price > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
