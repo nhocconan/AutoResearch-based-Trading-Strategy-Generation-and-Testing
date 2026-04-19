@@ -1,17 +1,23 @@
-# 12h_1d_1w_BollingerBandBreakout_VolumeTrend_v1
-# Hypothesis: 12h Bollinger Band breakout with 1d trend filter and 1w volume confirmation
-# Long: Price breaks above upper BB on 12h + 1d EMA50 uptrend + 1w volume spike
-# Short: Price breaks below lower BB on 12h + 1d EMA50 downtrend + 1w volume spike
-# Uses Bollinger Bands for volatility-based breakouts, EMA for trend, volume for confirmation
-# Target: 15-25 trades/year (60-100 total over 4 years) to avoid fee drag
-# Works in bull markets via upward breakouts, in bear via downward breakouts
-name = "12h_1d_1w_BollingerBandBreakout_VolumeTrend_v1"
-timeframe = "12h"
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Bull/Bear Power (Elder Ray) with 12h EMA trend filter and volume confirmation
+# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# Trend: 12h EMA34 (long above, short below)
+# Entry: Strong Bull Power + rising Bull Power + volume + 12h uptrend (long)
+#        Strong Bear Power + rising Bear Power + volume + 12h downtrend (short)
+# Exit: Opposite power cross or 2x ATR stop
+# Designed to work in both bull (strong bull power) and bear (strong bear power) markets
+# Target: 25-40 trades/year to avoid fee drag
+name = "4h_ElderRay_EMA12h_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,67 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    # Get 1w data for volume confirmation (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for trend filter (ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 12h EMA34 for trend filter
+    close_12h = df_12h['close'].values
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # 1w average volume for volume confirmation
-    volume_1w = df_1w['volume'].values
-    avg_volume_1w = pd.Series(volume_1w).rolling(window=4, min_periods=4).mean().values  # 4-week average
-    avg_volume_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_volume_1w, additional_delay_bars=1)
+    # Elder Ray: Bull Power and Bear Power using EMA(13)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # 12h Bollinger Bands (20-period, 2 std dev)
-    bb_period = 20
-    bb_std = 2
-    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma_bb + (bb_std * std_bb)
-    lower_bb = sma_bb - (bb_std * std_bb)
+    # Smooth the power values for better signal
+    bull_power_smooth = pd.Series(bull_power).ewm(span=5, adjust=False, min_periods=5).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=5, adjust=False, min_periods=5).mean().values
+    
+    # 4h ATR for stops
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 50)  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or \
-           np.isnan(avg_volume_1w_aligned[i]) or \
-           np.isnan(sma_bb[i]) or np.isnan(std_bb[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]):
+        if np.isnan(ema34_12h_aligned[i]) or \
+           np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or np.isnan(atr_4h[i]):
             signals[i] = 0.0
             continue
         
-        price = close[i]
+        # Volume filter: current volume > 1.3x average volume (20-period)
+        if i >= 20:
+            avg_volume = np.mean(volume[i-20:i])
+        else:
+            avg_volume = volume[i]
+        volume_filter = volume[i] > 1.3 * avg_volume
         
-        # Volume confirmation: current 12h volume > 1.5x 4-week average 1w volume
-        volume_spike = volume[i] > 1.5 * avg_volume_1w_aligned[i]
+        # Power rising/falling
+        bull_power_rising = bull_power_smooth[i] > bull_power_smooth[i-1]
+        bear_power_rising = bear_power_smooth[i] > bear_power_smooth[i-1]
         
         if position == 0:
-            # Long: Price breaks above upper BB + 1d uptrend + volume spike
-            if price > upper_bb[i] and price > ema50_1d_aligned[i] and volume_spike:
+            # Long: Bull Power positive and rising + volume + 12h uptrend
+            if bull_power_smooth[i] > 0 and bull_power_rising and volume_filter and close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower BB + 1d downtrend + volume spike
-            elif price < lower_bb[i] and price < ema50_1d_aligned[i] and volume_spike:
+            # Short: Bear Power positive and rising + volume + 12h downtrend
+            elif bear_power_smooth[i] > 0 and bear_power_rising and volume_filter and close[i] < ema34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price breaks below middle BB or 1d trend reverses
-            if price < sma_bb[i] or price < ema50_1d_aligned[i]:
+            # Exit: Bear Power becomes positive (market weakening) or 2x ATR stop
+            if bear_power_smooth[i] > 0 or close[i] < close[i-1] - 2.0 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price breaks above middle BB or 1d trend reverses
-            if price > sma_bb[i] or price > ema50_1d_aligned[i]:
+            # Exit: Bull Power becomes positive (market strengthening) or 2x ATR stop
+            if bull_power_smooth[i] > 0 or close[i] > close[i-1] + 2.0 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
