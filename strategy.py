@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Camarilla_R1S1_Breakout_Volume_ADX_v1"
+name = "6h_1d_ElderRay_BullBear_Power_With_Trend_v2"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,88 +23,64 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for Camarilla width
-    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 13-period EMA on daily close for Elder Ray
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Camarilla levels using previous day's data
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    # Bull Power = Daily High - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    # Bear Power = Daily Low - EMA13
+    bear_power_1d = low_1d - ema13_1d
     
-    camarilla_H4 = prev_close + 1.1/2 * (prev_high - prev_low)
-    camarilla_L4 = prev_close - 1.1/2 * (prev_high - prev_low)
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    # 6-day EMA on 1d close for trend filter (longer-term trend)
+    ema6_1d = pd.Series(close_1d).ewm(span=6, adjust=False, min_periods=6).mean().values
+    ema6_aligned = align_htf_to_ltf(prices, df_1d, ema6_1d)
     
-    # ADX(14) calculation on 6h data
-    tr6 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
-    tr6 = np.maximum(tr6, np.abs(high[1:] - close[:-1]))
-    tr6 = np.maximum(tr6, np.abs(low[1:] - close[:-1]))
-    tr6 = np.concatenate([[np.nan], tr6])
-    
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    
-    tr14 = pd.Series(tr6).rolling(window=14, min_periods=14).sum().values
-    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    plus_di = 100 * plus_dm14 / tr14
-    minus_di = 100 * minus_dm14 / tr14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: current volume > 1.8x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 20)
+    start_idx = max(100, 30)
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or \
-           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or \
+           np.isnan(ema6_aligned[i]) or np.isnan(vol_ma_30[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_30[i]
         
         # Volume filter
-        volume_ok = vol > 1.5 * vol_ma
-        
-        # ADX filter: trending when ADX > 25
-        trending = adx[i] > 25
+        volume_ok = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: price breaks above H4 with volume and trending market
-            if price > camarilla_H4_aligned[i] and volume_ok and trending:
+            # Long: Bull Power > 0 (bulls in control) AND price above 6-day EMA (uptrend)
+            if bull_power_aligned[i] > 0 and price > ema6_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below L4 with volume and trending market
-            elif price < camarilla_L4_aligned[i] and volume_ok and trending:
+            # Short: Bear Power < 0 (bears in control) AND price below 6-day EMA (downtrend)
+            elif bear_power_aligned[i] < 0 and price < ema6_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below H4 or ADX drops below 20 (range)
-            if price < camarilla_H4_aligned[i] or adx[i] < 20:
+            # Exit: Bull Power <= 0 (bulls lose control) OR price below 6-day EMA
+            if bull_power_aligned[i] <= 0 or price < ema6_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above L4 or ADX drops below 20 (range)
-            if price > camarilla_L4_aligned[i] or adx[i] < 20:
+            # Exit: Bear Power >= 0 (bears lose control) OR price above 6-day EMA
+            if bear_power_aligned[i] >= 0 or price > ema6_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
