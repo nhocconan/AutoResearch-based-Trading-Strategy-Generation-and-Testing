@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_S1R1_Breakout_VolumeATR"
-timeframe = "12h"
+name = "4h_1dPivot_S1R1_Breakout_VolumeATR_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +37,7 @@ def generate_signals(prices):
     s1_1d = 2 * pivot_1d - high_1d
     r1_1d = 2 * pivot_1d - low_1d
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
@@ -45,16 +45,20 @@ def generate_signals(prices):
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Trend filter: 4h close above/below 50-period EMA
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need volume MA and ATR data
+    start_idx = 50  # Need EMA50, volume MA and ATR data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
             np.isnan(r1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
         
@@ -62,6 +66,7 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         atr = atr_1d_aligned[i]
+        ema = ema_50[i]
         
         # Volume and volatility filters
         volume_confirmed = vol > 1.5 * vol_ma
@@ -72,12 +77,12 @@ def generate_signals(prices):
         pivot = pivot_1d_aligned[i]
         
         if position == 0:
-            # Long: Breakout above R1 with volume confirmation
-            if price > r1 and volume_confirmed:
+            # Long: Breakout above R1 with volume confirmation and uptrend
+            if price > r1 and volume_confirmed and price > ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below S1 with volume confirmation
-            elif price < s1 and volume_confirmed:
+            # Short: Breakdown below S1 with volume confirmation and downtrend
+            elif price < s1 and volume_confirmed and price < ema:
                 signals[i] = -0.25
                 position = -1
         
