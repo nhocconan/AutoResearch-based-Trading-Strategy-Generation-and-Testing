@@ -3,11 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with volume confirmation and ATR stoploss
-# Uses daily trend filter (price > 200-day EMA) to avoid counter-trend trades
-# Target: 20-40 trades/year per symbol, low turnover, works in bull/bear via trend filter
-name = "12h_Donchian20_Volume_EMA200Trend"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_VolumeATRFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,21 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA200
+    # Get 1d data for Pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 12h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Pivot, R1, S1 on 1d timeframe
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Volume confirmation: 20-period average
+    # Align to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Volume spike (volume > 2.0 * 20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    volume_spike = volume > (volume_ma * 2.0)
     
-    # ATR for stoploss (14-period)
+    # ATR for volatility filter
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -45,39 +48,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for ATR and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema200_1d_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(atr[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
             
-        # Trend filter: only long above EMA200, short below EMA200
-        trend_filter_long = close[i] > ema200_1d_aligned[i]
-        trend_filter_short = close[i] < ema200_1d_aligned[i]
+        # Volume confirmation required
+        vol_confirm = volume_spike[i]
+        # Volatility filter: require ATR > 0.5 * 50-period ATR average
+        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr[i] > (0.5 * atr_ma[i]) if not np.isnan(atr_ma[i]) else True
         
         if position == 0:
-            # Long: break above Donchian high with volume and uptrend
-            if close[i] > high_max[i] and volume_spike[i] and trend_filter_long:
+            # Long when price breaks above R1 with volume and volatility
+            if close[i] > r1_aligned[i] and vol_confirm and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume and downtrend
-            elif close[i] < low_min[i] and volume_spike[i] and trend_filter_short:
+            # Short when price breaks below S1 with volume and volatility
+            elif close[i] < s1_aligned[i] and vol_confirm and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long exit: break below Donchian low or trend reversal
-            if close[i] < low_min[i] or not trend_filter_long:
+            # Long position: exit when price falls below S1 (reversal) or volatility drops
+            if close[i] < s1_aligned[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short exit: break above Donchian high or trend reversal
-            if close[i] > high_max[i] or not trend_filter_short:
+            # Short position: exit when price rises above R1 (reversal) or volatility drops
+            if close[i] > r1_aligned[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
