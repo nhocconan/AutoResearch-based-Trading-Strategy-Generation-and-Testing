@@ -1,15 +1,16 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d EMA20 trend filter and volume confirmation
-# Donchian captures breakouts in trending markets
-# 1d EMA20 provides higher timeframe bias to avoid counter-trend trades
-# Volume confirmation filters weak breakouts and confirms strength
-# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
-name = "12h_Donchian20_1dEMA20_Volume"
-timeframe = "12h"
+# Hypothesis: Weekly donchian breakout with daily volume confirmation and ATR filter
+# Weekly donchian captures long-term structure (resistance/support breaks)
+# Daily volume > 1.5x average confirms institutional participation
+# ATR-based stop (2x ATR) limits drawdown in volatile moves
+# Target: 30-100 total trades over 4 years (7-25/year) with disciplined entries
+# Works in bull/bear: breaks above weekly high in bull, below weekly low in bear
+name = "1d_WeeklyDonchian_Volume_ATR"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,66 +23,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA20 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly Donchian channels (20-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate weekly high/low over 20 periods
+    weekly_high = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    weekly_low = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    # Donchian channel on 12h
-    period = 20
+    # Align to daily timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Highest high and lowest low over period
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(period-1, n):
-        highest_high[i] = np.max(high[i-(period-1):i+1])
-        lowest_low[i] = np.min(low[i-(period-1):i+1])
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Daily volume confirmation: > 1.5x 20-day average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
+    
+    # ATR for stop calculation (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0.0
+    tr2[0] = 0.0
+    tr3[0] = 0.0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = np.zeros(n)
+    atr[13] = tr[:14].mean()
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(period-1, 20)  # Ensure enough data for all indicators
+    start_idx = max(20, 14)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Close breaks above upper Donchian + above 1d EMA20 + volume confirmation
-            if (close[i] > highest_high[i-1] and 
-                close[i] > ema_20_1d_aligned[i] and 
-                volume_confirm[i]):
+            # Long: Price breaks above weekly high + volume confirmation
+            if close[i] > weekly_high_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below lower Donchian + below 1d EMA20 + volume confirmation
-            elif (close[i] < lowest_low[i-1] and 
-                  close[i] < ema_20_1d_aligned[i] and 
-                  volume_confirm[i]):
+            # Short: Price breaks below weekly low + volume confirmation
+            elif close[i] < weekly_low_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if close breaks below lower Donchian or below 1d EMA20
-            if (close[i] < lowest_low[i-1]) or (close[i] < ema_20_1d_aligned[i]):
+            # Long: exit if price breaks below weekly low OR 2x ATR trailing stop
+            if (close[i] < weekly_low_aligned[i]) or (close[i] < np.max(high[max(0, i-5):i+1]) - 2 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if close breaks above upper Donchian or above 1d EMA20
-            if (close[i] > highest_high[i-1]) or (close[i] > ema_20_1d_aligned[i]):
+            # Short: exit if price breaks above weekly high OR 2x ATR trailing stop
+            if (close[i] > weekly_high_aligned[i]) or (close[i] > np.min(low[max(0, i-5):i+1]) + 2 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
