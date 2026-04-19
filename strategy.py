@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with 1-week ATR-based breakout and volume confirmation.
-# Uses weekly ATR to set dynamic breakout bands from weekly open.
-# Long when price breaks above weekly open + 1.5*weekly ATR with volume confirmation.
-# Short when price breaks below weekly open - 1.5*weekly ATR with volume confirmation.
-# Exits when price returns to weekly open or opposite band is touched.
-# Works in both bull and bear markets by capturing breakouts with volatility filter.
-# Target: 30-100 total trades over 4 years (7-25/year).
-name = "1d_1w_ATRBreakout_VolumeFilter"
-timeframe = "1d"
+# Hypothesis: 6h timeframe with 12h pivot levels (R1/S1, R2/S2, R3/S3, R4/S4) 
+# and volume confirmation. Fade at extreme pivots (R4/S4) with reversal signals,
+# continue trend at middle pivots (R1/S1, R2/S2). Uses 12h pivot points 
+# calculated from prior 12h period's OHLC. Works in both bull and bear markets by 
+# fading extremes and catching continuations. Target: 50-150 total trades over 4 years.
+name = "6h_12h_Pivot_R1S1_R4S4_Strategy"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,33 +22,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR and open calculation (called ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
+    # Get 12h data for pivot calculation (called ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly ATR (14-period)
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 12h pivot points (using prior 12h period's OHLC)
+    # Pivot = (H + L + C) / 3
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    # Support and resistance levels
+    s1_12h = (2 * pivot_12h) - high_12h
+    r1_12h = (2 * pivot_12h) - low_12h
+    s2_12h = pivot_12h - (high_12h - low_12h)
+    r2_12h = pivot_12h + (high_12h - low_12h)
+    s3_12h = low_12h - 2 * (high_12h - pivot_12h)
+    r3_12h = high_12h + 2 * (pivot_12h - low_12h)
+    s4_12h = s3_12h - (high_12h - low_12h)
+    r4_12h = r3_12h + (high_12h - low_12h)
     
-    # Calculate breakout bands: weekly open ± 1.5 * weekly ATR
-    upper_band = open_1w + 1.5 * atr_1w
-    lower_band = open_1w - 1.5 * atr_1w
+    # Align 12h pivot levels to 6h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
+    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
     
-    # Align weekly bands to daily timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
-    open_1w_aligned = align_htf_to_ltf(prices, df_1w, open_1w)
-    
-    # Volume filter: volume > 1.5 * 20-period average
+    # Volume filter: volume > 1.3 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    volume_filter = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,32 +63,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
-            np.isnan(open_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or
+            np.isnan(r2_12h_aligned[i]) or np.isnan(s2_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or
+            np.isnan(s3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long breakout
-            if close[i] > upper_band_aligned[i] and volume_filter[i]:
+            # Fade at extreme pivots (R4/S4) - mean reversion
+            if close[i] <= s4_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout
-            elif close[i] < lower_band_aligned[i] and volume_filter[i]:
+            elif close[i] >= r4_12h_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
+            # Continue trend at middle pivots (R1/S1, R2/S2) - breakout
+            elif close[i] > r2_12h_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            elif close[i] < s2_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price returns to weekly open or touches lower band
-            if close[i] <= open_1w_aligned[i] or close[i] < lower_band_aligned[i]:
+            # Long position: exit at R3 (take profit) or S4 (stop reversal)
+            if close[i] >= r3_12h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] <= s4_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price returns to weekly open or touches upper band
-            if close[i] >= open_1w_aligned[i] or close[i] > upper_band_aligned[i]:
+            # Short position: exit at S3 (take profit) or R4 (stop reversal)
+            if close[i] <= s3_12h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] >= r4_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
