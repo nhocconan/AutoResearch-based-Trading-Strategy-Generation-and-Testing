@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Stochastic_Trend_Confirmation_V1"
-timeframe = "6h"
+# Hypothesis: 4h Donchian breakout with volume confirmation and 12h ADX trend filter.
+# Works in bull by catching breakouts, in bear by avoiding false breakouts via ADX.
+# Target: 20-40 trades/year per symbol, low turnover, high win rate.
+name = "4h_Donchian20_Volume_ADX12h_Filter_V1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,93 +20,181 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for indicators
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for ADX
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Stochastic %K on 1d data (14,3,3)
-    period_k = 14
-    period_d = 3
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    def calculate_stochastic(high_arr, low_arr, close_arr, k_period, d_period):
-        n_days = len(close_arr)
-        lowest_low = np.full(n_days, np.nan)
-        highest_high = np.full(n_days, np.nan)
-        percent_k = np.full(n_days, np.nan)
-        percent_d = np.full(n_days, np.nan)
+    # Calculate ADX on 12h (14-period)
+    def calculate_adx(high, low, close, period=14):
+        n = len(high)
+        tr = np.zeros(n)
+        plus_dm = np.zeros(n)
+        minus_dm = np.zeros(n)
         
-        for i in range(k_period - 1, n_days):
-            lowest_low[i] = np.min(low_arr[i - k_period + 1:i + 1])
-            highest_high[i] = np.max(high_arr[i - k_period + 1:i + 1])
-            if highest_high[i] != lowest_low[i]:
-                percent_k[i] = ((close_arr[i] - lowest_low[i]) / (highest_high[i] - lowest_low[i])) * 100
+        for i in range(1, n):
+            hl = high[i] - low[i]
+            hc = abs(high[i] - close[i-1])
+            lc = abs(low[i] - close[i-1])
+            tr[i] = max(hl, hc, lc)
+            
+            up = high[i] - high[i-1]
+            down = low[i-1] - low[i]
+            plus_dm[i] = up if up > down and up > 0 else 0
+            minus_dm[i] = down if down > up and down > 0 else 0
+        
+        # Smooth TR, +DM, -DM
+        atr = np.zeros(n)
+        plus_di = np.zeros(n)
+        minus_di = np.zeros(n)
+        
+        # Initial smoothed values
+        atr[period-1] = np.sum(tr[1:period]) / period
+        plus_dm_sum = np.sum(plus_dm[1:period]) / period
+        minus_dm_sum = np.sum(minus_dm[1:period]) / period
+        
+        for i in range(period, n):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smoothed = (plus_di[i-1] * (period-1) + plus_dm[i]) / period if i < len(plus_di) else 0
+            minus_dm_smoothed = (minus_di[i-1] * (period-1) + minus_dm[i]) / period if i < len(minus_di) else 0
+            # Actually compute smoothed +DM and -DM properly
+            plus_dm_smoothed = (plus_di[i-1] * (period-1) + plus_dm[i]) / period if i > 0 else plus_dm[i]
+            minus_dm_smoothed = (minus_di[i-1] * (period-1) + minus_dm[i]) / period if i > 0 else minus_dm[i]
+            # Fix: use separate arrays for smoothed DM
+            if i == period:
+                plus_dm_smoothed = np.sum(plus_dm[1:period]) / period
+                minus_dm_smoothed = np.sum(minus_dm[1:period]) / period
             else:
-                percent_k[i] = 50.0
+                plus_dm_smoothed = (plus_dm_smoothed_prev * (period-1) + plus_dm[i]) / period
+                minus_dm_smoothed = (minus_dm_smoothed_prev * (period-1) + minus_dm[i]) / period
+            
+            # Store for next iteration
+            if i == period:
+                plus_dm_smoothed_prev = plus_dm_smoothed
+                minus_dm_smoothed_prev = minus_dm_smoothed
+            elif i > period:
+                plus_dm_smoothed_prev = plus_dm_smoothed
+                minus_dm_smoothed_prev = minus_dm_smoothed
+            
+            plus_di[i] = 100 * plus_dm_smoothed / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_smoothed / atr[i] if atr[i] != 0 else 0
         
-        # Calculate %D (SMA of %K)
-        k_series = pd.Series(percent_k)
-        d_values = k_series.rolling(window=d_period, min_periods=d_period).mean().values
+        # Calculate DX and ADX
+        dx = np.zeros(n)
+        for i in range(period, n):
+            di_diff = abs(plus_di[i] - minus_di[i])
+            di_sum = plus_di[i] + minus_di[i]
+            dx[i] = 100 * di_diff / di_sum if di_sum != 0 else 0
         
-        return percent_k, d_values
+        adx = np.zeros(n)
+        adx[2*period-1] = np.sum(dx[period:2*period]) / period
+        for i in range(2*period, n):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    stoch_k, stoch_d = calculate_stochastic(high_1d, low_1d, close_1d, period_k, period_d)
+    # Calculate ADX with proper smoothing
+    period = 14
+    n_12h = len(high_12h)
+    if n_12h < period * 2:
+        adx_12h = np.full(n_12h, np.nan)
+    else:
+        tr = np.zeros(n_12h)
+        plus_dm = np.zeros(n_12h)
+        minus_dm = np.zeros(n_12h)
+        
+        for i in range(1, n_12h):
+            hl = high_12h[i] - low_12h[i]
+            hc = abs(high_12h[i] - close_12h[i-1])
+            lc = abs(low_12h[i] - close_12h[i-1])
+            tr[i] = max(hl, hc, lc)
+            
+            up = high_12h[i] - high_12h[i-1]
+            down = low_12h[i-1] - low_12h[i]
+            plus_dm[i] = up if up > down and up > 0 else 0
+            minus_dm[i] = down if down > up and down > 0 else 0
+        
+        # Smoothing
+        atr = np.zeros(n_12h)
+        plus_dm_smooth = np.zeros(n_12h)
+        minus_dm_smooth = np.zeros(n_12h)
+        
+        # Initial values
+        atr[period-1] = np.mean(tr[1:period])
+        plus_dm_smooth[period-1] = np.mean(plus_dm[1:period])
+        minus_dm_smooth[period-1] = np.mean(minus_dm[1:period])
+        
+        for i in range(period, n_12h):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+        minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+        
+        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        
+        adx_12h = np.zeros(n_12h)
+        adx_12h[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, n_12h):
+            adx_12h[i] = (adx_12h[i-1] * (period-1) + dx[i]) / period
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align ADX to 4h
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # Align indicators to 6h timeframe
-    stoch_k_aligned = align_htf_to_ltf(prices, df_1d, stoch_k)
-    stoch_d_aligned = align_htf_to_ltf(prices, df_1d, stoch_d)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Donchian channels on 4h (20-period)
+    def donchian_channels(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    # Volume spike on 6h (volume > 1.5 * 20-period average)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    upper, lower = donchian_channels(high, low, 20)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    volume_ma = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        volume_ma[i] = np.mean(volume[i-19:i+1])
     volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = max(30, 20)  # Enough for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(stoch_k_aligned[i]) or np.isnan(stoch_d_aligned[i]) or np.isnan(ema_34_aligned[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(adx_12h_aligned[i]):
             signals[i] = 0.0
             continue
             
-        vol_confirm = volume_spike[i]
+        # ADX trend filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_12h_aligned[i] > 25
         
         if position == 0:
-            # Long when: Stochastic oversold (<20) + %K crosses above %D + above EMA34 + volume spike
-            if (stoch_k_aligned[i] < 20 and 
-                stoch_k_aligned[i] > stoch_d_aligned[i] and
-                close[i] > ema_34_aligned[i] and
-                vol_confirm):
+            # Long when price breaks above upper Donchian + volume spike + strong trend
+            if close[i] > upper[i] and volume_spike[i] and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short when: Stochastic overbought (>80) + %K crosses below %D + below EMA34 + volume spike
-            elif (stoch_k_aligned[i] > 80 and 
-                  stoch_k_aligned[i] < stoch_d_aligned[i] and
-                  close[i] < ema_34_aligned[i] and
-                  vol_confirm):
+            # Short when price breaks below lower Donchian + volume spike + strong trend
+            elif close[i] < lower[i] and volume_spike[i] and strong_trend:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when Stochastic overbought or trend changes
-            if (stoch_k_aligned[i] > 80 or 
-                close[i] < ema_34_aligned[i]):
+            # Long position: exit when price breaks below lower Donchian or trend weakens
+            if close[i] < lower[i] or adx_12h_aligned[i] < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when Stochastic oversold or trend changes
-            if (stoch_k_aligned[i] < 20 or 
-                close[i] > ema_34_aligned[i]):
+            # Short position: exit when price breaks above upper Donchian or trend weakens
+            if close[i] > upper[i] or adx_12h_aligned[i] < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
