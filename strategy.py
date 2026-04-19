@@ -1,13 +1,10 @@
-# [6h] Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-# Hypothesis: Weekly pivot levels (from weekly chart) determine long-term trend direction.
-# Breakouts above/below 6h Donchian(20) channels are traded only in direction of weekly pivot (above/below pivot).
-# Volume confirmation filters breakouts with institutional participation.
-# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
-# Works in bull/bear via weekly pivot as trend filter and volume confirmation.
-# Uses discrete position sizing (0.25) to minimize fee churn.
-
-name = "6h_Donchian_20_Breakout_WeeklyPivot_Volume"
-timeframe = "6h"
+#!/usr/bin/env python3
+"""
+4h_Camarilla_R1S1_Breakout_Volume_TrendFilter
+Hypothesis: 4h price breaking above/below daily Camarilla R1/S1 levels with volume confirmation and trend filter (ADX > 20) captures institutional breakouts while avoiding false signals in ranging markets. Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year). Works in bull/bear markets via ADX trend filter.
+"""
+name = "4h_Camarilla_R1S1_Breakout_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,23 +21,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h Donchian(20) channels
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # ADX(14) for trend strength filter - calculated on 4h data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values using Wilder's smoothing (EMA-like)
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
+        
+        atr = WilderSmooth(tr, period)
+        dm_plus_smooth = WilderSmooth(dm_plus, period)
+        dm_minus_smooth = WilderSmooth(dm_minus, period)
+        
+        # Avoid division by zero
+        dx = np.full_like(close, np.nan)
+        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+        
+        adx = WilderSmooth(dx, period)
+        return adx
     
-    # Weekly data for pivot direction (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 4h data for ADX and other indicators
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Weekly pivot: (weekly high + weekly low + weekly close) / 3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Calculate ADX on 4h data
+    adx_4h = calculate_adx(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 14)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
     
-    # Weekly pivot aligned to 6h
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Previous day's Camarilla levels (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day
+    ph = df_1d['high'].shift(1).values  # Previous day high
+    pl = df_1d['low'].shift(1).values   # Previous day low
+    pc = df_1d['close'].shift(1).values # Previous day close
+    
+    # Camarilla calculations
+    rang = ph - pl
+    r1 = pc + (rang * 1.1 / 12)
+    s1 = pc - (rang * 1.1 / 12)
+    r4 = pc + (rang * 1.1 / 2)
+    s4 = pc - (rang * 1.1 / 2)
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,44 +103,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 2)  # Ensure enough data for Donchian and weekly pivot
+    start_idx = max(30, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(adx_4h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly pivot trend filter
-        above_pivot = close[i] > weekly_pivot_aligned[i]
-        below_pivot = close[i] < weekly_pivot_aligned[i]
+        # ADX filter: only trade when ADX > 20 (trending market)
+        strong_trend = adx_4h_aligned[i] > 20
         
         if position == 0:
-            # Long: price breaks above Donchian high AND above weekly pivot AND volume confirmation
-            if (close[i] > donch_high[i] and 
-                above_pivot and 
-                volume_confirm[i]):
+            # Long: price breaks above R1 with volume and strong trend
+            if (close[i] > r1_aligned[i] and 
+                volume_confirm[i] and 
+                strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND below weekly pivot AND volume confirmation
-            elif (close[i] < donch_low[i] and 
-                  below_pivot and 
-                  volume_confirm[i]):
+            # Short: price breaks below S1 with volume and strong trend
+            elif (close[i] < s1_aligned[i] and 
+                  volume_confirm[i] and 
+                  strong_trend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below Donchian low (reversal) or falls below weekly pivot
-            if (close[i] < donch_low[i]) or (not above_pivot):
+            # Long: exit if price breaks below S1 or trend weakens (ADX < 15)
+            if (close[i] < s1_aligned[i]) or (adx_4h_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above Donchian high (reversal) or rises above weekly pivot
-            if (close[i] > donch_high[i]) or (not below_pivot):
+            # Short: exit if price breaks above R1 or trend weakens (ADX < 15)
+            if (close[i] > r1_aligned[i]) or (adx_4h_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
