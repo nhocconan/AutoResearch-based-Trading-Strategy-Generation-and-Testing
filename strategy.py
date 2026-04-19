@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX trend filter.
-# Long when price breaks above Donchian upper band, 1d volume > 1.5x average, and 1d ADX > 25.
-# Short when price breaks below Donchian lower band, 1d volume > 1.5x average, and 1d ADX > 25.
-# Exit when price crosses back below/above Donchian middle band (20-period average).
-# Uses 4h timeframe with daily volume and ADX for confirmation.
+# Hypothesis: 4-hour Donchian(20) breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above Donchian upper band, volume > 1.5x average, and ADX > 25.
+# Short when price breaks below Donchian lower band, volume > 1.5x average, and ADX > 25.
+# Exit when price crosses back below/above Donchian middle (20-period SMA).
+# Uses 4h timeframe with daily ADX for trend strength and volume confirmation.
 # Target: 20-50 trades/year per symbol to stay within frequency limits.
-name = "4h_Donchian20_1dVol_ADX"
+name = "4h_Donchian20_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,24 +23,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume and ADX
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Get daily data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels on 4h data
-    donchian_period = 20
-    upper = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    middle = (upper + lower) / 2.0
-    
-    # Calculate daily volume average
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate daily ADX
+    # True Range
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -53,7 +48,7 @@ def generate_signals(prices):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
+    # Smooth TR, +DM, -DM using Wilder's smoothing
     def wilder_smooth(data, period):
         result = np.zeros_like(data)
         if len(data) < period:
@@ -65,7 +60,6 @@ def generate_signals(prices):
     
     period = 14
     atr_1d = wilder_smooth(tr, period)
-    # Avoid division by zero
     atr_1d = np.where(atr_1d == 0, np.finfo(float).eps, atr_1d)
     plus_di_1d = 100 * wilder_smooth(plus_dm, period) / atr_1d
     minus_di_1d = 100 * wilder_smooth(minus_dm, period) / atr_1d
@@ -74,28 +68,31 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / dx_denom
     adx_1d = wilder_smooth(dx_1d, period)
     
-    # Align daily volume MA and ADX to 4h timeframe
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Align ADX to 4h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Get 4h average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donchian_period, 30)  # Ensure Donchian and ADX are ready
+    start_idx = max(20, 30)  # Ensure Donchian, volume MA and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or 
-            np.isnan(vol_ma_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        up = upper[i]
-        low = lower[i]
-        mid = middle[i]
-        vol_ma = vol_ma_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        mid = donchian_mid[i]
         adx = adx_1d_aligned[i]
+        vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
@@ -103,11 +100,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long entry: price breaks above upper band, ADX > 25, volume confirmation
-            if price > up and adx > 25 and volume_confirmed:
+            if price > upper and adx > 25 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
             # Short entry: price breaks below lower band, ADX > 25, volume confirmation
-            elif price < low and adx > 25 and volume_confirmed:
+            elif price < lower and adx > 25 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
