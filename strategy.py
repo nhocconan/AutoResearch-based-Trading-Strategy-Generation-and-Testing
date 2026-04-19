@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with weekly trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) AND price > weekly EMA200 (bullish trend) AND volume > 1.3x daily average volume
-# Short when Williams %R > -20 (overbought) AND price < weekly EMA200 (bearish trend) AND volume > 1.3x daily average volume
-# Exit when Williams %R returns to -50 (mean reversion) or trend weakens
-# Williams %R identifies overbought/oversold conditions, weekly EMA200 filters trend direction, volume confirms momentum.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
-name = "6h_WilliamsR_MeanReversion_WeeklyTrend"
+# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) AND 12h trend bullish (price > 12h EMA34) AND volume > 1.3x 12h average volume
+# Short when Williams %R > -20 (overbought) AND 12h trend bearish (price < 12h EMA34) AND volume > 1.3x 12h average volume
+# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
+# Williams %R identifies short-term extremes, 12h EMA34 provides trend filter, volume confirms conviction.
+# Target: 15-35 trades/year per symbol.
+name = "6h_WilliamsR_12hTrend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,78 +23,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R calculation (14-period)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for trend filter and volume average
+    df_12h = get_htf_data(prices, '12h')
     
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Williams %R (14 periods) on 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align Williams %R to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # 12h EMA34 for trend filter
+    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Get weekly data for trend filter (EMA 200)
-    df_1w = get_htf_data(prices, '1w')
-    weekly_ema200 = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    weekly_ema200_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema200)
-    
-    # Get daily average volume for confirmation (20-period)
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # 12h average volume (20-period) for confirmation
+    vol_ma_12h = pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 200)  # Ensure Williams %R and weekly EMA are ready
+    start_idx = max(14, 34, 20)  # Ensure Williams %R, EMA34, and vol MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(weekly_ema200_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        wr = williams_r_aligned[i]
-        weekly_ema = weekly_ema200_aligned[i]
-        vol_ma = vol_ma_1d_aligned[i]
+        wr = williams_r[i]
+        ema34 = ema34_12h_aligned[i]
+        vol_ma = vol_ma_12h_aligned[i]
         vol = volume[i]
         
-        # Williams %R levels
-        oversold = wr < -80
-        overbought = wr > -20
-        mean_reversion = abs(wr + 50) < 10  # near -50 (mean level)
-        
-        # Weekly trend filter
-        bullish_trend = price > weekly_ema
-        bearish_trend = price < weekly_ema
-        
-        # Volume confirmation
+        # Trend and volume conditions
+        bullish_trend = price > ema34
+        bearish_trend = price < ema34
         volume_confirmed = vol > 1.3 * vol_ma
         
         if position == 0:
             # Long entry: oversold + bullish trend + volume confirmation
-            if oversold and bullish_trend and volume_confirmed:
+            if wr < -80 and bullish_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
             # Short entry: overbought + bearish trend + volume confirmation
-            elif overbought and bearish_trend and volume_confirmed:
+            elif wr > -20 and bearish_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: mean reversion OR trend weakens
-            if mean_reversion or not bullish_trend:
+            # Long exit: Williams %R crosses above -50 (exit oversold territory)
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: mean reversion OR trend weakens
-            if mean_reversion or not bearish_trend:
+            # Short exit: Williams %R crosses below -50 (exit overbought territory)
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
