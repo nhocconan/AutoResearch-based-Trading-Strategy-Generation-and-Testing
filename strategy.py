@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d Camarilla pivot reversal strategy
-# - Uses 1d Camarilla pivot levels (R1, S1) for reversal entries
-# - Enters long when price crosses above S1 in uptrend (1d EMA34 filter)
-# - Enters short when price crosses below R1 in downtrend (1d EMA34 filter)
-# - Requires volume confirmation: current 12h volume > 1.5x 20-period average
-# - Uses 12h RSI(14) for entry timing: long when RSI < 40, short when RSI > 60
-# - Exits on opposite RSI threshold or trend reversal
-# - Designed for low-frequency, high-conviction trades in both bull and bear markets
-# - Target: 20-40 trades/year to minimize fee drag
+# Hypothesis: 12h timeframe with 1w trend filter and 1d volume confirmation
+# - 1w EMA(34) defines trend direction (long when price > EMA34, short when price < EMA34)
+# - 1d volume > 1.3x 20-period average for conviction
+# - 12h RSI(14) for entry timing: long when RSI < 30 in uptrend, short when RSI > 70 in downtrend
+# - Exit on opposite RSI extreme (RSI > 70 for long, RSI < 30 for short) or trend reversal
+# - Session filter: only trade 08:00-20:00 UTC to avoid low-volume periods
+# - Position size: 0.25 (25%) to manage drawdown
+# - Designed to work in both bull and bear markets by following higher timeframe trend
+# - Target: 12-25 trades/year to avoid excessive fee drift
 
-name = "12h_Camarilla_Pivot_Reversal_Volume_v1"
+name = "12h_EMA34_RSI_1dVolume_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,27 +27,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # 1w EMA(34) for trend direction
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla pivot levels
-    # Formula: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C = (H+L+CLOSE)/3 (typical price)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    hl_range = df_1d['high'] - df_1d['low']
-    r1 = typical_price + hl_range * 1.1 / 12
-    s1 = typical_price - hl_range * 1.1 / 12
-    
-    # Align 1d R1 and S1 to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # 12h volume average (20-period)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     # 12h RSI(14) for entry timing
     delta = pd.Series(close).diff()
@@ -59,53 +52,50 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     rsi_values = rsi.values
     
+    # Pre-compute session filter (08:00-20:00 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 60  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_12h[i]) or 
-            np.isnan(rsi_values[i])):
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = vol_ma_12h[i] > 0 and volume[i] > 1.5 * vol_ma_12h[i]
+        # Skip if any required data is NaN
+        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(rsi_values[i]):
+            signals[i] = 0.0
+            continue
+            
+        # Volume filter: current 1d volume > 1.3x average
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.3 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Look for long entry: uptrend (price > 1d EMA34) + price > S1 + RSI < 40 + volume
-            if (close[i] > ema_34_1d_aligned[i] and 
-                close[i] > s1_aligned[i] and 
-                rsi_values[i] < 40 and 
-                volume_filter):
+            # Look for long entry: uptrend (price > 1w EMA34) + oversold RSI + volume
+            if close[i] > ema_34_1w_aligned[i] and rsi_values[i] < 30 and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: downtrend (price < 1d EMA34) + price < R1 + RSI > 60 + volume
-            elif (close[i] < ema_34_1d_aligned[i] and 
-                  close[i] < r1_aligned[i] and 
-                  rsi_values[i] > 60 and 
-                  volume_filter):
+            # Look for short entry: downtrend (price < 1w EMA34) + overbought RSI + volume
+            elif close[i] < ema_34_1w_aligned[i] and rsi_values[i] > 70 and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on RSI > 60 or trend reversal or price < S1
-            if (rsi_values[i] > 60 or 
-                close[i] < ema_34_1d_aligned[i] or 
-                close[i] < s1_aligned[i]):
+            # Long position: exit on overbought RSI or trend reversal
+            if rsi_values[i] > 70 or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on RSI < 40 or trend reversal or price > R1
-            if (rsi_values[i] < 40 or 
-                close[i] > ema_34_1d_aligned[i] or 
-                close[i] > r1_aligned[i]):
+            # Short position: exit on oversold RSI or trend reversal
+            if rsi_values[i] < 30 or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
