@@ -1,21 +1,17 @@
-# State your hypothesis in a comment at the top (strategy type, timeframe, why it should work in BOTH bull AND bear)
-# Hypothesis: 4h Donchian(20) breakout with 1-day volume confirmation and 1-week EMA50 trend filter.
-# Donchian breakouts capture trend continuation; volume confirms institutional participation.
-# EMA50 on weekly timeframe acts as a robust trend filter to avoid counter-trend trades.
-# Works in bull markets by catching breakouts; works in bear markets by filtering out false breakouts during downtrends.
-# Designed for 4h timeframe to balance trade frequency and signal quality.
-# Entry: Long when price breaks above Donchian(20) high AND volume > 1.5x 20-period average AND weekly EMA50 rising.
-# Short when price breaks below Donchian(20) low AND volume > 1.5x 20-period average AND weekly EMA50 falling.
-# Exit: Opposite Donchian level touch or EMA50 direction change.
-# Uses strict conditions to limit trades (~20-40/year) and avoid overtrading.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Volume_EMA50_WeeklyTrend"
-timeframe = "4h"
+# Hypothesis: 6h Williams %R overbought/oversold with weekly trend filter and volume confirmation.
+# Williams %R identifies reversal points; weekly trend ensures alignment with higher timeframe momentum.
+# Volume filter confirms participation. Designed for low frequency (~20-40 trades/year) to avoid fee drag.
+# Long when: Williams %R < -80 (oversold), weekly close > weekly open (bullish), volume > 1.5x average.
+# Short when: Williams %R > -20 (overbought), weekly close < weekly open (bearish), volume > 1.5x average.
+# Exit: Opposite Williams %R level or trend reversal.
+
+name = "6h_WilliamsR_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,28 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
-    
-    # Weekly EMA50 trend filter
+    # Weekly trend: bullish if weekly close > weekly open
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Weekly EMA50
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open
+    weekly_trend = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
     
-    # Weekly EMA50 direction: rising if current > previous, falling if current < previous
-    ema50_prev = np.roll(ema50_1w_aligned, 1)
-    ema50_prev[0] = ema50_1w_aligned[0]  # handle first value
-    ema50_rising = ema50_1w_aligned > ema50_prev
-    ema50_falling = ema50_1w_aligned < ema50_prev
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,36 +52,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(weekly_trend[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above Donchian high with volume and weekly uptrend
-            if (close[i] > high_20[i] and 
-                volume_confirm[i] and 
-                ema50_rising[i]):
+            # Long: oversold, weekly bullish, volume confirmation
+            if (williams_r[i] < -80 and 
+                weekly_trend[i] > 0.5 and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume and weekly downtrend
-            elif (close[i] < low_20[i] and 
-                  volume_confirm[i] and 
-                  ema50_falling[i]):
+            # Short: overbought, weekly bearish, volume confirmation
+            elif (williams_r[i] > -20 and 
+                  weekly_trend[i] < 0.5 and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price touches Donchian low or weekly EMA turns down
-            if (close[i] < low_20[i]) or (not ema50_rising[i]):
+            # Long: exit if overbought or weekly trend turns bearish
+            if (williams_r[i] > -20) or (weekly_trend[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price touches Donchian high or weekly EMA turns up
-            if (close[i] > high_20[i]) or (not ema50_falling[i]):
+            # Short: exit if oversold or weekly trend turns bullish
+            if (williams_r[i] < -80) or (weekly_trend[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
