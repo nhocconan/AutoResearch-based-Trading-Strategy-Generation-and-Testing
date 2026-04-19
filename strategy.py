@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""
-1d_Consolidation_Breakout_With_Trend_Filter
-Hypothesis: Daily consolidation breakouts with weekly trend filter work in both bull and bear markets.
-Consolidation is identified by low ATR volatility, breakouts by price moving outside Bollinger Bands.
-Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
-Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
-Works in bull/bear via weekly trend filter and volatility-based entry conditions.
-"""
+# 12h_Camarilla_R1S1_Breakout_Volume_ADX_Filter_v2
+# Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
+# Camarilla levels provide statistically significant support/resistance from previous day's price action
+# ADX > 25 filters for trending markets to avoid false breakouts in chop
+# Volume confirmation ensures institutional participation
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
+# Works in bull/bear via ADX trend filter and volatility-adjusted breakouts
+# This version includes an additional volatility filter (ATR-based) to reduce whipsaws in low volatility environments
 
-name = "1d_Consolidation_Breakout_With_Trend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_Volume_ADX_Filter_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,94 +26,156 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d indicators
-    # ATR for volatility measurement and consolidation detection
+    # ATR for volatility filter - calculated on 12h data
     def calculate_atr(high, low, close, period=14):
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
         tr[0] = tr1[0]
-        
-        atr = np.zeros_like(high)
-        atr[:period-1] = np.nan
-        if len(high) >= period:
-            atr[period-1] = np.nanmean(tr[:period])
-            for i in range(period, len(high)):
-                if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
-                    atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                else:
-                    atr[i] = np.nan
+        atr = np.zeros_like(tr)
+        atr[0] = tr[0]
+        for i in range(1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
         return atr
     
-    # Bollinger Bands
-    def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-        sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-        std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-        upper = sma + (std_dev * std)
-        lower = sma - (std_dev * std)
-        return upper, lower, sma
+    # ADX(14) for trend strength filter - calculated on 12h data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values using Wilder's smoothing (EMA-like)
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
+        
+        atr = WilderSmooth(tr, period)
+        dm_plus_smooth = WilderSmooth(dm_plus, period)
+        dm_minus_smooth = WilderSmooth(dm_minus, period)
+        
+        # Avoid division by zero
+        dx = np.full_like(close, np.nan)
+        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+        
+        adx = WilderSmooth(dx, period)
+        return adx
     
-    # Calculate 1d ATR and Bollinger Bands
-    atr_1d = calculate_atr(high, low, close, 14)
-    bb_upper, bb_lower, bb_middle = calculate_bollinger_bands(close, 20, 2.0)
-    
-    # Consolidation condition: low volatility (ATR below its 50-period average)
-    atr_ma = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    consolidation = atr_1d < (atr_ma * 0.7)  # ATR significantly below average
-    
-    # 1w trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # 12h data for ATR, ADX and other indicators
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:  # Need enough for ATR/ADX calculation
         return np.zeros(n)
     
-    # Weekly EMA34 for trend direction
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate ATR and ADX on 12h data
+    atr_12h = calculate_atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
+    atr_12h_ma = pd.Series(atr_12h).rolling(window=20, min_periods=20).mean().values  # 20-period ATR average
+    atr_12h_ma_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_ma)
+    
+    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Previous day's Camarilla levels (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day
+    ph = df_1d['high'].shift(1).values  # Previous day high
+    pl = df_1d['low'].shift(1).values   # Previous day low
+    pc = df_1d['close'].shift(1).values # Previous day close
+    
+    # Camarilla calculations
+    rang = ph - pl
+    r1 = pc + (rang * 1.1 / 12)
+    s1 = pc - (rang * 1.1 / 12)
+    r4 = pc + (rang * 1.1 / 2)
+    s4 = pc - (rang * 1.1 / 2)
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average (slightly stricter for fewer trades)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_ma * 1.5)
+    
+    # Volatility filter: current ATR > 0.7 * 20-period average ATR (avoid low volatility whipsaws)
+    volatility_filter = atr_12h_ma_aligned > 0
+    if len(atr_12h_ma_aligned) > 0:
+        # Only require volatility filter when we have sufficient data
+        volatility_condition = np.full_like(atr_12h_ma_aligned, True, dtype=bool)
+        valid_atr = ~np.isnan(atr_12h_ma_aligned)
+        if np.any(valid_atr):
+            volatility_condition[valid_atr] = atr_12h_ma_aligned[valid_atr] > (np.nanmedian(atr_12h_ma_aligned[valid_atr]) * 0.7)
+        volatility_filter = volatility_condition
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34)  # Ensure enough data for all indicators
+    start_idx = max(30, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d[i]) or np.isnan(atr_ma[i]) or 
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i]) or
+            np.isnan(atr_12h_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Consolidation breakout conditions
-        is_consolidating = consolidation[i]
-        price_above_upper = close[i] > bb_upper[i]
-        price_below_lower = close[i] < bb_lower[i]
-        
-        # Weekly trend direction
-        weekly_uptrend = close[i] > ema_34_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_34_1w_aligned[i]
+        # ADX filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_12h_aligned[i] > 25
         
         if position == 0:
-            # Long: consolidation breakout above upper BB in weekly uptrend
-            if (is_consolidating and price_above_upper and weekly_uptrend):
+            # Long: price breaks above R1 with volume, strong trend, and sufficient volatility
+            if (close[i] > r1_aligned[i] and 
+                volume_confirm[i] and 
+                strong_trend and
+                volatility_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: consolidation breakout below lower BB in weekly downtrend
-            elif (is_consolidating and price_below_lower and weekly_downtrend):
+            # Short: price breaks below S1 with volume, strong trend, and sufficient volatility
+            elif (close[i] < s1_aligned[i] and 
+                  volume_confirm[i] and 
+                  strong_trend and
+                  volatility_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below middle BB or consolidation ends
-            if (close[i] < bb_middle[i]) or (not consolidation[i]):
+            # Long: exit if price breaks below S1 or trend weakens (ADX < 20)
+            if (close[i] < s1_aligned[i]) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above middle BB or consolidation ends
-            if (close[i] > bb_middle[i]) or (not consolidation[i]):
+            # Short: exit if price breaks above R1 or trend weakens (ADX < 20)
+            if (close[i] > r1_aligned[i]) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
