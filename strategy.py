@@ -3,27 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1-day trend filter and volume confirmation.
-# Long when: Alligator jaws (13-period SMA of median price) > teeth (8-period SMA of median price) > lips (5-period SMA of median price) AND ADX(1d) > 25 AND volume > 1.5x 20-period average
-# Short when: Alligator lips > teeth > jaws AND ADX(1d) > 25 AND volume > 1.5x 20-period average
-# Exit when Alligator lines cross in opposite direction or price closes outside the Alligator mouth (lips/jaws)
-# Designed for ~20-30 trades/year per symbol. Works in both bull and bear markets by only taking trades in strong trending conditions.
-name = "12h_WilliamsAlligator_ADX_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX(1d) trend filter.
+# Long when: price closes above upper Donchian band, ADX(1d) > 20, volume > 1.5x 20-period average
+# Short when: price closes below lower Donchian band, ADX(1d) > 20, volume > 1.5x 20-period average
+# Exit when price returns to the 20-period SMA or reverses to opposite band.
+# Designed for ~20-30 trades/year per symbol. Works in both bull and bear markets by only taking trades in trending conditions.
+name = "4h_Donchian20_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Calculate median price
-    median_price = (high + low) / 2
     
     # 1-day data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -72,33 +69,13 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, atr_period)
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Williams Alligator lines on median price
-    # Jaws: 13-period SMA, 8 bars into the future
-    # Teeth: 8-period SMA, 5 bars into the future  
-    # Lips: 5-period SMA, 3 bars into the future
-    def smma(data, period):
-        """Smoothed Moving Average (used in Alligator)"""
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_DATA) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    jaws = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
-    
-    # Align Alligator lines to 12h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Calculate Donchian(20) on 4h data
+    upper_band = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower_band = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    middle_band = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     # Volume average (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -106,12 +83,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for indicator calculations
+    start_idx = 40  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(jaws_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(middle_band[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -120,31 +97,28 @@ def generate_signals(prices):
         adx_val = adx_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        jaw = jaws_aligned[i]
-        tooth = teeth_aligned[i]
-        lip = lips_aligned[i]
         
         if position == 0:
-            # Long: Jaws > Teeth > Lips (bullish alignment) with ADX > 25 and volume confirmation
-            if jaw > tooth > lip and adx_val > 25 and vol > 1.5 * vol_ma:
+            # Long breakout: price closes above upper band with ADX > 20 and volume confirmation
+            if price > upper_band[i] and adx_val > 20 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips > Teeth > Jaws (bearish alignment) with ADX > 25 and volume confirmation
-            elif lip > tooth > jaw and adx_val > 25 and vol > 1.5 * vol_ma:
+            # Short breakdown: price closes below lower band with ADX > 20 and volume confirmation
+            elif price < lower_band[i] and adx_val > 20 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Alligator lines cross in bearish direction OR price closes outside mouth (below lips)
-            if lip <= tooth <= jaw or price < lip:
+            # Long exit: price returns to 20-period SMA or breaks below lower band
+            if price <= middle_band[i] or price < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Alligator lines cross in bullish direction OR price closes outside mouth (above jaws)
-            if jaw <= tooth <= lip or price > jaw:
+            # Short exit: price returns to 20-period SMA or breaks above upper band
+            if price >= middle_band[i] or price > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
