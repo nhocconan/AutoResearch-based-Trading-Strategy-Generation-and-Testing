@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_CCI_Trend_Filter"
-timeframe = "6h"
+name = "4h_Pivot_R1_S1_Breakout_Volume_ATR_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,30 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for CCI and trend
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data for pivot levels and ATR
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h CCI(20)
-    tp_12h = (high_12h + low_12h + close_12h) / 3.0
-    sma_tp = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    # Avoid division by zero
-    mad = np.where(mad == 0, 1e-10, mad)
-    cci_12h = (tp_12h - sma_tp) / (0.015 * mad)
+    # Calculate daily pivot points: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Align CCI to 6h
-    cci_12h_aligned = align_htf_to_ltf(prices, df_12h, cci_12h)
+    # Align pivot levels to 4h
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 12h EMA(34) for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 1d ATR for volatility filter (14-period)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])
+    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -49,7 +50,8 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(cci_12h_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or 
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -57,32 +59,34 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        cci = cci_12h_aligned[i]
-        ema_trend = ema_34_12h_aligned[i]
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        atr = atr_14_1d_aligned[i]
         
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: CCI > -100 (oversold recovery) + price above EMA trend + volume
-            if cci > -100 and price > ema_trend and volume_confirmed:
+            # Long: break above R1 with volume
+            if price > r1 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: CCI < 100 (overbought pullback) + price below EMA trend + volume
-            elif cci < 100 and price < ema_trend and volume_confirmed:
+            # Short: break below S1 with volume
+            elif price < s1 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: CCI < -100 (re-enter oversold) or price below EMA
-            if cci < -100 or price < ema_trend:
+            # Exit: price below pivot or ATR-based stop
+            if price < pivot or price < close[i-1] - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: CCI > 100 (re-enter overbought) or price above EMA
-            if cci > 100 or price > ema_trend:
+            # Exit: price above pivot or ATR-based stop
+            if price > pivot or price > close[i-1] + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
