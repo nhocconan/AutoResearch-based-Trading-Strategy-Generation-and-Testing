@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-1h_4h_Donchian_Breakout_1d_Volume_Spike
-Hypothesis: 1h timeframe uses 4h Donchian channel breakout for direction with 1h volume spike confirmation.
-4h trend provides higher probability moves, 1h volume spike confirms institutional participation.
-Works in bull/bear by requiring volume confirmation on breakouts, avoiding false signals in chop.
-Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
+4h_Pivot_R1S1_Breakout_Volume_ADX_Filter
+Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
+Camarilla levels provide statistically significant intraday support/resistance
+ADX > 25 filters for trending markets to avoid false breakouts in chop
+Volume confirmation ensures institutional participation
+Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year)
+Works in bull/bear via ADX trend filter and volatility-adjusted breakouts
 """
 
-name = "1h_4h_Donchian_Breakout_1d_Volume_Spike"
-timeframe = "1h"
+name = "4h_Pivot_R1S1_Breakout_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,65 +27,129 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period) for trend direction
+    # ADX(14) for trend strength filter - calculated on 4h data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values using Wilder's smoothing (EMA-like)
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
+        
+        atr = WilderSmooth(tr, period)
+        dm_plus_smooth = WilderSmooth(dm_plus, period)
+        dm_minus_smooth = WilderSmooth(dm_minus, period)
+        
+        # Avoid division by zero
+        dx = np.full_like(close, np.nan)
+        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+        
+        adx = WilderSmooth(dx, period)
+        return adx
+    
+    # 4h data for ADX and other indicators
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate Donchian on 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate ADX on 4h data
+    adx_4h = calculate_adx(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 14)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
     
-    # Align to 1h timeframe
-    donch_high_1h = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_1h = align_htf_to_ltf(prices, df_4h, donch_low)
+    # Previous day's Camarilla levels (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # 1h volume spike confirmation (volume > 2.0 * 20-period average)
+    # Calculate Camarilla levels from previous day
+    ph = df_1d['high'].shift(1).values  # Previous day high
+    pl = df_1d['low'].shift(1).values   # Previous day low
+    pc = df_1d['close'].shift(1).values # Previous day close
+    
+    # Camarilla calculations
+    rang = ph - pl
+    r1 = pc + (rang * 1.1 / 12)
+    s1 = pc - (rang * 1.1 / 12)
+    r4 = pc + (rang * 1.1 / 2)
+    s4 = pc - (rang * 1.1 / 2)
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: volume > 1.3 * 20-period average (slightly relaxed for fewer trades)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
-    
-    # Session filter: 08:00-20:00 UTC only
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_confirm = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need enough data for Donchian and volume MA
+    start_idx = max(30, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(donch_high_1h[i]) or np.isnan(donch_low_1h[i]) or 
-            np.isnan(volume_ma[i]) or not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(adx_4h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # ADX filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_4h_aligned[i] > 25
+        
         if position == 0:
-            # Long: price breaks above 4h Donchian high with volume spike
-            if (close[i] > donch_high_1h[i] and volume_spike[i]):
-                signals[i] = 0.20
+            # Long: price breaks above R1 with volume and strong trend
+            if (close[i] > r1_aligned[i] and 
+                volume_confirm[i] and 
+                strong_trend):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low with volume spike
-            elif (close[i] < donch_low_1h[i] and volume_spike[i]):
-                signals[i] = -0.20
+            # Short: price breaks below S1 with volume and strong trend
+            elif (close[i] < s1_aligned[i] and 
+                  volume_confirm[i] and 
+                  strong_trend):
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below 4h Donchian low
-            if close[i] < donch_low_1h[i]:
+            # Long: exit if price breaks below S1 or trend weakens (ADX < 20)
+            if (close[i] < s1_aligned[i]) or (adx_4h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above 4h Donchian high
-            if close[i] > donch_high_1h[i]:
+            # Short: exit if price breaks above R1 or trend weakens (ADX < 20)
+            if (close[i] > r1_aligned[i]) or (adx_4h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
