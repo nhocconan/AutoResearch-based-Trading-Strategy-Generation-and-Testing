@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversal with daily volume spike and weekly trend filter.
-# Long at S1/S2 when price reverses up with volume spike and weekly trend up.
-# Short at R1/R2 when price reverses down with volume spike and weekly trend down.
-# Uses daily Camarilla levels for intraday mean reversion, weekly trend for direction filter.
-# Volume spike confirms momentum behind reversal. Designed to work in ranging markets (2022-2024)
-# and capture reversals in bear market rallies/pullbacks (2025+). Target: 20-35 trades/year per symbol.
-name = "6h_CamarillaReversal_Volume_WeeklyTrend"
-timeframe = "6h"
+# Hypothesis: 12h Williams Alligator with 1-week trend filter and volume confirmation.
+# Long when price > Alligator Jaw, weekly trend up, volume > 1.5x average.
+# Short when price < Alligator Jaw, weekly trend down, volume > 1.5x average.
+# Designed for 12h timeframe to capture multi-day trends with reduced whipsaw.
+# Target: 20-40 trades/year per symbol (~80-160 total over 4 years).
+name = "12h_WilliamsAlligator_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 120:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,93 +22,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Williams Alligator: Jaw (13-period SMMA shifted 8), Teeth (8-period SMMA shifted 5), Lips (5-period SMMA shifted 3)
+    # We'll use Jaw as the main reference line
+    def smma(source, length):
+        result = np.full_like(source, np.nan)
+        if len(source) < length:
+            return result
+        # First value is simple average
+        result[length-1] = np.mean(source[0:length])
+        # Subsequent values: SMMA = (PREV * (LENGTH-1) + CURRENT) / LENGTH
+        for i in range(length, len(source)):
+            result[i] = (result[i-1] * (length-1) + source[i]) / length
+        return result
     
-    # Calculate Camarilla levels from previous daily OHLC
-    # Using previous day's close, high, low
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Camarilla multipliers
-    R1 = prev_close + (prev_high - prev_low) * 1.0833
-    R2 = prev_close + (prev_high - prev_low) * 1.1666
-    S1 = prev_close - (prev_high - prev_low) * 1.0833
-    S2 = prev_close - (prev_high - prev_low) * 1.1666
-    
-    # Align daily Camarilla levels to 6h timeframe
-    R1_6h = align_htf_to_ltf(prices, df_1d, R1)
-    R2_6h = align_htf_to_ltf(prices, df_1d, R2)
-    S1_6h = align_htf_to_ltf(prices, df_1d, S1)
-    S2_6h = align_htf_to_ltf(prices, df_1d, S2)
+    jaw = smma(close, 13)
+    jaw_shifted = np.roll(jaw, 8)  # Shift 8 bars forward
+    jaw_shifted[:8] = np.nan  # Fill shifted portion with NaN
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    # Weekly EMA50 trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema50_6h = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    # Weekly EMA13 trend
+    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume confirmation: current volume > 2.0x 24-period average (48 hours)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Align weekly EMA13 to 12h
+    ema_13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Ensure volume MA and shifted data are ready
+    start_idx = max(20, 13+8)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_6h[i]) or np.isnan(R2_6h[i]) or np.isnan(S1_6h[i]) or 
-            np.isnan(S2_6h[i]) or np.isnan(weekly_ema50_6h[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(jaw_shifted[i]) or np.isnan(ema_13_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = R1_6h[i]
-        r2 = R2_6h[i]
-        s1 = S1_6h[i]
-        s2 = S2_6h[i]
-        weekly_ema = weekly_ema50_6h[i]
-        vol_ma = vol_ma_24[i]
+        jaw_val = jaw_shifted[i]
+        weekly_trend = ema_13_1w_aligned[i]
+        vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 2.0 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
-        # Weekly trend filter
-        weekly_uptrend = price > weekly_ema
-        weekly_downtrend = price < weekly_ema
+        # Determine if weekly trend is up or down
+        weekly_up = weekly_trend > 0  # Using positive slope approximation
+        weekly_down = weekly_trend < 0
         
         if position == 0:
-            # Enter long at S1/S2 reversal with volume and weekly uptrend
-            if price <= s1 and weekly_uptrend and volume_confirmed:
+            # Enter long if price above Jaw, weekly trend up, and volume confirmation
+            if price > jaw_val and weekly_up and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short at R1/R2 reversal with volume and weekly downtrend
-            elif price >= r1 and weekly_downtrend and volume_confirmed:
+            # Enter short if price below Jaw, weekly trend down, and volume confirmation
+            elif price < jaw_val and weekly_down and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price reaches midpoint (neutral) or weekly trend turns down
-            midpoint = (s1 + r1) / 2
-            if price >= midpoint or not weekly_uptrend:
+            # Exit long when price crosses below Jaw or weekly trend turns down
+            if price < jaw_val or not weekly_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price reaches midpoint or weekly trend turns up
-            midpoint = (s1 + r1) / 2
-            if price <= midpoint or not weekly_downtrend:
+            # Exit short when price crosses above Jaw or weekly trend turns up
+            if price > jaw_val or not weekly_down:
                 signals[i] = 0.0
                 position = 0
             else:
