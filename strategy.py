@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h trend filter and volume confirmation.
-# Long when: Close breaks above R1 and 12h EMA34 is rising, volume > 1.5x average.
-# Short when: Close breaks below S1 and 12h EMA34 is falling, volume > 1.5x average.
-# Exit when price returns to pivot (PP) or reverses at S2/R2.
-# Uses Camarilla levels for mean reversion breakouts, higher timeframe for trend alignment,
-# and volume to confirm institutional participation. Designed for ~25-40 trades/year per symbol.
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Trend"
-timeframe = "4h"
+# Hypothesis: 6s Elder Ray + weekly trend + volume confirmation.
+# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Long: Bull Power > 0 and Bear Power < 0 (bullish momentum) + price above weekly EMA26 + volume > 20-period average
+# Short: Bear Power < 0 and Bull Power > 0 (bearish momentum) + price below weekly EMA26 + volume > 20-period average
+# Uses Elder Ray for momentum, weekly trend for direction, volume for confirmation.
+# Designed for ~15-30 trades/year per symbol.
+name = "6h_ElderRay_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,15 +23,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_34_slope = ema_12h_34 - np.roll(ema_12h_34, 1)
-    ema_12h_34_slope[0] = 0
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w_26 = pd.Series(close_1w).ewm(span=26, adjust=False, min_periods=26).mean().values
+    ema_1w_26_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_26)
     
-    # Calculate 4-session average volume for confirmation
-    vol_avg_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # EMA13 for Elder Ray calculation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Volume confirmation: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -40,63 +46,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_12h_34_slope[i]) or np.isnan(vol_avg_4[i]) or 
-            np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(ema_1w_26_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Calculate Camarilla levels for current day using previous day's OHLC
-        # Need previous day's data - we'll use daily resampling from 4h data
-        # Group by date to get daily OHLC
-        if i < 24:  # Need at least 24 hours (6 bars of 4h) for previous day
-            signals[i] = 0.0
-            continue
-            
-        # Find start of current trading day (assuming 00:00 UTC)
-        # We'll use the last 6 bars (24h) to calculate daily OHLC
-        lookback = min(i, 24)
-        day_high = np.max(high[i-lookback+1:i+1])
-        day_low = np.min(low[i-lookback+1:i+1])
-        day_close = close[i-lookback+1]  # First bar of the period
-        
-        # Calculate Camarilla levels
-        range_val = day_high - day_low
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # Camarilla formulas
-        pp = (day_high + day_low + day_close) / 3
-        r1 = pp + (range_val * 1.1 / 12)
-        s1 = pp - (range_val * 1.1 / 12)
-        r2 = pp + (range_val * 1.1 / 6)
-        s2 = pp - (range_val * 1.1 / 6)
         
         price = close[i]
-        vol_ratio = volume[i] / (vol_avg_4[i] + 1e-10)
-        ema_slope = ema_12h_34_slope[i]
+        ema_weekly = ema_1w_26_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        vol_ma_val = vol_ma[i]
+        vol_current = volume[i]
         
         if position == 0:
-            # Long: Price breaks above R1, 12h EMA trending up, volume confirmation
-            if price > r1 and ema_slope > 0 and vol_ratio > 1.5:
+            # Long: Bullish momentum (Bull Power > 0, Bear Power < 0) + above weekly EMA26 + volume confirmation
+            if bull > 0 and bear < 0 and price > ema_weekly and vol_current > vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1, 12h EMA trending down, volume confirmation
-            elif price < s1 and ema_slope < 0 and vol_ratio > 1.5:
+            # Short: Bearish momentum (Bear Power < 0, Bull Power > 0) + below weekly EMA26 + volume confirmation
+            elif bear < 0 and bull > 0 and price < ema_weekly and vol_current > vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to pivot or reaches R2
-            if price <= pp or price >= r2:
+            # Long exit: Momentum turns bearish or price breaks below weekly EMA
+            if bull <= 0 or bear >= 0 or price < ema_weekly:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to pivot or reaches S2
-            if price >= pp or price <= s2:
+            # Short exit: Momentum turns bullish or price breaks above weekly EMA
+            if bear >= 0 or bull <= 0 or price > ema_weekly:
                 signals[i] = 0.0
                 position = 0
             else:
