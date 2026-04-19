@@ -3,28 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams Alligator with 1-day RSI filter.
-# Long when: Alligator jaws (13-period SMMA) above teeth (8-period SMMA) and teeth above lips (5-period SMMA),
-#            and 1-day RSI > 50.
-# Short when: Jaws below teeth and teeth below lips, and 1-day RSI < 50.
-# Exit when: Alligator lines re-cross (jaws crosses teeth).
-# Williams Alligator identifies trend alignment, while 1-day RSI filters for momentum bias.
-# Target: 20-35 trades/year per symbol. Works in trending markets (both bull and bear).
-name = "6h_WilliamsAlligator_1dRSI_Filter"
-timeframe = "6h"
+# Hypothesis: 4-hour Choppiness Index regime filter with daily VWAP deviation for mean reversion.
+# Long when: CHOP(14) > 61.8 (ranging market) AND price < VWAP - 1.5*ATR(20) (oversold)
+# Short when: CHOP(14) > 61.8 (ranging market) AND price > VWAP + 1.5*ATR(20) (overbought)
+# Exit when: Price crosses back through VWAP (mean reversion complete)
+# Choppiness Index identifies ranging markets ideal for mean reversion, VWAP acts as dynamic fair value,
+# ATR-scaled deviations prevent entries in low volatility. Works in both bull (buy dips) and bear (sell rallies).
+name = "4h_Choppiness_VWAP_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
-
-def smma(src, length):
-    """Smoothed Moving Average (SMMA) - same as Wilder's smoothing"""
-    if length < 1:
-        return src
-    result = np.full_like(src, np.nan, dtype=float)
-    # First value is simple average
-    result[length-1] = np.mean(src[:length])
-    # Subsequent values: (prev * (length-1) + current) / length
-    for i in range(length, len(src)):
-        result[i] = (result[i-1] * (length-1) + src[i]) / length
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,86 +19,97 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1-day data for RSI filter
+    # Daily data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Williams Alligator on 6h close
-    # Jaws: 13-period SMMA of SMMA (8 periods offset)
-    # Teeth: 8-period SMMA of SMMA (5 periods offset)
-    # Lips: 5-period SMMA
-    smma5 = smma(close, 5)
-    smma8 = smma(close, 8)
-    smma13 = smma(close, 13)
+    # Calculate daily VWAP (Volume Weighted Average Price)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_num = np.cumsum(typical_price_1d * volume_1d)
+    vwap_den = np.cumsum(volume_1d)
+    vwap_1d = vwap_num / vwap_den
     
-    jaws = smma(smma13, 8)  # 13-period SMMA smoothed with 8-period
-    teeth = smma(smma8, 5)   # 8-period SMMA smoothed with 5-period
-    lips = smma5              # 5-period SMMA
+    # Calculate ATR(20) for volatility scaling
+    atr_period = 20
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.zeros_like(close)
+    atr[atr_period] = np.mean(tr[:atr_period])
+    for i in range(atr_period + 1, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    # Calculate 1-day RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Choppiness Index (14) for regime detection
+    chop_period = 14
+    atr_sum = np.zeros_like(close)
+    atr_sum[chop_period] = np.sum(tr[:chop_period])
+    for i in range(chop_period + 1, len(tr)):
+        atr_sum[i] = atr_sum[i-1] - tr[i-chop_period] + tr[i]
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
+    max_high = np.zeros_like(close)
+    min_low = np.zeros_like(close)
+    max_high[chop_period] = np.max(high[:chop_period+1])
+    min_low[chop_period] = np.min(low[:chop_period+1])
+    for i in range(chop_period + 1, len(high)):
+        max_high[i] = max(max_high[i-1], high[i])
+        min_low[i] = min(min_low[i-1], low[i])
     
-    # Wilder's smoothing for RSI
-    avg_gain[13] = np.mean(gain[1:14])  # First average gain
-    avg_loss[13] = np.mean(loss[1:14])  # First average loss
+    chop = np.full_like(close, 50.0)  # Default to neutral
+    valid_range = (max_high - min_low) > 0
+    chop[chop_period:] = 100 * np.log10(atr_sum[chop_period:] / (max_high[chop_period:] - min_low[chop_period:])) / np.log10(chop_period)
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Align 1-day data to 6h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), jaws)
-    teeth_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), teeth)
-    lips_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), lips)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align daily data to 4H timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for all indicators to be calculated
+    start_idx = max(20, chop_period) + 1  # Wait for ATR and CHOP calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        jaws_val = jaws_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
+        price = close[i]
+        vwap = vwap_1d_aligned[i]
+        chop_val = chop_aligned[i]
+        atr_val = atr_aligned[i]
         
         if position == 0:
-            # Long entry: Jaws > Teeth > Lips (bullish alignment) and RSI > 50
-            if (jaws_val > teeth_val and teeth_val > lips_val and rsi_val > 50):
+            # Long entry: Choppy market (range) AND price significantly below VWAP (oversold)
+            if (chop_val > 61.8 and price < vwap - 1.5 * atr_val):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Jaws < Teeth < Lips (bearish alignment) and RSI < 50
-            elif (jaws_val < teeth_val and teeth_val < lips_val and rsi_val < 50):
+            # Short entry: Choppy market (range) AND price significantly above VWAP (overbought)
+            elif (chop_val > 61.8 and price > vwap + 1.5 * atr_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Jaws crosses below Teeth (trend weakening)
-            if jaws_val < teeth_val:
+            # Long exit: Price crosses back above VWAP (mean reversion)
+            if price > vwap:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Jaws crosses above Teeth (trend weakening)
-            if jaws_val > teeth_val:
+            # Short exit: Price crosses back below VWAP (mean reversion)
+            if price < vwap:
                 signals[i] = 0.0
                 position = 0
             else:
