@@ -1,13 +1,16 @@
-# 12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
-# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and ATR-based volatility filter.
-# Long when price breaks above R1 with volume > 1.5x 12h average and ATR ratio < 0.8.
-# Short when price breaks below S1 with volume > 1.5x 12h average and ATR ratio < 0.8.
-# Exit when price returns to pivot point or volatility increases (ATR ratio > 1.2).
-# Uses 1d Camarilla levels for structure, volume for confirmation, ATR for volatility regime.
-# Designed for 12-30 trades/year per symbol to minimize fee drag.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "12h"
+# Hypothesis: 4h Williams %R with 12h trend filter and volume confirmation.
+# Long when: Williams %R < -80 (oversold) and price > 12h EMA(34) and volume > 1.5x average
+# Short when: Williams %R > -20 (overbought) and price < 12h EMA(34) and volume > 1.5x average
+# Exit when Williams %R crosses back to -50.
+# Williams %R identifies reversals in both bull and bear markets. EMA filter ensures trend alignment.
+# Volume confirmation reduces false signals. Designed for ~20-30 trades/year per symbol.
+name = "4h_WilliamsR_EMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,38 +23,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_34_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_34)
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Williams %R calculation (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # 12h volume average (20-period)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # 1d ATR for volatility filter
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma_10 = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_ratio = atr_1d / (atr_ma_10 + 1e-10)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,46 +45,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(ema_12h_34_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_ma = volume_ma[i]
-        pivot = pivot_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        atr_ratio_val = atr_ratio_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = vol > 1.5 * vol_ma
-        
-        # Volatility filter: ATR ratio < 0.8 (low volatility environment)
-        vol_filter = atr_ratio_val < 0.8
+        ema_12h = ema_12h_34_aligned[i]
+        wr = williams_r[i]
+        vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation and low volatility
-            if price > r1 and volume_confirm and vol_filter:
+            # Long: Williams %R oversold (< -80), price above 12h EMA34, volume confirmation
+            if wr < -80 and price > ema_12h and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation and low volatility
-            elif price < s1 and volume_confirm and vol_filter:
+            # Short: Williams %R overbought (> -20), price below 12h EMA34, volume confirmation
+            elif wr > -20 and price < ema_12h and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to pivot or volatility increases
-            if price < pivot or atr_ratio_val > 1.2:
+            # Long exit: Williams %R crosses above -50
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to pivot or volatility increases
-            if price > pivot or atr_ratio_val > 1.2:
+            # Short exit: Williams %R crosses below -50
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
