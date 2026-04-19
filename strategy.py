@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Donchian breakout with 4h volume confirmation and 1d trend filter.
-# Uses 4h volume spike to confirm institutional interest and 1d EMA200 for trend direction.
-# Designed to work in both bull and bear markets by filtering breakouts with volume and trend.
-# Target: 15-37 trades/year per symbol.
-name = "1h_Donchian20_VolumeTrend_EMA200"
-timeframe = "1h"
+# Hypothesis: 6h Ichimoku Cloud breakout with weekly trend filter and volume confirmation.
+# Ichimoku provides dynamic support/resistance via Kumo (cloud). TK cross (Tenkan/Kijun) signals momentum shifts.
+# Weekly trend filter (price vs weekly Kumo) ensures alignment with higher timeframe trend.
+# Volume confirmation filters false breakouts. Works in bull/bear markets: cloud acts as dynamic S/R in trends,
+# and TK cross captures momentum shifts. Target: 12-30 trades/year per symbol.
+name = "6h_Ichimoku_TK_Cross_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -16,85 +17,112 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for volume confirmation (spike detection)
-    df_4h = get_htf_data(prices, '4h')
-    vol_4h = df_4h['volume'].values
+    # Ichimoku parameters (6h)
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
+    displacement = 26
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Calculate Donchian Channel (20-period) on 1h
-    donch_len = 20
-    upper_dc = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
-    lower_dc = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
     
-    # Calculate 4h volume average (20-period) for spike detection
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(displacement)
     
-    # Calculate 1d EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b = ((pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                      pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2).shift(displacement)
     
-    # Align 4h volume MA and 1d EMA200 to 1h timeframe
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) == 0:
+        return np.zeros(n)
+    
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    
+    # Weekly Ichimoku components (same parameters)
+    weekly_tenkan = (pd.Series(weekly_high).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                     pd.Series(weekly_low).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
+    weekly_kijun = (pd.Series(weekly_high).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                    pd.Series(weekly_low).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+    weekly_senkou_a = ((weekly_tenkan + weekly_kijun) / 2).shift(displacement)
+    weekly_senkou_b = ((pd.Series(weekly_high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                        pd.Series(weekly_low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2).shift(displacement)
+    
+    # Align weekly Ichimoku to 6h
+    weekly_senkou_a_aligned = align_htf_to_ltf(prices, df_weekly, weekly_senkou_a.values)
+    weekly_senkou_b_aligned = align_htf_to_ltf(prices, df_weekly, weekly_senkou_b.values)
+    
+    # Weekly Kumo (cloud) boundaries
+    weekly_kumo_top = np.maximum(weekly_senkou_a_aligned, weekly_senkou_b_aligned)
+    weekly_kumo_bottom = np.minimum(weekly_senkou_a_aligned, weekly_senkou_b_aligned)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donch_len, 20, 200)  # Ensure all indicators are ready
+    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period, displacement, 20) + displacement
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
-            np.isnan(vol_ma_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or np.isnan(senkou_span_a[i]) or 
+            np.isnan(senkou_span_b[i]) or np.isnan(weekly_kumo_top[i]) or np.isnan(weekly_kumo_bottom[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_dc[i]
-        lower = lower_dc[i]
-        vol_ma = vol_ma_4h_aligned[i]
-        ema_200 = ema_200_1d_aligned[i]
+        tk_cross = tenkan_sen[i] - kijun_sen[i]
+        prev_tk_cross = tenkan_sen[i-1] - kijun_sen[i-1] if i > 0 else 0
         vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        weekly_top = weekly_kumo_top[i]
+        weekly_bottom = weekly_kumo_bottom[i]
         
-        # Volume confirmation: current volume > 2.0x 4h average volume
-        volume_confirmed = vol > 2.0 * vol_ma
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.5 * vol_ma
         
-        # Breakout conditions
-        bullish_breakout = price > upper
-        bearish_breakout = price < lower
+        # Price relative to weekly cloud
+        price_above_weekly_kumo = price > weekly_top
+        price_below_weekly_kumo = price < weekly_bottom
         
         if position == 0:
-            # Look for entry: breakout in direction of 1d trend with volume confirmation
-            if bullish_breakout and (price > ema_200) and volume_confirmed:
-                signals[i] = 0.20
+            # Long: TK cross turns positive (bullish momentum) + price above weekly cloud + volume
+            if tk_cross > 0 and prev_tk_cross <= 0 and price_above_weekly_kumo and volume_confirmed:
+                signals[i] = 0.25
                 position = 1
-            elif bearish_breakout and (price < ema_200) and volume_confirmed:
-                signals[i] = -0.20
+            # Short: TK cross turns negative (bearish momentum) + price below weekly cloud + volume
+            elif tk_cross < 0 and prev_tk_cross >= 0 and price_below_weekly_kumo and volume_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns to 50% of the Donchian channel or trend changes
-            mid_point = (upper + lower) * 0.5
-            if price < mid_point:  # Return to midpoint
+            # Exit long when TK cross turns negative (momentum shift) or price enters weekly cloud
+            if tk_cross < 0 or (price >= weekly_bottom and price <= weekly_top):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns to 50% of the Donchian channel
-            mid_point = (upper + lower) * 0.5
-            if price > mid_point:  # Return to midpoint
+            # Exit short when TK cross turns positive (momentum shift) or price enters weekly cloud
+            if tk_cross > 0 or (price >= weekly_bottom and price <= weekly_top):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
