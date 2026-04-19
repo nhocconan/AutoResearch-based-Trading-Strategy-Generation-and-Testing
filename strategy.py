@@ -1,24 +1,20 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 12h_Median_CCI_D1_1wTrend_v1
+# Hypothesis: 12h median CCI(20) with 1d volume confirmation and 1w trend filter
+# - Median CCI(20) uses median price (HLC/3) to reduce noise and improve robustness
+# - Long when median CCI crosses above -100 (emerging uptrend) with volume confirmation
+# - Short when median CCI crosses below +100 (emerging downtrend) with volume confirmation
+# - 1w EMA(34) trend filter ensures alignment with weekly trend direction
+# - Volume filter: 12h volume > 1.3x 20-period average for institutional participation
+# - Designed to work in both bull and bear markets by following higher timeframe trend
+# - Target: 15-30 trades/year to avoid excessive fee drag
 
-# Hypothesis: 6h Elder Ray power with 1d ADX regime filter
-# - Elder Ray Bull Power = High - EMA(13), Bear Power = EMA(13) - Low (on 6h)
-# - 1d ADX > 25 indicates trending market, < 20 indicates ranging
-# - In trending (ADX>25): go long when Bull Power > 0 and rising, short when Bear Power > 0 and rising
-# - In ranging (ADX<20): fade extreme Elder Ray values (long when Bear Power < -std, short when Bull Power < -std)
-# - Volume confirmation: 6h volume > 1.5x 20-period average
-# - Position size: 0.25 to manage drawdown
-# - Designed to work in both bull and bear markets by adapting to regime
-
-name = "6h_ElderRay_1dADXRegime_Volume_v2"
-timeframe = "6h"
+name = "12h_Median_CCI_D1_1wTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,126 +22,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX regime filter
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d ADX calculation
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # 1w EMA(34) for trend direction
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Smooth TR, +DM, -DM
-    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    plus_dm_ma = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    minus_dm_ma = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    # Median price for CCI calculation (typical price = (H+L+C)/3)
+    median_price = (high + low + close) / 3.0
     
-    # DI and DX
-    plus_di = 100 * plus_dm_ma / tr_ma
-    minus_di = 100 * minus_dm_ma / tr_ma
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    adx_values = adx.values
+    # CCI(20) calculation
+    # CCI = (Typical Price - SMA) / (0.015 * Mean Deviation)
+    tp = median_price
+    sma_20 = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
     
-    # Align ADX to 6h
-    adx_6h_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    # Mean deviation calculation
+    def mean_deviation(arr, window):
+        md = np.zeros_like(arr)
+        for i in range(window-1, len(arr)):
+            md[i] = np.mean(np.abs(arr[i-window+1:i+1] - np.mean(arr[i-window+1:i+1])))
+        return md
     
-    # Elder Ray on 6h: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean()
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
+    md_20 = mean_deviation(tp, 20)
+    cci = (tp - sma_20) / (0.015 * md_20 + 1e-10)  # Add small epsilon to avoid division by zero
     
-    # Volume filter: 6h volume > 1.5x 20-period average
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    
-    # Regime thresholds
-    adx_trending = 25
-    adx_ranging = 20
+    # Pre-compute session filter (00:00-23:00 UTC - trade all hours for 12h)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # For 12h timeframe, trade during active market hours (00:00-23:00 UTC covers all)
+    in_session = np.ones(n, dtype=bool)  # Trade all hours for 12h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_6h_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ma_6h[i]) or
-            np.isnan(ema_13[i])):
+        if (np.isnan(cci[i]) or np.isnan(sma_20[i]) or np.isnan(md_20[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter
-        volume_filter = vol_ma_6h[i] > 0 and volume[i] > 1.5 * vol_ma_6h[i]
+        # Volume filter: current 12h volume > 1.3x average
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.3 * vol_ma_1d_aligned[i]
+        
+        # Trend filter: align with 1w EMA direction
+        uptrend = close[i] > ema_34_1w_aligned[i]
+        downtrend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Determine regime
-            if adx_6h_aligned[i] > adx_trending:  # Trending market
-                # Long: Bull Power positive and rising
-                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and volume_filter:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Bear Power positive and rising
-                elif bear_power[i] > 0 and bear_power[i] > bear_power[i-1] and volume_filter:
-                    signals[i] = -0.25
-                    position = -1
-            elif adx_6h_aligned[i] < adx_ranging:  # Ranging market
-                # Calculate standard deviation of Elder Ray for extreme detection
-                # Use rolling std of Bear Power for long signals, Bull Power for short signals
-                bear_std = pd.Series(bear_power[max(0, i-20):i+1]).std()
-                bull_std = pd.Series(bull_power[max(0, i-20):i+1]).std()
+            # Look for long entry: CCI crosses above -100 + uptrend + volume
+            if cci[i] > -100 and cci[i-1] <= -100 and uptrend and volume_filter:
+                signals[i] = 0.25
+                position = 1
+            # Look for short entry: CCI crosses below +100 + downtrend + volume
+            elif cci[i] < 100 and cci[i-1] >= 100 and downtrend and volume_filter:
+                signals[i] = -0.25
+                position = -1
                 
-                # Long: Bear Power extremely negative (strong selling exhaustion)
-                if bear_std > 0 and bear_power[i] < -1.5 * bear_std and volume_filter:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Bull Power extremely negative (strong buying exhaustion)
-                elif bull_std > 0 and bull_power[i] < -1.5 * bull_std and volume_filter:
-                    signals[i] = -0.25
-                    position = -1
-                    
         elif position == 1:
-            # Long exit conditions
-            if adx_6h_aligned[i] > adx_trending:
-                # In trending: exit when Bull Power turns negative
-                if bull_power[i] <= 0:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long position: exit on CCI crossing below +100 or trend reversal
+            if cci[i] < 100 and cci[i-1] >= 100 or not uptrend:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging: exit when Bear Power recovers from extreme
-                bear_std = pd.Series(bear_power[max(0, i-20):i+1]).std()
-                if bear_std > 0 and bear_power[i] > -0.5 * bear_std:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-                    
+                signals[i] = 0.25
+                
         elif position == -1:
-            # Short exit conditions
-            if adx_6h_aligned[i] > adx_trending:
-                # In trending: exit when Bear Power turns negative
-                if bear_power[i] <= 0:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short position: exit on CCI crossing above -100 or trend reversal
+            if cci[i] > -100 and cci[i-1] <= -100 or not downtrend:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging: exit when Bull Power recovers from extreme
-                bull_std = pd.Series(bull_power[max(0, i-20):i+1]).std()
-                if bull_std > 0 and bull_power[i] > -0.5 * bull_std:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
