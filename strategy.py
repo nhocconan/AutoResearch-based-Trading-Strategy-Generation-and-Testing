@@ -3,8 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_Alligator_Fractal_Trend_v1"
-timeframe = "6h"
+# Hypothesis: 4h price action near 1-day VWAP with volume confirmation and ATR-based stops.
+# Uses 1-day VWAP as dynamic support/resistance, works in both trending and ranging markets.
+# Targets 20-40 trades/year to avoid fee drag, with clear entry/exit rules.
+name = "4h_1d_VWAP_Bounce_Volume_ATR_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,93 +20,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Alligator and fractals (once before loop)
+    # Get 1d data for VWAP calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Get 1w data for weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 1d VWAP: typical price * volume / cumulative volume
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vp = typical_price * df_1d['volume']
+    cum_vp = vp.cumsum()
+    cum_vol = df_1d['volume'].cumsum()
+    vwap = (cum_vp / cum_vol).replace([np.inf, -np.inf], np.nan).ffill().values
     
-    # Alligator components (13,8,5 SMAs with future shifts)
-    jaw_1d = pd.Series(close_1d).rolling(window=13, min_periods=13).mean()
-    jaw_1d = jaw_1d.shift(8)  # shift forward by 8 bars
-    teeth_1d = pd.Series(close_1d).rolling(window=8, min_periods=8).mean()
-    teeth_1d = teeth_1d.shift(5)  # shift forward by 5 bars
-    lips_1d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean()
-    lips_1d = lips_1d.shift(3)  # shift forward by 3 bars
+    # Align 1d VWAP to 4h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
     
-    # Williams Fractals (requires 2-bar confirmation)
-    from mtf_data import compute_williams_fractals
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # 4h ATR for volatility and stop calculation (14-period)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
+    tr = np.maximum(tr, np.absolute(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Alligator lines to 6h timeframe
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d.values)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d.values)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d.values)
-    
-    # Align fractals with 2-bar confirmation delay
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # Align 1w close for trend filter
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average (6h)
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
-            np.isnan(lips_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(close_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(vwap_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        jaw = jaw_1d_aligned[i]
-        teeth = teeth_1d_aligned[i]
-        lips = lips_1d_aligned[i]
-        bearish_fract = bearish_fractal_aligned[i]
-        bullish_fract = bullish_fractal_aligned[i]
-        weekly_close = close_1w_aligned[i]
+        vwap = vwap_aligned[i]
+        atr_val = atr[i]
         
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # Alligator alignment: lips > teeth > jaw = bullish, lips < teeth < jaw = bearish
-        alligator_bullish = lips > teeth and teeth > jaw
-        alligator_bearish = lips < teeth and teeth < jaw
-        
         if position == 0:
-            # Long: bullish Alligator + price above weekly close + bullish fractal + volume
-            if alligator_bullish and price > weekly_close and bullish_fract and volume_confirmed:
+            # Long: bounce off VWAP support with volume
+            if price > vwap and price < vwap + 0.5 * atr_val and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish Alligator + price below weekly close + bearish fractal + volume
-            elif alligator_bearish and price < weekly_close and bearish_fract and volume_confirmed:
+            # Short: rejection at VWAP resistance with volume
+            elif price < vwap and price > vwap - 0.5 * atr_val and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: bearish Alligator alignment or price below weekly close
-            if not alligator_bullish or price < weekly_close:
+            # Exit: price moves below VWAP or ATR stop
+            if price < vwap or price < vwap + 2.0 * atr_val:  # trailing stop from entry area
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: bullish Alligator alignment or price above weekly close
-            if not alligator_bearish or price > weekly_close:
+            # Exit: price moves above VWAP or ATR stop
+            if price > vwap or price > vwap - 2.0 * atr_val:  # trailing stop from entry area
                 signals[i] = 0.0
                 position = 0
             else:
