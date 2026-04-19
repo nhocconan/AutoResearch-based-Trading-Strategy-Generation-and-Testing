@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with weekly trend filter and daily mean reversion
-# - Weekly EMA(20) defines trend direction (long when price > weekly EMA20, short when price < weekly EMA20)
-# - Daily RSI(14) for mean reversion entries: long when RSI < 30 in weekly uptrend, short when RSI > 70 in weekly downtrend
-# - Exit on opposite RSI extreme (RSI > 70 for long, RSI < 30 for short) or weekly trend reversal
-# - Volume confirmation: current 6h volume > 1.5x 20-period average of 6h volume
-# - Position size: 0.25 (25%) to manage drawdown
-# - Designed to work in both bull and bear markets by following higher timeframe trend while exploiting mean reversion
-# - Target: 15-30 trades/year to avoid excessive fee drag
+# Hypothesis: 12h timeframe with 1d trend filter and 4h volume confirmation
+# - 1d EMA(34) defines trend direction (long when price > EMA34, short when price < EMA34)
+# - 4h volume > 1.5x 20-period average for confirmation
+# - 12h close crosses above/below 1d EMA34 for entry
+# - Exit on opposite cross or trend reversal
+# - Session filter: only trade 08:00-20:00 UTC to avoid low-volume periods
+# - Position size: 0.25 (25%) to balance risk and return
+# - Designed to work in both bull and bear markets by following higher timeframe trend
+# - Target: 15-30 trades/year to avoid excessive fee drift
 
-name = "6h_WeeklyTrend_DailyRSI_Volume_v1"
-timeframe = "6h"
+name = "12h_EMA34_4hVolume_1dTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,33 +27,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA(20) for trend direction
-    ema_20_weekly = pd.Series(df_weekly['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    # 1d EMA(34) for trend direction
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get daily data for RSI
-    df_daily = get_htf_data(prices, '1d')
+    # Get 4h data for volume confirmation
+    df_4h = get_htf_data(prices, '4h')
     
-    # Daily RSI(14)
-    delta = pd.Series(df_daily['close'].values).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_daily = 100 - (100 / (1 + rs))
-    rsi_daily_values = rsi_daily.values
-    rsi_daily_aligned = align_htf_to_ltf(prices, df_daily, rsi_daily_values)
+    # 4h volume average (20-period)
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
-    # 6h volume average (20-period)
-    vol_6h = volume
-    vol_ma_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute time of day filter (optional: avoid low volatility periods)
+    # Pre-compute session filter (08:00-20:00 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,42 +52,40 @@ def generate_signals(prices):
     start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Optional: time filter (uncomment if needed)
-        # if hours[i] < 0 or hours[i] > 23:  # trade all hours
-        #     signals[i] = 0.0
-        #     continue
-            
-        # Skip if any required data is NaN
-        if (np.isnan(ema_20_weekly_aligned[i]) or 
-            np.isnan(rsi_daily_aligned[i]) or 
-            np.isnan(vol_ma_6h[i])):
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 6h volume > 1.5x average
-        volume_filter = vol_ma_6h[i] > 0 and volume[i] > 1.5 * vol_ma_6h[i]
+        # Skip if any required data is NaN
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i]):
+            signals[i] = 0.0
+            continue
+            
+        # Volume filter: current 4h volume > 1.5x average
+        volume_filter = vol_ma_4h_aligned[i] > 0 and volume[i] > 1.5 * vol_ma_4h_aligned[i]
         
         if position == 0:
-            # Look for long entry: weekly uptrend (price > weekly EMA20) + oversold daily RSI + volume
-            if close[i] > ema_20_weekly_aligned[i] and rsi_daily_aligned[i] < 30 and volume_filter:
+            # Look for long entry: price crosses above 1d EMA34 + volume confirmation
+            if close[i] > ema_34_1d_aligned[i] and close[i-1] <= ema_34_1d_aligned[i-1] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: weekly downtrend (price < weekly EMA20) + overbought daily RSI + volume
-            elif close[i] < ema_20_weekly_aligned[i] and rsi_daily_aligned[i] > 70 and volume_filter:
+            # Look for short entry: price crosses below 1d EMA34 + volume confirmation
+            elif close[i] < ema_34_1d_aligned[i] and close[i-1] >= ema_34_1d_aligned[i-1] and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on overbought RSI or weekly trend reversal
-            if rsi_daily_aligned[i] > 70 or close[i] < ema_20_weekly_aligned[i]:
+            # Long position: exit on cross below EMA34 or trend reversal
+            if close[i] < ema_34_1d_aligned[i] or close[i-1] >= ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on oversold RSI or weekly trend reversal
-            if rsi_daily_aligned[i] < 30 or close[i] > ema_20_weekly_aligned[i]:
+            # Short position: exit on cross above EMA34 or trend reversal
+            if close[i] > ema_34_1d_aligned[i] or close[i-1] <= ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
