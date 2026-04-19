@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter_Tight_v3"
-timeframe = "4h"
+name = "6h_1d_RVOL_Pullback_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (once before loop)
+    # Get 1d data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + range_1d * 1.1 / 12.0
-    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    # 1d EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_6h = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Align Camarilla levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # 6h EMA34 for pullback entries
+    ema34_6h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 4h ATR for volatility and stop loss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_4h = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # 6h RSI(14) for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Volume confirmation: current volume > 2.5x 20-period average (tightened)
+    # 6h Volume: current > 2.0 x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 150
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
-           np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema200_6h[i]) or np.isnan(ema34_6h[i]) or np.isnan(rsi[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        ema34 = ema34_6h[i]
+        ema200 = ema200_6h[i]
+        rsi_val = rsi[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_4h[i]
-        pivot = pivot_4h[i]
-        r1 = r1_4h[i]
-        s1 = s1_4h[i]
         
-        volume_confirmed = vol > 2.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above R1 + volume (tightened volume threshold)
-            if price > r1 and volume_confirmed:
+            # Long: Above EMA200, pullback to EMA34 with RSI<40 and volume
+            if price > ema200 and price <= ema34 and rsi_val < 40 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume
-            elif price < s1 and volume_confirmed:
+            # Short: Below EMA200, pullback to EMA34 with RSI>60 and volume
+            elif price < ema200 and price >= ema34 and rsi_val > 60 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below pivot OR ATR stop (2x ATR from entry high)
-            if price < pivot or price < (high[i] - 2.0 * atr):
+            # Exit: Price crosses below EMA34 or RSI>60
+            if price < ema34 or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above pivot OR ATR stop (2x ATR from entry low)
-            if price > pivot or price > (low[i] + 2.0 * atr):
+            # Exit: Price crosses above EMA34 or RSI<40
+            if price > ema34 or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
