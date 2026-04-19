@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1-day volume confirmation.
-# Long when: BB width < 20th percentile, price breaks above upper BB, volume > 1.5x avg
-# Short when: BB width < 20th percentile, price breaks below lower BB, volume > 1.5x avg
-# Exit when price returns to middle BB or opposite band is touched.
-# Designed for ~20-40 trades/year per symbol. Works in both bull and bear by trading volatility breakouts in low-vol regimes.
-name = "6h_BB_Squeeze_Volume_Breakout"
-timeframe = "6h"
+# Hypothesis: 12h Donchian(20) breakout with 1-day volume confirmation and ADX trend filter.
+# Long when: price closes above Donchian upper band (20-day high), ADX(1d) > 20, volume > 1.5x 20-period average
+# Short when: price closes below Donchian lower band (20-day low), ADX(1d) > 20, volume > 1.5x 20-period average
+# Exit when price returns to the 20-period SMA or reverses to opposite Donchian band.
+# Designed for ~15-25 trades/year per symbol. Works in both bull and bear markets by only taking trades in trending conditions.
+name = "12h_Donchian20_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,33 +22,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for BB calculation
+    # 1-day data for ADX trend filter and Donchian calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands on daily close (20-period, 2 std dev)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = upper_bb - lower_bb
+    # Calculate ADX on daily data
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 50th percentile of BB width for threshold (squeeze = low volatility)
-    # Use expanding window to avoid look-ahead
-    bb_width_pct = np.full_like(bb_width, np.nan)
-    for i in range(20, len(bb_width)):  # Need at least 20 values for percentile
-        if i >= 20:
-            bb_width_pct[i] = pd.Series(bb_width[:i+1]).rolling(window=50, min_periods=10).quantile(0.2).values[-1] if i >= 50 else np.percentile(bb_width[:i+1], 20)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align BB levels and squeeze signal to 6h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    bb_width_pct_aligned = align_htf_to_ltf(prices, df_1d, bb_width_pct)
+    # Wilder's smoothing function
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period]) 
+        # Subsequent values
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # 20-period SMA on 6h data for exit
-    sma_20_6h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    atr_period = 14
+    atr = wilders_smoothing(tr, atr_period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
+    
+    # Directional Indicators
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, atr_period)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Donchian channels from previous day (20-period high/low)
+    # Using previous 20 days to avoid look-ahead
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Align Donchian levels to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    
+    # 20-period SMA on 12h data
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     # Volume average (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,47 +90,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 40  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(bb_width_pct_aligned[i]) or np.isnan(sma_20_6h[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or np.isnan(sma_20[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        bb_width = upper_bb_aligned[i] - lower_bb_aligned[i]
-        bb_width_threshold = bb_width_pct_aligned[i]
+        adx_val = adx_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Check for BB squeeze (low volatility)
-            if bb_width <= bb_width_threshold and vol > 1.5 * vol_ma:
-                # Long breakout: price breaks above upper BB
-                if price > upper_bb_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short breakdown: price breaks below lower BB
-                elif price < lower_bb_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long breakout: price closes above Donchian upper band with ADX > 20 and volume confirmation
+            if price > high_20_aligned[i] and adx_val > 20 and vol > 1.5 * vol_ma:
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown: price closes below Donchian lower band with ADX > 20 and volume confirmation
+            elif price < low_20_aligned[i] and adx_val > 20 and vol > 1.5 * vol_ma:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle BB or touches lower BB
-            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if price <= middle_bb or price < lower_bb_aligned[i]:
+            # Long exit: price returns to 20-period SMA or breaks below Donchian lower band
+            if price <= sma_20[i] or price < low_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle BB or touches upper BB
-            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if price >= middle_bb or price > upper_bb_aligned[i]:
+            # Short exit: price returns to 20-period SMA or breaks above Donchian upper band
+            if price >= sma_20[i] or price > high_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
