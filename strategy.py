@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""
-6h_WeeklyPivot_Breakout_Volume_V1
-Hypothesis: 6h breakouts of weekly (Monday) pivot levels (R1/S1) with volume confirmation.
-Weekly pivots provide strong institutional support/resistance that holds across market regimes.
-Breakouts with volume indicate genuine institutional participation, reducing false signals.
-Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
-Works in bull/bear via volume confirmation and pivot-level structure.
-"""
+# 12h_RSI_MeanReversion_With_Volume_and_Trend_Filter
+# Hypothesis: 12h RSI mean reversion with volume confirmation and ADX trend filter
+# RSI < 30 for long, > 70 for short with volume > 1.5x 20-period average
+# ADX > 25 ensures trading in trending markets to avoid false signals in chop
+# Designed for 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
+# Works in bull/bear via ADX trend filter and RSI mean reversion logic
 
-name = "6h_WeeklyPivot_Breakout_Volume_V1"
-timeframe = "6h"
+name = "12h_RSI_MeanReversion_With_Volume_and_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,111 +24,128 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data (resampled from daily for pivot calculation)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # ADX(14) for trend strength filter - calculated on 12h data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values using Wilder's smoothing (EMA-like)
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
+        
+        atr = WilderSmooth(tr, period)
+        dm_plus_smooth = WilderSmooth(dm_plus, period)
+        dm_minus_smooth = WilderSmooth(dm_minus, period)
+        
+        # Avoid division by zero
+        dx = np.full_like(close, np.nan)
+        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+        
+        adx = WilderSmooth(dx, period)
+        return adx
+    
+    # 12h data for ADX and other indicators
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate weekly pivot points from previous week
-    # Group by week starting Monday
-    df_1d = df_1d.copy()
-    df_1d['week_start'] = df_1d.index.to_series().dt.to_period('W').dt.start_time
+    # Calculate ADX on 12h data
+    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # Get previous week's OHLC for pivot calculation
-    weekly_agg = df_1d.groupby('week_start').agg({
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }).shift(1)  # Previous week's data
+    # RSI(14) on 12h data
+    def calculate_rsi(close, period=14):
+        delta = np.diff(close)
+        delta = np.insert(delta, 0, 0)  # Insert 0 at beginning for same length
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Wilder's smoothing
+        avg_gain = np.full_like(close, np.nan)
+        avg_loss = np.full_like(close, np.nan)
+        
+        if len(close) >= period:
+            avg_gain[period-1] = np.mean(gain[:period])
+            avg_loss[period-1] = np.mean(loss[:period])
+            
+            for i in range(period, len(close)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    if len(weekly_agg) < 2:
-        return np.zeros(n)
+    rsi_12h = calculate_rsi(df_12h['close'].values, 14)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
-    # Calculate weekly pivot levels
-    ph = weekly_agg['high'].values  # Previous week high
-    pl = weekly_agg['low'].values   # Previous week low
-    pc = weekly_agg['close'].values # Previous week close
-    
-    # Weekly pivot point and support/resistance levels
-    pw = (ph + pl + pc) / 3  # Weekly pivot
-    r1 = 2 * pw - pl         # Weekly R1
-    s1 = 2 * pw - ph         # Weekly S1
-    r4 = pw + 3 * (ph - pl)  # Weekly R4 (strong breakout)
-    s4 = pw - 3 * (ph - pl)  # Weekly S4 (strong breakdown)
-    
-    # Align weekly levels to 6h timeframe
-    # Need to map each 6h bar to its corresponding week's levels
-    week_start_series = df_1d.index.to_series().dt.to_period('W').dt.start_time
-    week_start_ffilled = week_start_series.ffill()
-    
-    # Create mapping from date to weekly levels
-    week_to_levels = {}
-    for idx, week_start in enumerate(weekly_agg.index):
-        week_to_levels[week_start] = {
-            'r1': r1[idx],
-            's1': s1[idx],
-            'r4': r4[idx],
-            's4': s4[idx]
-        }
-    
-    # Map each daily bar to its weekly levels
-    r1_daily = np.full(len(df_1d), np.nan)
-    s1_daily = np.full(len(df_1d), np.nan)
-    r4_daily = np.full(len(df_1d), np.nan)
-    s4_daily = np.full(len(df_1d), np.nan)
-    
-    for i, week_start in enumerate(week_start_ffilled.values):
-        if week_start in week_to_levels:
-            levels = week_to_levels[week_start]
-            r1_daily[i] = levels['r1']
-            s1_daily[i] = levels['s1']
-            r4_daily[i] = levels['r4']
-            s4_daily[i] = levels['s4']
-    
-    # Align weekly levels to 6h timeframe
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1_daily)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1_daily)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4_daily)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4_daily)
-    
-    # Volume confirmation: volume > 1.8 * 20-period average (stricter for fewer trades)
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.8)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 10)  # Ensure enough data for volume MA
+    start_idx = max(30, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or 
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or 
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # ADX filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_12h_aligned[i] > 25
+        
         if position == 0:
-            # Long: price breaks above weekly R1 with volume confirmation
-            if (close[i] > r1_6h[i] and volume_confirm[i]):
+            # Long: RSI < 30 (oversold) with volume and strong trend
+            if (rsi_12h_aligned[i] < 30 and 
+                volume_confirm[i] and 
+                strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 with volume confirmation
-            elif (close[i] < s1_6h[i] and volume_confirm[i]):
+            # Short: RSI > 70 (overbought) with volume and strong trend
+            elif (rsi_12h_aligned[i] > 70 and 
+                  volume_confirm[i] and 
+                  strong_trend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below weekly S1 or strong breakdown below S4
-            if (close[i] < s1_6h[i]) or (close[i] < s4_6h[i]):
+            # Long: exit if RSI > 50 (mean reversion complete) or trend weakens (ADX < 20)
+            if (rsi_12h_aligned[i] > 50) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above weekly R1 or strong breakout above R4
-            if (close[i] > r1_6h[i]) or (close[i] > r4_6h[i]):
+            # Short: exit if RSI < 50 (mean reversion complete) or trend weakens (ADX < 20)
+            if (rsi_12h_aligned[i] < 50) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
