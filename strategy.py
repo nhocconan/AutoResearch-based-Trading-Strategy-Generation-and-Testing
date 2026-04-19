@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla R1/S1 breakout with weekly EMA34 filter and volume spike confirmation.
-# Long when: Price breaks above R1, weekly EMA34 upward, volume > 1.5x 20-period average
-# Short when: Price breaks below S1, weekly EMA34 downward, volume > 1.5x 20-period average
-# Exit when: Price crosses back through the pivot point (PP)
-# Weekly EMA34 filters trend direction, 12h timeframe reduces overtrading, volume confirms breakout strength.
-# Target: 15-25 trades/year per symbol. Works in bull (buy breakouts) and bear (sell breakdowns).
-name = "12h_Camarilla_R1_S1_Breakout_Volume_EMA34Filter"
-timeframe = "12h"
+# Hypothesis: 1-hour EMA crossover with 4-hour MACD trend filter and volume spike confirmation.
+# Long when: 9 EMA crosses above 21 EMA, 4-hour MACD > 0, volume > 2x 20-period average, and time in 08-20 UTC session.
+# Short when: 9 EMA crosses below 21 EMA, 4-hour MACD < 0, volume > 2x 20-period average, and time in 08-20 UTC session.
+# Exit when: Opposite EMA crossover occurs.
+# This uses 4h MACD for trend direction (reduces whipsaw) and 1h EMA for entry timing.
+# Session filter reduces noise outside active hours. Volume spike confirms momentum.
+# Target: 20-30 trades/year per symbol (60-120 over 4 years).
+name = "1h_EMA9_21_Cross_4hMACD_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,79 +24,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla pivot levels and EMA34
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 4-hour data for MACD trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate weekly pivot point (PP) and Camarilla levels
-    # PP = (H + L + C) / 3
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
-    # R1 = C + (H - L) * 1.1 / 12
-    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12.0
-    # S1 = C - (H - L) * 1.1 / 12
-    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12.0
+    # Calculate MACD on 4-hour data
+    ema12_4h = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26_4h = pd.Series(close_4h).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_4h = ema12_4h - ema26_4h
+    signal_4h = pd.Series(macd_4h).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist_4h = macd_4h - signal_4h  # Using MACD histogram for cleaner signals
     
-    # Calculate EMA34 on weekly data for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align 4H MACD to 1H timeframe
+    macd_hist_4h_aligned = align_htf_to_ltf(prices, df_4h, macd_hist_4h)
     
-    # Align weekly data to 12H timeframe
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 1-hour EMA for entry timing
+    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA34 calculation
+    start_idx = max(21, 26)  # Wait for EMA21 and EMA26 calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema9[i]) or np.isnan(ema21[i]) or 
+            np.isnan(macd_hist_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        pp = pp_1w_aligned[i]
-        r1 = r1_1w_aligned[i]
-        s1 = s1_1w_aligned[i]
-        ema34 = ema34_1w_aligned[i]
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            signals[i] = 0.0
+            continue
+        
+        # EMA crossover signals
+        ema9_prev = ema9[i-1]
+        ema21_prev = ema21[i-1]
+        ema9_curr = ema9[i]
+        ema21_curr = ema21[i]
+        
+        bullish_cross = (ema9_prev <= ema21_prev) and (ema9_curr > ema21_curr)
+        bearish_cross = (ema9_prev >= ema21_prev) and (ema9_curr < ema21_curr)
+        
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        vol_spike = vol > 2.0 * vol_ma
+        
+        macd_hist = macd_hist_4h_aligned[i]
         
         if position == 0:
-            # Long entry: Price breaks above R1, EMA34 upward, volume spike
-            if (price > r1 and close[i-1] <= r1 and 
-                ema34 > ema34_1w_aligned[i-1] and vol > 1.5 * vol_ma):
-                signals[i] = 0.25
+            # Long entry: bullish EMA crossover, 4h MACD positive, volume spike, in session
+            if bullish_cross and macd_hist > 0 and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: Price breaks below S1, EMA34 downward, volume spike
-            elif (price < s1 and close[i-1] >= s1 and 
-                  ema34 < ema34_1w_aligned[i-1] and vol > 1.5 * vol_ma):
-                signals[i] = -0.25
+            # Short entry: bearish EMA crossover, 4h MACD negative, volume spike, in session
+            elif bearish_cross and macd_hist < 0 and vol_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses back below pivot point
-            if price < pp:
+            # Long exit: bearish EMA crossover
+            if bearish_cross:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Price crosses back above pivot point
-            if price > pp:
+            # Short exit: bullish EMA crossover
+            if bullish_cross:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
