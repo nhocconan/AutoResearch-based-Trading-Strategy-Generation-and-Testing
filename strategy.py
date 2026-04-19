@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h ADX(14) + volume confirmation + 1d EMA200 trend filter.
-# ADX > 25 indicates strong trend, we enter long/short based on 1d EMA200 direction.
-# Volume confirmation ensures breakout validity. Works in bull/bear markets by
-# filtering weak trends and choppy markets. Target: 20-40 trades/year per symbol.
-name = "4h_ADX25_EMA200_Volume_Filter"
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high, price > EMA200, and volume spike.
+# Short when price breaks below Donchian(20) low, price < EMA200, and volume spike.
+# Uses ATR-based stoploss to limit drawdown. Designed for 4h timeframe with ~20-40 trades/year.
+name = "4h_Donchian20_EMA200_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,102 +28,88 @@ def generate_signals(prices):
     # Calculate EMA200 on daily
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
+    # ATR(14) for stoploss
+    def calculate_atr(high, low, close, period=14):
         tr = np.zeros_like(high)
-        
         for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-                
             tr[i] = max(high[i] - low[i], 
                        abs(high[i] - close[i-1]), 
                        abs(low[i] - close[i-1]))
+        tr[0] = high[0] - low[0]
         
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        
+        atr = np.zeros_like(high)
         atr[period] = np.mean(tr[1:period+1])
-        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
-        
         for i in range(period+1, len(tr)):
             atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        dx = np.zeros_like(close)
-        dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
-        
-        adx = np.zeros_like(close)
-        adx[2*period] = np.mean(dx[period:2*period+1])
-        for i in range(2*period+1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+        return atr
     
-    adx = calculate_adx(high, low, close, 14)
+    atr = calculate_atr(high, low, close, 14)
+    
+    # Donchian channels (20-period)
+    def calculate_donchian(high, low, period=20):
+        upper = np.zeros_like(high)
+        lower = np.zeros_like(high)
+        for i in range(len(high)):
+            if i >= period - 1:
+                upper[i] = np.max(high[i - period + 1:i + 1])
+                lower[i] = np.min(low[i - period + 1:i + 1])
+            else:
+                upper[i] = np.nan
+                lower[i] = np.nan
+        return upper, lower
+    
+    donch_upper, donch_lower = calculate_donchian(high, low, 20)
+    
+    # Volume spike: current volume > 2.0 x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Align 1d EMA200 to 4h
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 28)  # Ensure EMA200 and ADX are ready
+    start_idx = max(200, 20)  # Ensure EMA200 and Donchian are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(donch_upper[i]) or 
+            np.isnan(donch_lower[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         ema_200_val = ema_200_aligned[i]
-        adx_val = adx[i]
+        upper = donch_upper[i]
+        lower = donch_lower[i]
+        atr_val = atr[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
-        
-        # ADX trend strength filter
-        strong_trend = adx_val > 25
+        volume_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Enter long if price above EMA200, strong trend, and volume confirmation
-            if price > ema_200_val and strong_trend and volume_confirmed:
+            # Enter long on Donchian breakout above upper band, price > EMA200, volume spike
+            if price > upper and price > ema_200_val and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price below EMA200, strong trend, and volume confirmation
-            elif price < ema_200_val and strong_trend and volume_confirmed:
+            # Enter short on Donchian breakdown below lower band, price < EMA200, volume spike
+            elif price < lower and price < ema_200_val and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below EMA200 or trend weakens
-            if price < ema_200_val or adx_val < 20:  # Trend weakening
+            # Long position: exit on Donchian breakdown below lower band or ATR stop
+            if price < lower or price < ema_200_val - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above EMA200 or trend weakens
-            if price > ema_200_val or adx_val < 20:  # Trend weakening
+            # Short position: exit on Donchian breakout above upper band or ATR stop
+            if price > upper or price > ema_200_val + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
