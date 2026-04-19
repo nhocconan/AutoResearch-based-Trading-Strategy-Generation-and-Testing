@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_Volume_ADX_Filter
-# Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter.
-# Camarilla levels provide statistically significant support/resistance from previous day's price action.
-# ADX > 25 filters for trending markets to avoid false breakouts in chop.
-# Volume confirmation ensures institutional participation.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# 1d_WeeklyPivot_Breakout_Volume_ADX_Filter
+# Hypothesis: Daily breakout of weekly R1/S1 pivot levels with volume confirmation and ADX trend filter.
+# Weekly pivots provide strong support/resistance from weekly price action. ADX > 25 filters for trending markets to avoid false breakouts in chop.
+# Volume confirmation ensures institutional participation. Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
 # Works in bull/bear via ADX trend filter and volatility-adjusted breakouts.
 
-name = "12h_Camarilla_R1S1_Breakout_Volume_ADX_Filter"
-timeframe = "12h"
+name = "1d_WeeklyPivot_Breakout_Volume_ADX_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX(14) for trend strength filter - calculated on 12h data
+    # ADX(14) for trend strength filter - calculated on 1w data
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high - low
@@ -68,39 +66,39 @@ def generate_signals(prices):
         adx = WilderSmooth(dx, period)
         return adx
     
-    # 12h data for ADX and other indicators
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough for ADX calculation
+    # Weekly data for ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate ADX on 12h data
-    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Calculate ADX on weekly data
+    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Previous day's Camarilla levels (using 1d data)
+    # Daily data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].shift(1).values  # Previous day high
-    pl = df_1d['low'].shift(1).values   # Previous day low
-    pc = df_1d['close'].shift(1).values # Previous day close
+    # Calculate weekly pivot levels from previous week
+    ph = df_1d['high'].rolling(window=7).max().shift(1).values  # Previous week high
+    pl = df_1d['low'].rolling(window=7).min().shift(1).values   # Previous week low
+    pc = df_1d['close'].rolling(window=7).mean().shift(1).values # Previous week close (approximated)
     
-    # Camarilla calculations
+    # Weekly pivot calculations (similar to Camarilla but using weekly range)
     rang = ph - pl
     r1 = pc + (rang * 1.1 / 12)
     s1 = pc - (rang * 1.1 / 12)
     r4 = pc + (rang * 1.1 / 2)
     s4 = pc - (rang * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align weekly pivot levels to daily timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (slightly stricter for fewer trades)
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
     
@@ -111,14 +109,14 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # ADX filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_12h_aligned[i] > 25
+        strong_trend = adx_1w_aligned[i] > 25
         
         if position == 0:
             # Long: price breaks above R1 with volume and strong trend
@@ -136,7 +134,7 @@ def generate_signals(prices):
                 
         elif position == 1:
             # Long: exit if price breaks below S1 or trend weakens (ADX < 20)
-            if (close[i] < s1_aligned[i]) or (adx_12h_aligned[i] < 20):
+            if (close[i] < s1_aligned[i]) or (adx_1w_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -144,7 +142,7 @@ def generate_signals(prices):
                 
         elif position == -1:
             # Short: exit if price breaks above R1 or trend weakens (ADX < 20)
-            if (close[i] > r1_aligned[i]) or (adx_12h_aligned[i] < 20):
+            if (close[i] > r1_aligned[i]) or (adx_1w_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
