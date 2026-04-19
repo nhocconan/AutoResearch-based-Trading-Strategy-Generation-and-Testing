@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Fade_With_Volume_Confirm
-Hypothesis: Fade at Camarilla R3/S3 levels with volume exhaustion signals. 
-In ranging markets (common in 2025), price often reverses at these levels. 
-Volume drying up on approach indicates lack of conviction for breakout.
-Works in both bull/bear as it fades extremes rather than following trends.
-Target: 50-150 total trades over 4 years (12-37/year).
+4h_RSI_Trend_Divergence_With_Volume
+Hypothesis: RSI divergence on 4h with trend confirmation (EMA50) and volume spike
+Works in bull/bear: divergence signals reversals, volume confirms institutional interest
+Target: 20-40 trades/year by requiring multiple confluence factors
 """
-
-name = "6h_Camarilla_R3S3_Fade_With_Volume_Confirm"
-timeframe = "6h"
+name = "4h_RSI_Trend_Divergence_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,81 +23,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # RSI(14) - standard calculation
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices, prepend=prices[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Wilder's smoothing
+        avg_gain = np.zeros_like(gain)
+        avg_loss = np.zeros_like(loss)
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        for i in range(period+1, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    # EMA(50) for trend filter
+    def calculate_ema(data, period):
+        ema = np.zeros_like(data)
+        alpha = 2.0 / (period + 1)
+        ema[0] = data[0]
+        for i in range(1, len(data)):
+            ema[i] = alpha * data[i] + (1 - alpha) * ema[i-1]
+        return ema
+    
+    # 4h data for indicators
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 60:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    ph = df_1d['high'].shift(1).values
-    pl = df_1d['low'].shift(1).values
-    pc = df_1d['close'].shift(1).values
+    rsi_4h = calculate_rsi(df_4h['close'].values, 14)
+    ema50_4h = calculate_ema(df_4h['close'].values, 50)
     
-    # Calculate Camarilla levels
-    rang = ph - pl
-    r3 = pc + (rang * 1.1 / 4)
-    s3 = pc - (rang * 1.1 / 4)
+    # Align to lower timeframe (though we're on 4h, this ensures proper handling)
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    ema50_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume exhaustion: current volume < 50% of 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average (strict for fewer trades)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_exhaustion = volume < (volume_ma * 0.5)
-    
-    # Optional: avoid extreme volatility (use ATR-based filter)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Avoid extremely volatile periods (ATR > 2 * 50-period average)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr < (atr_ma * 2.0)
+    volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure enough data
+    start_idx = 60
     
     for i in range(start_idx, n):
-        # Skip if required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(rsi_aligned[i]) or np.isnan(ema50_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
-            
-        vol_exhaust = volume_exhaustion[i]
-        vol_ok = vol_filter[i]
+        
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        bullish_div = False
+        if i >= 5:  # Look back for divergence
+            # Find recent low in price
+            price_low_idx = i - np.argmin(low[i-4:i+1]) - 4
+            if price_low_idx >= start_idx:
+                # Find another low earlier
+                price_low_idx2 = price_low_idx - np.argmin(low[price_low_idx-4:price_low_idx+1]) - 4
+                if price_low_idx2 >= start_idx:
+                    # Check if second low is lower than first (lower low in price)
+                    if low[price_low_idx2] < low[price_low_idx]:
+                        # Check if RSI at second low is higher than at first (higher low in RSI)
+                        if rsi_aligned[price_low_idx2] > rsi_aligned[price_low_idx]:
+                            bullish_div = True
+        
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        bearish_div = False
+        if i >= 5:
+            # Find recent high in price
+            price_high_idx = i - np.argmax(high[i-4:i+1]) - 4
+            if price_high_idx >= start_idx:
+                # Find another high earlier
+                price_high_idx2 = price_high_idx - np.argmax(high[price_high_idx-4:price_high_idx+1]) - 4
+                if price_high_idx2 >= start_idx:
+                    # Check if second high is higher than first (higher high in price)
+                    if high[price_high_idx2] > high[price_high_idx]:
+                        # Check if RSI at second high is lower than at first (lower high in RSI)
+                        if rsi_aligned[price_high_idx2] < rsi_aligned[price_high_idx]:
+                            bearish_div = True
         
         if position == 0:
-            # Long: price approaches S3 from below with volume exhaustion
-            if (low[i] <= s3_aligned[i] * 1.005 and  # Within 0.5% of S3
-                close[i] > s3_aligned[i] and         # But closed above it (rejection)
-                vol_exhaust and vol_ok):
+            # Long: bullish divergence + price above EMA50 + volume spike
+            if (bullish_div and 
+                close[i] > ema50_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price approaches R3 from above with volume exhaustion
-            elif (high[i] >= r3_aligned[i] * 0.995 and  # Within 0.5% of R3
-                  close[i] < r3_aligned[i] and          # But closed below it (rejection)
-                  vol_exhaust and vol_ok):
+            # Short: bearish divergence + price below EMA50 + volume spike
+            elif (bearish_div and 
+                  close[i] < ema50_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price moves back below S3 or reaches R3 (mean reversion target)
-            if close[i] < s3_aligned[i] or close[i] >= r3_aligned[i]:
+            # Long: exit on bearish divergence or price below EMA50
+            if bearish_div or close[i] < ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price moves back above R3 or reaches S3
-            if close[i] > r3_aligned[i] or close[i] <= s3_aligned[i]:
+            # Short: exit on bullish divergence or price above EMA50
+            if bullish_div or close[i] > ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
