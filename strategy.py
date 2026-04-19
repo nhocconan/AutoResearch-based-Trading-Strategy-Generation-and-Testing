@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d ADX trend filter and volume confirmation
-# Alligator uses three SMAs (Jaw, Teeth, Lips) to detect trends and convergence/divergence
-# In trending markets, the lines are ordered and separated; in ranging, they intertwine
-# ADX > 25 filters for trending conditions to avoid whipsaws in sideways markets
-# Volume confirmation ensures breakouts have conviction
-# Target: 80-180 total trades over 4 years (20-45/year) with disciplined entries
-name = "4h_WilliamsAlligator_1dADX_Volume"
-timeframe = "4h"
+# Hypothesis: 6h Bollinger Squeeze + Volume Breakout with 1d EMA34 trend filter
+# Bollinger Squeeze identifies low volatility periods preceding breakouts
+# Squeeze occurs when Bollinger Band width < Keltner Channel width
+# Breakout direction confirmed by close outside Bollinger Bands + volume surge
+# 1d EMA34 provides higher timeframe trend bias to avoid counter-trend trades
+# Works in both bull and bear markets by capturing volatility expansion moves
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
+name = "6h_BollingerSqueeze_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,72 +24,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d ADX for trend filter
+    # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate ADX components on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = sma + (bb_std_dev * bb_std)
+    bb_lower = sma - (bb_std_dev * bb_std)
+    bb_width = bb_upper - bb_lower
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Keltner Channel (20, 1.5 ATR)
+    kc_period = 20
+    kc_multiplier = 1.5
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(np.maximum(tr1, tr2), tr3)])
+    atr = pd.Series(tr).rolling(window=kc_period, min_periods=kc_period).mean().values
+    kc_middle = pd.Series(close).rolling(window=kc_period, min_periods=kc_period).mean().values
+    kc_upper = kc_middle + (atr * kc_multiplier)
+    kc_lower = kc_middle - (atr * kc_multiplier)
+    kc_width = kc_upper - kc_lower
     
-    # Smoothed values
-    def smoothed_avg(values, period):
-        result = np.full_like(values, np.nan, dtype=float)
-        if len(values) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(values[:period])
-        # Subsequent values are smoothed
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    # Squeeze condition: BB width < KC width
+    squeeze = bb_width < kc_width
     
-    period = 14
-    atr = smoothed_avg(tr, period)
-    dm_plus_smooth = smoothed_avg(dm_plus, period)
-    dm_minus_smooth = smoothed_avg(dm_minus, period)
-    
-    # Avoid division by zero
-    dm_plus_safe = np.where(atr == 0, 1e-10, dm_plus_smooth)
-    dm_minus_safe = np.where(atr == 0, 1e-10, dm_minus_smooth)
-    atr_safe = np.where(atr == 0, 1e-10, atr)
-    
-    di_plus = 100 * dm_plus_safe / atr_safe
-    di_minus = 100 * dm_minus_safe / atr_safe
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = smoothed_avg(dx, period)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Williams Alligator on 4h
-    jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
-    
-    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().values
-    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().values
-    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().values
-    
-    # Shift the lines as per Williams Alligator specification
-    jaw = np.roll(jaw, int(jaw_period/2))
-    teeth = np.roll(teeth, int(teeth_period/2))
-    lips = np.roll(lips, int(lips_period/2))
+    # Breakout conditions
+    breakout_up = close > bb_upper
+    breakout_down = close < bb_lower
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -97,40 +68,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(jaw_period, teeth_period, lips_period, 20) + 5  # Ensure enough data
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(sma[i]) or np.isnan(bb_width[i]) or np.isnan(kc_width[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) + ADX > 25 + volume confirmation
-            if (lips[i] > teeth[i] > jaw[i] and 
-                adx_aligned[i] > 25 and 
-                volume_confirm[i]):
+            # Look for breakout after squeeze with volume confirmation and trend alignment
+            if (squeeze[i-1] and  # Was in squeeze on previous bar
+                volume_confirm[i] and  # Current bar has volume confirmation
+                breakout_up[i] and  # Price broke above upper BB
+                close[i] > ema_34_1d_aligned[i]):  # Above 1d EMA34 (uptrend bias)
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw (bearish alignment) + ADX > 25 + volume confirmation
-            elif (lips[i] < teeth[i] < jaw[i] and 
-                  adx_aligned[i] > 25 and 
-                  volume_confirm[i]):
+            elif (squeeze[i-1] and  # Was in squeeze on previous bar
+                  volume_confirm[i] and  # Current bar has volume confirmation
+                  breakout_down[i] and  # Price broke below lower BB
+                  close[i] < ema_34_1d_aligned[i]):  # Below 1d EMA34 (downtrend bias)
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Alligator lines cross (Lips < Teeth) or ADX drops below 20
-            if (lips[i] < teeth[i]) or (adx_aligned[i] < 20):
+            # Long: exit if price returns to middle Bollinger Band or trend breaks
+            if (close[i] <= sma[i]) or (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Alligator lines cross (Lips > Teeth) or ADX drops below 20
-            if (lips[i] > teeth[i]) or (adx_aligned[i] < 20):
+            # Short: exit if price returns to middle Bollinger Band or trend breaks
+            if (close[i] >= sma[i]) or (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
