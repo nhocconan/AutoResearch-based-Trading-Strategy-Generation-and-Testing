@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversal with 12h ADX filter and volume confirmation
-# Uses 12h ADX to filter strong trends (ADX > 25) and only trade reversals in ranging markets (ADX < 25)
-# Camarilla levels from 1d: long at S1/S2, short at R1/R2 with rejection candlestick
-# Volume confirmation: current volume > 1.5x 20-period average
-# Target: 15-25 trades/year per symbol with high-probability reversals in ranging markets
-name = "6h_Camarilla_12hADX_Reversal_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Choppiness Index regime filter + 1d Donchian breakout + volume confirmation
+# Uses Choppiness Index (14-period) to identify trending vs ranging markets
+# In trending markets (CHOP < 38.2): trade Donchian breakouts
+# In ranging markets (CHOP > 61.8): mean-revert at Donchian channels
+# Volume confirmation (>1.5x average) reduces false signals
+# 1d Donchian provides higher timeframe structure
+# Target: 20-30 trades/year per symbol with disciplined entries
+name = "4h_Chop_Donchian_1d_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,132 +24,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h ADX for trend strength filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    # Calculate ADX on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with original index
-    
-    # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    def smooth_wilder(data, period):
-        smoothed = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            smoothed[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                smoothed[i] = smoothed[i-1] - (smoothed[i-1]/period) + data[i]
-        return smoothed
-    
-    period = 14
-    atr = smooth_wilder(tr, period)
-    dm_plus_smooth = smooth_wilder(dm_plus, period)
-    dm_minus_smooth = smooth_wilder(dm_minus, period)
-    
-    # DI and DX
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smooth_wilder(dx, period)
-    adx_12h = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # 1d Camarilla levels
+    # 1d Donchian channels (20-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Camarilla levels
-    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    R2 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    S2 = prev_close - (prev_high - prev_low) * 1.1 / 6
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Choppiness Index (14-period) on 4h data
+    def true_range(high, low, close):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = high[0] - low[0]  # First period
+        return tr
     
-    # Align Camarilla levels to 6h timeframe
-    R1_1d = align_htf_to_ltf(prices, df_1d, R1)
-    R2_1d = align_htf_to_ltf(prices, df_1d, R2)
-    S1_1d = align_htf_to_ltf(prices, df_1d, S1)
-    S2_1d = align_htf_to_ltf(prices, df_1d, S2)
+    tr = true_range(high, low, close)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Avoid division by zero
+    chop_raw = 100 * np.log10(atr_14 / (hh_14 - ll_14)) / np.log10(14)
+    chop = np.where((hh_14 - ll_14) != 0, chop_raw, 50.0)  # Default to neutral when range=0
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = max(20, 14)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(adx_12h[i]) or np.isnan(R1_1d[i]) or np.isnan(R2_1d[i]) or 
-            np.isnan(S1_1d[i]) or np.isnan(S2_1d[i]) or np.isnan(volume_ma[i])):
+        # Skip if any required data is NaN or invalid
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(chop[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in ranging markets (ADX < 25)
-        if adx_12h[i] >= 25:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: price at S1 or S2 with bullish rejection
-            if ((close[i] <= S1_1d[i] * 1.001 and close[i] >= S1_1d[i] * 0.999) or
-                (close[i] <= S2_1d[i] * 1.001 and close[i] >= S2_1d[i] * 0.999)):
-                # Bullish rejection: close > open and close > (high+low)/2
-                if close[i] > prices['open'].iloc[i] and close[i] > (high[i] + low[i]) / 2:
-                    if volume_confirm[i]:
-                        signals[i] = 0.25
-                        position = 1
-            # Short: price at R1 or R2 with bearish rejection
-            elif ((close[i] >= R1_1d[i] * 0.999 and close[i] <= R1_1d[i] * 1.001) or
-                  (close[i] >= R2_1d[i] * 0.999 and close[i] <= R2_1d[i] * 1.001)):
-                # Bearish rejection: close < open and close < (high+low)/2
-                if close[i] < prices['open'].iloc[i] and close[i] < (high[i] + low[i]) / 2:
-                    if volume_confirm[i]:
-                        signals[i] = -0.25
-                        position = -1
-                        
+            # Trending market: CHOP < 38.2
+            if chop[i] < 38.2:
+                # Long breakout: price breaks above 1d Donchian high
+                if close[i] > donch_high_aligned[i] and volume_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short breakout: price breaks below 1d Donchian low
+                elif close[i] < donch_low_aligned[i] and volume_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Ranging market: CHOP > 61.8
+            elif chop[i] > 61.8:
+                # Mean reversion long: price near Donchian low
+                if close[i] <= donch_low_aligned[i] * 1.005 and volume_confirm[i]:  # Within 0.5% of low
+                    signals[i] = 0.25
+                    position = 1
+                # Mean reversion short: price near Donchian high
+                elif close[i] >= donch_high_aligned[i] * 0.995 and volume_confirm[i]:  # Within 0.5% of high
+                    signals[i] = -0.25
+                    position = -1
+                
         elif position == 1:
-            # Long: exit if price reaches R1 or ADX strengthens
-            if (close[i] >= R1_1d[i] * 0.999) or (adx_12h[i] >= 25):
+            # Long exit: price reaches Donchian high or choppiness exits trending state
+            if (close[i] >= donch_high_aligned[i] * 0.995) or (chop[i] > 50.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price reaches S1 or ADX strengthens
-            if (close[i] <= S1_1d[i] * 1.001) or (adx_12h[i] >= 25):
+            # Short exit: price reaches Donchian low or choppiness exits trending state
+            if (close[i] <= donch_low_aligned[i] * 1.005) or (chop[i] > 50.0):
                 signals[i] = 0.0
                 position = 0
             else:
