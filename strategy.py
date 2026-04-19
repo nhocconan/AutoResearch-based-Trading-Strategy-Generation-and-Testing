@@ -1,22 +1,15 @@
-# 12h_1dPivot_S1R1_Breakout_VolumeATR_Simple
-# Hypothesis: 12h pivot point breakout with volume confirmation and ATR-based stop.
-# Pivot levels (S1/R1) from daily data act as strong support/resistance.
-# Breakouts with volume indicate institutional interest. Works in bull/bear as
-# mean-reversion at pivot levels captures reversals, while breakouts catch trends.
-# Target: 20-50 trades over 4 years to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_S1R1_Breakout_VolumeATR_Simple"
-timeframe = "12h"
+name = "4h_1dPivot_S1R1_Breakout_VolumeATR_Tight"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 25:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -43,12 +36,12 @@ def generate_signals(prices):
     s1_1d = 2 * pivot_1d - high_1d
     r1_1d = 2 * pivot_1d - low_1d
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -68,7 +61,7 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         atr = atr_1d_aligned[i]
         
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 1.3 * vol_ma
         s1 = s1_1d_aligned[i]
         r1 = r1_1d_aligned[i]
         
@@ -83,16 +76,16 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below S1 or ATR stop
-            if price < s1 or price < (high[i] - 2.0 * atr):
+            # Exit: price closes below S1 or ATR stop (1.5x ATR)
+            if price < s1 or price < (high[i] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above R1 or ATR stop
-            if price > r1 or price > (low[i] + 2.0 * atr):
+            # Exit: price closes above R1 or ATR stop (1.5x ATR)
+            if price > r1 or price > (low[i] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
