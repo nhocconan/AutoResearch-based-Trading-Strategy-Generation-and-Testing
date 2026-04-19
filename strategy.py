@@ -1,15 +1,15 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d trend alignment and volume confirmation.
-# Uses 1d EMA34 for trend direction and 1d Donchian breakout for momentum.
+# Hypothesis: 1h timeframe with 4h EMA34 trend and 1h RSI divergence for entry timing.
+# Uses 4h EMA34 for trend direction and 1h RSI(14) with bullish/bearish divergence for entries.
 # Enters only during 08-20 UTC session to avoid low-volume noise.
 # Targets 15-37 trades/year (60-150 total over 4 years) with strict entry conditions.
 # Works in bull/bear by following higher timeframe trends.
-name = "12h_1d_EMA34_Donchian20_Volume"
-timeframe = "12h"
+name = "1h_4h_EMA34_RSI_Divergence"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,74 +20,72 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     open_time = prices['open_time']
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend and Donchian20 breakout (called ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 4h data for EMA34 trend (called ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # EMA34 for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Donchian channels: 20-period high/low
-    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
-    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
-    
-    # Volume filter: volume > 1.5 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    # RSI(14) for divergence detection
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20_1d_aligned[i]) or 
-            np.isnan(low_20_1d_aligned[i]) or np.isnan(volume_ma[i]) or
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(rsi[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above 1d EMA34 AND breaks 1d Donchian high with volume
-            if (close[i] > ema_34_1d_aligned[i] and 
-                close[i] > high_20_1d_aligned[i] and 
-                volume_filter[i]):
-                signals[i] = 0.25
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            bullish_div = (low[i] < low[i-5]) and (rsi[i] > rsi[i-5])
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            bearish_div = (high[i] > high[i-5]) and (rsi[i] < rsi[i-5])
+            
+            # Long: above 4h EMA34 AND bullish divergence
+            if (close[i] > ema_34_4h_aligned[i] and 
+                bullish_div and 
+                rsi[i] < 40):  # Oversold condition
+                signals[i] = 0.20
                 position = 1
-            # Short: price below 1d EMA34 AND breaks 1d Donchian low with volume
-            elif (close[i] < ema_34_1d_aligned[i] and 
-                  close[i] < low_20_1d_aligned[i] and 
-                  volume_filter[i]):
-                signals[i] = -0.25
+            # Short: below 4h EMA34 AND bearish divergence
+            elif (close[i] < ema_34_4h_aligned[i] and 
+                  bearish_div and 
+                  rsi[i] > 60):  # Overbought condition
+                signals[i] = -0.20
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below 1d EMA34 or 1d Donchian low
-            if close[i] < ema_34_1d_aligned[i] or close[i] < low_20_1d_aligned[i]:
+            # Long: exit if price breaks below 4h EMA34 or RSI overbought
+            if close[i] < ema_34_4h_aligned[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:
-            # Short: exit if price breaks above 1d EMA34 or 1d Donchian high
-            if close[i] > ema_34_1d_aligned[i] or close[i] > high_20_1d_aligned[i]:
+            # Short: exit if price breaks above 4h EMA34 or RSI oversold
+            if close[i] > ema_34_4h_aligned[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
