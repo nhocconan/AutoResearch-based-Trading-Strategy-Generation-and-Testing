@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout (20-period) with 1-day EMA(50) trend filter and volume spike (1.5x 20-period average).
-# Donchian breakouts capture momentum in trending markets, while the 1-day EMA filter ensures alignment with higher-timeframe trend.
-# Volume spike filters out low-momentum breakouts. Designed for low trade frequency (<30/year) to minimize fee drag.
-# Works in both bull and bear markets by taking long/short based on price position relative to EMA(50).
-name = "4h_Donchian_EMA50_Volume"
-timeframe = "4h"
+# Hypothesis: 1d Bollinger Band breakout with 1w trend filter, volume confirmation, and ATR stop.
+# Uses daily Bollinger Bands (20, 2) for breakout entries in the direction of the weekly trend.
+# Weekly trend defined by EMA(34) slope to avoid whipsaw.
+# Volume filter ensures breakouts have conviction (volume > 1.5x 20-day average).
+# Designed for low trade frequency (~15-25/year) to minimize fee drag and work in both bull/bear markets.
+name = "1d_Bollinger_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,56 +22,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Daily Bollinger Bands (20, 2)
+    close_series = pd.Series(close)
+    basis = close_series.rolling(window=20, min_periods=20).mean()
+    dev = close_series.rolling(window=20, min_periods=20).std()
+    upper_band = (basis + 2 * dev).values
+    lower_band = (basis - 2 * dev).values
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly trend filter: EMA(34) slope
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ema34_slope = np.diff(ema34_1w_aligned, prepend=ema34_1w_aligned[0])
     
-    # Volume filter: volume > 1.5 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Volume filter: volume > 1.5 * 20-day average
+    volume_ma = close_series.rolling(window=20, min_periods=20).mean()
+    volume_ma_vals = volume_ma.values
+    volume_filter = volume > (volume_ma_vals * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(basis[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(ema34_slope[i]) or
+            np.isnan(volume_ma_vals[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Donchian + above 1d EMA50 + volume spike
-            if (close[i] > high_20[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume_spike[i]):
+            # Long: price breaks above upper band + weekly uptrend (positive slope) + volume filter
+            if (close[i] > upper_band[i] and 
+                ema34_slope[i] > 0 and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + below 1d EMA50 + volume spike
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume_spike[i]):
+            # Short: price breaks below lower band + weekly downtrend (negative slope) + volume filter
+            elif (close[i] < lower_band[i] and 
+                  ema34_slope[i] < 0 and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below lower Donchian OR below 1d EMA50
-            if (close[i] < low_20[i]) or (close[i] < ema50_1d_aligned[i]):
+            # Long: exit if price crosses below basis OR weekly trend turns down
+            if (close[i] < basis[i]) or (ema34_slope[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above upper Donchian OR above 1d EMA50
-            if (close[i] > high_20[i]) or (close[i] > ema50_1d_aligned[i]):
+            # Short: exit if price crosses above basis OR weekly trend turns up
+            if (close[i] > basis[i]) or (ema34_slope[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
