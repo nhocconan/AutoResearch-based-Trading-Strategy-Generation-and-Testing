@@ -1,17 +1,10 @@
-# Strategy: 1d_1wPivot_S1R1_Breakout_VolumeATR_Filter_v2
-# Hypothesis: Weekly pivot points provide robust support/resistance levels. 
-# Breakouts above R1 or below S1 with volume confirmation capture trend continuations.
-# ATR-based stop loss manages risk. Designed for low trade frequency (~10-25/year) 
-# to minimize fee impact. Works in bull (breakouts) and bear (breakdowns) markets.
-# Uses 1d timeframe with 1h pivot calculation for precision.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1wPivot_S1R1_Breakout_VolumeATR_Filter_v2"
-timeframe = "1d"
+name = "4h_1dCMO_VolumeBreakout_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (higher timeframe for stronger levels)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data for CMO and volatility regime
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly ATR(10) for stops
-    tr1 = np.maximum(high_1w[1:], close_1w[:-1]) - np.minimum(low_1w[1:], close_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # Calculate daily CMO (Chande Momentum Oscillator) 14-period
+    # CMO = (Sum of gains - Sum of losses) / (Sum of gains + Sum of losses) * 100
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gains = np.where(delta > 0, delta, 0)
+    losses = np.where(delta < 0, -delta, 0)
+    
+    sum_gains = pd.Series(gains).rolling(window=14, min_periods=14).sum().values
+    sum_losses = pd.Series(losses).rolling(window=14, min_periods=14).sum().values
+    
+    # Avoid division by zero
+    denominator = sum_gains + sum_losses
+    cmo_1d = np.where(denominator != 0, (sum_gains - sum_losses) / denominator * 100, 0)
+    cmo_1d_aligned = align_htf_to_ltf(prices, df_1d, cmo_1d)
+    
+    # Calculate daily ATR for volatility regime filter
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Weekly pivot points: P = (H+L+C)/3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    s1_1w = 2 * pivot_1w - high_1w
-    r1_1w = 2 * pivot_1w - low_1w
+    # Daily volatility regime: ATR ratio (current ATR / 50-period ATR mean)
+    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_1d / atr_ma_50
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Align weekly pivots to daily timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average (strict)
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,8 +59,7 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
+        if (np.isnan(cmo_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -66,33 +67,35 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_1w_aligned[i]
+        cmo = cmo_1d_aligned[i]
+        atr_ratio_val = atr_ratio_aligned[i]
+        atr = atr_1d_aligned[i]
         
-        volume_confirmed = vol > 2.0 * vol_ma
-        s1 = s1_1w_aligned[i]
-        r1 = r1_1w_aligned[i]
+        volume_confirmed = vol > 1.8 * vol_ma
+        # Volatility regime: prefer moderate volatility (avoid extreme low/high vol)
+        vol_regime_ok = (atr_ratio_val > 0.6) & (atr_ratio_val < 2.2)
         
         if position == 0:
-            # Long: Break above R1 with strong volume
-            if price > r1 and volume_confirmed:
+            # Long: CMO oversold (< -30) turning up + volume + vol regime
+            if cmo < -30 and cmo > cmo_1d_aligned[i-1] and volume_confirmed and vol_regime_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with strong volume
-            elif price < s1 and volume_confirmed:
+            # Short: CMO overbought (> 30) turning down + volume + vol regime
+            elif cmo > 30 and cmo < cmo_1d_aligned[i-1] and volume_confirmed and vol_regime_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below S1 or ATR stop (2.5x ATR)
-            if price < s1 or price < (high[i] - 2.5 * atr):
+            # Exit: CMO crosses above 30 (overbought) or volatility too high
+            if cmo > 30 or atr_ratio_val > 2.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above R1 or ATR stop (2.5x ATR)
-            if price > r1 or price > (low[i] + 2.5 * atr):
+            # Exit: CMO crosses below -30 (oversold) or volatility too high
+            if cmo < -30 or atr_ratio_val > 2.5:
                 signals[i] = 0.0
                 position = 0
             else:
