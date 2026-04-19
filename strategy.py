@@ -3,16 +3,67 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power + Weekly Trend Filter
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-# Use weekly EMA(34) for trend: price > EMA = bullish trend, price < EMA = bearish trend
-# In bullish weekly trend: enter long when Bull Power > 0 and rising
-# In bearish weekly trend: enter short when Bear Power > 0 and rising
-# Volume confirmation: volume > 1.5x 20-period average
+# Hypothesis: 12h Williams %R + 1d ADX trend filter + volume confirmation
+# Williams %R identifies overbought/oversold conditions (-20 to -80 range)
+# ADX > 25 filters for trending markets to avoid whipsaws in ranging conditions
+# Volume > 1.5x 20-period average confirms conviction
+# In trending markets (ADX > 25): buy when Williams %R crosses above -80 from below, sell when crosses below -20 from above
+# In ranging markets (ADX <= 25): mean reversion at Williams %R extremes (-80 oversold, -20 overbought)
+# Position size: 0.25 to limit drawdown
 # Target: 20-40 trades/year per symbol to stay within frequency limits
-name = "6h_ElderRay_WeeklyTrend_Volume"
-timeframe = "6h"
+
+name = "12h_WilliamsR_ADX_Volume"
+timeframe = "12h"
 leverage = 1.0
+
+def williams_r(high, low, close, period):
+    """Williams %R indicator"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    wr = np.where((highest_high - lowest_low) == 0, -50, wr)
+    return wr.values
+
+def adx(high, low, close, period):
+    """ADX indicator"""
+    plus_dm = np.zeros_like(high)
+    minus_dm = np.zeros_like(high)
+    tr = np.zeros_like(high)
+    
+    for i in range(1, len(high)):
+        plus_dm[i] = max(high[i] - high[i-1], 0)
+        minus_dm[i] = max(low[i-1] - low[i], 0)
+        if plus_dm[i] == minus_dm[i]:
+            plus_dm[i] = 0
+            minus_dm[i] = 0
+        elif plus_dm[i] < minus_dm[i]:
+            plus_dm[i] = 0
+        else:
+            minus_dm[i] = 0
+            
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Wilder's smoothing
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    tr14 = wilders_smoothing(tr, period)
+    plus_dm14 = wilders_smoothing(plus_dm, period)
+    minus_dm14 = wilders_smoothing(minus_dm, period)
+    
+    plus_di14 = 100 * plus_dm14 / tr14
+    minus_di14 = 100 * minus_dm14 / tr14
+    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
+    dx = np.where((plus_di14 + minus_di14) == 0, 0, dx)
+    adx_result = wilders_smoothing(dx, period)
+    return adx_result
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,84 +75,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA(34) for trend
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Daily EMA(13) for Elder Ray calculation
+    # Get daily data for Williams %R and ADX
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Elder Ray components
-    bull_power = high - ema_13_1d_aligned  # High - EMA(13)
-    bear_power = ema_13_1d_aligned - low   # EMA(13) - Low
+    # Calculate Williams %R (14-period)
+    wr_14 = williams_r(high_1d, low_1d, close_1d, 14)
     
-    # Smooth power values (2-period) to reduce noise
-    bull_power_smooth = pd.Series(bull_power).ewm(span=2, adjust=False).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=2, adjust=False).mean().values
+    # Calculate ADX (14-period)
+    adx_14 = adx(high_1d, low_1d, close_1d, 14)
     
-    # Get 6h average volume for confirmation
+    # Align indicators to 12h timeframe
+    wr_aligned = align_htf_to_ltf(prices, df_1d, wr_14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Get 12h average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 13, 20)  # Ensure weekly EMA, daily EMA, and volume MA are ready
+    start_idx = max(34, 20)  # Ensure Williams %R (14*2+6), ADX (14*2+6), and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bull_power_smooth[i]) or 
-            np.isnan(bear_power_smooth[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(wr_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        ema_34_1w_val = ema_34_1w_aligned[i]
-        bull_val = bull_power_smooth[i]
-        bear_val = bear_power_smooth[i]
+        wr_val = wr_aligned[i]
+        adx_val = adx_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # Weekly trend determination
-        weekly_bullish = price > ema_34_1w_val
-        weekly_bearish = price < ema_34_1w_val
+        # Trend determination
+        is_trending = adx_val > 25
+        is_ranging = adx_val <= 25
         
         if position == 0:
-            # Determine entry based on weekly trend
-            if weekly_bullish and volume_confirmed:
-                # Bullish weekly trend: look for long signals
-                if bull_val > 0 and bull_val > bull_power_smooth[i-1]:
+            # Determine entry based on regime
+            if is_trending and volume_confirmed:
+                # Trending regime: Williams %R crossovers
+                if wr_val > -80 and wr_aligned[i-1] <= -80:
                     signals[i] = 0.25
                     position = 1
-            elif weekly_bearish and volume_confirmed:
-                # Bearish weekly trend: look for short signals
-                if bear_val > 0 and bear_val > bear_power_smooth[i-1]:
+                elif wr_val < -20 and wr_aligned[i-1] >= -20:
+                    signals[i] = -0.25
+                    position = -1
+            elif is_ranging and volume_confirmed:
+                # Ranging regime: mean reversion at extremes
+                if wr_val <= -80:  # Oversold
+                    signals[i] = 0.25
+                    position = 1
+                elif wr_val >= -20:  # Overbought
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: weekly trend turns bearish or Bull Power turns negative
-            if not weekly_bullish or bull_val <= 0:
-                signals[i] = 0.0
-                position = 0
+            # Long exit conditions
+            if is_trending:
+                # In trending regime, exit when Williams %R crosses below -50 from above
+                if wr_val < -50 and wr_aligned[i-1] >= -50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                # In ranging regime, exit when Williams %R returns from oversold
+                if wr_val > -50:  # Returning from oversold
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: weekly trend turns bullish or Bear Power turns negative
-            if not weekly_bearish or bear_val <= 0:
-                signals[i] = 0.0
-                position = 0
+            # Short exit conditions
+            if is_trending:
+                # In trending regime, exit when Williams %R crosses above -50 from below
+                if wr_val > -50 and wr_aligned[i-1] <= -50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # In ranging regime, exit when Williams %R returns from overbought
+                if wr_val < -50:  # Returning from overbought
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
