@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams Alligator system with daily momentum filter.
-# Long when green lip (fast SMA) crosses above red jaw (slow SMA) with price above 1d EMA50.
-# Short when red jaw crosses above green lip with price below 1d EMA50.
-# Williams Alligator: Jaw=SMA(13,8), Teeth=SMA(8,5), Lip=SMA(5,3).
-# Uses 1d EMA50 as trend filter to avoid counter-trend trades, reducing whipsaw in sideways markets.
-# Target: 12-37 trades/year per symbol (~50-150 total over 4 years).
-name = "12h_WilliamsAlligator_1dEMA50"
-timeframe = "12h"
+# Hypothesis: 4h Donchian channel breakout with 12h ADX trend filter and volume confirmation.
+# Long when price breaks above upper Donchian(20) with 12h ADX > 25 and volume > 1.5x average.
+# Short when price breaks below lower Donchian(20) with 12h ADX > 25 and volume > 1.5x average.
+# Uses ADX to filter for trending markets only, reducing whipsaw in sideways periods.
+# Volume confirmation ensures breakouts have institutional participation.
+# Target: 20-50 trades/year per symbol (~80-200 total over 4 years).
+name = "4h_Donchian20_12hADX25_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,63 +21,134 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for EMA50 calculation
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for ADX calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Williams Alligator components (Jaw=13, Teeth=8, Lip=5)
-    # Jaw: 13-period SMA, shifted 8 bars forward
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
-    # Teeth: 8-period SMA, shifted 5 bars forward
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
-    # Lip: 5-period SMA, shifted 3 bars forward
-    lip = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
+    # Calculate ADX on 12h data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # First value is NaN
+        
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = np.concatenate([[0.0], plus_dm])
+        minus_dm = np.concatenate([[0.0], minus_dm])
+        
+        # Smoothed values
+        atr = np.zeros_like(close)
+        plus_di = np.zeros_like(close)
+        minus_di = np.zeros_like(close)
+        
+        # Initial values
+        atr[period] = np.nansum(tr[1:period+1]) / period
+        plus_dm_sum = np.nansum(plus_dm[1:period+1])
+        minus_dm_sum = np.nansum(minus_dm[1:period+1])
+        
+        for i in range(period + 1, len(close)):
+            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+            plus_dm_sum = plus_dm_sum - (plus_dm_sum / period) + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - (minus_dm_sum / period) + minus_dm[i]
+            
+            if atr[i] != 0:
+                plus_di[i] = 100 * plus_dm_sum / atr[i]
+                minus_di[i] = 100 * minus_dm_sum / atr[i]
+            else:
+                plus_di[i] = 0
+                minus_di[i] = 0
+        
+        # Calculate DX and ADX
+        dx = np.zeros_like(close)
+        adx = np.zeros_like(close)
+        
+        for i in range(2 * period, len(close)):
+            if plus_di[i] + minus_di[i] != 0:
+                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+            else:
+                dx[i] = 0
+        
+        adx[2 * period] = np.nanmean(dx[period+1:2*period+1])
+        for i in range(2 * period + 1, len(close)):
+            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+        
+        return adx
     
-    # Calculate EMA50 on daily close
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
     
-    # Align 1d EMA50 to 12h timeframe (wait for daily close)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 12h ADX to 4h timeframe (wait for 12h bar close)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Calculate Donchian channels on 4h data
+    def donchian_channels(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        for i in range(period - 1, len(high)):
+            upper[i] = np.max(high[i - period + 1:i + 1])
+            lower[i] = np.min(low[i - period + 1:i + 1])
+        return upper, lower
+    
+    upper_dc, lower_dc = donchian_channels(high, low, 20)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 13  # Need jaw data (13-period SMA + 8 shift)
+    start_idx = max(20, 30)  # Need Donchian and ADX data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lip[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        jaw_val = jaw[i]
-        lip_val = lip[i]
-        ema_trend = ema_50_aligned[i]
+        upper = upper_dc[i]
+        lower = lower_dc[i]
+        adx_val = adx_aligned[i]
+        vol_ma = vol_ma_20[i]
+        vol = volume[i]
+        
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.5 * vol_ma
+        
+        # ADX trend filter
+        trending = adx_val > 25
         
         if position == 0:
-            # Enter long: green lip crosses above red jaw AND price above 1d EMA50
-            if lip_val > jaw_val and lip[i-1] <= jaw[i-1] and price > ema_trend:
+            # Enter long: price breaks above upper Donchian AND trending AND volume
+            if price > upper and trending and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: red jaw crosses above green lip AND price below 1d EMA50
-            elif jaw_val > lip_val and jaw[i-1] <= lip[i-1] and price < ema_trend:
+            # Enter short: price breaks below lower Donchian AND trending AND volume
+            elif price < lower and trending and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when red jaw crosses above green lip
-            if jaw_val > lip_val and jaw[i-1] <= lip[i-1]:
+            # Exit long when price breaks below lower Donchian or ADX weakens
+            if price < lower or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when green lip crosses above red jaw
-            if lip_val > jaw_val and lip[i-1] <= jaw[i-1]:
+            # Exit short when price breaks above upper Donchian or ADX weakens
+            if price > upper or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
