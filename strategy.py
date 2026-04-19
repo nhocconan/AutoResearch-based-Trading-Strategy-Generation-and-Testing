@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Supertrend with 1-week ATR-based trend filter and volume confirmation.
-# Long when: Supertrend flips below price (green), 1w ATR > 1.5x 10-period average (high volatility regime), volume > 1.2x 20-period average
-# Short when: Supertrend flips above price (red), 1w ATR > 1.5x 10-period average, volume > 1.2x 20-period average
-# Exit when Supertrend flips to opposite side.
-# Supertrend adapts to volatility, capturing trends while avoiding whipsaws in low-volatility regimes.
-# High volatility filter ensures we only trade when trends are strong enough to overcome noise.
-# Target: 20-40 trades/year per symbol.
-name = "6h_Supertrend_Vol_VolatilityFilter"
-timeframe = "6h"
+# Hypothesis: 12h EMA34 with 1-day volume confirmation and ADX trend filter.
+# Long when: EMA34 slope positive, price > EMA34, ADX(1d) > 25, volume > 1.5x 20-period average
+# Short when: EMA34 slope negative, price < EMA34, ADX(1d) > 25, volume > 1.5x 20-period average
+# Exit when price crosses back over EMA34.
+# EMA34 is a strong trend filter; combined with volume and ADX, it avoids whipsaws.
+# Target: 15-25 trades/year per symbol. Works in both bull and bear markets via trend following.
+name = "12h_EMA34_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,73 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week data for volatility filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1-day data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR on weekly data
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr_1w_ma = pd.Series(atr_1w).rolling(window=10, min_periods=10).mean().values
-    
-    # Align ATR and its MA to 6h timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    atr_1w_ma_aligned = align_htf_to_ltf(prices, df_1w, atr_1w_ma)
-    
-    # Calculate Supertrend on 6h data
-    atr_period = 10
-    multiplier = 3.0
-    
+    # Calculate ADX on daily data using Wilder's smoothing
     # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high + low) / 2 + multiplier * atr
-    basic_lb = (high + low) / 2 - multiplier * atr
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Final Upper and Lower Bands
-    final_ub = np.full(n, np.nan)
-    final_lb = np.full(n, np.nan)
-    for i in range(n):
-        if i == 0:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
-        else:
-            if close[i-1] <= final_ub[i-1]:
-                final_ub[i] = min(basic_ub[i], final_ub[i-1])
-            else:
-                final_ub[i] = basic_ub[i]
-            if close[i-1] >= final_lb[i-1]:
-                final_lb[i] = max(basic_lb[i], final_lb[i-1])
-            else:
-                final_lb[i] = basic_lb[i]
+    # Wilder's smoothing function
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period]) 
+        # Subsequent values
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Supertrend and Direction
-    supertrend = np.full(n, np.nan)
-    trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
-    for i in range(n):
-        if i == 0:
-            supertrend[i] = final_ub[i]
-            trend[i] = 1
-        else:
-            if trend[i-1] == 1 and close[i] <= final_ub[i]:
-                trend[i] = -1
-                supertrend[i] = final_lb[i]
-            elif trend[i-1] == -1 and close[i] >= final_lb[i]:
-                trend[i] = 1
-                supertrend[i] = final_ub[i]
-            else:
-                trend[i] = trend[i-1]
-                supertrend[i] = final_ub[i] if trend[i] == 1 else final_lb[i]
+    atr_period = 14
+    atr = wilders_smoothing(tr, atr_period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
+    
+    # Directional Indicators
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, atr_period)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate EMA34 on 12h data
+    close_series = pd.Series(close)
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate EMA34 slope (positive/negative)
+    ema34_slope = np.diff(ema34, prepend=ema34[0])
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -98,45 +86,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicator calculations
+    start_idx = 34  # Wait for EMA34 calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(supertrend[i]) or np.isnan(trend[i]) or 
-            np.isnan(atr_1w_aligned[i]) or np.isnan(atr_1w_ma_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(ema34[i]) or 
+            np.isnan(ema34_slope[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        st = supertrend[i]
-        tr = trend[i]
-        vol_atr = atr_1w_aligned[i]
-        vol_atr_ma = atr_1w_ma_aligned[i]
+        adx_val = adx_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long entry: Supertrend green (below price), high volatility regime, volume confirmation
-            if price > st and tr == 1 and vol_atr > 1.5 * vol_atr_ma and vol > 1.2 * vol_ma:
+            # Long entry: EMA34 slope up, price > EMA34, ADX > 25, volume confirmation
+            if ema34_slope[i] > 0 and price > ema34[i] and adx_val > 25 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Supertrend red (above price), high volatility regime, volume confirmation
-            elif price < st and tr == -1 and vol_atr > 1.5 * vol_atr_ma and vol > 1.2 * vol_ma:
+            # Short entry: EMA34 slope down, price < EMA34, ADX > 25, volume confirmation
+            elif ema34_slope[i] < 0 and price < ema34[i] and adx_val > 25 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Supertrend flips red (above price)
-            if price < st:
+            # Long exit: price crosses below EMA34
+            if price <= ema34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Supertrend flips green (below price)
-            if price > st:
+            # Short exit: price crosses above EMA34
+            if price >= ema34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
