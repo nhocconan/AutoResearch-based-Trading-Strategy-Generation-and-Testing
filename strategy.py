@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with 12-hour EMA trend filter and volume confirmation.
-# Donchian channels identify price extremes and breakout opportunities.
-# We trade breakouts in the direction of the 12h trend (EMA50) with volume confirmation.
+# Hypothesis: 1d Bollinger Band squeeze breakout with 1-week trend filter and volume confirmation.
+# Bollinger Band squeeze identifies low volatility periods preceding explosive moves.
+# We trade breakouts in the direction of the weekly trend (EMA50) with volume confirmation.
 # Works in bull/bear markets: avoids false breakouts in ranging markets, captures true breakouts.
-# Target: 20-50 trades/year per symbol.
-name = "4h_Donchian20_EMA50_Volume_Breakout"
-timeframe = "4h"
+# Target: 15-35 trades/year per symbol.
+name = "1d_BB_Squeeze_WeeklyEMA50_Volume_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,20 +22,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA50 on 12h
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA50 on weekly
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Donchian Channel (20 period) on 4h
-    dc_period = 20
-    upper_channel = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
-    lower_channel = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
+    # Bollinger Bands (20, 2) on 1d
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma_20 + (bb_std * std_20)
+    lower_band = sma_20 - (bb_std * std_20)
+    bb_width = (upper_band - lower_band) / sma_20  # Normalized bandwidth
     
-    # Align 12h EMA50 to 4h
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Bollinger Band squeeze detection: bandwidth below 20-period mean
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze_condition = bb_width < bb_width_ma  # Bandwidth below average = squeeze
+    
+    # Align 1w EMA50 to 1d
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,51 +51,53 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(dc_period, 50, 20)  # Ensure Donchian, EMA50, and volume MA are ready
+    start_idx = max(bb_period, 50, 20)  # Ensure BB, EMA50, and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(bb_width[i]) or np.isnan(bb_width_ma[i]) or
             np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_channel[i]
-        lower = lower_channel[i]
+        upper = upper_band[i]
+        lower = lower_band[i]
         ema_50_val = ema_50_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
+        is_squeeze = squeeze_condition[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
         # Breakout conditions
-        bullish_breakout = price > upper  # Price breaks above upper channel
-        bearish_breakout = price < lower  # Price breaks below lower channel
+        bullish_breakout = price > upper  # Price breaks above upper band
+        bearish_breakout = price < lower  # Price breaks below lower band
         
         if position == 0:
-            # Look for entry after Donchian breakout, in direction of 12h trend
-            if bullish_breakout and (price > ema_50_val) and volume_confirmed:
+            # Look for entry after Bollinger Band squeeze, in direction of weekly trend
+            if is_squeeze and bullish_breakout and (price > ema_50_val) and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            elif bearish_breakout and (price < ema_50_val) and volume_confirmed:
+            elif is_squeeze and bearish_breakout and (price < ema_50_val) and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns to middle of channel (mean reversion)
-            middle_channel = (upper + lower) / 2
-            if price < middle_channel:  # Return to mean
+            # Exit long when price returns to middle band (mean reversion) or volatility expands
+            middle_band = sma_20[i]
+            if price < middle_band:  # Return to mean
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns to middle of channel
-            middle_channel = (upper + lower) / 2
-            if price > middle_channel:  # Return to mean
+            # Exit short when price returns to middle band
+            middle_band = sma_20[i]
+            if price > middle_band:  # Return to mean
                 signals[i] = 0.0
                 position = 0
             else:
