@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h price action with 4h Donchian breakout and volume confirmation.
-# Long when: 4h Donchian upper breaks, volume > 2x 20-period avg, and price > 1h VWAP
-# Short when: 4h Donchian lower breaks, volume > 2x 20-period avg, and price < 1h VWAP
-# Uses 4h for direction (reduces false signals), 1h for entry timing.
-# Target: 15-30 trades/year per symbol.
-name = "1h_DonchianBreakout_Volume_VWAP"
-timeframe = "1h"
+# Hypothesis: 6-hour 1-week Camarilla pivot breakout with volume confirmation.
+# Uses weekly Camarilla levels (H5, L5, H6, L6) calculated from previous week's range.
+# Long when price breaks above H6 with volume > 1.5x 20-period average.
+# Short when price breaks below L6 with volume > 1.5x 20-period average.
+# Exit when price returns to weekly midpoint (H4/L4 average).
+# Weekly Camarilla provides institutional support/resistance, breakouts capture momentum,
+# volume confirms institutional participation. Works in trending markets (bull/bear).
+name = "6h_WeeklyCamarilla_H6L6_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,37 +24,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Calculate weekly Camarilla levels from previous week's data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Previous week's high, low, close
+    prev_week_high = df_1w['high'].shift(1).values  # Previous week's high
+    prev_week_low = df_1w['low'].shift(1).values    # Previous week's low
+    prev_week_close = df_1w['close'].shift(1).values # Previous week's close
     
-    # Align 4h Donchian to 1h
-    donchian_high_1h = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_1h = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Calculate Camarilla levels for current week based on previous week
+    # H6 = Close + 1.163*(High - Low)
+    # L6 = Close - 1.163*(High - Low)
+    # H4 = Close + 0.550*(High - Low)
+    # L4 = Close - 0.550*(High - Low)
+    range_wk = prev_week_high - prev_week_low
+    h6 = prev_week_close + 1.163 * range_wk
+    l6 = prev_week_close - 1.163 * range_wk
+    h4 = prev_week_close + 0.550 * range_wk
+    l4 = prev_week_close - 0.550 * range_wk
+    midpoint = (h4 + l4) / 2  # Weekly midpoint for exit
     
-    # Calculate 1h VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, 0)
+    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
+    h6_aligned = align_htf_to_ltf(prices, df_1w, h6)
+    l6_aligned = align_htf_to_ltf(prices, df_1w, l6)
+    midpoint_aligned = align_htf_to_ltf(prices, df_1w, midpoint)
     
-    # 20-period volume average
+    # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators
+    start_idx = 20  # Wait for volume MA calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_1h[i]) or np.isnan(donchian_low_1h[i]) or 
-            np.isnan(vwap[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(h6_aligned[i]) or np.isnan(l6_aligned[i]) or 
+            np.isnan(midpoint_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -61,33 +71,29 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long entry: 4h Donchian upper break, volume spike, price > VWAP
-            if (price > donchian_high_1h[i] and 
-                vol > 2.0 * vol_ma and 
-                price > vwap[i]):
-                signals[i] = 0.20
+            # Long entry: price breaks above H6 with volume spike
+            if price > h6_aligned[i] and vol > 1.5 * vol_ma:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: 4h Donchian lower break, volume spike, price < VWAP
-            elif (price < donchian_low_1h[i] and 
-                  vol > 2.0 * vol_ma and 
-                  price < vwap[i]):
-                signals[i] = -0.20
+            # Short entry: price breaks below L6 with volume spike
+            elif price < l6_aligned[i] and vol > 1.5 * vol_ma:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < 4h Donchian lower or volume drop
-            if (price < donchian_low_1h[i] or vol < 0.5 * vol_ma):
+            # Long exit: price returns to weekly midpoint
+            if price <= midpoint_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > 4h Donchian upper or volume drop
-            if (price > donchian_high_1h[i] or vol < 0.5 * vol_ma):
+            # Short exit: price returns to weekly midpoint
+            if price >= midpoint_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
