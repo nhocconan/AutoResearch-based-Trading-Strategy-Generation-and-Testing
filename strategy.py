@@ -1,11 +1,13 @@
-#!/usr/bin/env python3
-# 6h_SuperTrend_Filtered_Breakout
-# Hypothesis: 6h SuperTrend (ATR=10, mult=3) defines trend direction, price breaks above/below
-# previous day's ATR-based channels with volume confirmation. Works in bull/bear via trend filter.
-# Target: 50-150 total trades over 4 years (12-37/year). Uses discrete sizing 0.25 to minimize churn.
+# 12h_Pivot_R1S1_Breakout_Volume_ADX_Filter
+# Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
+# Camarilla levels provide statistically significant support/resistance from previous day's price action
+# ADX > 25 filters for trending markets to avoid false breakouts in chop
+# Volume confirmation ensures institutional participation
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
+# Works in bull/bear via ADX trend filter and volatility-adjusted breakouts
 
-name = "6h_SuperTrend_Filtered_Breakout"
-timeframe = "6h"
+name = "12h_Pivot_R1S1_Breakout_Volume_ADX_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,149 +24,126 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # SuperTrend calculation (ATR=10, multiplier=3)
-    def supertrend(high, low, close, atr_period=10, multiplier=3):
+    # ADX(14) for trend strength filter - calculated on 12h data
+    def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
+        tr[0] = tr1[0]  # First period
         
-        # ATR
-        atr = np.full_like(close, np.nan)
-        if len(close) >= atr_period:
-            atr[atr_period-1] = np.nanmean(tr[:atr_period])
-            for i in range(atr_period, len(tr)):
-                if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
-                    atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-                else:
-                    atr[i] = np.nan
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
         
-        # Basic Upper and Lower Bands
-        basic_ub = (high + low) / 2 + multiplier * atr
-        basic_lb = (high + low) / 2 - multiplier * atr
+        # Smoothed values using Wilder's smoothing (EMA-like)
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
         
-        # Final Upper and Lower Bands
-        final_ub = np.full_like(close, np.nan)
-        final_lb = np.full_like(close, np.nan)
-        final_ub[0] = basic_ub[0]
-        final_lb[0] = basic_lb[0]
+        atr = WilderSmooth(tr, period)
+        dm_plus_smooth = WilderSmooth(dm_plus, period)
+        dm_minus_smooth = WilderSmooth(dm_minus, period)
         
-        for i in range(1, len(close)):
-            if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
-                final_ub[i] = basic_ub[i]
-            else:
-                final_ub[i] = final_ub[i-1]
-                
-            if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
-                final_lb[i] = basic_lb[i]
-            else:
-                final_lb[i] = final_lb[i-1]
+        # Avoid division by zero
+        dx = np.full_like(close, np.nan)
+        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
         
-        # SuperTrend
-        supertrend = np.full_like(close, np.nan)
-        for i in range(len(close)):
-            if i == 0:
-                supertrend[i] = final_ub[i]
-            elif supertrend[i-1] == final_ub[i-1] and close[i] <= final_ub[i]:
-                supertrend[i] = final_ub[i]
-            elif supertrend[i-1] == final_ub[i-1] and close[i] > final_ub[i]:
-                supertrend[i] = final_lb[i]
-            elif supertrend[i-1] == final_lb[i-1] and close[i] >= final_lb[i]:
-                supertrend[i] = final_lb[i]
-            elif supertrend[i-1] == final_lb[i-1] and close[i] < final_lb[i]:
-                supertrend[i] = final_ub[i]
-        
-        return supertrend, atr
+        adx = WilderSmooth(dx, period)
+        return adx
     
-    # 6h data for SuperTrend and ATR
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # 12h data for ADX and other indicators
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    st, atr = supertrend(df_6h['high'].values, df_6h['low'].values, df_6h['close'].values, 10, 3)
-    st_aligned = align_htf_to_ltf(prices, df_6h, st)
-    atr_aligned = align_htf_to_ltf(prices, df_6h, atr)
+    # Calculate ADX on 12h data
+    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # Previous day's ATR-based channels (using 1d data)
+    # Previous day's Camarilla levels (using 1d data)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's high, low, close
-    ph = df_1d['high'].shift(1).values
-    pl = df_1d['low'].shift(1).values
-    pc = df_1d['close'].shift(1).values
+    # Calculate Camarilla levels from previous day
+    ph = df_1d['high'].shift(1).values  # Previous day high
+    pl = df_1d['low'].shift(1).values   # Previous day low
+    pc = df_1d['close'].shift(1).values # Previous day close
     
-    # Previous day's ATR (14-period)
-    def calculate_atr(high, low, close, period=14):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        atr = np.full_like(close, np.nan)
-        if len(close) >= period:
-            atr[period-1] = np.nanmean(tr[:period])
-            for i in range(period, len(tr)):
-                if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
-                    atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                else:
-                    atr[i] = np.nan
-        return atr
+    # Camarilla calculations
+    rang = ph - pl
+    r1 = pc + (rang * 1.1 / 12)
+    s1 = pc - (rang * 1.1 / 12)
+    r4 = pc + (rang * 1.1 / 2)
+    s4 = pc - (rang * 1.1 / 2)
     
-    atr_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_1d_prev = atr_1d.shift(1).values  # Previous day's ATR
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Upper and lower channels: previous day close ± 1.5 * previous day ATR
-    upper_channel = pc + 1.5 * atr_1d_prev
-    lower_channel = pc - 1.5 * atr_1d_prev
-    
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average (slightly stricter for fewer trades)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Ensure enough data
+    start_idx = max(30, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(st_aligned[i]) or np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # ADX filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_12h_aligned[i] > 25
+        
         if position == 0:
-            # Long: SuperTrend bullish (price > SuperTrend) AND price breaks above upper channel with volume
-            if (close[i] > st_aligned[i] and 
-                close[i] > upper_aligned[i] and 
-                volume_confirm[i]):
+            # Long: price breaks above R1 with volume and strong trend
+            if (close[i] > r1_aligned[i] and 
+                volume_confirm[i] and 
+                strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: SuperTrend bearish (price < SuperTrend) AND price breaks below lower channel with volume
-            elif (close[i] < st_aligned[i] and 
-                  close[i] < lower_aligned[i] and 
-                  volume_confirm[i]):
+            # Short: price breaks below S1 with volume and strong trend
+            elif (close[i] < s1_aligned[i] and 
+                  volume_confirm[i] and 
+                  strong_trend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below SuperTrend (trend reversal) OR price breaks below lower channel
-            if (close[i] < st_aligned[i]) or (close[i] < lower_aligned[i]):
+            # Long: exit if price breaks below S1 or trend weakens (ADX < 20)
+            if (close[i] < s1_aligned[i]) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above SuperTrend (trend reversal) OR price breaks above upper channel
-            if (close[i] > st_aligned[i]) or (close[i] > upper_aligned[i]):
+            # Short: exit if price breaks above R1 or trend weakens (ADX < 20)
+            if (close[i] > r1_aligned[i]) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
