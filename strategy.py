@@ -1,15 +1,16 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1S1_Breakout_VolumeATR_v1"
-timeframe = "12h"
+name = "6h_Alligator_GatorOsc_Trend_HTF1d"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +18,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation (once before loop)
+    # Get daily data for Alligator (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily high, low, close for pivot calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Alligator (Williams' Alligator) on daily close
+    # Jaw (blue): 13-period SMMA, smoothed 8 bars ahead
+    # Teeth (red): 8-period SMMA, smoothed 5 bars ahead  
+    # Lips (green): 5-period SMMA, smoothed 3 bars ahead
+    
+    # SMMA (Smoothed Moving Average) calculation
+    def smma(values, period):
+        sma = np.full_like(values, np.nan, dtype=np.float64)
+        smma_vals = np.full_like(values, np.nan, dtype=np.float64)
+        if len(values) >= period:
+            # First value is SMA
+            sma[period-1] = np.mean(values[:period])
+            smma_vals[period-1] = sma[period-1]
+            # Subsequent values: SMMA = (prev_smma * (period-1) + current) / period
+            for i in range(period, len(values)):
+                smma_vals[i] = (smma_vals[i-1] * (period-1) + values[i]) / period
+        return smma_vals
+    
+    # Calculate SMMA series
     close_1d = df_1d['close'].values
+    jaw_raw = smma(close_1d, 13)
+    teeth_raw = smma(close_1d, 8)
+    lips_raw = smma(close_1d, 5)
     
-    # Calculate daily pivot points: P = (H+L+C)/3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    # Apply smoothing (shift forward)
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
     
-    # Align daily pivot levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Daily ATR for volatility filter (14-period)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
-    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Gator Oscillator: |Jaw-Teeth| and |Teeth-Lips| (absolute values)
+    jaw_teeth_diff = np.abs(jaw_aligned - teeth_aligned)
+    teeth_lips_diff = np.abs(teeth_aligned - lips_aligned)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (12h)
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        pivot = pivot_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        atr = atr_14_1d_aligned[i]
+        jaw = jaw_aligned[i]
+        teeth = teeth_aligned[i]
+        lips = lips_aligned[i]
         
-        volume_confirmed = vol > 2.0 * vol_ma
+        # Alligator alignment check: all three lines in proper order
+        # For uptrend: Lips > Teeth > Jaw (green > red > blue)
+        # For downtrend: Jaw > Teeth > Lips (blue > red > green)
+        vol_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: break above R1 with volume
-            if price > r1 and volume_confirmed:
+            # Long: Lips > Teeth > Jaw (bullish alignment) + volume
+            if lips > teeth and teeth > jaw and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume
-            elif price < s1 and volume_confirmed:
+            # Short: Jaw > Teeth > Lips (bearish alignment) + volume
+            elif jaw > teeth and teeth > lips and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price below pivot or ATR-based stop
-            if price < pivot or price < close[i-1] - 1.5 * atr:
+            # Exit: Lips cross below Teeth or volume confirmation lost
+            if lips < teeth or not vol_confirmed:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above pivot or ATR-based stop
-            if price > pivot or price > close[i-1] + 1.5 * atr:
+            # Exit: Jaw crosses below Teeth or volume confirmation lost
+            if jaw < teeth or not vol_confirmed:
                 signals[i] = 0.0
                 position = 0
             else:
