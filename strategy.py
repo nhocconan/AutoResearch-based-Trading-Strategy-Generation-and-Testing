@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume_ADX_Filter_v2
-Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
-Uses 1d for Camarilla levels and 1w for ADX to reduce whipsaw and improve trend filtering
-Target: 50-150 total trades over 4 years (12-37/year) with focus on quality over quantity
-Works in bull/bear via multi-timeframe trend alignment (1w ADX > 25)
+12h_KAMA_Trend_With_ADX_Filter
+Hypothesis: KAMA adapts to market noise, providing a smooth trend line that reduces whipsaw.
+In trending markets (ADX > 25), price above KAMA indicates uptrend, below indicates downtrend.
+This combination works in both bull and bear markets by following the trend only when strong.
+Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "12h_Pivot_R1S1_Breakout_Volume_ADX_Filter_v2"
+name = "12h_KAMA_Trend_With_ADX_Filter"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,31 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Wilder smoothing for Wilder's indicators (ADX)
-    def WilderSmooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        alpha = 1.0 / period
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-            else:
-                result[i] = np.nan
-        return result
+    # KAMA parameters
+    kama_period = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # ADX calculation (standard Wilder's)
+    # Efficiency Ratio (ER) and Smoothing Constant (SC) for KAMA
+    def calculate_kama(close, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        # Avoid division by zero
+        er = np.zeros_like(close)
+        er[period:] = change[period-1:] / volatility[period-1:]
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        kama = np.zeros_like(close)
+        kama[:period] = close[:period]
+        for i in range(period, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
+    
+    # ADX calculation (same as before)
     def calculate_adx(high, low, close, period=14):
-        # True Range
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
         tr[0] = tr1[0]
         
-        # Directional Movement
         dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
                            np.maximum(high - np.roll(high, 1), 0), 0)
         dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
@@ -57,12 +60,22 @@ def generate_signals(prices):
         dm_plus[0] = 0
         dm_minus[0] = 0
         
-        # Smoothed values
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
+        
         atr = WilderSmooth(tr, period)
         dm_plus_smooth = WilderSmooth(dm_plus, period)
         dm_minus_smooth = WilderSmooth(dm_minus, period)
         
-        # DX and ADX
         dx = np.full_like(close, np.nan)
         mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
         dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
@@ -70,78 +83,62 @@ def generate_signals(prices):
         adx = WilderSmooth(dx, period)
         return adx
     
-    # Get 1d data for Camarilla levels (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h data for indicators
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].shift(1).values  # Previous day high
-    pl = df_1d['low'].shift(1).values   # Previous day low
-    pc = df_1d['close'].shift(1).values # Previous day close
+    # Calculate KAMA and ADX on 12h data
+    kama_12h = calculate_kama(df_12h['close'].values, kama_period, fast_ema, slow_ema)
+    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
     
-    # Handle NaNs from shift
-    rang = ph - pl
-    r1 = pc + (rang * 1.1 / 12)
-    s1 = pc - (rang * 1.1 / 12)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # Get 1w data for ADX (stronger trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Calculate ADX on 1w data
-    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average (stricter for fewer trades)
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure enough data
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(kama_12h_aligned[i]) or np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when ADX > 25 (strong trend)
-        strong_trend = adx_1w_aligned[i] > 25
+        # ADX filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_12h_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above R1 with volume and strong trend
-            if (close[i] > r1_aligned[i] and 
+            # Long: price above KAMA with volume and strong trend
+            if (close[i] > kama_12h_aligned[i] and 
                 volume_confirm[i] and 
                 strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and strong trend
-            elif (close[i] < s1_aligned[i] and 
+            # Short: price below KAMA with volume and strong trend
+            elif (close[i] < kama_12h_aligned[i] and 
                   volume_confirm[i] and 
                   strong_trend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 or trend weakens (ADX < 20)
-            if (close[i] < s1_aligned[i]) or (adx_1w_aligned[i] < 20):
+            # Long: exit if price crosses below KAMA or trend weakens
+            if (close[i] < kama_12h_aligned[i]) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 or trend weakens (ADX < 20)
-            if (close[i] > r1_aligned[i]) or (adx_1w_aligned[i] < 20):
+            # Short: exit if price crosses above KAMA or trend weakens
+            if (close[i] > kama_12h_aligned[i]) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
