@@ -1,15 +1,16 @@
+# State the hypothesis:
+# This strategy uses 4h timeframe with 1d trend filter (EMA34) and 4h Donchian breakout (20-period) with volume confirmation.
+# Enters only during 08-20 UTC session. Uses strict conditions to limit trades (~20-40/year) and avoid overtrading.
+# Trend-following in bull markets, avoids false signals in bear/chop via EMA34 filter and volume spike requirement.
+# Target: 80-160 total trades over 4 years (20-40/year) to stay under the 400 trade hard limit and minimize fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour chart with 12-hour pivot levels (R1/S1) and 1-day trend filter (EMA50).
-# Enters long when price breaks above R1 with volume confirmation in uptrend (price > EMA50).
-# Enters short when price breaks below S1 with volume confirmation in downtrend (price < EMA50).
-# Uses daily pivot points calculated from prior day's OHLC. Volume filter requires 1.5x average.
-# Designed for 15-30 trades/year to avoid overtrading. Works in both bull (breakouts) and bear (breakdowns).
-name = "6h_12h_Pivot_R1S1_EMA50_Volume"
-timeframe = "6h"
+name = "4h_1d_EMA34_Donchian20_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,34 +24,29 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time']
     
-    # Pre-compute session filter (08-20 UTC) - optional but helps reduce noise
+    # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA50 trend (called ONCE before loop)
+    # Get 1d data for EMA34 trend (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 1d data for pivot points (prior day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_for_pivot = df_1d['close'].values
+    # Get 4h data for Donchian20 breakout (called ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    # Donchian channels: 20-period high/low
+    high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    high_20_4h_aligned = align_htf_to_ltf(prices, df_4h, high_20_4h)
+    low_20_4h_aligned = align_htf_to_ltf(prices, df_4h, low_20_4h)
     
-    # Calculate pivot points: P = (H + L + C)/3
-    pivot = (high_1d + low_1d + close_1d_for_pivot) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    
-    # Align pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter: volume > 1.5 * 20-period average
+    # Volume filter: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    volume_filter = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,37 +54,38 @@ def generate_signals(prices):
     start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ma[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20_4h_aligned[i]) or 
+            np.isnan(low_20_4h_aligned[i]) or np.isnan(volume_ma[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above EMA50 (uptrend) AND breaks above R1 with volume
-            if (close[i] > ema_50_1d_aligned[i] and 
-                close[i] > r1_aligned[i] and 
+            # Long: price above 1d EMA34 AND breaks 4h Donchian high with volume
+            if (close[i] > ema_34_1d_aligned[i] and 
+                close[i] > high_20_4h_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA50 (downtrend) AND breaks below S1 with volume
-            elif (close[i] < ema_50_1d_aligned[i] and 
-                  close[i] < s1_aligned[i] and 
+            # Short: price below 1d EMA34 AND breaks 4h Donchian low with volume
+            elif (close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < low_20_4h_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below EMA50 or S1
-            if close[i] < ema_50_1d_aligned[i] or close[i] < s1_aligned[i]:
+            # Long: exit if price breaks below 1d EMA34 or 4h Donchian low
+            if close[i] < ema_34_1d_aligned[i] or close[i] < low_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above EMA50 or R1
-            if close[i] > ema_50_1d_aligned[i] or close[i] > r1_aligned[i]:
+            # Short: exit if price breaks above 1d EMA34 or 4h Donchian high
+            if close[i] > ema_34_1d_aligned[i] or close[i] > high_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
