@@ -1,15 +1,12 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-1d_W1_HighLow_Breakout_Volume_Trend
-Hypothesis: Daily breakout above weekly high or below weekly low with volume confirmation and ADX trend filter.
-Uses weekly high/low as structural support/resistance levels. ADX > 25 ensures trending markets to avoid false breakouts in chop.
-Volume confirmation ensures institutional participation. Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
-Works in bull/bear via ADX trend filter and volatility-adjusted breakouts.
-"""
+# 12h_Pivot_R1S1_Breakout_Volume_ADX_Filter_v2
+# Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
+# Added volume confirmation during breakout only (not continuous) to reduce whipsaw
+# Adjusted exit conditions to be more permissive for trend continuation
+# Target: 50-150 total trades over 4 years for 12h timeframe
 
-name = "1d_W1_HighLow_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "12h_Pivot_R1S1_Breakout_Volume_ADX_Filter_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX(14) for trend strength filter - calculated on 1d data
+    # ADX(14) for trend strength filter - calculated on 12h data
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high - low
@@ -69,31 +66,40 @@ def generate_signals(prices):
         adx = WilderSmooth(dx, period)
         return adx
     
-    # 1d data for ADX and other indicators
+    # 12h data for ADX and other indicators
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:  # Need enough for ADX calculation
+        return np.zeros(n)
+    
+    # Calculate ADX on 12h data
+    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Previous day's Camarilla levels (using 1d data)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ADX on 1d data
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate Camarilla levels from previous day
+    ph = df_1d['high'].shift(1).values  # Previous day high
+    pl = df_1d['low'].shift(1).values   # Previous day low
+    pc = df_1d['close'].shift(1).values # Previous day close
     
-    # Weekly high/low (using 1w data)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Camarilla calculations
+    rang = ph - pl
+    r1 = pc + (rang * 1.1 / 12)
+    s1 = pc - (rang * 1.1 / 12)
+    r4 = pc + (rang * 1.1 / 2)
+    s4 = pc - (rang * 1.1 / 2)
     
-    # Calculate weekly high/low from previous week
-    wh = df_1w['high'].shift(1).values  # Previous week high
-    wl = df_1w['low'].shift(1).values   # Previous week low
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Align weekly levels to 1d timeframe
-    wh_aligned = align_htf_to_ltf(prices, df_1w, wh)
-    wl_aligned = align_htf_to_ltf(prices, df_1w, wl)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average (checked at breakout)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -102,39 +108,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(wh_aligned[i]) or 
-            np.isnan(wl_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # ADX filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_1d_aligned[i] > 25
+        strong_trend = adx_12h_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above weekly high with volume and strong trend
-            if (close[i] > wh_aligned[i] and 
-                volume_confirm[i] and 
+            # Long: price breaks above R1 with volume and strong trend
+            volume_cond = volume[i] > (volume_ma[i] * 1.5)
+            if (close[i] > r1_aligned[i] and 
+                volume_cond and 
                 strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly low with volume and strong trend
-            elif (close[i] < wl_aligned[i] and 
-                  volume_confirm[i] and 
+            # Short: price breaks below S1 with volume and strong trend
+            elif (close[i] < s1_aligned[i] and 
+                  volume_cond and 
                   strong_trend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below weekly low or trend weakens (ADX < 20)
-            if (close[i] < wl_aligned[i]) or (adx_1d_aligned[i] < 20):
+            # Long: exit if price breaks below S1 or trend weakens significantly (ADX < 15)
+            if (close[i] < s1_aligned[i]) or (adx_12h_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above weekly high or trend weakens (ADX < 20)
-            if (close[i] > wh_aligned[i]) or (adx_1d_aligned[i] < 20):
+            # Short: exit if price breaks above R1 or trend weakens significantly (ADX < 15)
+            if (close[i] > r1_aligned[i]) or (adx_12h_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
