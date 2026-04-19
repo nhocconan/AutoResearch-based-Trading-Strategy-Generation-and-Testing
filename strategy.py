@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 12h pivot levels (R1/S1, R2/S2, R3/S3, R4/S4) 
-# and volume confirmation. Fade at extreme pivots (R4/S4) with reversal signals,
-# continue trend at middle pivots (R1/S1, R2/S2). Uses 12h pivot points 
-# calculated from prior 12h period's OHLC. Works in both bull and bear markets by 
-# fading extremes and catching continuations. Target: 50-150 total trades over 4 years.
-name = "6h_12h_Pivot_R1S1_R4S4_Strategy"
-timeframe = "6h"
+# Hypothesis: 4h timeframe with 1-day pivot levels (R1/S1, R2/S2) and volume confirmation.
+# Fade at extreme pivots (R2/S2) for mean reversion, continue trend at inner pivots (R1/S1).
+# Uses daily pivot points from previous day's OHLC. Works in both bull and bear by fading extremes
+# and catching continuations. Target: 75-200 total trades over 4 years (19-50/year).
+name = "4h_1d_Pivot_R1S1_R2S2_Strategy"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,35 +21,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for pivot calculation (called ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get daily data for pivot calculation (called ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h pivot points (using prior 12h period's OHLC)
+    # Calculate daily pivot points (using previous day's OHLC)
     # Pivot = (H + L + C) / 3
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     # Support and resistance levels
-    s1_12h = (2 * pivot_12h) - high_12h
-    r1_12h = (2 * pivot_12h) - low_12h
-    s2_12h = pivot_12h - (high_12h - low_12h)
-    r2_12h = pivot_12h + (high_12h - low_12h)
-    s3_12h = low_12h - 2 * (high_12h - pivot_12h)
-    r3_12h = high_12h + 2 * (pivot_12h - low_12h)
-    s4_12h = s3_12h - (high_12h - low_12h)
-    r4_12h = r3_12h + (high_12h - low_12h)
+    s1_1d = (2 * pivot_1d) - high_1d
+    r1_1d = (2 * pivot_1d) - low_1d
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r2_1d = pivot_1d + (high_1d - low_1d)
     
-    # Align 12h pivot levels to 6h timeframe
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
-    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    # Align daily pivot levels to 4h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     
     # Volume filter: volume > 1.3 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,46 +54,44 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or
-            np.isnan(r2_12h_aligned[i]) or np.isnan(s2_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or
-            np.isnan(s3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Fade at extreme pivots (R4/S4) - mean reversion
-            if close[i] <= s4_12h_aligned[i] and volume_filter[i]:
+            # Fade at extreme pivots (R2/S2) - mean reversion
+            if close[i] <= s2_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            elif close[i] >= r4_12h_aligned[i] and volume_filter[i]:
+            elif close[i] >= r2_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
-            # Continue trend at middle pivots (R1/S1, R2/S2) - breakout
-            elif close[i] > r2_12h_aligned[i] and volume_filter[i]:
+            # Continue trend at inner pivots (R1/S1) - breakout
+            elif close[i] > r1_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            elif close[i] < s2_12h_aligned[i] and volume_filter[i]:
+            elif close[i] < s1_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit at R3 (take profit) or S4 (stop reversal)
-            if close[i] >= r3_12h_aligned[i]:
+            # Long position: exit at R2 (take profit) or S2 (stop reversal)
+            if close[i] >= r2_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif close[i] <= s4_12h_aligned[i]:
+            elif close[i] <= s2_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit at S3 (take profit) or R4 (stop reversal)
-            if close[i] <= s3_12h_aligned[i]:
+            # Short position: exit at S2 (take profit) or R2 (stop reversal)
+            if close[i] <= s2_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif close[i] >= r4_12h_aligned[i]:
+            elif close[i] >= r2_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
