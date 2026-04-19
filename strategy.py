@@ -3,18 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 1d Camarilla R1/S1 breakout + volume confirmation + session filter
-# Uses daily pivot structure for direction, 1h for entry timing. Designed to work in both bull/bear
-# by capturing intraday momentum within established daily support/resistance levels.
-# Target: 15-35 trades/year to avoid fee drag.
-
-name = "1h_1d_Camarilla_R1S1_Breakout_Volume"
-timeframe = "1h"
+name = "6h_1w_Camarilla_R1S1_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,18 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    prev_close = np.roll(close_1d, 1)
+    # Calculate weekly Camarilla pivot levels from previous week
+    prev_close = np.roll(close_1w, 1)
     prev_close[0] = np.nan
-    prev_high = np.roll(high_1d, 1)
+    prev_high = np.roll(high_1w, 1)
     prev_high[0] = np.nan
-    prev_low = np.roll(low_1d, 1)
+    prev_low = np.roll(low_1w, 1)
     prev_low[0] = np.nan
     
     # Pivot = (H + L + C) / 3
@@ -42,62 +37,70 @@ def generate_signals(prices):
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
     # S1 = C - (H - L) * 1.1 / 12
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
+    # R4 = C + (H - L) * 1.1 / 2
+    r4 = prev_close + (prev_high - prev_low) * 1.1 / 2.0
+    # S4 = C - (H - L) * 1.1 / 2
+    s4 = prev_close - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align to 1h timeframe
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
+    r4_6h = align_htf_to_ltf(prices, df_1w, r4)
+    s4_6h = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (stricter to reduce trades)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 2.0x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
-    # Time filter: 08-20 UTC (reduces noise outside active sessions)
+    # Time filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     time_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 50
     
     for i in range(start_idx, n):
         if not time_filter[i]:
             signals[i] = 0.0
             continue
             
-        if np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
+           np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(vol_ma_50[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_50[i]
         
-        volume_confirmed = vol > 2.0 * vol_ma  # Stricter volume filter
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
             # Long: Price breaks above R1 with volume
-            if price > r1_1h[i] and volume_confirmed:
-                signals[i] = 0.20
+            if price > r1_6h[i] and volume_confirmed:
+                signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 with volume
-            elif price < s1_1h[i] and volume_confirmed:
-                signals[i] = -0.20
+            elif price < s1_6h[i] and volume_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below S1 (reversal signal)
-            if price < s1_1h[i]:
+            if price < s1_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit: Price returns above R1 (reversal signal)
-            if price > r1_1h[i]:
+            if price > r1_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
