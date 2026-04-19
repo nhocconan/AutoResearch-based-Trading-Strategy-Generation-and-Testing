@@ -1,18 +1,15 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h 4-hour Donchian breakout with 1-day volume filter and session filter (08-20 UTC).
-# Uses 4h Donchian(20) for trend direction, 1d volume spike for confirmation, 1h for entry timing.
-# Designed for 1h timeframe to capture medium-term breakouts with low frequency (~15-25 trades/year).
-# Entry: Long when 1h close > 4h Donchian upper band and volume > 1.5x 20-day avg and session active.
-# Short when 1h close < 4h Donchian lower band and volume > 1.5x 20-day avg and session active.
-# Exit: Opposite Donchian band touch or volume drop below average.
-# Uses strict conditions to limit trades and avoid overtrading.
-
-name = "1h_Donchian20_Volume_Session"
-timeframe = "1h"
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with weekly trend filter.
+# Elder Ray measures bull/bear power relative to EMA13; combined with weekly EMA34 trend.
+# Long when Bull Power > 0 and weekly EMA34 rising; Short when Bear Power < 0 and weekly EMA34 falling.
+# Weekly trend filter reduces whipsaw in sideways markets, focusing on stronger trends.
+# Designed for low frequency (~10-20 trades/year) with clear trend-following edge.
+name = "6h_ElderRay_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,72 +20,68 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate EMA13 for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
+    
+    # Weekly trend filter: EMA34 on weekly timeframe
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian bands on 4h data
-    donchian_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    weekly_close = df_1w['close'].values
+    weekly_ema34 = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_ema34_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema34)
     
-    # Align to 1h timeframe (waits for completed 4h bar)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # 1-day volume spike filter: volume > 1.5x 20-day average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    volume_20d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = df_1d['volume'].values > (volume_20d * 1.5)
-    
-    # Align volume spike to 1h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
-    
-    # Session filter: 08-20 UTC (precompute for efficiency)
-    session_hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (session_hours >= 8) & (session_hours <= 20)
+    # Weekly trend: rising if current > previous, falling if current < previous
+    weekly_trend_up = np.zeros(n, dtype=bool)
+    weekly_trend_down = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        if not np.isnan(weekly_ema34_aligned[i]) and not np.isnan(weekly_ema34_aligned[i-1]):
+            weekly_trend_up[i] = weekly_ema34_aligned[i] > weekly_ema34_aligned[i-1]
+            weekly_trend_down[i] = weekly_ema34_aligned[i] < weekly_ema34_aligned[i-1]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = 34  # Ensure enough data for weekly EMA34
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or not in session
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(volume_spike_aligned[i]) or not in_session[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(weekly_ema34_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above 4h Donchian high with volume confirmation
-            if (close[i] > donchian_high_aligned[i] and volume_spike_aligned[i]):
-                signals[i] = 0.20
+            # Long: Bull Power positive AND weekly trend up
+            if bull_power[i] > 0 and weekly_trend_up[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below 4h Donchian low with volume confirmation
-            elif (close[i] < donchian_low_aligned[i] and volume_spike_aligned[i]):
-                signals[i] = -0.20
+            # Short: Bear Power negative AND weekly trend down
+            elif bear_power[i] < 0 and weekly_trend_down[i]:
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price touches 4h Donchian low or volume drops
-            if (close[i] < donchian_low_aligned[i]) or (not volume_spike_aligned[i]):
+            # Long: exit if Bull Power turns negative or weekly trend turns down
+            if bull_power[i] <= 0 or not weekly_trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price touches 4h Donchian high or volume drops
-            if (close[i] > donchian_high_aligned[i]) or (not volume_spike_aligned[i]):
+            # Short: exit if Bear Power turns positive or weekly trend turns up
+            if bear_power[i] >= 0 or not weekly_trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
