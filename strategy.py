@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d Williams Fractal breakout + 1w EMA50 trend + volume confirmation.
-# Uses Williams Fractal to identify swing points for breakout signals.
-# Uses 1w EMA50 for higher timeframe trend direction.
-# Enters only during 08-20 UTC session to avoid low-volume noise.
-# Targets 20-50 trades/year (80-200 total over 4 years) with strict entry conditions.
-# Works in bull/bear by following weekly trend direction.
-name = "4h_1wWilliamsFractal_EMA50_Volume"
-timeframe = "4h"
+# Hypothesis: 1d strategy using weekly Ichimoku Cloud for trend direction and daily momentum for entry.
+# The Ichimoku Cloud provides a robust trend filter that works in both bull and bear markets.
+# Entries are taken when price crosses above/below the Cloud with volume confirmation.
+# Exit when price re-enters the Cloud. Targets 15-25 trades/year (60-100 total over 4 years).
+# Weekly timeframe for trend reduces whipsaw, daily for timely entries.
+name = "1d_1w_IchimokuCloud_Momentum_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,49 +23,54 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time']
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Get 1d data for momentum and volume
+    close_1d = close
+    high_1d = high
+    low_1d = low
+    volume_1d = volume
     
-    # Get 1d data for Williams Fractal (called ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Williams Fractal: 5-bar pattern
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] > high[n+1] > high[n+2]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] < low[n+1] < low[n+2]
-    n_1d = len(high_1d)
-    bearish_fractal = np.zeros(n_1d, dtype=bool)
-    bullish_fractal = np.zeros(n_1d, dtype=bool)
-    
-    for i in range(2, n_1d - 2):
-        # Bearish fractal (sell signal)
-        if (high_1d[i-2] < high_1d[i-1] and 
-            high_1d[i] > high_1d[i-1] and 
-            high_1d[i] > high_1d[i+1] and 
-            high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = True
-        # Bullish fractal (buy signal)
-        if (low_1d[i-2] > low_1d[i-1] and 
-            low_1d[i] < low_1d[i-1] and 
-            low_1d[i] < low_1d[i+1] and 
-            low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = True
-    
-    # Get 1w data for EMA50 trend (called ONCE before loop)
+    # Get weekly data for Ichimoku Cloud (called ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Williams Fractal needs 2 extra bars for confirmation (after the center bar)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Ichimoku components on weekly data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Volume filter: volume > 2.0 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 2.0)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = ((period52_high + period52_low) / 2)
+    
+    # Align Ichimoku components to daily timeframe
+    # Note: Senkou spans are already shifted in calculation, so we align without additional shift
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    
+    # The Cloud is between Senkou Span A and Senkou Span B
+    # For trend: price above Cloud = bullish, price below Cloud = bearish
+    # We'll use the Cloud edges for entry/exit signals
+    
+    # Momentum: daily price change
+    price_change = pd.Series(close_1d).diff().values
+    
+    # Volume filter: volume > 1.3 * 20-day average
+    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume_1d > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,38 +78,44 @@ def generate_signals(prices):
     start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma[i]) or
-            not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(price_change[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Determine Cloud boundaries
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
         if position == 0:
-            # Long: bullish fractal breakout AND above weekly EMA50 with volume
-            if (bullish_fractal_aligned[i] > 0 and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # Long: price crosses above Cloud with positive momentum and volume
+            if (close_1d[i] > cloud_top and 
+                close_1d[i-1] <= cloud_top and  # crossed above
+                price_change[i] > 0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish fractal breakout AND below weekly EMA50 with volume
-            elif (bearish_fractal_aligned[i] > 0 and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # Short: price crosses below Cloud with negative momentum and volume
+            elif (close_1d[i] < cloud_bottom and 
+                  close_1d[i-1] >= cloud_bottom and  # crossed below
+                  price_change[i] < 0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if bearish fractal appears or price breaks below weekly EMA50
-            if bearish_fractal_aligned[i] > 0 or close[i] < ema_50_1w_aligned[i]:
+            # Long: exit if price re-enters Cloud (below cloud top)
+            if close_1d[i] < cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if bullish fractal appears or price breaks above weekly EMA50
-            if bullish_fractal_aligned[i] > 0 or close[i] > ema_50_1w_aligned[i]:
+            # Short: exit if price re-enters Cloud (above cloud bottom)
+            if close_1d[i] > cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
