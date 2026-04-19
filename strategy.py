@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_Pivot_R4S4_Breakout_Volume_Spike_v2"
-timeframe = "6h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,51 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot levels from previous weekly bar
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_close_1w[0] = np.nan
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_high_1w[0] = np.nan
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_low_1w[0] = np.nan
-    
-    # Weekly pivot = (H + L + C) / 3
-    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    # R4 = C + (H - L) * 1.1 / 2
-    r4_1w = prev_close_1w + (prev_high_1w - prev_low_1w) * 1.1 / 2.0
-    # S4 = C - (H - L) * 1.1 / 2
-    s4_1w = prev_close_1w - (prev_high_1w - prev_low_1w) * 1.1 / 2.0
-    
-    # Align to 6h timeframe
-    pivot_1w_6h = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r4_1w_6h = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_1w_6h = align_htf_to_ltf(prices, df_1w, s4_1w)
-    
-    # Get daily data for trend filter
+    # Get 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d pivot levels from previous 1d bar
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = np.nan
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_low_1d[0] = np.nan
     
-    # Volume confirmation: current volume > 2.5x 20-period average
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12.0
+    
+    # Align to 12h timeframe
+    pivot_1d_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_1w_6h[i]) or np.isnan(r4_1w_6h[i]) or np.isnan(s4_1w_6h[i]) or \
-           np.isnan(ema_34_1d_6h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_1d_12h[i]) or np.isnan(r1_1d_12h[i]) or np.isnan(s1_1d_12h[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -69,34 +61,30 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 2.5x average
-        volume_spike = vol > 2.5 * vol_ma
-        
-        # Trend filter: price above/below daily EMA34
-        trend_up = price > ema_34_1d_6h[i]
-        trend_down = price < ema_34_1d_6h[i]
+        # Volume spike: current volume > 2.0x average
+        volume_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above weekly R4 with volume spike and uptrend
-            if price > r4_1w_6h[i] and volume_spike and trend_up:
+            # Long: Price breaks above 1d R1 with volume spike
+            if price > r1_1d_12h[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly S4 with volume spike and downtrend
-            elif price < s4_1w_6h[i] and volume_spike and trend_down:
+            # Short: Price breaks below 1d S1 with volume spike
+            elif price < s1_1d_12h[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below weekly pivot (reversal signal)
-            if price < pivot_1w_6h[i]:
+            # Exit: Price returns below 1d S1 (reversal signal)
+            if price < s1_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above weekly pivot (reversal signal)
-            if price > pivot_1w_6h[i]:
+            # Exit: Price returns above 1d R1 (reversal signal)
+            if price > r1_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
