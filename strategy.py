@@ -1,10 +1,17 @@
+# 12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter
+# Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
+# In bull markets, price breaks above R1 with volume; in bear markets, breaks below S1.
+# Volume confirmation filters false breakouts. ATR-based stop loss manages risk.
+# Works in both bull and bear by trading breakouts in direction of 12h trend.
+# Target: 20-50 trades over 4 years (5-12/year) to avoid fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_KAMA_Trend_Follow"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,94 +26,82 @@ def generate_signals(prices):
     
     # Get 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate KAMA on 1d close
-    er_len = 10
-    fast_ema = 2 / (2 + 1)
-    slow_ema = 2 / (30 + 1)
-    
-    change = np.abs(np.diff(close_1d, n=er_len))
-    change = np.concatenate([np.full(er_len, np.nan), change])
-    
-    volatility = np.abs(np.diff(close_1d))
-    volatility = np.concatenate([np.array([np.nan]), volatility])
-    vol_sum = pd.Series(volatility).rolling(window=er_len, min_periods=er_len).sum().values
-    
-    er = np.divide(change, vol_sum, out=np.full_like(change, np.nan), where=vol_sum!=0)
-    sc = np.square(er * (fast_ema - slow_ema) + slow_ema)
-    
-    kama = np.full_like(close_1d, np.nan)
-    kama[er_len] = close_1d[er_len]
-    for i in range(er_len + 1, len(close_1d)):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Calculate 4h EMA20 for entry filter
-    close_s = pd.Series(close)
-    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume filter: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ATR(14) for stop loss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate ATR(14) on 12h for stop loss
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]  # First TR is just high-low
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Camarilla levels from previous day
+    # R1 = C + (H-L) * 1.1/12
+    # S1 = C - (H-L) * 1.1/12
+    rang = high_1d - low_1d
+    camarilla_r1 = close_1d + rang * 1.1 / 12
+    camarilla_s1 = close_1d - rang * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe (previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Calculate 12h EMA(34) for trend filter
+    close_s = pd.Series(close)
+    ema_34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume filter: current volume > 2.0 x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(100, 20, 14)
+    start_idx = max(34, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(ema20[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or \
+           np.isnan(ema_34[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        kama_val = kama_aligned[i]
-        ema_val = ema20[i]
         atr_val = atr[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        ema_val = ema_34[i]
         
         # Volume filter
-        volume_ok = vol > 1.8 * vol_ma
+        volume_ok = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: price above KAMA and above EMA20 with volume
-            if price > kama_val and price > ema_val and volume_ok:
+            # Long breakout above R1 with volume and above EMA34 (uptrend)
+            if price > r1 and volume_ok and price > ema_val:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price below KAMA and below EMA20 with volume
-            elif price < kama_val and price < ema_val and volume_ok:
+            # Short breakdown below S1 with volume and below EMA34 (downtrend)
+            elif price < s1 and volume_ok and price < ema_val:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Exit: price crosses below KAMA or stop loss hit
-            if price < kama_val or price < entry_price - 2.5 * atr_val:
+            # Long exit: price drops below entry - 2*ATR (stop loss) or reverses below S1
+            if price < entry_price - 2.0 * atr_val or price < s1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above KAMA or stop loss hit
-            if price > kama_val or price > entry_price + 2.5 * atr_val:
+            # Short exit: price rises above entry + 2*ATR (stop loss) or reverses above R1
+            if price > entry_price + 2.0 * atr_val or price > r1:
                 signals[i] = 0.0
                 position = 0
             else:
