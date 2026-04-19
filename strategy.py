@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1_S1_Breakout_Volume_Trend_v1"
-timeframe = "12h"
+name = "4h_1d_WilliamsAlligator_ElderRay_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,84 +17,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for multi-timeframe analysis
+    # Get 1d data for HTF analysis
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d pivot levels (R1, S1) from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d Williams Alligator (13,8,5 SMAs shifted)
     close_1d = df_1d['close'].values
-    prev_high_1d = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
-    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1_1d = 2 * pivot_1d - prev_low_1d
-    s1_1d = 2 * pivot_1d - prev_high_1d
+    jaw_1d = pd.Series(close_1d).rolling(window=13, min_periods=13).mean()
+    teeth_1d = pd.Series(close_1d).rolling(window=8, min_periods=8).mean()
+    lips_1d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean()
+    jaw_1d = jaw_1d.shift(8).values   # shift by half period
+    teeth_1d = teeth_1d.shift(5).values
+    lips_1d = lips_1d.shift(3).values
     
-    # Align 1d pivot levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
-    # 1d ATR for volatility filter and stoploss
-    tr_1d = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)), np.absolute(low_1d - np.roll(close_1d, 1)))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 1d Elder Ray (EMA13, High-Low)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # 12h EMA34 for trend filter
-    ema34_12h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 4h Williams %R for entry timing (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min()
+    willr = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    willr = willr.values
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # 4h Volume filter (current > 1.5x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 14)  # Ensure enough data for all indicators
+    start_idx = max(50, 20)  # Ensure enough data
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or \
-           np.isnan(s1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or \
-           np.isnan(ema34_12h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or \
+           np.isnan(lips_1d_aligned[i]) or np.isnan(bull_power_1d_aligned[i]) or \
+           np.isnan(bear_power_1d_aligned[i]) or np.isnan(willr[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        wr = willr[i]
+        
+        # Alligator alignment: bullish when lips > teeth > jaw
+        bullish_alligator = lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i]
+        bearish_alligator = lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i]
+        
+        # Elder Ray: bullish when bull power > 0 and rising, bearish when bear power < 0 and falling
+        bullish_elder = bull_power_1d_aligned[i] > 0 and bull_power_1d_aligned[i] > bull_power_1d_aligned[i-1]
+        bearish_elder = bear_power_1d_aligned[i] < 0 and bear_power_1d_aligned[i] < bear_power_1d_aligned[i-1]
         
         # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
-        # Trend filter: price above/below EMA34
-        above_ema = price > ema34_12h[i]
-        below_ema = price < ema34_12h[i]
-        
         if position == 0:
-            # Long: price breaks above R1 with volume and trend alignment
-            if price > r1_1d_aligned[i] and volume_ok and above_ema:
+            # Long: bullish Alligator + bullish Elder Ray + Williams %R oversold + volume
+            if bullish_alligator and bullish_elder and wr < -80 and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and trend alignment
-            elif price < s1_1d_aligned[i] and volume_ok and below_ema:
+            # Short: bearish Alligator + bearish Elder Ray + Williams %R overbought + volume
+            elif bearish_alligator and bearish_elder and wr > -20 and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Hold long: maintain position
-            signals[i] = 0.25
-            # Exit: price drops below S1 or trend turns bearish
-            if price < s1_1d_aligned[i] or price < ema34_12h[i]:
+            # Exit: bearish Alligator or bearish Elder Ray or Williams %R overbought
+            if bearish_alligator or bearish_elder or wr > -20:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = 0.25
         
         elif position == -1:
-            # Hold short: maintain position
-            signals[i] = -0.25
-            # Exit: price rises above R1 or trend turns bullish
-            if price > r1_1d_aligned[i] or price > ema34_12h[i]:
+            # Exit: bullish Alligator or bullish Elder Ray or Williams %R oversold
+            if bullish_alligator or bullish_elder or wr < -80:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
