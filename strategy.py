@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_Pivot_R1S1_Breakout_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,21 +17,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data for trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Pivot, R1, S1 on 12h timeframe
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    r1_12h = 2 * pivot_12h - low_12h
-    s1_12h = 2 * pivot_12h - high_12h
+    # Calculate EMA34 on daily close
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Donchian channel (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike (volume > 2.0 * 20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -40,11 +36,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume MA
+    start_idx = 40  # Ensure enough data for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]):
             signals[i] = 0.0
             continue
             
@@ -52,29 +48,29 @@ def generate_signals(prices):
         vol_confirm = volume_spike[i]
         
         if position == 0:
-            # Long when price breaks above R1 with volume
-            if close[i] > r1_aligned[i] and vol_confirm:
-                signals[i] = 0.25
+            # Long when price breaks above upper Donchian with volume and above daily EMA34
+            if close[i] > high_20[i] and vol_confirm and close[i] > ema_34_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short when price breaks below S1 with volume
-            elif close[i] < s1_aligned[i] and vol_confirm:
-                signals[i] = -0.25
+            # Short when price breaks below lower Donchian with volume and below daily EMA34
+            elif close[i] < low_20[i] and vol_confirm and close[i] < ema_34_aligned[i]:
+                signals[i] = -0.30
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price falls below S1 (reversal)
-            if close[i] < s1_aligned[i]:
+            # Long position: exit when price falls below lower Donchian (reversal)
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:
-            # Short position: exit when price rises above R1 (reversal)
-            if close[i] > r1_aligned[i]:
+            # Short position: exit when price rises above upper Donchian (reversal)
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
