@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Pivot_R1S1_Breakout_VolumeATR_v3"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_Breakout_VolumeATR_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,20 +17,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations (once before loop)
+    # Get daily data for Camarilla pivot calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily high, low, close for calculations
+    # Daily high, low, close for Camarilla pivot calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot point and S1, R1
+    # Calculate daily pivot point
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate R1 and S1 using Camarilla formula
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily levels to 4h timeframe
+    # Align daily pivot levels to 12h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -42,11 +43,8 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 1.8x 20-period average (4h)
+    # Volume confirmation: current volume > 1.5x 20-period average (12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Additional filter: only trade when price is away from extremes (avoid chop)
-    price_ma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,7 +54,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
             np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(price_ma_50[i])):
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -67,19 +65,16 @@ def generate_signals(prices):
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
-        price_ma = price_ma_50[i]
         
-        volume_confirmed = vol > 1.8 * vol_ma
-        # Only trade when price is not too far from MA (avoid extreme moves)
-        price_not_extreme = abs(price - price_ma) < 3 * atr
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: break above R1 with volume and not extreme
-            if price > r1 and volume_confirmed and price_not_extreme:
+            # Long: break above R1 with volume
+            if price > r1 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume and not extreme
-            elif price < s1 and volume_confirmed and price_not_extreme:
+            # Short: break below S1 with volume
+            elif price < s1 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
