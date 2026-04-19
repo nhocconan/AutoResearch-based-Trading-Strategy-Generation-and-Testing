@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian20_Trend_Volume"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Spike_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,63 +23,71 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d pivot levels from previous 1d bar
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = np.nan
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_low_1d[0] = np.nan
     
-    # Calculate 1d trend filter (EMA 50)
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12.0
     
     # Align to 4h timeframe
-    high_20_4h = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_4h = align_htf_to_ltf(prices, df_1d, low_20)
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
+    pivot_1d_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 2.5x 24-period average (more stringent)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40
+    start_idx = 24
     
     for i in range(start_idx, n):
-        if np.isnan(high_20_4h[i]) or np.isnan(low_20_4h[i]) or np.isnan(ema_50_4h[i]) or \
-           np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_1d_4h[i]) or np.isnan(r1_1d_4h[i]) or np.isnan(s1_1d_4h[i]) or \
+           np.isnan(vol_ma_24[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_24[i]
         
-        # Volume spike: current volume > 1.5x average
-        volume_spike = vol > 1.5 * vol_ma
+        # Volume spike: current volume > 2.5x average (more stringent)
+        volume_spike = vol > 2.5 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above 1d Donchian high + above 1d EMA50 + volume spike
-            if price > high_20_4h[i] and price > ema_50_4h[i] and volume_spike:
-                signals[i] = 0.25
+            # Long: Price breaks above 1d R1 with volume spike
+            if price > r1_1d_4h[i] and volume_spike:
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below 1d Donchian low + below 1d EMA50 + volume spike
-            elif price < low_20_4h[i] and price < ema_50_4h[i] and volume_spike:
-                signals[i] = -0.25
+            # Short: Price breaks below 1d S1 with volume spike
+            elif price < s1_1d_4h[i] and volume_spike:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below 1d Donchian low (reversal signal)
-            if price < low_20_4h[i]:
+            # Exit: Price returns below 1d S1 (reversal signal)
+            if price < s1_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit: Price returns above 1d Donchian high (reversal signal)
-            if price > high_20_4h[i]:
+            # Exit: Price returns above 1d R1 (reversal signal)
+            if price > r1_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
