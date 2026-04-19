@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA13 trend filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13 to detect strength of buyers/sellers
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# In trending markets, Bull Power stays positive in uptrends, Bear Power stays positive in downtrends
-# Volume confirmation filters weak breakouts
-# EMA13 from 1d provides higher timeframe trend bias to avoid counter-trend trades
+# Hypothesis: 12h Williams %R (14) with 1d EMA50 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions: values below -80 = oversold, above -20 = overbought
+# In trending markets, we buy oversold dips in uptrends and sell overbought bounces in downtrends
+# 1d EMA50 provides higher timeframe trend bias to avoid counter-trend trades
+# Volume confirmation filters weak signals
 # Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
-name = "6h_ElderRay_1dEMA13_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,20 +23,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA13 for trend filter
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate EMA13 on 6h for Elder Ray
-    ema_13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13_6h  # Bull Power: High - EMA13
-    bear_power = ema_13_6h - low   # Bear Power: EMA13 - Low
+    # Williams %R (14) on 12h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Volume confirmation: volume > 1.3 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,40 +43,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_13_6h[i]) or np.isnan(ema_13_1d_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 (buyers in control) + above 1d EMA13 + volume confirmation
-            if (bull_power[i] > 0 and 
-                close[i] > ema_13_1d_aligned[i] and 
+            # Long: Williams %R < -80 (oversold) + above 1d EMA50 + volume confirmation
+            if (williams_r[i] < -80 and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power > 0 (sellers in control) + below 1d EMA13 + volume confirmation
-            elif (bear_power[i] > 0 and 
-                  close[i] < ema_13_1d_aligned[i] and 
+            # Short: Williams %R > -20 (overbought) + below 1d EMA50 + volume confirmation
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Bear Power becomes positive (sellers take control) or breaks below 1d EMA13
-            if (bear_power[i] > 0) or (close[i] < ema_13_1d_aligned[i]):
+            # Long: exit if Williams %R > -20 (overbought) or breaks below 1d EMA50
+            if (williams_r[i] > -20) or (close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Bull Power becomes positive (buyers take control) or breaks above 1d EMA13
-            if (bull_power[i] > 0) or (close[i] > ema_13_1d_aligned[i]):
+            # Short: exit if Williams %R < -80 (oversold) or breaks above 1d EMA50
+            if (williams_r[i] < -80) or (close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
