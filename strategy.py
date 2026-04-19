@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_CCI_Momentum_Trend"
-timeframe = "1d"
+name = "6h_KAMA_BullBearPower_ElderRay"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,79 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period CCI on weekly
-    # Typical Price
-    tp_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Calculate EMA13 and EMA21 for Elder Ray (1d)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # 20-period SMA of TP
-    tp_sma_20 = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
+    # Bull Power = High - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    # Bear Power = Low - EMA21
+    bear_power_1d = low_1d - ema21_1d
     
-    # Mean Deviation
-    tp_dev = np.abs(tp_1w - tp_sma_20)
-    tp_md_20 = pd.Series(tp_dev).rolling(window=20, min_periods=20).mean().values
+    # Align Bull/Bear Power to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # CCI
-    cci_1w = (tp_1w - tp_sma_20) / (0.015 * tp_md_20)
-    
-    # Align CCI to daily
-    cci_1w_aligned = align_htf_to_ltf(prices, df_1w, cci_1w)
-    
-    # Daily 50-period EMA for trend filter
+    # KAMA on 6h close
     close_s = pd.Series(close)
-    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Efficiency Ratio
+    change = abs(close_s.diff(10))
+    volatility = close_s.diff().abs().rolling(10).sum()
+    er = change / volatility
+    er = er.fillna(0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume filter: current volume > 1.5x 20-day average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 50)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(cci_1w_aligned[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or \
+           np.isnan(kama[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        cci = cci_1w_aligned[i]
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
+        kama_val = kama[i]
         
         # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
-        # Trend filter
-        above_ema = price > ema_50[i]
-        below_ema = price < ema_50[i]
-        
         if position == 0:
-            # Long: CCI > 100 (strong momentum) + above EMA + volume
-            if cci > 100 and above_ema and volume_ok:
+            # Long: Bull Power > 0, price > KAMA, volume
+            if bull_power > 0 and price > kama_val and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: CCI < -100 (strong bearish momentum) + below EMA + volume
-            elif cci < -100 and below_ema and volume_ok:
+            # Short: Bear Power < 0, price < KAMA, volume
+            elif bear_power < 0 and price < kama_val and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: CCI drops below 0 or price crosses below EMA
-            if cci < 0 or not above_ema:
+            # Exit: Bull Power <= 0 or price < KAMA
+            if bull_power <= 0 or price < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: CCI rises above 0 or price crosses above EMA
-            if cci > 0 or not below_ema:
+            # Exit: Bear Power >= 0 or price > KAMA
+            if bear_power >= 0 or price > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
