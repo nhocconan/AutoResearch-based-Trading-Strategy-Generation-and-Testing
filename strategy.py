@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA + RSI + chop filter - Weekly trend filter for daily signals
-# Use weekly Choppiness Index to determine regime: >61.8 = range (mean revert), <38.2 = trending (trend follow).
-# In trending regime: KAMA direction for trend following (long when KAMA rising, short when falling).
-# In ranging regime: RSI extremes for mean reversion (long RSI<30, short RSI>70).
-# Volume confirmation: volume > 1.5x 20-period average.
-# Target: 15-25 trades/year per symbol to stay within frequency limits.
-name = "1d_KAMA_RSI_Chop_Volume"
-timeframe = "1d"
+# Hypothesis: 6h Williams Alligator + 1d EMA34 trend filter with volume confirmation.
+# The Alligator (Jaw/Teeth/Lips) identifies trend absence when lines are intertwined.
+# We trade only when the Alligator is "awake" (lines separated) AND aligned with 1d EMA34.
+# Volume > 1.5x 20-period average confirms momentum.
+# Works in bull/bear: avoids whipsaws in ranging markets, catches strong trends.
+# Target: 15-35 trades/year per symbol.
+name = "6h_Alligator_EMA34_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,202 +23,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Choppiness Index calculation
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate Choppiness Index (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Wilder's smoothing function
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    # ATR (14-period Wilder's smoothing)
-    atr_1w = wilder_smooth(tr, 14)
-    # Sum of TR over 14 periods
-    tr_sum_14 = wilder_smooth(tr, 14)
-    
-    # Highest high and lowest low over 14 periods
-    def highest_high(arr, period):
-        result = np.full_like(arr, np.nan)
-        for i in range(period-1, len(arr)):
-            result[i] = np.max(arr[i-period+1:i+1])
-        return result
-    
-    def lowest_low(arr, period):
-        result = np.full_like(arr, np.nan)
-        for i in range(period-1, len(arr)):
-            result[i] = np.min(arr[i-period+1:i+1])
-        return result
-    
-    hh_14 = highest_high(high_1w, 14)
-    ll_14 = lowest_low(low_1w, 14)
-    
-    # Avoid division by zero
-    safe_tr_sum = np.where(tr_sum_14 == 0, np.finfo(float).eps, tr_sum_14)
-    chop = 100 * np.log10(safe_tr_sum / (hh_14 - ll_14)) / np.log10(14)
-    # Handle cases where hh_14 == ll_14
-    chop = np.where((hh_14 - ll_14) == 0, 50, chop)  # Neutral when no range
-    
-    # Get daily data for KAMA and RSI
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # KAMA (Adaptive Moving Average) - ER=10, FC=2, SC=30
-    def kama(close, er_length=10, fast_sc=2, slow_sc=30):
-        n = len(close)
-        if n < er_length:
-            return np.full(n, np.nan)
-        
-        # Calculate Efficiency Ratio
-        change = np.abs(np.diff(close, n=er_length))
-        abs_change = np.abs(np.diff(close))
-        abs_sum = np.zeros_like(close)
-        for i in range(er_length, len(close)):
-            abs_sum[i] = np.sum(abs_change[i-er_length+1:i+1])
-        
-        er = np.zeros(n)
-        er[er_length:] = change / np.where(abs_sum[er_length:] == 0, 1, abs_sum[er_length:])
-        
-        # Smoothing constants
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        
-        # Calculate KAMA
-        kama_vals = np.full(n, np.nan)
-        kama_vals[er_length] = close[er_length]
-        for i in range(er_length + 1, n):
-            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
-        return kama_vals
+    # Calculate EMA34 on daily
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # RSI (14-period)
-    def rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        
-        for i in range(period + 1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss == 0, np.inf, avg_gain / avg_loss)
-        rsi_vals = 100 - (100 / (1 + rs))
-        return rsi_vals
+    # Williams Alligator components (13,8,5 periods SMAs of median price)
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # Blue line (13)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # Red line (8)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values    # Green line (5)
     
-    # Calculate indicators
-    kama_vals = kama(close_1d, er_length=10, fast_sc=2, slow_sc=30)
-    rsi_vals = rsi(close_1d, period=14)
+    # Align 1d EMA34 to 6h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align indicators to daily timeframe (already daily, but for consistency)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_vals)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_vals)
-    
-    # Get daily average volume for confirmation
+    # Get 6s average volume for confirmation (20-period)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure KAMA (10+), RSI (14), chop (14*2+6), and volume MA are ready
+    start_idx = max(13, 34, 20)  # Ensure Alligator jaw, EMA34, and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(chop_aligned[i]) or np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        chop_val = chop_aligned[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema_34_val = ema_34_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # KAMA slope (trend direction)
-        kama_slope = kama_val - kama_aligned[i-1] if i > 0 else 0
+        # Alligator "awake" condition: lines are separated (not intertwined)
+        # For uptrend: Lips > Teeth > Jaw
+        # For downtrend: Lips < Teeth < Jaw
+        lips_above_teeth = lips_val > teeth_val
+        teeth_above_jaw = teeth_val > jaw_val
+        lips_below_teeth = lips_val < teeth_val
+        teeth_below_jaw = teeth_val < jaw_val
         
-        # Regime determination
-        is_ranging = chop_val > 61.8
-        is_trending = chop_val < 38.2
-        # Neutral zone (38.2-61.8) - no trades
+        is_uptrend_aligned = lips_above_teeth and teeth_above_jaw and (price > ema_34_val)
+        is_downtrend_aligned = lips_below_teeth and teeth_below_jaw and (price < ema_34_val)
         
         if position == 0:
-            # Determine entry based on regime
-            if is_trending and volume_confirmed:
-                # Trending regime: KAMA direction
-                if kama_slope > 0:
-                    signals[i] = 0.25
-                    position = 1
-                elif kama_slope < 0:
-                    signals[i] = -0.25
-                    position = -1
-            elif is_ranging and volume_confirmed:
-                # Ranging regime: RSI extremes
-                if rsi_val < 30:
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi_val > 70:
-                    signals[i] = -0.25
-                    position = -1
+            # Look for entry when Alligator is awake and aligned with daily trend
+            if is_uptrend_aligned and volume_confirmed:
+                signals[i] = 0.25
+                position = 1
+            elif is_downtrend_aligned and volume_confirmed:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit conditions
-            exit_signal = False
-            if is_trending:
-                # Exit when KAMA slope turns negative
-                if kama_slope < 0:
-                    exit_signal = True
-            else:
-                # Exit when RSI reaches overbought
-                if rsi_val > 70:
-                    exit_signal = True
+            # Exit long when Alligator starts to sleep (lines intertwine) or trend breaks
+            # Sleep condition: jaws, teeth, lips are intertwined (not separated)
+            lips_teeth_crossed = abs(lips_val - teeth_val) < 0.0001 * price  # Very close
+            teeth_jaw_crossed = abs(teeth_val - jaw_val) < 0.0001 * price
+            is_sleeping = lips_teeth_crossed or teeth_jaw_crossed
             
-            if exit_signal:
+            if is_sleeping or (price < ema_34_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit conditions
-            exit_signal = False
-            if is_trending:
-                # Exit when KAMA slope turns positive
-                if kama_slope > 0:
-                    exit_signal = True
-            else:
-                # Exit when RSI reaches oversold
-                if rsi_val < 30:
-                    exit_signal = True
+            # Exit short when Alligator starts to sleep or trend breaks
+            lips_teeth_crossed = abs(lips_val - teeth_val) < 0.0001 * price
+            teeth_jaw_crossed = abs(teeth_val - jaw_val) < 0.0001 * price
+            is_sleeping = lips_teeth_crossed or teeth_jaw_crossed
             
-            if exit_signal:
+            if is_sleeping or (price > ema_34_val):
                 signals[i] = 0.0
                 position = 0
             else:
