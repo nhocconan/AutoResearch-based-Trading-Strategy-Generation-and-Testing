@@ -1,18 +1,19 @@
+# 2025-06-23
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h 1d pivot breakout with volume confirmation and ATR stop
-# In trending markets, price breaks through daily pivot S2/R2 with volume.
-# In ranging markets, price oscillates between S1/R1 (mean reversion).
+# Hypothesis: 4h Donchian(20) breakout with 1d daily pivot S1/R1 reversal zones and volume confirmation
+# In ranging markets, price tends to reverse at daily pivot S1/R1 (mean reversion)
+# In trending markets, price breaks through daily pivot S2/R2 with volume (breakout)
 # Uses 1d pivots as dynamic support/resistance with volume filter to distinguish
 # between breakouts and reversals. Works in both bull and bear markets by
 # adapting to volatility regime via ATR filter.
 # Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
 
-name = "12h_1dPivot_S1R1_S2R2_VolumeATR"
-timeframe = "12h"
+name = "4h_1dPivot_S1R1_S2R2_VolumeATR"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,19 +26,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot points and ATR calculation
+    # Get 1h data for ATR calculation (better resolution than 4h)
+    df_1h = get_htf_data(prices, '1h')
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
+    
+    # Calculate ATR(14) on 1h
+    tr1 = np.maximum(high_1h[1:], close_1h[:-1]) - np.minimum(low_1h[1:], close_1h[:-1])
+    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
+    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1h_aligned = align_htf_to_ltf(prices, df_1h, atr_1h)
+    
+    # Get 1d data for pivot points
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate ATR(14) on 1d
-    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate daily pivot points: P = (H+L+C)/3
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
@@ -47,7 +54,7 @@ def generate_signals(prices):
     s2_1d = pivot_1d - (high_1d - low_1d)
     r2_1d = pivot_1d + (high_1d - low_1d)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
@@ -66,7 +73,7 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
             np.isnan(r1_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
-            np.isnan(r2_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(r2_1d_aligned[i]) or np.isnan(atr_1h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -74,7 +81,7 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_1d_aligned[i]
+        atr = atr_1h_aligned[i]
         
         # Volume and volatility filters
         volume_confirmed = vol > 1.5 * vol_ma
