@@ -1,15 +1,16 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Daily_Pivot_R1S1_Breakout_VolumeATR_v1"
-timeframe = "12h"
+name = "4h_12h_Pivot_R1S1_Breakout_VolumeATR_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,43 +18,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for pivot calculation (once before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Daily high, low, close for pivot calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h high, low, close for pivot calculation
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily pivot points: P = (H+L+C)/3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate 12h pivot points: P = (H+L+C)/3
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
     # R1 = 2*P - L, S1 = 2*P - H
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    r1_12h = 2 * pivot_12h - low_12h
+    s1_12h = 2 * pivot_12h - high_12h
     
-    # Align daily pivot levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align 12h pivot levels to 4h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
-    # Daily ATR for volatility filter (14-period)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
-    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
+    # 12h ATR for volatility filter (14-period)
+    tr1 = np.maximum(high_12h[1:] - low_12h[1:], np.absolute(high_12h[1:] - close_12h[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low_12h[1:] - close_12h[:-1]))
     tr1 = np.concatenate([[np.nan], tr1])
-    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_14_12h = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (12h)
+    # Volume confirmation: current volume > 2.0x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or 
+            np.isnan(s1_12h_aligned[i]) or np.isnan(atr_14_12h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -61,37 +62,37 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        pivot = pivot_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        atr = atr_14_1d_aligned[i]
+        pivot = pivot_12h_aligned[i]
+        r1 = r1_12h_aligned[i]
+        s1 = s1_12h_aligned[i]
+        atr = atr_14_12h_aligned[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
             # Long: break above R1 with volume
             if price > r1 and volume_confirmed:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: break below S1 with volume
             elif price < s1 and volume_confirmed:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: price below pivot or ATR-based stop
-            if price < pivot or price < close[i-1] - 2.0 * atr:
+            if price < pivot or price < close[i-1] - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit: price above pivot or ATR-based stop
-            if price > pivot or price > close[i-1] + 2.0 * atr:
+            if price > pivot or price > close[i-1] + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
