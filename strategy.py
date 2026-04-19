@@ -1,21 +1,21 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with 1-day ATR filter and volume confirmation.
-# Long when price breaks above 4h Donchian(20) high AND 1d ATR ratio > 1.5 AND volume > 1.2x 4h average volume
-# Short when price breaks below 4h Donchian(20) low AND 1d ATR ratio > 1.5 AND volume > 1.2x 4h average volume
-# Exit when price crosses below/above 4h Donchian(10) midpoint or when ATR ratio drops below 1.2
-# ATR filter ensures trades only during high volatility regimes (breakouts, breakdowns).
-# Target: 20-50 trades/year per symbol to stay within frequency limits.
-name = "4h_Donchian_Breakout_ATR_Volume_Filter"
-timeframe = "4h"
+# Hypothesis: 6h Camarilla pivot reversal from R1/S1 with 12h EMA34 filter and volume confirmation.
+# Long when price crosses below S1, closes above S1, and price > 12h EMA34 and volume > 1.5x 6h average volume.
+# Short when price crosses above R1, closes below R1, and price < 12h EMA34 and volume > 1.5x 6h average volume.
+# Exit when price crosses the 12h EMA34 or when price reaches R3/S3 (profit target).
+# Uses Camarilla for reversal zones, EMA for trend filter, volume for confirmation.
+# Target: 15-30 trades/year per symbol to stay within frequency limits.
+name = "6h_Camarilla_R1_S1_Reversal_EMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,81 +23,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # 1-day ATR(14) for volatility filter
-    tr1 = np.maximum(df_1d['high'], np.roll(df_1d['close'], 1)) - np.minimum(df_1d['low'], np.roll(df_1d['close'], 1))
-    tr1[0] = df_1d['high'][0] - df_1d['low'][0]
-    atr1 = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr1_smooth = pd.Series(atr1).rolling(window=5, min_periods=1).mean().values  # smooth for stability
-    atr_ratio = atr1_smooth / pd.Series(atr1_smooth).rolling(window=30, min_periods=30).mean().values
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # Get 4-hour data for Donchian channels and volume average
-    df_4h = get_htf_data(prices, '4h')
+    # Camarilla levels
+    R3 = prev_close + 1.1 * prev_range * 1.1 / 12
+    R2 = prev_close + 1.1 * prev_range * 1.1 / 6
+    R1 = prev_close + 1.1 * prev_range * 1.1 / 4
+    S1 = prev_close - 1.1 * prev_range * 1.1 / 4
+    S2 = prev_close - 1.1 * prev_range * 1.1 / 6
+    S3 = prev_close - 1.1 * prev_range * 1.1 / 12
     
-    # Donchian channels (20-period for entry, 10-period for exit)
-    high_20 = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
-    high_10 = pd.Series(df_4h['high']).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(df_4h['low']).rolling(window=10, min_periods=10).min().values
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Align Donchian channels to 4h timeframe
-    donchian_high_20 = align_htf_to_ltf(prices, df_4h, high_20)
-    donchian_low_20 = align_htf_to_ltf(prices, df_4h, low_20)
-    donchian_high_10 = align_htf_to_ltf(prices, df_4h, high_10)
-    donchian_low_10 = align_htf_to_ltf(prices, df_4h, low_10)
+    # Get 12h data for EMA34 filter
+    df_12h = get_htf_data(prices, '12h')
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # 4h average volume for confirmation
-    vol_ma_20 = pd.Series(df_4h['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    # Get 6h average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure ATR ratio and Donchian channels are ready
+    start_idx = 34  # Ensure EMA34 is ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
-            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper_20 = donchian_high_20[i]
-        lower_20 = donchian_low_20[i]
-        mid_10 = (donchian_high_10[i] + donchian_low_10[i]) / 2
-        atr_ratio_val = atr_ratio_aligned[i]
-        vol_ma = vol_ma_20_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        ema_34 = ema_34_aligned[i]
+        vol_ma = vol_ma_20[i]
         vol = volume[i]
         
-        # Volatility and volume confirmation
-        vol_filter = atr_ratio_val > 1.5
-        vol_confirmed = vol > 1.2 * vol_ma
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long entry: price breaks above 4h Donchian(20) high AND high volatility AND volume confirmation
-            if price > upper_20 and vol_filter and vol_confirmed:
+            # Long entry: price crosses below S1, closes above S1, and above EMA34 with volume confirmation
+            if i > 0 and low[i-1] < s1_aligned[i-1] and close[i-1] < s1_aligned[i-1] and \
+               price > s1 and price > ema_34 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below 4h Donchian(20) low AND high volatility AND volume confirmation
-            elif price < lower_20 and vol_filter and vol_confirmed:
+            # Short entry: price crosses above R1, closes below R1, and below EMA34 with volume confirmation
+            elif i > 0 and high[i-1] > r1_aligned[i-1] and close[i-1] > r1_aligned[i-1] and \
+                 price < r1 and price < ema_34 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 4h Donchian(10) midpoint OR volatility drops
-            if price < mid_10 or atr_ratio_val < 1.2:
+            # Long exit: price crosses below EMA34 or reaches S3 (stop)
+            if price < ema_34 or price < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 4h Donchian(10) midpoint OR volatility drops
-            if price > mid_10 or atr_ratio_val < 1.2:
+            # Short exit: price crosses above EMA34 or reaches R3 (stop)
+            if price > ema_34 or price > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
