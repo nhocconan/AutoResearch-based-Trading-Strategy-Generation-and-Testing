@@ -1,15 +1,16 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h Donchian(20) breakout with 1d daily pivot S1/R1 reversal zones and volume confirmation
+# 4h_1dPivot_S1R1_S2R2_VolumeATR
+# Hypothesis: 4h price action reacting to daily pivot S1/R1 levels with volume confirmation
 # In ranging markets, price tends to reverse at daily pivot S1/R1 (mean reversion)
 # In trending markets, price breaks through daily pivot S2/R2 with volume (breakout)
 # Uses 1d pivots as dynamic support/resistance with volume filter to distinguish
 # between breakouts and reversals. Works in both bull and bear markets by
 # adapting to volatility regime via ATR filter.
 # Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 name = "4h_1dPivot_S1R1_S2R2_VolumeATR"
 timeframe = "4h"
