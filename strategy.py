@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_KAMA_Trend_Filter_1d_Camarilla_Squeeze_V1"
-timeframe = "4h"
+name = "1h_4h_1d_Trend_Pullback_RSI_V1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,88 +17,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (trend direction)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    # KAMA parameters: ER=10, fast=2, slow=30
-    close_12h_series = pd.Series(close_12h)
-    change = np.abs(close_12h_series.diff(10))
-    volatility = close_12h_series.diff().abs().rolling(10, min_periods=10).sum()
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 1/30) + 1/30) ** 2
-    kama = np.full_like(close_12h, np.nan)
-    kama[9] = close_12h[9]  # seed
-    for i in range(10, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    # Hour filter: 8-20 UTC (already datetime64[ms], use index.hour)
+    hours = prices.index.hour
     
-    # Get 1d data for Camarilla levels (entry levels)
+    # 4h trend: EMA34 on close
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    
+    # 1d trend filter: price vs EMA50 (avoid counter-trend in strong trends)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Previous day's range for Camarilla
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    range_1d = prev_high - prev_low
-    
-    # Camarilla levels: R3, S3 (stronger levels)
-    r3 = prev_close + (range_1d * 1.1 / 4)  # R3 level
-    s3 = prev_close - (range_1d * 1.1 / 4)  # S3 level
-    
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume filter: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1h RSI(14) for pullback entries
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(50, 34)
     
     for i in range(start_idx, n):
-        if np.isnan(kama_12h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma_20[i]):
+        # Session filter: 8-20 UTC
+        if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
-        
+            
+        if np.isnan(ema_34_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]):
+            signals[i] = 0.0
+            continue
+            
         price = close[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        
-        # Volume filter
-        volume_ok = vol > 1.8 * vol_ma
-        
-        # Trend filter: price above/below 12h KAMA
-        price_above_kama = price > kama_12h_aligned[i]
-        price_below_kama = price < kama_12h_aligned[i]
+        ema_4h = ema_34_4h_aligned[i]
+        ema_1d = ema_50_1d_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume and uptrend
-            if price > r3_aligned[i] and volume_ok and price_above_kama:
-                signals[i] = 0.25
+            # Long: uptrend (price > 4h EMA34 AND price > 1d EMA50) + RSI pullback (<40)
+            if price > ema_4h and price > ema_1d and rsi_val < 40:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S3 with volume and downtrend
-            elif price < s3_aligned[i] and volume_ok and price_below_kama:
-                signals[i] = -0.25
+            # Short: downtrend (price < 4h EMA34 AND price < 1d EMA50) + RSI bounce (>60)
+            elif price < ema_4h and price < ema_1d and rsi_val > 60:
+                signals[i] = -0.20
                 position = -1
-        
+                
         elif position == 1:
-            # Exit: price returns below S3 (mean reversion to opposite level)
-            if price < s3_aligned[i]:
+            # Long exit: RSI overbought (>70) or trend break (price < 4h EMA34)
+            if rsi_val > 70 or price < ema_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        
+                signals[i] = 0.20
+                
         elif position == -1:
-            # Exit: price returns above R3 (mean reversion to opposite level)
-            if price > r3_aligned[i]:
+            # Short exit: RSI oversold (<30) or trend break (price > 4h EMA34)
+            if rsi_val < 30 or price > ema_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
