@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions; we enter reversals
-# aligned with the 1d EMA50 trend. Volume filter ensures momentum.
-# Works in bull/bear by following higher timeframe trend. Targets ~20-40 trades/year.
-name = "4h_WilliamsR_1dEMA50_Volume"
-timeframe = "4h"
+# Hypothesis: 6h timeframe with 12h trend alignment and 12h volume confirmation.
+# Uses 12h EMA34 for trend direction and 12h volume spike for momentum.
+# Enters only during 08-20 UTC session to avoid low-volume noise.
+# Targets 20-40 trades/year (80-160 total over 4 years) with strict entry conditions.
+# Works in bull/bear by following higher timeframe trends.
+name = "6h_12h_EMA34_VolumeSpike_Session"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,21 +21,27 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Williams %R (14-period) on 4h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Get 12h data for EMA34 trend and volume (called ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Volume filter: volume > 1.3 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.3)
+    # 12h EMA34 for trend direction
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # 12h volume average for spike detection (20-period)
+    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
+    
+    # Volume spike: current 12h volume > 2.0 * 20-period average
+    volume_spike = volume_12h > (volume_ma_12h_aligned * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -42,37 +49,35 @@ def generate_signals(prices):
     start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(volume_ma_12h_aligned[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) AND price above 1d EMA50 with volume
-            if (williams_r[i] < -80 and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_filter[i]):
+            # Long: price above 12h EMA34 AND volume spike
+            if (close[i] > ema_34_12h_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) AND price below 1d EMA50 with volume
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_filter[i]):
+            # Short: price below 12h EMA34 AND volume spike
+            elif (close[i] < ema_34_12h_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Williams %R becomes overbought or price breaks below 1d EMA50
-            if williams_r[i] > -20 or close[i] < ema_50_1d_aligned[i]:
+            # Long: exit if price breaks below 12h EMA34
+            if close[i] < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Williams %R becomes oversold or price breaks above 1d EMA50
-            if williams_r[i] < -80 or close[i] > ema_50_1d_aligned[i]:
+            # Short: exit if price breaks above 12h EMA34
+            if close[i] > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
