@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_TRIX_VolumeSpike_ChopFilter_v1"
+name = "4h_Pivot_R1S1_Breakout_VolumeATR_Filter_v3"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,95 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for TRIX and chop filter (once before loop)
+    # Get daily data for pivot calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily TRIX (15-period)
-    # EMA1: EMA(close, 15)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # EMA2: EMA(EMA1, 15)
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # EMA3: EMA(EMA2, 15)
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # TRIX: (EMA3 - prev_EMA3) / prev_EMA3 * 100
-    trix_raw = np.zeros_like(ema3)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    trix_raw[0] = 0
-    trix_1d = trix_raw
-    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_1d)
+    # Daily high, low, close for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily Choppiness Index (14-period) for regime filter
-    # True Range
-    tr1 = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
-    tr1 = np.maximum(tr1, np.absolute(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr1])
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Sum of True Range over 14 periods
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Chop = LOG10(sum_tr_14 / (highest_high_14 - lowest_low_14)) / LOG10(14) * 100
-    # Avoid division by zero
-    range_14 = highest_high_14 - lowest_low_14
-    chop_raw = np.zeros_like(sum_tr_14)
-    mask = range_14 > 0
-    chop_raw[mask] = (np.log10(sum_tr_14[mask] / range_14[mask]) / np.log10(14)) * 100
-    chop_raw[~mask] = 50  # neutral when range is zero
-    chop_1d = chop_raw
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate daily pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate R1 and S1 using Camarilla formula
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Volume confirmation: current volume > 2.5x 20-period average (4h)
+    # Align daily pivot levels to 4h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Daily ATR for volatility filter (14-period)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])
+    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Trend filter: price above/below 50-period EMA
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trix_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
         
-        trix = trix_1d_aligned[i]
-        chop = chop_1d_aligned[i]
+        price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        atr = atr_14_1d_aligned[i]
+        ema = ema_50[i]
         
-        volume_confirmed = vol > 2.5 * vol_ma
-        # Chop filter: only trade in trending markets (Chop < 38.2) or strong reversals in chop (Chop > 61.8)
-        # We'll use Chop < 38.2 for trend following, and Chop > 61.8 for mean reversion
-        chop_trending = chop < 38.2
-        chop_reversal = chop > 61.8
+        volume_confirmed = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume confirmation in trending market
-            # OR TRIX deep oversold with volume in choppy market (mean reversion)
-            if (trix > 0 and trix_1d_aligned[i-1] <= 0 and volume_confirmed and chop_trending) or \
-               (trix < -1.5 and volume_confirmed and chop_reversal):
+            # Long: break above R1 with volume and above EMA
+            if price > r1 and volume_confirmed and price > ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume confirmation in trending market
-            # OR TRIX overbought with volume in choppy market (mean reversion)
-            elif (trix < 0 and trix_1d_aligned[i-1] >= 0 and volume_confirmed and chop_trending) or \
-                 (trix > 1.5 and volume_confirmed and chop_reversal):
+            # Short: break below S1 with volume and below EMA
+            elif price < s1 and volume_confirmed and price < ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: TRIX crosses below zero OR Chop enters extreme reversal zone
-            if trix < 0 or chop > 61.8:
+            # Exit: price below pivot or ATR-based stop
+            if price < pivot or price < ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: TRIX crosses above zero OR Chop enters extreme reversal zone
-            if trix > 0 or chop > 61.8:
+            # Exit: price above pivot or ATR-based stop
+            if price > pivot or price > ema:
                 signals[i] = 0.0
                 position = 0
             else:
