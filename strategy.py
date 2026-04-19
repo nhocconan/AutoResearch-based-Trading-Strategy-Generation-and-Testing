@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d ADX trend filter with 1w Donchian breakout and volume confirmation.
-# Long when: price breaks above weekly Donchian upper (20), daily ADX > 25, volume > 1.5x 20-day average
-# Short when: price breaks below weekly Donchian lower (20), daily ADX > 25, volume > 1.5x 20-day average
-# Exit when price returns to weekly Donchian midpoint.
-# Weekly trend filter avoids false breakouts in ranging markets. Volume confirms institutional interest.
-# Target: 10-25 trades/year per symbol. Works in bull (breakouts continue) and bear (mean reversion at extremes).
-name = "1d_ADX_WeeklyDonchian_Volume"
-timeframe = "1d"
+# Hypothesis: 12h Ehlers Fisher Transform with 1-day volume confirmation and ADX trend filter.
+# Long when: Fisher crosses above -1.5, ADX(1d) > 20, volume > 1.5x 20-period average
+# Short when: Fisher crosses below +1.5, ADX(1d) > 20, volume > 1.5x 20-period average
+# Exit when Fisher crosses back through zero.
+# Fisher Transform identifies turning points with Gaussian normal distribution, effective in both trending and ranging markets.
+# Target: 15-25 trades/year per symbol. Uses proper smoothing to reduce noise.
+name = "12h_FisherTransform_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,25 +22,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # 1-week data for Donchian channels (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate weekly Donchian channels (20-period)
-    # Upper band: highest high over 20 weeks
-    # Lower band: lowest low over 20 weeks
-    # Middle band: average of upper and lower
-    lookback = 20
-    upper = pd.Series(high_1w).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low_1w).rolling(window=lookback, min_periods=lookback).min().values
-    middle = (upper + lower) / 2
-    
-    # Align weekly Donchian to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
-    middle_aligned = align_htf_to_ltf(prices, df_1w, middle)
     
     # 1-day data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -89,51 +70,90 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, atr_period)
     
-    # Align ADX to daily timeframe (already daily, but keep for consistency)
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 20-day volume average for confirmation
+    # Fisher Transform on 12h price (Ehlers)
+    # Normalize price to [-1, 1] range over 10 periods
+    def fisher_transform(price_series, length=10):
+        n = len(price_series)
+        if n < length:
+            return np.full(n, np.nan)
+        
+        # Find highest high and lowest low over length period
+        highest = np.full(n, np.nan)
+        lowest = np.full(n, np.nan)
+        
+        for i in range(length-1, n):
+            highest[i] = np.max(price_series[i-length+1:i+1])
+            lowest[i] = np.min(price_series[i-length+1:i+1])
+        
+        # Avoid division by zero
+        range_val = highest - lowest
+        range_val = np.where(range_val == 0, 1e-10, range_val)
+        
+        # Normalize to [-1, 1]
+        value = 2 * ((price_series - lowest) / range_val - 0.5)
+        # Clip to prevent extreme values
+        value = np.clip(value, -0.999, 0.999)
+        
+        # Fisher transform
+        fisher = 0.5 * np.log((1 + value) / (1 - value))
+        
+        # Smooth with 3-period exponential smoothing
+        smoothed = np.full(n, np.nan)
+        if n >= 3:
+            smoothed[2] = fisher[2]
+            for i in range(3, n):
+                smoothed[i] = 0.5 * fisher[i] + 0.5 * smoothed[i-1]
+        
+        return smoothed
+    
+    fisher = fisher_transform(close, length=10)
+    
+    # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, lookback)  # Wait for indicator calculations
+    start_idx = 30  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(middle_aligned[i]) or np.isnan(adx_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(fisher[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         adx_val = adx_aligned[i]
+        fisher_val = fisher[i]
+        fisher_prev = fisher[i-1] if i > 0 else 0
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long entry: price breaks above weekly Donchian upper, ADX > 25, volume confirmation
-            if price > upper_aligned[i] and adx_val > 25 and vol > 1.5 * vol_ma:
+            # Long entry: Fisher crosses above -1.5, ADX > 20, volume confirmation
+            if fisher_prev <= -1.5 and fisher_val > -1.5 and adx_val > 20 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below weekly Donchian lower, ADX > 25, volume confirmation
-            elif price < lower_aligned[i] and adx_val > 25 and vol > 1.5 * vol_ma:
+            # Short entry: Fisher crosses below +1.5, ADX > 20, volume confirmation
+            elif fisher_prev >= 1.5 and fisher_val < 1.5 and adx_val > 20 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to weekly Donchian midpoint
-            if price <= middle_aligned[i]:
+            # Long exit: Fisher crosses below zero
+            if fisher_prev > 0 and fisher_val <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to weekly Donchian midpoint
-            if price >= middle_aligned[i]:
+            # Short exit: Fisher crosses above zero
+            if fisher_prev < 0 and fisher_val >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
