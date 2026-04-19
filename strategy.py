@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + Donchian breakout with volume confirmation
-# Choppiness Index > 61.8 indicates ranging market (mean reversion)
-# Choppiness Index < 38.2 indicates trending market (trend following)
-# In ranging markets: buy near Donchian lower band, sell near upper band
-# In trending markets: buy breakout above upper band, sell breakout below lower band
-# Volume confirmation: current volume > 1.5x 20-period average
-# Designed to work in both trending and ranging markets
-# Target: 20-40 trades/year to avoid fee drag
-name = "4h_Chop_Donchian_Breakout_Volume_v1"
-timeframe = "4h"
+# Hypothesis: 6h Camarilla Pivot Reversal with 1d Trend Filter and Volume Confirmation
+# Camarilla levels calculated from previous 1d OHLC: R1, R2, R3, R4, S1, S2, S3, S4
+# Logic: Fade at R3/S3 (mean reversion), breakout continuation at R4/S4
+# Trend filter: 1d EMA50 (long above, short below) to avoid counter-trend trades
+# Volume: current volume > 1.5x 20-period average for confirmation
+# Designed to work in both bull (breakouts) and bear (fades at extremes) markets
+# Target: 15-25 trades/year to avoid fee drag
+name = "6h_Camarilla_Pivot_Reversal_1dTrend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,58 +24,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Choppiness Index (trend regime filter)
+    # Get 1d data for Camarilla pivot and trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Choppiness Index on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla pivot levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    R1 = pivot + (range_hl * 1.1 / 12)
+    R2 = pivot + (range_hl * 1.1 / 6)
+    R3 = pivot + (range_hl * 1.1 / 4)
+    R4 = pivot + (range_hl * 1.1 / 2)
+    S1 = pivot - (range_hl * 1.1 / 12)
+    S2 = pivot - (range_hl * 1.1 / 6)
+    S3 = pivot - (range_hl * 1.1 / 4)
+    S4 = pivot - (range_hl * 1.1 / 2)
+    
+    # Align Camarilla levels to 6h timeframe (wait for previous day's close)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    
-    # ATR(14) for daily
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of ATR over 14 periods
-    sum_atr_14 = pd.Series(atr_14_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
-    # Avoid division by zero
-    range_14 = highest_high_14 - lowest_low_14
-    chop_1d = np.full_like(close_1d, 50.0)  # default to neutral
-    mask = range_14 > 0
-    chop_1d[mask] = 100 * np.log10(sum_atr_14[mask] / range_14[mask]) / np.log10(14)
-    
-    # Align Choppiness Index to 4h timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # 4h Donchian channels (20-period)
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 4h ATR for stops
+    # 6h ATR for stops
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(chop_1d_aligned[i]) or \
-           np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or np.isnan(atr_4h[i]):
+        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_6h[i]):
             signals[i] = 0.0
             continue
         
@@ -87,64 +82,37 @@ def generate_signals(prices):
             avg_volume = volume[i]
         volume_filter = volume[i] > 1.5 * avg_volume
         
-        chop = chop_1d_aligned[i]
-        donchian_upper = highest_high_20[i]
-        donchian_lower = lowest_low_20[i]
-        
         if position == 0:
-            # Ranging market (chop > 61.8): mean reversion at extremes
-            if chop > 61.8:
-                # Buy near lower band, sell near upper band
-                if close[i] <= donchian_lower * 1.001 and volume_filter:  # slight buffer
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] >= donchian_upper * 0.999 and volume_filter:  # slight buffer
-                    signals[i] = -0.25
-                    position = -1
-            # Trending market (chop < 38.2): breakout in direction of trend
-            elif chop < 38.2:
-                # Buy breakout above upper band
-                if close[i] > donchian_upper and volume_filter:
-                    signals[i] = 0.25
-                    position = 1
-                # Sell breakout below lower band
-                elif close[i] < donchian_lower and volume_filter:
-                    signals[i] = -0.25
-                    position = -1
+            # Fade at R3/S3 (mean reversion)
+            # Short at R3 if below 1d EMA50
+            if close[i] >= R3_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_filter:
+                signals[i] = -0.25
+                position = -1
+            # Long at S3 if above 1d EMA50
+            elif close[i] <= S3_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_filter:
+                signals[i] = 0.25
+                position = 1
+            # Breakout continuation at R4/S4
+            # Long breakout at R4 if above 1d EMA50
+            elif close[i] > R4_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown at S4 if below 1d EMA50
+            elif close[i] < S4_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_filter:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit conditions
-            exit_signal = False
-            # In ranging market: exit when price reaches opposite band
-            if chop > 61.8 and close[i] >= donchian_upper * 0.999:
-                exit_signal = True
-            # In trending market: exit on breakdown below lower band
-            elif chop < 38.2 and close[i] < donchian_lower:
-                exit_signal = True
-            # Always exit on 2x ATR stop
-            elif close[i] < highest_high_20[i] - 2.0 * atr_4h[i]:
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit: price reaches S1 (mean reversion target) or R4 (breakout failure) or 2x ATR stop
+            if close[i] <= S1_aligned[i] or close[i] >= R4_aligned[i] or close[i] < close[i-1] - 2.0 * atr_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit conditions
-            exit_signal = False
-            # In ranging market: exit when price reaches opposite band
-            if chop > 61.8 and close[i] <= donchian_lower * 1.001:
-                exit_signal = True
-            # In trending market: exit on breakout above upper band
-            elif chop < 38.2 and close[i] > donchian_upper:
-                exit_signal = True
-            # Always exit on 2x ATR stop
-            elif close[i] > lowest_low_20[i] + 2.0 * atr_4h[i]:
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit: price reaches R1 (mean reversion target) or S4 (breakdown failure) or 2x ATR stop
+            if close[i] >= R1_aligned[i] or close[i] <= S4_aligned[i] or close[i] > close[i-1] + 2.0 * atr_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
