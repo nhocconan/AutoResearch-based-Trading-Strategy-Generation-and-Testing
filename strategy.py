@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout (20-period) with 12h ADX filter (threshold 25) and volume confirmation (1.5x 20-period avg).
-# Breakouts in the direction of the 12h trend (via ADX > 25) capture strong moves in both bull and bear markets.
-# Volume confirmation filters false breakouts. Target: 20-40 trades/year per symbol.
-name = "4h_Donchian20_12hADX25_Volume"
-timeframe = "4h"
+# Hypothesis: 1d ADX + volume filter for trend strength, with 1w EMA50 as trend filter.
+# ADX > 25 indicates strong trend, we enter long/short based on EMA50 direction.
+# Volume confirmation ensures breakout validity. Weekly EMA50 smooths long-term trend.
+# Designed to capture sustained trends while avoiding whipsaws in sideways markets.
+# Target: 15-25 trades/year per symbol for low fee drag.
+name = "1d_ADX25_EMA50_1w_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,13 +22,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # ADX calculation (14-period) on 12h data
+    # Calculate EMA50 on weekly
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -70,42 +73,28 @@ def generate_signals(prices):
         
         return adx
     
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx = calculate_adx(high, low, close, 14)
     
-    # Align 12h ADX to 4h
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Donchian channels (20-period) on 4h data
-    donchian_high = np.zeros(n)
-    donchian_low = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
-        else:
-            donchian_high[i] = np.max(high[i-20:i])
-            donchian_low[i] = np.min(low[i-20:i])
+    # Align weekly EMA50 to daily
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)  # Ensure ADX and Donchian are ready
+    start_idx = max(50, 28)  # Ensure EMA50 and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_12h_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
+        ema_50_val = ema_50_aligned[i]
+        adx_val = adx[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
@@ -116,26 +105,26 @@ def generate_signals(prices):
         strong_trend = adx_val > 25
         
         if position == 0:
-            # Enter long on breakout above upper band with strong trend and volume
-            if price > upper and strong_trend and volume_confirmed:
+            # Enter long if price above weekly EMA50, strong trend, and volume confirmation
+            if price > ema_50_val and strong_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short on breakout below lower band with strong trend and volume
-            elif price < lower and strong_trend and volume_confirmed:
+            # Enter short if price below weekly EMA50, strong trend, and volume confirmation
+            elif price < ema_50_val and strong_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below lower band or trend weakens
-            if price < lower or adx_val < 20:  # Trend weakening
+            # Exit long when price crosses below weekly EMA50 or trend weakens
+            if price < ema_50_val or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above upper band or trend weakens
-            if price > upper or adx_val < 20:  # Trend weakening
+            # Exit short when price crosses above weekly EMA50 or trend weakens
+            if price > ema_50_val or adx_val < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
