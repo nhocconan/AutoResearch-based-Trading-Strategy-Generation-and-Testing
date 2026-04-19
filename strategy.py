@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA with RSI filter and weekly trend filter.
-# Long when: KAMA turns upward, RSI(14) > 50, and weekly EMA21 upward
-# Short when: KAMA turns downward, RSI(14) < 50, and weekly EMA21 downward
-# Exit when: KAMA reverses direction
-# KAMA adapts to market noise, reducing whipsaws in sideways markets.
-# RSI filters for momentum alignment. Weekly EMA21 ensures trend alignment.
-# Target: 15-25 trades/year per symbol. Works in bull (buy strength) and bear (sell weakness).
-name = "1d_KAMA_RSI_WeeklyEMA21Filter"
-timeframe = "1d"
+# Hypothesis: 12-hour Camarilla R1/S1 breakout with weekly EMA34 filter and volume spike confirmation.
+# Long when: Price breaks above R1, weekly EMA34 upward, volume > 1.5x 20-period average
+# Short when: Price breaks below S1, weekly EMA34 downward, volume > 1.5x 20-period average
+# Exit when: Price crosses back through the pivot point (PP)
+# Weekly EMA34 filters trend direction, 12h timeframe reduces overtrading, volume confirms breakout strength.
+# Target: 15-25 trades/year per symbol. Works in bull (buy breakouts) and bear (sell breakdowns).
+name = "12h_Camarilla_R1_S1_Breakout_Volume_EMA34Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,101 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Seed value
-    
-    for i in range(10, n):
-        if not np.isnan(sc[i-10]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i-10] * (close[i] - kama[i-1])
-    
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.zeros_like(close)
-    rsi = np.zeros_like(close)
-    mask = avg_loss != 0
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi = 100 - (100 / (1 + rs))
-    rsi[avg_loss == 0] = 100
-    rsi[avg_gain == 0] = 0
-    
-    # Weekly data for EMA21 trend filter
+    # Weekly data for Camarilla pivot levels and EMA34
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate EMA21 on weekly data
-    ema21_1w = np.full_like(close_1w, np.nan)
-    ema21_1w[20] = np.mean(close_1w[0:21])
-    for i in range(21, len(close_1w)):
-        ema21_1w[i] = close_1w[i] * (2/(21+1)) + ema21_1w[i-1] * (1 - 2/(21+1))
+    # Calculate weekly pivot point (PP) and Camarilla levels
+    # PP = (H + L + C) / 3
+    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12.0
     
-    # Align weekly EMA21 to daily timeframe
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # Calculate EMA34 on weekly data for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align weekly data to 12H timeframe
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # 20-period volume average for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for KAMA and RSI calculation
+    start_idx = 34  # Wait for EMA34 calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema21_1w_aligned[i])):
+        if (np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        kama_now = kama[i]
-        kama_prev = kama[i-1]
-        rsi_now = rsi[i]
-        ema21 = ema21_1w_aligned[i]
-        ema21_prev = ema21_1w_aligned[i-1]
+        price = close[i]
+        pp = pp_1w_aligned[i]
+        r1 = r1_1w_aligned[i]
+        s1 = s1_1w_aligned[i]
+        ema34 = ema34_1w_aligned[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long entry: KAMA turns upward, RSI > 50, weekly EMA21 upward
-            if (kama_now > kama_prev and 
-                rsi_now > 50 and 
-                ema21 > ema21_prev):
+            # Long entry: Price breaks above R1, EMA34 upward, volume spike
+            if (price > r1 and close[i-1] <= r1 and 
+                ema34 > ema34_1w_aligned[i-1] and vol > 1.5 * vol_ma):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: KAMA turns downward, RSI < 50, weekly EMA21 downward
-            elif (kama_now < kama_prev and 
-                  rsi_now < 50 and 
-                  ema21 < ema21_prev):
+            # Short entry: Price breaks below S1, EMA34 downward, volume spike
+            elif (price < s1 and close[i-1] >= s1 and 
+                  ema34 < ema34_1w_aligned[i-1] and vol > 1.5 * vol_ma):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA turns downward
-            if kama_now < kama_prev:
+            # Long exit: Price crosses back below pivot point
+            if price < pp:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA turns upward
-            if kama_now > kama_prev:
+            # Short exit: Price crosses back above pivot point
+            if price > pp:
                 signals[i] = 0.0
                 position = 0
             else:
