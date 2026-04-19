@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1dCMO_VolumeBreakout_Regime_v1"
+name = "4h_1dPivot_S1R1_Breakout_VolumeATR_Tight"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,27 +17,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for CMO and volatility regime
+    # Get daily data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily CMO (Chande Momentum Oscillator) 14-period
-    # CMO = (Sum of gains - Sum of losses) / (Sum of gains + Sum of losses) * 100
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gains = np.where(delta > 0, delta, 0)
-    losses = np.where(delta < 0, -delta, 0)
-    
-    sum_gains = pd.Series(gains).rolling(window=14, min_periods=14).sum().values
-    sum_losses = pd.Series(losses).rolling(window=14, min_periods=14).sum().values
-    
-    # Avoid division by zero
-    denominator = sum_gains + sum_losses
-    cmo_1d = np.where(denominator != 0, (sum_gains - sum_losses) / denominator * 100, 0)
-    cmo_1d_aligned = align_htf_to_ltf(prices, df_1d, cmo_1d)
-    
-    # Calculate daily ATR for volatility regime filter
+    # Calculate daily ATR(14)
     tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -45,13 +31,18 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Daily volatility regime: ATR ratio (current ATR / 50-period ATR mean)
-    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_1d / atr_ma_50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Daily pivot points: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    s1_1d = 2 * pivot_1d - high_1d
+    r1_1d = 2 * pivot_1d - low_1d
     
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align to 4h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    
+    # Volume confirmation: current volume > 1.5x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,43 +50,42 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(cmo_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        cmo = cmo_1d_aligned[i]
-        atr_ratio_val = atr_ratio_aligned[i]
+        vol_ma = vol_ma_30[i]
         atr = atr_1d_aligned[i]
         
-        volume_confirmed = vol > 1.8 * vol_ma
-        # Volatility regime: prefer moderate volatility (avoid extreme low/high vol)
-        vol_regime_ok = (atr_ratio_val > 0.6) & (atr_ratio_val < 2.2)
+        volume_confirmed = vol > 1.5 * vol_ma
+        s1 = s1_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
         
         if position == 0:
-            # Long: CMO oversold (< -30) turning up + volume + vol regime
-            if cmo < -30 and cmo > cmo_1d_aligned[i-1] and volume_confirmed and vol_regime_ok:
+            # Long: Break above R1 with volume
+            if price > r1 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: CMO overbought (> 30) turning down + volume + vol regime
-            elif cmo > 30 and cmo < cmo_1d_aligned[i-1] and volume_confirmed and vol_regime_ok:
+            # Short: Break below S1 with volume
+            elif price < s1 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: CMO crosses above 30 (overbought) or volatility too high
-            if cmo > 30 or atr_ratio_val > 2.5:
+            # Exit: price closes below S1 or ATR stop (2.0x ATR)
+            if price < s1 or price < (high[i] - 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: CMO crosses below -30 (oversold) or volatility too high
-            if cmo < -30 or atr_ratio_val > 2.5:
+            # Exit: price closes above R1 or ATR stop (2.0x ATR)
+            if price > r1 or price > (low[i] + 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
