@@ -1,10 +1,16 @@
-# 12h_Camarilla_R1_S1_Breakout_Volume_ADX
-# Hypothesis: 12h timeframe with daily Camarilla pivot breakout (R1/S1) filtered by volume spike and ADX trend strength.
-# Works in bull markets by capturing breakouts with momentum, and in bear markets by requiring ADX>25 to avoid false breakouts in low volatility.
-# Volume confirmation ensures institutional participation, reducing false signals.
-# Target: 20-40 trades per year to stay within frequency limits for 12h timeframe.
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ADX"
-timeframe = "12h"
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above Donchian upper band, volume > 1.5x average, and ADX > 25.
+# Short when price breaks below Donchian lower band, volume > 1.5x average, and ADX > 25.
+# Exit when price crosses back below/above Donchian middle (20-period SMA).
+# Uses 4h timeframe with daily ADX for trend strength.
+# Target: 20-50 trades/year per symbol to stay within frequency limits.
+name = "4h_Donchian20_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,19 +23,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation and ADX
+    # Get daily data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels using previous day's OHLC
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
-    
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    range_prev = high_prev - low_prev
-    
-    R1 = pivot + (range_prev * 1.1 / 12)
-    S1 = pivot - (range_prev * 1.1 / 12)
+    # Calculate Donchian channels (20-period high/low) and middle (SMA)
+    period = 20
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     
     # Calculate ADX on daily timeframe
     high_1d = df_1d['high'].values
@@ -49,7 +50,7 @@ def generate_signals(prices):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Wilder's smoothing function
+    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
     def wilder_smooth(data, period):
         result = np.zeros_like(data)
         if len(data) < period:
@@ -59,43 +60,43 @@ def generate_signals(prices):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    period = 14
-    atr_1d = wilder_smooth(tr, period)
+    period_adx = 14
+    atr_1d = wilder_smooth(tr, period_adx)
     # Avoid division by zero
     atr_1d = np.where(atr_1d == 0, np.finfo(float).eps, atr_1d)
-    plus_di_1d = 100 * wilder_smooth(plus_dm, period) / atr_1d
-    minus_di_1d = 100 * wilder_smooth(minus_dm, period) / atr_1d
+    plus_di_1d = 100 * wilder_smooth(plus_dm, period_adx) / atr_1d
+    minus_di_1d = 100 * wilder_smooth(minus_dm, period_adx) / atr_1d
     dx_denom = plus_di_1d + minus_di_1d
     dx_denom = np.where(dx_denom == 0, np.finfo(float).eps, dx_denom)
     dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / dx_denom
-    adx_1d = wilder_smooth(dx_1d, period)
+    adx_1d = wilder_smooth(dx_1d, period_adx)
     
-    # Align Camarilla levels and ADX to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align Donchian levels and ADX to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), upper)
+    lower_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), lower)
+    middle_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), middle)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Get 12h average volume for confirmation (20-period MA)
+    # Get 4h average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # Ensure volume MA and ADX are ready
+    start_idx = max(20, 30)  # Ensure Donchian and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(middle_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        R1 = R1_aligned[i]
-        S1 = S1_aligned[i]
-        pivot_pt = pivot_aligned[i]
+        upper_band = upper_aligned[i]
+        lower_band = lower_aligned[i]
+        middle_line = middle_aligned[i]
         adx = adx_1d_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
@@ -104,26 +105,26 @@ def generate_signals(prices):
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long entry: price breaks above R1, ADX > 25, volume confirmation
-            if price > R1 and adx > 25 and volume_confirmed:
+            # Long entry: price breaks above upper band, ADX > 25, volume confirmation
+            if price > upper_band and adx > 25 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1, ADX > 25, volume confirmation
-            elif price < S1 and adx > 25 and volume_confirmed:
+            # Short entry: price breaks below lower band, ADX > 25, volume confirmation
+            elif price < lower_band and adx > 25 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below pivot point
-            if price < pivot_pt:
+            # Long exit: price crosses below middle line
+            if price < middle_line:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above pivot point
-            if price > pivot_pt:
+            # Short exit: price crosses above middle line
+            if price > middle_line:
                 signals[i] = 0.0
                 position = 0
             else:
