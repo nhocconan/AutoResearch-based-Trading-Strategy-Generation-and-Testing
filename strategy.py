@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 12h Choppiness Index regime filter + 4h Donchian breakout and volume confirmation.
-# Uses 12h Choppiness Index to identify trending vs ranging markets: only trade breakouts when trending (CHOP < 38.2).
-# In trending markets, Donchian(20) breakouts with volume confirmation capture momentum.
-# In ranging markets (CHOP > 61.8), remain flat to avoid false breakouts.
-# Designed to work in both bull and bear markets by adapting to market regime.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
-name = "4h_12h_Chop_Donchian20_Volume"
-timeframe = "4h"
+# Hypothesis: 6h timeframe with 1w Pivot R2/S2 breakout, volume confirmation, and ATR-based volatility filter.
+# Uses weekly pivot levels as dynamic support/resistance, enters on breakouts with volume and volatility confirmation.
+# Designed to work in both bull and bear markets by filtering for genuine momentum bursts.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+name = "6h_1w_Pivot_R2S2_Breakout_VolumeATRFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,81 +21,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Choppiness Index calculation (called ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1w data for Pivot calculation (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate True Range and ATR for Choppiness Index (period=14)
-    tr1 = np.abs(high_12h - low_12h)
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_12h[0] = tr1_2h[0] if len(tr_12h) > 0 else tr1[0]  # Fix for first element
+    # Calculate Pivot, R2, S2 on 1w timeframe
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r2_1w = pivot_1w + (high_1w - low_1w)  # R2 = P + (H - L)
+    s2_1w = pivot_1w - (high_1w - low_1w)  # S2 = P - (H - L)
     
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    # Align to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Calculate Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
-    # We'll use a rolling window of 14 periods for the calculation
-    atr_sum = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    range_12h = max_high - min_low
-    range_12h = np.where(range_12h == 0, 1e-10, range_12h)
-    
-    chop_12h = 100 * np.log10(atr_sum / range_12h) / np.log10(14)
-    
-    # Align Choppiness Index to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
-    
-    # Calculate Donchian channels on 4h (period=20)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume spike (volume > 2.0 * 20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    volume_spike = volume > (volume_ma * 2.0)
+    
+    # ATR for volatility filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 60  # Ensure enough data for ATR and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(chop_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
             
-        # Regime filter: only trade when market is trending (CHOP < 38.2)
-        # Avoid ranging markets (CHOP > 61.8) where breakouts often fail
-        trending_market = chop_aligned[i] < 38.2
-        ranging_market = chop_aligned[i] > 61.8
+        # Volume confirmation required
+        vol_confirm = volume_spike[i]
+        # Volatility filter: require ATR > 0.5 * 50-period ATR average
+        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr[i] > (0.5 * atr_ma[i]) if not np.isnan(atr_ma[i]) else True
         
         if position == 0:
-            # Long when price breaks above Donchian high with volume confirmation in trending market
-            if close[i] > donchian_high[i] and volume_confirm[i] and trending_market:
+            # Long when price breaks above R2 with volume and volatility
+            if close[i] > r2_aligned[i] and vol_confirm and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Donchian low with volume confirmation in trending market
-            elif close[i] < donchian_low[i] and volume_confirm[i] and trending_market:
+            # Short when price breaks below S2 with volume and volatility
+            elif close[i] < s2_aligned[i] and vol_confirm and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price breaks below Donchian low or market becomes ranging
-            if close[i] < donchian_low[i] or ranging_market:
+            # Long position: exit when price falls below S2 (reversal) or volatility drops
+            if close[i] < s2_aligned[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price breaks above Donchian high or market becomes ranging
-            if close[i] > donchian_high[i] or ranging_market:
+            # Short position: exit when price rises above R2 (reversal) or volatility drops
+            if close[i] > r2_aligned[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
