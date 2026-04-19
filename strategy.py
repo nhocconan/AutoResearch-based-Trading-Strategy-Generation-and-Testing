@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_KAMA_1dVolatility_Regime_V1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and pivot calculation
+    # Get 1d data for volatility regime and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d ATR(14) for volatility regime
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), np.abs(high_1d[0:-1] - close_1d[1:]))
+    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla R1/S1 from previous day's data
-    def calculate_camarilla(high_arr, low_arr, close_arr):
-        n_days = len(close_arr)
-        R1 = np.full(n_days, np.nan)
-        S1 = np.full(n_days, np.nan)
-        
-        for i in range(1, n_days):
-            high_prev = high_arr[i-1]
-            low_prev = low_arr[i-1]
-            close_prev = close_arr[i-1]
-            
-            R1[i] = close_prev + (high_prev - low_prev) * 1.1 / 12
-            S1[i] = close_prev - (high_prev - low_prev) * 1.1 / 12
-        
-        return R1, S1
+    # Calculate 1d ATR ratio: current ATR / 50-period average ATR (volatility regime filter)
+    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_1d / atr_ma_50
+    # Low volatility regime: ATR ratio < 0.8 (calm market)
+    # High volatility regime: ATR ratio > 1.2 (volatile market)
+    low_vol = atr_ratio < 0.8
+    high_vol = atr_ratio > 1.2
     
-    R1, S1 = calculate_camarilla(high_1d, low_1d, close_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Calculate KAMA on 4h close
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.zeros_like(close)
+    er[10:] = change[10:] / volatility[10:]
+    er[volatility == 0] = 0
     
-    # Volume spike filter: volume > 2.0 * 50-period average
-    volume_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Align 1d indicators to 4h
+    low_vol_aligned = align_htf_to_ltf(prices, df_1d, low_vol)
+    high_vol_aligned = align_htf_to_ltf(prices, df_1d, high_vol)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]):
+        if (np.isnan(kama[i]) or np.isnan(low_vol_aligned[i]) or 
+            np.isnan(high_vol_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
-            
-        # Volume confirmation required
-        vol_confirm = volume_spike[i]
+        
+        # Low volatility regime: mean reversion at KAMA
+        # High volatility regime: trend following
         
         if position == 0:
-            # Long when price breaks above R1 with volume AND daily trend is up (close > EMA34)
-            if close[i] > R1_aligned[i] and vol_confirm and close[i] > ema_34_1d_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short when price breaks below S1 with volume AND daily trend is down (close < EMA34)
-            elif close[i] < S1_aligned[i] and vol_confirm and close[i] < ema_34_1d_aligned[i]:
-                signals[i] = -0.25
-                position = -1
-                
+            # Enter long in low vol when price < KAMA (oversold)
+            # Enter short in low vol when price > KAMA (overbought)
+            # In high vol, follow price > KAMA for long, price < KAMA for short
+            if low_vol_aligned[i]:
+                # Mean reversion: fade extreme
+                if close[i] < kama[i] * 0.998:  # 0.2% below KAMA
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] > kama[i] * 1.002:  # 0.2% above KAMA
+                    signals[i] = -0.25
+                    position = -1
+            else:  # high vol or neutral
+                # Trend following
+                if close[i] > kama[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < kama[i]:
+                    signals[i] = -0.25
+                    position = -1
+        
         elif position == 1:
-            # Long position: exit when price falls below S1 or trend turns down
-            if close[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-                
+            # Exit long: price crosses back above KAMA in low vol, or below in high vol
+            # Or use ATR-based stop
+            if low_vol_aligned[i]:
+                if close[i] > kama[i] * 1.001:  # 0.1% above KAMA
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # high vol
+                if close[i] < kama[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+        
         elif position == -1:
-            # Short position: exit when price rises above R1 or trend turns up
-            if close[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Exit short: price crosses back below KAMA in low vol, or above in high vol
+            if low_vol_aligned[i]:
+                if close[i] < kama[i] * 0.999:  # 0.1% below KAMA
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # high vol
+                if close[i] > kama[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
