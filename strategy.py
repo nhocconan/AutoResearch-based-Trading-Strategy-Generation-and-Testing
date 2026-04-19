@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and 1d volatility regime filter.
-# Long when: 1h RSI(14) > 55, 4h EMA(20) > EMA(50) (uptrend), and 1d ATR(14) < ATR(50) (low vol regime)
-# Short when: 1h RSI(14) < 45, 4h EMA(20) < EMA(50) (downtrend), and 1d ATR(14) < ATR(50)
-# Exit when RSI crosses back to 50 or volatility regime changes
-# Uses 4h EMA for trend direction, 1h RSI for entry timing, 1d ATR regime to avoid choppy markets.
-# Target: 15-30 trades/year per symbol (~60-120 total over 4 years) to stay within fee limits.
-name = "1h_RSI_EMA_Trend_VolRegime"
-timeframe = "1h"
+# Hypothesis: 12h Camarilla R1/S1 breakout with daily volume confirmation and 1d ADX trend filter.
+# Long when price breaks above R1 (Camarilla resistance) AND volume > 1.5x daily average volume AND ADX(14) > 20 (trending market)
+# Short when price breaks below S1 (Camarilla support) AND volume > 1.5x daily average volume AND ADX(14) > 20
+# Exit when price crosses back through the Camarilla midpoint (close of previous day)
+# Uses Camarilla pivot levels for precise intraday levels, volume for confirmation, ADX for trend strength.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+name = "12h_Camarilla_R1S1_Volume_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,86 +23,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get 4h EMA for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    ema20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Get 1d ATR for volatility regime filter
+    # Get daily data for Camarilla pivots, volume average, and ADX
     df_1d = get_htf_data(prices, '1d')
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50_1d = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
-    atr50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr50_1d)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Calculate Camarilla pivot levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C, H, L are from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    camarilla_mid = prev_close  # using previous close as midpoint/reference
+    
+    # Calculate daily average volume (20-day MA)
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate ADX(14) for trend strength
+    # TR = max(H-L, abs(H-PC), abs(L-PC))
+    tr1 = prev_high - prev_low
+    tr2 = np.abs(prev_high - prev_close)
+    tr3 = np.abs(prev_low - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # +DM = max(H-PH, 0) if H-PH > PL-L else 0
+    # -DM = max(PL-L, 0) if PL-L > H-PH else 0
+    dm_plus = np.where((prev_high - df_1d['high'].shift(2).values) > (df_1d['low'].shift(2).values - prev_low),
+                       np.maximum(prev_high - df_1d['high'].shift(2).values, 0), 0)
+    dm_minus = np.where((df_1d['low'].shift(2).values - prev_low) > (prev_high - df_1d['high'].shift(2).values),
+                        np.maximum(df_1d['low'].shift(2).values - prev_low, 0), 0)
+    
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align all 1d indicators to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20, 50)  # RSI(14), EMA20, EMA50
+    start_idx = max(20, 14, 14) + 1  # ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi[i]) or np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
-            np.isnan(atr50_1d_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(camarilla_mid_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        rsi_val = rsi[i]
-        ema20 = ema20_4h_aligned[i]
-        ema50 = ema50_4h_aligned[i]
-        atr14 = atr14_1d_aligned[i]
-        atr50 = atr50_1d_aligned[i]
-        hour = hours[i]
+        price = close[i]
+        vol = volume[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        mid = camarilla_mid_aligned[i]
+        vol_ma = vol_ma_1d_aligned[i]
+        adx_val = adx_aligned[i]
         
-        # Regime filters: trend and low volatility
-        uptrend = ema20 > ema50
-        downtrend = ema20 < ema50
-        low_vol = atr14 < atr50
-        in_session = (8 <= hour <= 20)
+        # Trend filter: only trade when ADX > 20 (trending market)
+        trending = adx_val > 20
         
         if position == 0:
-            # Long entry: RSI > 55, uptrend, low vol, in session
-            if rsi_val > 55 and uptrend and low_vol and in_session:
-                signals[i] = 0.20
+            # Long entry: break above R1 + volume spike + trending market
+            if price > r1 and vol > 1.5 * vol_ma and trending:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: RSI < 45, downtrend, low vol, in session
-            elif rsi_val < 45 and downtrend and low_vol and in_session:
-                signals[i] = -0.20
+            # Short entry: break below S1 + volume spike + trending market
+            elif price < s1 and vol > 1.5 * vol_ma and trending:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI < 50 or trend breaks or high vol or outside session
-            if rsi_val < 50 or not uptrend or not low_vol or not in_session:
+            # Long exit: price crosses below midpoint
+            if price < mid:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI > 50 or trend breaks or high vol or outside session
-            if rsi_val > 50 or not downtrend or not low_vol or not in_session:
+            # Short exit: price crosses above midpoint
+            if price > mid:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
