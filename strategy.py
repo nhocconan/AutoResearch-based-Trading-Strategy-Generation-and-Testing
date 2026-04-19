@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""
-12h_Pivot_R1S1_Breakout_Volume_ADX_Filter
-Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and ADX trend filter
-- Camarilla levels from prior 1d provide statistically significant support/resistance
-- ADX > 25 filters for trending markets to avoid false breakouts in chop
-- Volume confirmation ensures institutional participation
-- Designed for 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-- Works in bull/bear via ADX trend filter (avoids range-bound false signals)
-"""
+# 4h_RSI_2_45_Stochastic_Bullish_Cross_With_Volume
+# Hypothesis: 4-hour RSI(2) crossing above 45 (reversal from oversold) combined with
+# bullish Stochastic crossover (%K > %D) and volume confirmation. RSI(2) captures
+# short-term momentum reversals effectively. Volume ensures institutional participation.
+# Works in bull markets via momentum continuations and in bear markets via oversold
+# bounces. Target: 20-40 trades/year to avoid fee drag.
 
-name = "12h_Pivot_R1S1_Breakout_Volume_ADX_Filter"
-timeframe = "12h"
+name = "4h_RSI_2_45_Stochastic_Bullish_Cross_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,124 +24,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Wilder smoothing helper
-    def WilderSmooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        alpha = 1.0 / period
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+    # RSI(2) - fast RSI for early reversal signals
+    def calculate_rsi(close_prices, period=2):
+        delta = np.diff(close_prices, prepend=close_prices[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Wilder's smoothing
+        avg_gain = np.zeros_like(close_prices)
+        avg_loss = np.zeros_like(close_prices)
+        
+        # First average
+        if len(close_prices) >= period:
+            avg_gain[period-1] = np.mean(gain[:period])
+            avg_loss[period-1] = np.mean(loss[:period])
+            
+            for i in range(period, len(close_prices)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    # Stochastic Oscillator
+    def calculate_stochastic(high_prices, low_prices, close_prices, k_period=14, d_period=3):
+        # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
+        lowest_low = np.zeros_like(low_prices)
+        highest_high = np.zeros_like(high_prices)
+        
+        for i in range(len(close_prices)):
+            start_idx = max(0, i - k_period + 1)
+            lowest_low[i] = np.min(low_prices[start_idx:i+1])
+            highest_high[i] = np.max(high_prices[start_idx:i+1])
+        
+        # Avoid division by zero
+        denominator = highest_high - lowest_low
+        k_percent = np.where(denominator != 0, 
+                            (close_prices - lowest_low) / denominator * 100, 0)
+        
+        # %D = SMA of %K
+        d_percent = np.zeros_like(k_percent)
+        for i in range(len(k_percent)):
+            start_idx = max(0, i - d_period + 1)
+            if i >= d_period - 1:
+                d_percent[i] = np.mean(k_percent[start_idx:i+1])
             else:
-                result[i] = np.nan
-        return result
+                d_percent[i] = k_percent[i]  # Not enough data yet
+        
+        return k_percent, d_percent
     
-    # ADX(14) for trend strength filter - calculated on 12h data
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
+    # Calculate indicators
+    rsi_2 = calculate_rsi(close, 2)
+    stoch_k, stoch_d = calculate_stochastic(high, low, close, 14, 3)
     
-    # True Range
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = np.abs(df_12h['high'] - np.roll(df_12h['close'], 1))
-    tr3 = np.abs(df_12h['low'] - np.roll(df_12h['close'], 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr.iloc[0] = tr1.iloc[0]
-    
-    # Directional Movement
-    dm_plus = np.where((df_12h['high'] - np.roll(df_12h['high'], 1)) > 
-                       (np.roll(df_12h['low'], 1) - df_12h['low']), 
-                       np.maximum(df_12h['high'] - np.roll(df_12h['high'], 1), 0), 0)
-    dm_minus = np.where((np.roll(df_12h['low'], 1) - df_12h['low']) > 
-                        (df_12h['high'] - np.roll(df_12h['high'], 1)), 
-                        np.maximum(np.roll(df_12h['low'], 1) - df_12h['low'], 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = WilderSmooth(tr.values, 14)
-    dm_plus_smooth = WilderSmooth(dm_plus, 14)
-    dm_minus_smooth = WilderSmooth(dm_minus, 14)
-    
-    # DX and ADX
-    dx = np.full_like(close, np.nan)
-    mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
-    dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
-    adx_12h = WilderSmooth(dx, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Previous day's Camarilla levels (using 1d data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].shift(1).values
-    pl = df_1d['low'].shift(1).values
-    pc = df_1d['close'].shift(1).values
-    
-    rang = ph - pl
-    r1 = pc + (rang * 1.1 / 12)
-    s1 = pc - (rang * 1.1 / 12)
-    r4 = pc + (rang * 1.1 / 2)
-    s4 = pc - (rang * 1.1 / 2)
-    
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 1.3 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    volume_confirm = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
-    start_idx = max(30, 20)
+    start_idx = max(30, 20)  # Ensure enough data
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
+        # Skip if any required data is invalid
+        if (np.isnan(rsi_2[i]) or np.isnan(stoch_k[i]) or np.isnan(stoch_d[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_12h_aligned[i] > 25
+        # Entry conditions: RSI(2) > 45 AND bullish Stochastic cross AND volume
+        rsi_condition = rsi_2[i] > 45
+        stoch_cross = stoch_k[i] > stoch_d[i] and stoch_k[i-1] <= stoch_d[i-1]
         
         if position == 0:
-            # Long: price breaks above R1 with volume and strong trend
-            if (close[i] > r1_aligned[i] and 
-                volume_confirm[i] and 
-                strong_trend):
+            if rsi_condition and stoch_cross and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and strong trend
-            elif (close[i] < s1_aligned[i] and 
-                  volume_confirm[i] and 
-                  strong_trend):
-                signals[i] = -0.25
-                position = -1
-                
         elif position == 1:
-            # Long: exit if price breaks below S1 or trend weakens (ADX < 20)
-            if (close[i] < s1_aligned[i]) or (adx_12h_aligned[i] < 20):
+            # Exit: RSI(2) < 55 (overbought) OR bearish Stochastic cross
+            rsi_exit = rsi_2[i] < 55
+            stoch_cross_down = stoch_k[i] < stoch_d[i] and stoch_k[i-1] >= stoch_d[i-1]
+            
+            if rsi_exit or stoch_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                
-        elif position == -1:
-            # Short: exit if price breaks above R1 or trend weakens (ADX < 20)
-            if (close[i] > r1_aligned[i]) or (adx_12h_aligned[i] < 20):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
