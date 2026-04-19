@@ -1,10 +1,16 @@
+# 4h_HighLow_Pullback_Strategy_v1
+# Hypothesis: Price tends to pull back to recent highs/lows during trends. Enter on pullbacks to 4h swing points
+# in the direction of the 1-week trend. Use volume confirmation to avoid false breakouts.
+# Works in bull/bear by following higher timeframe trend and using mean-reversion entries.
+# Target: 20-40 trades/year per symbol with clear entry/exit rules.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Camarilla_Pivot_Breakout_Volume_Trend_v1"
-timeframe = "12h"
+name = "4h_HighLow_Pullback_Strategy_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,88 +23,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot levels
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Get daily data for trend filter (EMA34) and volume confirmation
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 50-period EMA on 1w close for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate weekly Camarilla pivot levels (R1, S1, R2, S2, R3, S3)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    # Calculate 4-period EMA on 4h for entry timing
+    ema_4_4h = pd.Series(close).ewm(span=4, adjust=False, min_periods=4).mean().values
     
-    pivot = (high_w + low_w + close_w) / 3
-    range_w = high_w - low_w
+    # Calculate rolling max/min for swing points (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    R1 = pivot + (range_w * 1.1 / 12)
-    S1 = pivot - (range_w * 1.1 / 12)
-    R2 = pivot + (range_w * 1.1 / 6)
-    S2 = pivot - (range_w * 1.1 / 6)
-    R3 = pivot + (range_w * 1.1 / 4)
-    S3 = pivot - (range_w * 1.1 / 4)
-    
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Calculate daily volume average (20-period) for volume confirmation
-    vol_1d = df_1d['volume'].values
-    vol_avg = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
-    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
+    # Volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_avg_aligned[i]) or
-            np.isnan(volume[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_4_4h[i]) or 
+            np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation: current volume > 1.5x daily average
-        vol_confirm = volume[i] > (vol_avg_aligned[i] * 1.5)
+        # Trend filter: 1-week EMA50 direction
+        if i >= 51:
+            trend_up = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
+            trend_down = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]
+        else:
+            trend_up = trend_down = False
         
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        
+        # Entry conditions
         if position == 0:
-            # Long when price breaks above R3 with volume and above daily EMA34
-            if (close[i] > R3_aligned[i] and 
-                vol_confirm and 
-                close[i] > ema34_aligned[i]):
+            # Long: pullback to recent low in uptrend
+            if (trend_up and vol_confirm and 
+                close[i] <= low_min_20[i] * 1.005 and  # Within 0.5% of 20-period low
+                ema_4_4h[i] > ema_4_4h[i-1]):  # Short-term momentum turning up
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3 with volume and below daily EMA34
-            elif (close[i] < S3_aligned[i] and 
-                  vol_confirm and 
-                  close[i] < ema34_aligned[i]):
+            # Short: pullback to recent high in downtrend
+            elif (trend_down and vol_confirm and 
+                  close[i] >= high_max_20[i] * 0.995 and  # Within 0.5% of 20-period high
+                  ema_4_4h[i] < ema_4_4h[i-1]):  # Short-term momentum turning down
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price falls below R1 or volume drops
-            if (close[i] < R1_aligned[i] or 
-                volume[i] < (vol_avg_aligned[i] * 0.5)):
+            # Long exit: price reaches recent high or momentum fails
+            if (close[i] >= high_max_20[i] * 0.995 or  # Near 20-period high
+                ema_4_4h[i] < ema_4_4h[i-1]):  # Short-term momentum turns down
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price rises above S1 or volume drops
-            if (close[i] > S1_aligned[i] or 
-                volume[i] < (vol_avg_aligned[i] * 0.5)):
+            # Short exit: price reaches recent low or momentum fails
+            if (close[i] <= low_min_20[i] * 1.005 or  # Near 20-period low
+                ema_4_4h[i] > ema_4_4h[i-1]):  # Short-term momentum turns up
                 signals[i] = 0.0
                 position = 0
             else:
