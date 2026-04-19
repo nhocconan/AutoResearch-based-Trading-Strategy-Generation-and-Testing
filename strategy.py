@@ -3,100 +3,115 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1-week trend filter and volume confirmation.
-# Long when price > Alligator Jaw, weekly trend up, volume > 1.5x average.
-# Short when price < Alligator Jaw, weekly trend down, volume > 1.5x average.
-# Designed for 12h timeframe to capture multi-day trends with reduced whipsaw.
-# Target: 20-40 trades/year per symbol (~80-160 total over 4 years).
-name = "12h_WilliamsAlligator_WeeklyTrend_Volume"
-timeframe = "12h"
+# Hypothesis: 6h Ichimoku Cloud with 1d trend filter
+# Long when: price > Kumo (cloud), Tenkan > Kijun, and 1d price > 1d EMA50
+# Short when: price < Kumo, Tenkan < Kijun, and 1d price < 1d EMA50
+# Uses Kumo as dynamic support/resistance, effective in both trending and ranging markets
+# Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag
+name = "6h_Ichimoku_Cloud_1dEMA50"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 120:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Williams Alligator: Jaw (13-period SMMA shifted 8), Teeth (8-period SMMA shifted 5), Lips (5-period SMMA shifted 3)
-    # We'll use Jaw as the main reference line
-    def smma(source, length):
-        result = np.full_like(source, np.nan)
-        if len(source) < length:
-            return result
-        # First value is simple average
-        result[length-1] = np.mean(source[0:length])
-        # Subsequent values: SMMA = (PREV * (LENGTH-1) + CURRENT) / LENGTH
-        for i in range(length, len(source)):
-            result[i] = (result[i-1] * (length-1) + source[i]) / length
-        return result
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    jaw = smma(close, 13)
-    jaw_shifted = np.roll(jaw, 8)  # Shift 8 bars forward
-    jaw_shifted[:8] = np.nan  # Fill shifted portion with NaN
+    # Calculate Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
     
-    # Weekly EMA13 trend
-    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Align weekly EMA13 to 12h
-    ema_13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
+    # Calculate Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b = (pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate EMA50 on daily
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d EMA50 to 6h
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Align Ichimoku components (they are already calculated on 6h data, but need proper alignment for plotting)
+    # For trading logic, we use the current values directly as they don't involve future data
+    tenkan = tenkan_sen.values
+    kijun = kijun_sen.values
+    span_a = senkou_span_a.values
+    span_b = senkou_span_b.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13+8)  # Ensure indicators are ready
+    start_idx = max(kijun_period, senkou_span_b_period) + 26  # Ensure all components are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw_shifted[i]) or np.isnan(ema_13_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(span_a[i]) or 
+            np.isnan(span_b[i]) or np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        jaw_val = jaw_shifted[i]
-        weekly_trend = ema_13_1w_aligned[i]
-        vol_ma = vol_ma_20[i]
-        vol = volume[i]
+        # Kumo (cloud) boundaries: Senkou Span A and B
+        # The cloud is between span_a and span_b
+        upper_kumo = max(span_a[i], span_b[i])
+        lower_kumo = min(span_a[i], span_b[i])
         
-        # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        # 1d trend filter
+        trend_up = close_1d[i//24] > ema_50_aligned[i] if i//24 < len(close_1d) else False  # Simplified alignment check
+        trend_down = close_1d[i//24] < ema_50_aligned[i] if i//24 < len(close_1d) else False
         
-        # Determine if weekly trend is up or down
-        weekly_up = weekly_trend > 0  # Using positive slope approximation
-        weekly_down = weekly_trend < 0
+        # Use aligned 1d EMA for trend
+        ema_50_val = ema_50_aligned[i]
+        trend_up = close[i] > ema_50_val  # Simplified: use current price vs EMA for trend
+        trend_down = close[i] < ema_50_val
+        
+        # Ichimoku signals
+        # Bullish: price above cloud, Tenkan > Kijun
+        bullish = price > upper_kumo and tenkan[i] > kijun[i]
+        # Bearish: price below cloud, Tenkan < Kijun
+        bearish = price < lower_kumo and tenkan[i] < kijun[i]
         
         if position == 0:
-            # Enter long if price above Jaw, weekly trend up, and volume confirmation
-            if price > jaw_val and weekly_up and volume_confirmed:
+            # Enter long if bullish and uptrend
+            if bullish and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price below Jaw, weekly trend down, and volume confirmation
-            elif price < jaw_val and weekly_down and volume_confirmed:
+            # Enter short if bearish and downtrend
+            elif bearish and trend_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below Jaw or weekly trend turns down
-            if price < jaw_val or not weekly_up:
+            # Exit long when price crosses below Kumo or Tenkan < Kijun
+            if price < lower_kumo or tenkan[i] < kijun[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above Jaw or weekly trend turns up
-            if price > jaw_val or not weekly_down:
+            # Exit short when price crosses above Kumo or Tenkan > Kijun
+            if price > upper_kumo or tenkan[i] > kijun[i]:
                 signals[i] = 0.0
                 position = 0
             else:
