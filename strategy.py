@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_VolumeTrend_Regime_v2"
-timeframe = "4h"
+name = "1d_WeeklyBreakout_VolumeTrend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 400:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for multi-timeframe analysis
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for multi-timeframe analysis
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d ATR for volatility regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr_1d = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)), np.absolute(low_1d - np.roll(close_1d, 1)))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_avg = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr_1d / atr_1d_avg
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Weekly ATR for volatility filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr_1w = np.maximum(high_1w - low_1w, np.absolute(high_1w - np.roll(close_1w, 1)), np.absolute(low_1w - np.roll(close_1w, 1)))
+    tr_1w[0] = high_1w[0] - low_1w[0]  # Fix first value
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # 4h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
+    # Weekly EMA200 for trend filter
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # 4h volume filter
+    # Weekly Donchian channels for breakout signals
+    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 30, 30)  # Donchian + volume + ATR ratio
+    start_idx = max(200, 20, 14)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(atr_ratio_aligned[i]) or np.isnan(donchian_upper[i]) or \
-           np.isnan(donchian_lower[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(atr_1w_aligned[i]) or np.isnan(ema200_1w_aligned[i]) or \
+           np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr_ratio_val = atr_ratio_aligned[i]
         
-        # Regime filter: high volatility (ATR ratio > 1.2) = trend following
-        # Low volatility (ATR ratio < 0.8) = range bound (avoid)
-        vol_regime_ok = atr_ratio_val > 1.2
-        
-        # Volume confirmation
+        # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
+        # Trend bias: long bias if price > weekly EMA200, short bias if price < weekly EMA200
+        long_bias = price > ema200_1w_aligned[i]
+        short_bias = price < ema200_1w_aligned[i]
+        
         if position == 0:
-            # Long: breakout above Donchian upper + volume + high vol regime
-            if price > donchian_upper[i-1] and volume_ok and vol_regime_ok:
+            # Long: breakout above weekly Donchian high + above weekly EMA200 + volume
+            if price > donchian_high_20_aligned[i] and long_bias and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below Donchian lower + volume + high vol regime
-            elif price < donchian_lower[i-1] and volume_ok and vol_regime_ok:
+            # Short: breakout below weekly Donchian low + below weekly EMA200 + volume
+            elif price < donchian_low_20_aligned[i] and short_bias and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below Donchian middle or volatility drops
-            donchian_mid = (donchian_upper[i-1] + donchian_lower[i-1]) / 2
-            if price < donchian_mid or atr_ratio_val < 0.9:
+            # Exit: price drops below weekly EMA200 or breaks below weekly Donchian low
+            if price < ema200_1w_aligned[i] or price < donchian_low_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above Donchian middle or volatility drops
-            donchian_mid = (donchian_upper[i-1] + donchian_lower[i-1]) / 2
-            if price > donchian_mid or atr_ratio_val < 0.9:
+            # Exit: price rises above weekly EMA200 or breaks above weekly Donchian high
+            if price > ema200_1w_aligned[i] or price > donchian_high_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
