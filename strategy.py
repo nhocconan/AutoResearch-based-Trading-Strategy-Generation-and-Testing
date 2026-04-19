@@ -1,11 +1,14 @@
-# Theta: 4h Volume-Pressure Breakout with 1D ATR Filter
-# Hypothesis: Breakouts above/below 20-period high/low on 4h with volume spike (>2x average) and 1D ATR > 0.8% of price
-# work in bull/bear because volatility expansion precedes trends. Volume confirms institutional participation.
-# Target: 20-40 trades/year per symbol. Max position size 0.30.
-# Uses 1D ATR as regime filter to avoid low-volatility chop.
+#!/usr/bin/env python3
+"""
+1d_KAMA_Trend_With_ADX_Filter
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) identifies trend direction, 
+filtered by weekly ADX > 25 to ensure strong trending markets (avoiding chop/range).
+Works in both bull and bear markets by following the trend direction.
+Target: 20-50 total trades over 4 years (5-12/year) to minimize fee drag.
+"""
 
-name = "Theta_4h_VolumePressure_Breakout"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_ADX_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,75 +23,127 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 20-period high/low for breakout levels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # KAMA parameters
+    kama_fast = 2
+    kama_slow = 30
     
-    # Volume confirmation: volume > 2.0 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 2.0)
+    # Calculate KAMA
+    def calculate_kama(close, fast, slow):
+        # Efficiency Ratio
+        change = np.abs(close - np.roll(close, 10))  # 10-period change
+        volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if False else np.zeros_like(close)
+        # Calculate volatility properly
+        volatility = np.zeros_like(close)
+        for i in range(1, len(close)):
+            volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+        # Vectorized volatility calculation
+        volatility = np.zeros_like(close)
+        volatility[1:] = np.cumsum(np.abs(np.diff(close)))
+        # Subtract to get rolling sum
+        volatility = np.zeros_like(close)
+        for i in range(10, len(close)):
+            volatility[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
+        er = np.zeros_like(close)
+        for i in range(10, len(close)):
+            if volatility[i] > 0:
+                er[i] = change[i] / volatility[i]
+            else:
+                er[i] = 0
+        
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # KAMA calculation
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # 1D ATR for volatility regime filter
+    # 1d data for KAMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate True Range and ATR on 1D data
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    kama_1d = calculate_kama(df_1d['close'].values, kama_fast, kama_slow)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # ATR as percentage of price (avoid zero division)
-    atr_pct = np.where(df_1d['close'].values > 0, atr_1d / df_1d['close'].values, 0)
-    atr_pct_aligned = align_htf_to_ltf(prices, df_1d, atr_pct)
+    # Weekly ADX for trend strength filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Volatility filter: only trade when 1D ATR > 0.8% of price
-    vol_filter = atr_pct_aligned > 0.008
+    # ADX calculation
+    def calculate_adx(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + (1.0/period) * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
+        
+        atr = WilderSmooth(tr, period)
+        dm_plus_smooth = WilderSmooth(dm_plus, period)
+        dm_minus_smooth = WilderSmooth(dm_minus, period)
+        
+        dx = np.full_like(close, np.nan)
+        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+        
+        adx = WilderSmooth(dx, period)
+        return adx
+    
+    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough for 20-period lookback
+    start_idx = max(30, 10)
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr_pct_aligned[i])):
+        if np.isnan(kama_1d_aligned[i]) or np.isnan(adx_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
+        strong_trend = adx_1w_aligned[i] > 25
+        
         if position == 0:
-            # Long: break above 20-period high with volume spike and sufficient volatility
-            if (close[i] > high_20[i] and 
-                volume_spike[i] and 
-                vol_filter[i]):
-                signals[i] = 0.30
+            if close[i] > kama_1d_aligned[i] and strong_trend:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below 20-period low with volume spike and sufficient volatility
-            elif (close[i] < low_20[i] and 
-                  volume_spike[i] and 
-                  vol_filter[i]):
-                signals[i] = -0.30
+            elif close[i] < kama_1d_aligned[i] and strong_trend:
+                signals[i] = -0.25
                 position = -1
-                
         elif position == 1:
-            # Long: exit if price breaks below 20-period low or volatility drops
-            if (close[i] < low_20[i]) or (atr_pct_aligned[i] < 0.005):
+            if close[i] < kama_1d_aligned[i] or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
-                
+                signals[i] = 0.25
         elif position == -1:
-            # Short: exit if price breaks above 20-period high or volatility drops
-            if (close[i] > high_20[i]) or (atr_pct_aligned[i] < 0.005):
+            if close[i] > kama_1d_aligned[i] or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
