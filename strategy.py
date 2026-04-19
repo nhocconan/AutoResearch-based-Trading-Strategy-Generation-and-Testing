@@ -1,16 +1,15 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_S1R1_Breakout_VolumeATR_Tight_v2"
-timeframe = "12h"
+name = "4h_1dPivot_S1R1_Breakout_VolumeATR_Tight_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,7 +36,7 @@ def generate_signals(prices):
     s1_1d = 2 * pivot_1d - high_1d
     r1_1d = 2 * pivot_1d - low_1d
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
