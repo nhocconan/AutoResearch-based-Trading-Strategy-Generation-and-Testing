@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RSI2_Bollinger_Bounce_Volume"
-timeframe = "6h"
+name = "4h_1d_Donchian20_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,65 +19,33 @@ def generate_signals(prices):
     
     # Get 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period RSI on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1d Donchian channels (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Calculate 1d trend filter (EMA 50)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14[:13] = np.nan
-    
-    # Calculate Bollinger Bands on daily (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    
-    # RSI(2) on 6h for short-term mean reversion
-    delta_6h = np.diff(close, prepend=close[0])
-    gain_6h = np.where(delta_6h > 0, delta_6h, 0)
-    loss_6h = np.where(delta_6h < 0, -delta_6h, 0)
-    
-    avg_gain_6h = np.zeros_like(gain_6h)
-    avg_loss_6h = np.zeros_like(loss_6h)
-    for i in range(1, len(gain_6h)):
-        avg_gain_6h[i] = (avg_gain_6h[i-1] * 1 + gain_6h[i]) / 2
-        avg_loss_6h[i] = (avg_loss_6h[i-1] * 1 + loss_6h[i]) / 2
-    
-    rs_6h = np.where(avg_loss_6h != 0, avg_gain_6h / avg_loss_6h, 100)
-    rsi_2 = 100 - (100 / (1 + rs_6h))
-    rsi_2[:1] = np.nan
+    # Align to 4h timeframe
+    high_20_4h = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_4h = align_htf_to_ltf(prices, df_1d, low_20)
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily indicators to 6h
-    rsi_14_6h = align_htf_to_ltf(prices, df_1d, rsi_14)
-    sma_20_6h = align_htf_to_ltf(prices, df_1d, sma_20)
-    upper_bb_6h = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_6h = align_htf_to_ltf(prices, df_1d, lower_bb)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_14_6h[i]) or np.isnan(sma_20_6h[i]) or np.isnan(upper_bb_6h[i]) or \
-           np.isnan(lower_bb_6h[i]) or np.isnan(rsi_2[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(high_20_4h[i]) or np.isnan(low_20_4h[i]) or np.isnan(ema_50_4h[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -85,36 +53,30 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume filter
-        volume_ok = vol > 1.5 * vol_ma
+        # Volume spike: current volume > 1.5x average
+        volume_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: RSI2 < 10 (oversold) + price near lower BB + daily RSI < 40 (not overbought)
-            if (rsi_2[i] < 10 and 
-                price <= lower_bb_6h[i] * 1.02 and  # Allow small tolerance
-                rsi_14_6h[i] < 40 and
-                volume_ok):
+            # Long: Price breaks above 1d Donchian high + above 1d EMA50 + volume spike
+            if price > high_20_4h[i] and price > ema_50_4h[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI2 > 90 (overbought) + price near upper BB + daily RSI > 60 (not oversold)
-            elif (rsi_2[i] > 90 and 
-                  price >= upper_bb_6h[i] * 0.98 and  # Allow small tolerance
-                  rsi_14_6h[i] > 60 and
-                  volume_ok):
+            # Short: Price breaks below 1d Donchian low + below 1d EMA50 + volume spike
+            elif price < low_20_4h[i] and price < ema_50_4h[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price crosses above SMA20 or RSI2 > 50
-            if price > sma_20_6h[i] or rsi_2[i] > 50:
+            # Exit: Price returns below 1d Donchian low (reversal signal)
+            if price < low_20_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price crosses below SMA20 or RSI2 < 50
-            if price < sma_20_6h[i] or rsi_2[i] < 50:
+            # Exit: Price returns above 1d Donchian high (reversal signal)
+            if price > high_20_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
