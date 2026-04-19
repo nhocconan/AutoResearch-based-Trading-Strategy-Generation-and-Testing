@@ -3,19 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
-# Williams Alligator (13,8,5 SMAs) identifies trend direction and strength
-# 1d EMA50 filter ensures alignment with higher timeframe trend
-# Volume spike (>1.5x average) confirms conviction
-# Designed to work in trending markets with low frequency to avoid fee drag
-# Target: 20-40 trades/year for 12h timeframe
-name = "12h_WilliamsAlligator_1dTrend_Volume_v1"
-timeframe = "12h"
+# Hypothesis: 1h timeframe with 4h trend filter and 1d volume confirmation
+# - 4h EMA(50) defines trend direction (long when price > EMA50, short when price < EMA50)
+# - 1d volume > 1.5x 20-period average for conviction
+# - 1h RSI(14) for entry timing: long when RSI < 30 in uptrend, short when RSI > 70 in downtrend
+# - Exit on opposite RSI extreme (RSI > 70 for long, RSI < 30 for short) or trend reversal
+# - Session filter: only trade 08:00-20:00 UTC to avoid low-volume periods
+# - Position size: 0.20 (20%) to manage drawdown
+# - Designed to work in both bull and bear markets by following higher timeframe trend
+# - Target: 15-30 trades/year to avoid excessive fee drag
+
+name = "1h_EMA50_RSI_1dVolume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,62 +27,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    
+    # 4h EMA(50) for trend direction
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # 1d Volume average (20-period)
+    # 1d volume average (20-period)
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Williams Alligator components (13,8,5 SMAs)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # 13-period SMA
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values   # 8-period SMA
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values    # 5-period SMA
+    # 1h RSI(14) for entry timing
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Pre-compute session filter (08:00-20:00 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
-           np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]):
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
-        
-        # Volume filter: current volume > 1.5x 1d average volume
+            
+        # Skip if any required data is NaN
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(rsi_values[i]):
+            signals[i] = 0.0
+            continue
+            
+        # Volume filter: current 1d volume > 1.5x average
         volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Long entry: lips > teeth > jaw (bullish alignment) + price > EMA50_1d + volume
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema50_1d_aligned[i] and volume_filter:
-                signals[i] = 0.25
+            # Look for long entry: uptrend (price > 4h EMA50) + oversold RSI + volume
+            if close[i] > ema_50_4h_aligned[i] and rsi_values[i] < 30 and volume_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: jaws > teeth > lips (bearish alignment) + price < EMA50_1d + volume
-            elif jaw[i] > teeth[i] and teeth[i] > lips[i] and close[i] < ema50_1d_aligned[i] and volume_filter:
-                signals[i] = -0.25
+            # Look for short entry: downtrend (price < 4h EMA50) + overbought RSI + volume
+            elif close[i] < ema_50_4h_aligned[i] and rsi_values[i] > 70 and volume_filter:
+                signals[i] = -0.20
                 position = -1
-        
+                
         elif position == 1:
-            # Long exit: Alligator lines intertwine (loss of trend) OR price < EMA50_1d
-            if not (lips[i] > teeth[i] and teeth[i] > jaw[i]) or close[i] < ema50_1d_aligned[i]:
+            # Long position: exit on overbought RSI or trend reversal
+            if rsi_values[i] > 70 or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        
+                signals[i] = 0.20
+                
         elif position == -1:
-            # Short exit: Alligator lines intertwine (loss of trend) OR price > EMA50_1d
-            if not (jaw[i] > teeth[i] and teeth[i] > lips[i]) or close[i] > ema50_1d_aligned[i]:
+            # Short position: exit on oversold RSI or trend reversal
+            if rsi_values[i] < 30 or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
