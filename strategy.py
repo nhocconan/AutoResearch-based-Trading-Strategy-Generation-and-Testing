@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_TwinPeak_Reversal"
-timeframe = "12h"
+name = "4h_12h_Donchian_Breakout_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,93 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Twin Peak (double top/bottom) pattern
-    # Peak detection: local maxima/minima over 5 periods
-    window = 5
-    peak = np.zeros_like(high_1d, dtype=bool)
-    trough = np.zeros_like(low_1d, dtype=bool)
+    # Calculate 12-period EMA on 12h data for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema_12h = close_12h_series.ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    for i in range(window, len(high_1d) - window):
-        # Check for peak (local maximum)
-        if high_1d[i] == np.max(high_1d[i-window:i+window+1]):
-            peak[i] = True
-        # Check for trough (local minimum)
-        if low_1d[i] == np.min(low_1d[i-window:i+window+1]):
-            trough[i] = True
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Twin peak signals: two peaks/troughs within 20 periods
-    twin_peak_high = np.zeros_like(high_1d, dtype=bool)
-    twin_peak_low = np.zeros_like(low_1d, dtype=bool)
+    # Donchian channels (20-period) on 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    peak_indices = np.where(peak)[0]
-    trough_indices = np.where(trough)[0]
-    
-    # Look for two peaks within 20 periods
-    for i in range(len(peak_indices)-1):
-        if peak_indices[i+1] - peak_indices[i] <= 20:
-            twin_peak_high[peak_indices[i+1]] = True
-    
-    # Look for two troughs within 20 periods
-    for i in range(len(trough_indices)-1):
-        if trough_indices[i+1] - trough_indices[i] <= 20:
-            twin_peak_low[trough_indices[i+1]] = True
-    
-    # Twin peak values: 1 for bearish signal (double top), -1 for bullish signal (double bottom)
-    twin_peak_signal = np.zeros_like(close_1d)
-    twin_peak_signal[twin_peak_high] = 1   # Bearish: potential top
-    twin_peak_signal[twin_peak_low] = -1   # Bullish: potential bottom
-    
-    # Align twin peak signal to 12h timeframe
-    twin_peak_aligned = align_htf_to_ltf(prices, df_1d, twin_peak_signal)
-    
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(20, 12)
     
     for i in range(start_idx, n):
-        if np.isnan(twin_peak_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        tp_signal = twin_peak_aligned[i]
+        ema_trend = ema_12h_aligned[i]
         
         # Volume filter
-        volume_ok = vol > 1.8 * vol_ma
+        volume_ok = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: Twin bottom (-1) with volume confirmation
-            if tp_signal < -0.5 and volume_ok:
+            # Long: price breaks above upper Donchian + uptrend + volume
+            if price > upper[i] and price > ema_trend and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Twin top (1) with volume confirmation
-            elif tp_signal > 0.5 and volume_ok:
+            # Short: price breaks below lower Donchian + downtrend + volume
+            elif price < lower[i] and price < ema_trend and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Twin top signal appears or volume drops
-            if tp_signal > 0.5 or not volume_ok:
+            # Exit: price crosses below lower Donchian or trend turns down
+            if price < lower[i] or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Twin bottom signal appears or volume drops
-            if tp_signal < -0.5 or not volume_ok:
+            # Exit: price crosses above upper Donchian or trend turns up
+            if price > upper[i] or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
