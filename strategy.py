@@ -1,17 +1,16 @@
-# 12h_4hEMA34_Trend_Filter_With_1d_Volume_Spike
-# Hypothesis: Use 1d volume spike as entry trigger with 4h EMA34 trend filter on 12h timeframe.
-# Enter long when: 4h EMA34 trending up AND 1d volume > 2x 20-day average AND price > 4h EMA34.
-# Enter short when: 4h EMA34 trending down AND 1d volume > 2x 20-day average AND price < 4h EMA34.
-# Exit when trend reverses. Volume spike ensures momentum, EMA34 filters whipsaw.
-# Designed for 5-15 trades/year per symbol to avoid fee drag.
-# Works in bull/bear: volume spikes occur in both regimes, trend filter avoids counter-trend trades.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_4hEMA34_Trend_Filter_With_1d_Volume_Spike"
+# Hypothesis: 12h Williams Fractal + Weekly EMA Trend Filter + Volume Spike
+# Uses weekly EMA(34) to determine trend direction (bullish/bearish).
+# In bullish weekly trend: long on bullish fractal break above prior high with volume spike.
+# In bearish weekly trend: short on bearish fractal break below prior low with volume spike.
+# In neutral weekly trend: no trades to avoid chop.
+# Volume confirmation: volume > 1.5x 20-period average to filter weak moves.
+# Target: 15-30 trades/year per symbol to stay within frequency limits.
+name = "12h_WilliamsFractal_WeeklyEMA_Trend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,69 +24,114 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA34 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get weekly data for EMA trend and fractals
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate EMA34 on 4h
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Weekly EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Get 1d data for volume spike
+    # Williams Fractals (5-bar: bar is highest/lowest of 2 bars on each side)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    bullish_fractal = np.zeros(len(high_1w), dtype=bool)
+    bearish_fractal = np.zeros(len(low_1w), dtype=bool)
+    
+    for i in range(2, len(high_1w) - 2):
+        # Bullish fractal: lowest low of 5 bars
+        if (low_1w[i] < low_1w[i-1] and low_1w[i] < low_1w[i-2] and
+            low_1w[i] < low_1w[i+1] and low_1w[i] < low_1w[i+2]):
+            bullish_fractal[i] = True
+        # Bearish fractal: highest high of 5 bars
+        if (high_1w[i] > high_1w[i-1] and high_1w[i] > high_1w[i-2] and
+            high_1w[i] > high_1w[i+1] and high_1w[i] > high_1w[i+2]):
+            bearish_fractal[i] = True
+    
+    # Get daily data for reference levels (prior day high/low)
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 20-day average volume on 1d
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (2.0 * vol_ma_20_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # Prior day high/low for breakout confirmation
+    prior_high_1d = np.roll(high_1d, 1)
+    prior_low_1d = np.roll(low_1d, 1)
+    prior_high_1d[0] = np.nan  # First day has no prior
+    prior_low_1d[0] = np.nan
+    
+    # Align indicators to 12h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal.astype(float), additional_delay_bars=2)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal.astype(float), additional_delay_bars=2)
+    prior_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_high_1d)
+    prior_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_low_1d)
+    
+    # Get 12h average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA34 to be ready
+    start_idx = max(36, 20)  # Ensure EMA(34) + 2 delay, fractal + 2 delay, and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(prior_high_1d_aligned[i]) or
+            np.isnan(prior_low_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema34 = ema34_4h_aligned[i]
-        vol_spike = vol_spike_1d_aligned[i] > 0.5  # Convert back to boolean
+        ema_trend = ema_34_1w_aligned[i]
+        bullish_fract = bullish_fractal_aligned[i] > 0.5
+        bearish_fract = bearish_fractal_aligned[i] > 0.5
+        prior_high = prior_high_1d_aligned[i]
+        prior_low = prior_low_1d_aligned[i]
+        vol_ma = vol_ma_20[i]
+        vol = volume[i]
         
-        # Determine trend direction from EMA34 slope (using 3-period change)
-        if i >= 37:  # Need 3 periods for slope
-            ema34_prev = ema34_4h_aligned[i-3]
-            ema34_slope = ema34 - ema34_prev
-            is_uptrend = ema34_slope > 0
-            is_downtrend = ema34_slope < 0
-        else:
-            is_uptrend = False
-            is_downtrend = False
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.5 * vol_ma
+        
+        # Weekly trend determination (using prior weekly close to avoid look-ahead)
+        weekly_close = df_1w['close'].values
+        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
+        if np.isnan(weekly_close_aligned[i]):
+            signals[i] = 0.0
+            continue
+        prev_weekly_close = np.roll(weekly_close_aligned, 1)[i]
+        prev_weekly_close = np.nan if i == 0 else prev_weekly_close
+        if np.isnan(prev_weekly_close):
+            signals[i] = 0.0
+            continue
+        weekly_trend_up = weekly_close_aligned[i] > ema_trend
+        weekly_trend_down = weekly_close_aligned[i] < ema_trend
         
         if position == 0:
-            # Look for volume spike with trend alignment
-            if vol_spike:
-                if is_uptrend and price > ema34:
+            # Determine entry based on weekly trend
+            if weekly_trend_up and bullish_fract and volume_confirmed:
+                # Bullish weekly trend: long on bullish fractal break above prior day high
+                if price > prior_high:
                     signals[i] = 0.25
                     position = 1
-                elif is_downtrend and price < ema34:
+            elif weekly_trend_down and bearish_fract and volume_confirmed:
+                # Bearish weekly trend: short on bearish fractal break below prior day low
+                if price < prior_low:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: trend turns down or price crosses below EMA34
-            if is_downtrend or price < ema34:
+            # Long exit: price crosses below prior day low or weekly EMA
+            if price < prior_low or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend turns up or price crosses above EMA34
-            if is_uptrend or price > ema34:
+            # Short exit: price crosses above prior day high or weekly EMA
+            if price > prior_high or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
