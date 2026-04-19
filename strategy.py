@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 4h trend filter (EMA) and 1d regime filter (Chop).
-# Long when price > 4h EMA20 AND Chop < 50 (trending), with 1h pullback entry.
-# Short when price < 4h EMA20 AND Chop < 50, with 1h bounce entry.
-# Uses Chop to avoid ranging markets where trend following fails.
-# Target: 60-150 total trades over 4 years (15-37/year).
-name = "1h_4hEMA_1dChop_Pullback"
-timeframe = "1h"
+# Hypothesis: 6h timeframe with weekly pivot reversal and daily volume confirmation.
+# Uses weekly pivot points (R1/S1) to identify key levels: long when price retraces to S1 with bullish daily candle,
+# short when price retraces to R1 with bearish daily candle. Weekly pivot provides structure from higher timeframe,
+# daily volume confirms participation. Works in both bull and bear markets by fading extremes at key levels.
+# Target: 50-150 total trades over 4 years (12-37/year).
+name = "6h_1w_Pivot_R1S1_DailyVolume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,96 +20,89 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for EMA trend (called ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get weekly data for pivot calculation (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA20 on 4h
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # Get 1d data for Chop regime (called ONCE before loop)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Get daily data for volume and candle direction (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # Calculate Chop on 1d (14-period)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily volume filter: volume > 1.5 * 20-day average
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_filter_1d = volume_1d > (volume_ma_1d * 1.5)
     
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Calculate daily candle direction: 1 for bullish (close > open), -1 for bearish
+    daily_bullish = close_1d > open_1d
+    daily_bearish = close_1d < open_1d
     
-    # Chop = 100 * log10(sum(atr) / (max(high) - min(low))) / log10(14)
-    sum_atr = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr / (highest_high - lowest_low + 1e-10)) / np.log10(14)
-    chop[np.isnan(chop)] = 100  # Default to ranging when undefined
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 1h EMA for pullback entry
-    ema_1h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align daily filters to 6h timeframe
+    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d.astype(float))
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish.astype(float))
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data
+    start_idx = 30  # Ensure enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(chop_aligned[i]) or np.isnan(ema_1h[i]):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(volume_filter_aligned[i])):
             signals[i] = 0.0
             continue
             
-        # Check regime: trending (Chop < 50)
-        trending = chop_aligned[i] < 50
+        # Current price levels
+        curr_price = close[i]
+        r1_level = r1_1w_aligned[i]
+        s1_level = s1_1w_aligned[i]
         
-        if not trending or not in_session[i]:
-            # Exit position if not trending or outside session
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-            
-        # Trend direction from 4h EMA
-        trend_up = close[i] > ema_4h_aligned[i]
-        trend_down = close[i] < ema_4h_aligned[i]
+        # Check if price is near weekly S1 (within 0.5%) for long
+        near_s1 = abs(curr_price - s1_level) / s1_level < 0.005
+        # Check if price is near weekly R1 (within 0.5%) for short
+        near_r1 = abs(curr_price - r1_level) / r1_level < 0.005
         
         if position == 0:
-            # Long: pullback to 1h EMA in uptrend
-            if trend_up and close[i] <= ema_1h[i]:
-                signals[i] = 0.20
+            # Long when price retraces to S1 with bullish daily candle and volume
+            if near_s1 and daily_bullish_aligned[i] > 0.5 and volume_filter_aligned[i] > 0.5:
+                signals[i] = 0.25
                 position = 1
-            # Short: bounce to 1h EMA in downtrend
-            elif trend_down and close[i] >= ema_1h[i]:
-                signals[i] = -0.20
+            # Short when price retraces to R1 with bearish daily candle and volume
+            elif near_r1 and daily_bearish_aligned[i] > 0.5 and volume_filter_aligned[i] > 0.5:
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit on trend reversal or overextension
-            if not trend_up or close[i] > ema_1h[i] * 1.02:  # 2% above EMA
+            # Long position: exit when price moves above weekly pivot or stops bullish
+            if curr_price > pivot_1w_aligned[i] or daily_bullish_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit on trend reversal or overextension
-            if not trend_down or close[i] < ema_1h[i] * 0.98:  # 2% below EMA
+            # Short position: exit when price moves below weekly pivot or stops bearish
+            if curr_price < pivot_1w_aligned[i] or daily_bearish_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
