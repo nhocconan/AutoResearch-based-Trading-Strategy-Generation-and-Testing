@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_Volume_Spread
-# Hypothesis: 1h Camarilla R1/S1 breakout with volume confirmation and spread filter (avoid high spread periods)
-# Uses 1d Camarilla levels for support/resistance, volume > 1.5x 20-period average for confirmation
-# Spread filter ensures trading only during liquid periods (spread < 0.05% of price)
-# Designed for 1h timeframe targeting 60-150 total trades over 4 years (15-37/year)
-# Works in bull/bear via volume confirmation and spread filter reducing false breakouts
-
-name = "1h_Camarilla_R1_S1_Breakout_Volume_Spread"
-timeframe = "1h"
-leverage = 1.0
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+name = "6h_WeeklyPivot_Breakout_Volume_Momentum"
+timeframe = "6h"
+leverage = 1.0
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,79 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla levels
+    # Momentum: ROC(5)
+    roc = np.zeros_like(close)
+    roc[5:] = (close[5:] - close[:-5]) / close[:-5] * 100
+    
+    # 1d data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 7:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].shift(1).values  # Previous day high
-    pl = df_1d['low'].shift(1).values   # Previous day low
-    pc = df_1d['close'].shift(1).values # Previous day close
+    # Calculate weekly pivot from previous week
+    # Weekly high/low/close from 7 days ago
+    weekly_high = df_1d['high'].shift(7).rolling(window=7, min_periods=7).max().values
+    weekly_low = df_1d['low'].shift(7).rolling(window=7, min_periods=7).min().values
+    weekly_close = df_1d['close'].shift(7).rolling(window=7, min_periods=7).last().values
     
-    # Camarilla calculations
-    rang = ph - pl
-    r1 = pc + (rang * 1.1 / 12)
-    s1 = pc - (rang * 1.1 / 12)
-    r4 = pc + (rang * 1.1 / 2)
-    s4 = pc - (rang * 1.1 / 2)
+    # Weekly pivot point
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
     
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Weekly support/resistance levels (standard pivot)
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Align weekly levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
+    
+    # Volume confirmation: volume > 1.3 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    volume_confirm = volume > (volume_ma * 1.3)
     
-    # Spread filter: avoid high spread periods (spread < 0.05% of price)
-    spread = (high - low) / close
-    spread_ma = pd.Series(spread).rolling(window=20, min_periods=20).mean().values
-    spread_filter = spread < (spread_ma * 1.5)  # Avoid unusually wide spreads
-    
+    # Momentum filter: ROC > 0 for long, ROC < 0 for short
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure enough data for all indicators
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(spread_ma[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or 
+            np.isnan(weekly_s2_aligned[i]) or np.isnan(volume_ma[i]) or 
+            np.isnan(roc[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume and spread filter
-            if (close[i] > r1_aligned[i] and 
+            # Long: price breaks above weekly R1 with volume and positive momentum
+            if (close[i] > weekly_r1_aligned[i] and 
                 volume_confirm[i] and 
-                spread_filter[i]):
-                signals[i] = 0.20
+                roc[i] > 0):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and spread filter
-            elif (close[i] < s1_aligned[i] and 
+            # Short: price breaks below weekly S1 with volume and negative momentum
+            elif (close[i] < weekly_s1_aligned[i] and 
                   volume_confirm[i] and 
-                  spread_filter[i]):
-                signals[i] = -0.20
+                  roc[i] < 0):
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1
-            if close[i] < s1_aligned[i]:
+            # Long: exit if price breaks below weekly S1 or momentum turns negative
+            if (close[i] < weekly_s1_aligned[i]) or (roc[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1
-            if close[i] > r1_aligned[i]:
+            # Short: exit if price breaks above weekly R1 or momentum turns positive
+            if (close[i] > weekly_r1_aligned[i]) or (roc[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
