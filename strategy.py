@@ -3,18 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 1-day Camarilla Pivot Level (H3/L3) breakout with volume confirmation and momentum filter (RSI > 55 for long, < 45 for short).
-# Uses tight entry conditions to limit trades (~20-30/year) and avoid overtrading.
-# Works in bull markets via breakout momentum and in bear via mean reversion off H3/L3 levels.
-# Exit on opposite touch (L3 for long exit, H3 for short exit) or RSI reversal.
-# Designed for 4h timeframe with daily pivot calculation.
-name = "4h_Camarilla_H3L3_RSI_Volume_v2"
-timeframe = "4h"
+# Hypothesis: 12h Donchian channel breakout with volume confirmation and ADX trend filter.
+# Donchian(20) provides clear breakout levels, volume confirms breakout strength,
+# ADX > 25 filters for trending markets to avoid false signals in ranging conditions.
+# Designed for 12h timeframe to capture medium-term trends with low frequency.
+# Entry: Long when price breaks above upper band with volume spike and ADX > 25;
+#        Short when price breaks below lower band with volume spike and ADX > 25.
+# Exit: Opposite band touch or ADX < 20 (trend weakening).
+# Uses strict conditions to limit trades (~15-30/year) and avoid overtrading.
+
+name = "12h_Donchian20_ADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,75 +26,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot levels (based on prior day OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Prior day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # ADX (14-period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - low[:-1]), np.absolute(low[1:] - high[:-1]))
     
-    # Camarilla levels: H3/L3 = close ± (high-low)*1.1/2
-    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
     
-    # Align to 4h timeframe (waits for prior day close)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.absolute(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume spike: volume > 1.8 * 20-period average
+    # Volume spike: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.8)
+    volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for all indicators
+    start_idx = 30  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(adx[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above H3 with bullish momentum and volume
-            if (close[i] > camarilla_h3_aligned[i] and 
-                rsi[i] > 55 and 
-                volume_spike[i]):
+            # Long: break above upper band with volume and trend
+            if (close[i] > high_20[i] and 
+                volume_spike[i] and 
+                adx[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below L3 with bearish momentum and volume
-            elif (close[i] < camarilla_l3_aligned[i] and 
-                  rsi[i] < 45 and 
-                  volume_spike[i]):
+            # Short: break below lower band with volume and trend
+            elif (close[i] < low_20[i] and 
+                  volume_spike[i] and 
+                  adx[i] > 25):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price touches L3 or RSI turns bearish
-            if (close[i] < camarilla_l3_aligned[i]) or (rsi[i] < 40):
+            # Long: exit if price touches lower band or trend weakens
+            if (close[i] < low_20[i]) or (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price touches H3 or RSI turns bullish
-            if (close[i] > camarilla_h3_aligned[i]) or (rsi[i] > 60):
+            # Short: exit if price touches upper band or trend weakens
+            if (close[i] > high_20[i]) or (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
