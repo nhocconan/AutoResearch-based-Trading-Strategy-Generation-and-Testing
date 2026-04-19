@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d EMA200 trend filter and volume confirmation.
-# Williams Alligator uses 3 SMAs (jaw=13, teeth=8, lips=5) to detect trends.
-# Long when: Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA200 AND volume > 1.5x 20-period average
-# Short when: Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA200 AND volume > 1.5x 20-period average
-# Exit when: Alligator alignment breaks (jaws cross teeth or lips)
-# The Alligator identifies trends, 1d EMA200 filters for higher timeframe direction, volume confirms strength.
-# Works in trending markets by capturing sustained moves. Target: 20-30 trades/year per symbol.
-name = "4h_WilliamsAlligator_1dEMA200_Volume"
-timeframe = "4h"
+# Hypothesis: 1d Daily trend following with weekly EMA34 trend filter and volume confirmation.
+# Long when: Price > Weekly EMA34 AND volume > 1.5x 20-period average
+# Short when: Price < Weekly EMA34 AND volume > 1.5x 20-period average
+# Exit when: Price crosses back below/above Weekly EMA34
+# Weekly EMA34 filters direction, volume confirms strength, daily price action triggers entries.
+# Works in trending markets by capturing sustained moves. Target: 10-20 trades/year per symbol.
+name = "1d_EMA34_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,19 +19,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d EMA200 ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # Get 1w EMA34 ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -40,47 +32,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 13, 8, 5, 20)  # Ensure indicators are ready
+    start_idx = max(34, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(ema200_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema200 = ema200_1d_aligned[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        ema34 = ema34_1w_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Alligator alignment conditions
-        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
-        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
-        
         if position == 0:
-            # Long entry: Bullish alignment + price > 1d EMA200 + volume spike
-            if bullish_alignment and price > ema200 and vol > 1.5 * vol_ma:
+            # Long entry: Price > Weekly EMA34 + volume spike
+            if price > ema34 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Bearish alignment + price < 1d EMA200 + volume spike
-            elif bearish_alignment and price < ema200 and vol > 1.5 * vol_ma:
+            # Short entry: Price < Weekly EMA34 + volume spike
+            elif price < ema34 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bullish alignment breaks OR price crosses below 1d EMA200
-            if not bullish_alignment or price < ema200:
+            # Long exit: Price crosses below Weekly EMA34
+            if price < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bearish alignment breaks OR price crosses above 1d EMA200
-            if not bearish_alignment or price > ema200:
+            # Short exit: Price crosses above Weekly EMA34
+            if price > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
