@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Donchian Breakout with Volume Confirmation and RSI Filter
-# Uses 1-week Donchian channels for major trend structure, entered only on high volume
-# and confirmed by RSI not being overextended. Designed for low turnover (10-30 trades/year)
-# to minimize fee drag while capturing strong trending moves in both bull and bear markets.
-# Weekly timeframe reduces noise, daily timeframe provides timely entries.
-name = "1d_WeeklyDonchian20_Volume_RSI"
-timeframe = "1d"
+# Hypothesis: 6h ADX + Williams Alligator trend alignment with 12h volume confirmation
+# ADX > 25 confirms strong trend, Alligator lines aligned (Lips>Teeth>Jaw for long, Jaw>Teeth>Lips for short)
+# 12h volume > 1.5x 20-period average confirms institutional participation
+# Works in bull/bear by following strong trends, avoids chop via ADX filter
+# Target: 20-35 trades/year per symbol
+name = "6h_ADX_Alligator_12hVolume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,90 +22,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian Channel (20-period)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 12h volume average for confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
-    # Calculate 20-period high and low for weekly Donchian
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Align to daily timeframe (waits for weekly candle to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    
-    # Volume confirmation: volume > 1.5 * 20-day average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
-    
-    # RSI filter: avoid overextended conditions
-    def calculate_rsi(data, period=14):
-        delta = np.diff(data, prepend=data[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
+    # ADX calculation (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
         
-        avg_gain = np.zeros_like(data)
-        avg_loss = np.zeros_like(data)
+        for i in range(1, len(high)):
+            high_diff = high[i] - high[i-1]
+            low_diff = low[i-1] - low[i]
+            plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
+            minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        # First average
+        atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+        plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).sum().values / (atr * period + 1e-10)
+        minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).sum().values / (atr * period + 1e-10)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+        return adx
+    
+    adx = calculate_adx(high, low, close, 14)
+    
+    # Williams Alligator components (SMMA = Smoothed Moving Average)
+    def smoothed_moving_average(data, period):
+        sma = np.full_like(data, np.nan, dtype=float)
         if len(data) >= period:
-            avg_gain[period-1] = np.mean(gain[:period])
-            avg_loss[period-1] = np.mean(loss[:period])
-            
-            # Wilder smoothing
+            sma[period-1] = np.mean(data[:period])
             for i in range(period, len(data)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
+        return sma
     
-    rsi = calculate_rsi(close, 14)
-    rsi_not_overbought = rsi < 70
-    rsi_not_oversold = rsi > 30
+    jaw = smoothed_moving_average(close, 13)  # Blue line (13-period)
+    teeth = smoothed_moving_average(close, 8)   # Red line (8-period)
+    lips = smoothed_moving_average(close, 5)    # Green line (5-period)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(rsi[i])):
+        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Donchian high + volume confirmation + RSI not overbought
-            if (close[i] > donchian_high_aligned[i] and 
-                volume_confirm[i] and 
-                rsi_not_overbought[i]):
+            # Long: ADX > 25 (strong trend) + Lips > Teeth > Jaw (bullish alignment) + volume confirmation
+            if (adx[i] > 25 and 
+                lips[i] > teeth[i] and teeth[i] > jaw[i] and 
+                volume[i] > (vol_ma_12h_aligned[i] * 1.5)):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian low + volume confirmation + RSI not oversold
-            elif (close[i] < donchian_low_aligned[i] and 
-                  volume_confirm[i] and 
-                  rsi_not_oversold[i]):
+            # Short: ADX > 25 (strong trend) + Jaw > Teeth > Lips (bearish alignment) + volume confirmation
+            elif (adx[i] > 25 and 
+                  jaw[i] > teeth[i] and teeth[i] > lips[i] and 
+                  volume[i] > (vol_ma_12h_aligned[i] * 1.5)):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below weekly Donchian low
-            if close[i] < donchian_low_aligned[i]:
+            # Long: exit if trend weakens (ADX < 20) or Alligator lines intertwine
+            if (adx[i] < 20) or (lips[i] < teeth[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above weekly Donchian high
-            if close[i] > donchian_high_aligned[i]:
+            # Short: exit if trend weakens (ADX < 20) or Alligator lines intertwine
+            if (adx[i] < 20) or (jaw[i] < teeth[i]):
                 signals[i] = 0.0
                 position = 0
             else:
