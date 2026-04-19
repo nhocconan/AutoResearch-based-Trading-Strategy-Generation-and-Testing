@@ -3,28 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with daily trend filter and volume confirmation.
-# Long when price > Alligator Jaw and Alligator Mouth opens upward (Jaw < Teeth < Lips) with price above 1d EMA50 and volume spike (>1.8x average).
-# Short when price < Alligator Jaw and Alligator Mouth opens downward (Jaw > Teeth > Lips) with price below 1d EMA50 and volume spike.
-# Williams Alligator uses smoothed SMAs (Jaw: 13-period SMMA shifted 8, Teeth: 8-period SMMA shifted 5, Lips: 5-period SMMA shifted 3).
-# The 1d EMA50 filter ensures trend alignment, reducing whipsaw in sideways markets.
-# Volume confirmation ensures breakouts have institutional participation.
-# Target: 12-37 trades/year per symbol (~50-150 total over 4 years).
-name = "12h_WilliamsAlligator_1dEMA50_Volume"
-timeframe = "12h"
+# Hypothesis: Daily KAMA direction with weekly RSI filter and volume confirmation.
+# Long when KAMA(14) is rising (bullish) and weekly RSI(14) > 50 with volume > 1.5x average.
+# Short when KAMA(14) is falling (bearish) and weekly RSI(14) < 50 with volume > 1.5x average.
+# Uses weekly RSI to filter out counter-trend trades and avoid whipsaw in sideways markets.
+# Volume confirmation ensures momentum has institutional participation.
+# Target: 15-25 trades/year per symbol (~60-100 total over 4 years).
+name = "1d_KAMA14_WeeklyRSI_Volume"
+timeframe = "1d"
 leverage = 1.0
-
-def smma(data, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=np.float64)
-    result = np.full_like(data, np.nan, dtype=np.float64)
-    # First value is SMA
-    result[period-1] = np.mean(data[:period])
-    # Subsequent values: SMMA = (Prev SMMA * (period-1) + Current Price) / period
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,83 +23,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA50 calculation
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for RSI calculation
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly RSI(14)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # Align 1d EMA50 to 12h timeframe (wait for daily close)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align weekly RSI to daily timeframe (wait for weekly close)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Calculate Williams Alligator components on 12h data
-    # Jaw: 13-period SMMA shifted 8 bars
-    jaw = smma(close, 13)
-    jaw = np.roll(jaw, 8)  # Shift right by 8
-    jaw[:8] = np.nan
+    # Calculate daily KAMA(14)
+    # Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, k=14, prepend=close[:14]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])).reshape(-1, 14), axis=1)
+    er = change / (volatility + 1e-10)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Teeth: 8-period SMMA shifted 5 bars
-    teeth = smma(close, 8)
-    teeth = np.roll(teeth, 5)  # Shift right by 5
-    teeth[:5] = np.nan
-    
-    # Lips: 5-period SMMA shifted 3 bars
-    lips = smma(close, 5)
-    lips = np.roll(lips, 3)  # Shift right by 3
-    lips[:3] = np.nan
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50, 13+8, 8+5, 5+3)  # Need all indicators
+    start_idx = max(14, 20)  # Need KAMA and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(vol_ma_20[i]) or i < 14):  # KAMA needs at least 14 periods
             signals[i] = 0.0
             continue
         
         price = close[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        ema_trend = ema_50_aligned[i]
+        rsi_val = rsi_1w_aligned[i]
+        kama_val = kama[i]
+        kama_prev = kama[i-1]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.8 * vol_ma
+        volume_confirmed = vol > 1.5 * vol_ma
         
-        # Alligator Mouth direction
-        mouth_open_up = jaw_val < teeth_val < lips_val  # Jaw < Teeth < Lips
-        mouth_open_down = jaw_val > teeth_val > lips_val  # Jaw > Teeth > Lips
+        # KAMA direction: rising if current > previous
+        kama_rising = kama_val > kama_prev
+        kama_falling = kama_val < kama_prev
         
         if position == 0:
-            # Enter long: price > Jaw AND Mouth opens upward AND price > EMA50 AND volume confirmed
-            if price > jaw_val and mouth_open_up and price > ema_trend and volume_confirmed:
+            # Enter long: KAMA rising AND weekly RSI > 50 AND volume confirmed
+            if kama_rising and rsi_val > 50 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < Jaw AND Mouth opens downward AND price < EMA50 AND volume confirmed
-            elif price < jaw_val and mouth_open_down and price < ema_trend and volume_confirmed:
+            # Enter short: KAMA falling AND weekly RSI < 50 AND volume confirmed
+            elif kama_falling and rsi_val < 50 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price < Jaw or Mouth closes or price < EMA50
-            if price < jaw_val or not mouth_open_up or price < ema_trend:
+            # Exit long when KAMA falls or weekly RSI < 50
+            if kama_falling or rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price > Jaw or Mouth closes or price > EMA50
-            if price > jaw_val or not mouth_open_down or price > ema_trend:
+            # Exit short when KAMA rises or weekly RSI > 50
+            if kama_rising or rsi_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
