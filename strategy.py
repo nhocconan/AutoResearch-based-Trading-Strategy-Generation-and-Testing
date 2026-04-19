@@ -1,21 +1,22 @@
+# [Experiment #62625] 12h_1dPivot_S1R1_S2R2_VolumeATR
+# Hypothesis: 12h price action around daily pivot S1/R1 and S2/R2 with volume confirmation.
+# In ranging markets, price reverses at S1/R1 (mean reversion).
+# In trending markets, price breaks S2/R2 with volume (momentum).
+# Works in both bull and bear by adapting to volatility via ATR filter.
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend + RSI mean reversion + chop filter
-# In trending markets (chop < 61.8), trade in direction of KAMA
-# In ranging markets (chop > 61.8), use RSI extremes for mean reversion
-# Works in both bull and bear by adapting to volatility regime
-# Target: 15-25 trades/year per symbol (~60-100 total over 4 years)
-
-name = "1d_KAMA_RSI_Chop"
-timeframe = "1d"
+name = "12h_1dPivot_S1R1_S2R2_VolumeATR"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,125 +24,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA on close
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    change[0:10] = np.nan  # First 10 values invalid
+    # Get 12h data for ATR calculation (better resolution than 1d)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # For each point, sum of absolute changes over last 10 periods
-    volatility_sum = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility_sum[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
+    # Calculate ATR(14) on 12h
+    tr1 = np.maximum(high_12h[1:], close_12h[:-1]) - np.minimum(low_12h[1:], close_12h[:-1])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start at index 9
-    for i in range(10, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Get 1d data for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, np.nan)  # Align with close
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily pivot points: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Support and resistance levels
+    s1_1d = 2 * pivot_1d - high_1d
+    r1_1d = 2 * pivot_1d - low_1d
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r2_1d = pivot_1d + (high_1d - low_1d)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[13] = np.nanmean(gain[1:14])  # First average
-    avg_loss[13] = np.nanmean(loss[1:14])
+    # Align pivot levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index (14)
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - np.roll(close, 1)[1:])
-    tr3 = np.abs(low[1:] - np.roll(close, 1)[1:])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.insert(tr, 0, np.nan)  # Align with close
-    
-    # ATR(14)
-    atr = np.zeros_like(close)
-    for i in range(14, len(close)):
-        atr[i] = np.nansum(tr[i-13:i+1])
-    
-    # Highest high and lowest low over 14 periods
-    hh = np.zeros_like(close)
-    ll = np.zeros_like(close)
-    for i in range(14, len(close)):
-        hh[i] = np.nanmax(high[i-13:i+1])
-        ll[i] = np.nanmin(low[i-13:i+1])
-    
-    # Chop calculation
-    chop = np.zeros_like(close)
-    for i in range(14, len(close)):
-        if atr[i] > 0 and (hh[i] - ll[i]) > 0:
-            chop[i] = 100 * np.log10(np.nansum(tr[i-13:i+1]) / (hh[i] - ll[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # Default when undefined
-    
-    # Chop < 61.8 = trending, Chop > 61.8 = ranging
-    chop_threshold = 61.8
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need sufficient data for indicators
+    start_idx = 20  # Need volume MA and ATR data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop[i]) or np.isnan(close[i-1])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
+            np.isnan(r2_1d_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        prev_close = close[i-1]
-        chop_val = chop[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        atr = atr_12h_aligned[i]
         
-        if chop_val < chop_threshold:  # Trending market
-            # Trade in direction of KAMA
-            if price > kama[i] and prev_close <= kama[i-1]:
-                # Bullish crossover
+        # Volume and volatility filters
+        volume_confirmed = vol > 1.5 * vol_ma
+        volatility_filter = atr > 0  # Always true but keeps structure
+        
+        # Pivot levels
+        s1 = s1_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s2 = s2_1d_aligned[i]
+        r2 = r2_1d_aligned[i]
+        pivot = pivot_1d_aligned[i]
+        
+        if position == 0:
+            # Long conditions:
+            # 1. Breakout above R2 with volume (strong bullish)
+            # 2. Mean reversion from S1 with volume (bullish bounce)
+            if ((price > r2 and volume_confirmed) or 
+                (price < s1 and price > s2 and volume_confirmed and price > pivot)):
                 signals[i] = 0.25
                 position = 1
-            elif price < kama[i] and prev_close >= kama[i-1]:
-                # Bearish crossover
+            # Short conditions:
+            # 1. Breakdown below S2 with volume (strong bearish)
+            # 2. Mean reversion from R1 with volume (bearish rejection)
+            elif ((price < s2 and volume_confirmed) or 
+                  (price > r1 and price < r2 and volume_confirmed and price < pivot)):
                 signals[i] = -0.25
                 position = -1
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25 if position == -1 else 0.0
-        else:  # Ranging market
-            # Mean reversion using RSI extremes
-            if rsi[i] < 30 and position <= 0:
-                # Oversold - go long
-                signals[i] = 0.25
-                position = 1
-            elif rsi[i] > 70 and position >= 0:
-                # Overbought - go short
-                signals[i] = -0.25
-                position = -1
-            elif (rsi[i] > 40 and rsi[i] < 60) and position != 0:
-                # Exit when RSI returns to neutral
+        
+        elif position == 1:
+            # Exit long: breakdown below S1 or reversal at R1
+            if price < s1 or (price > r1 and price < r2):
                 signals[i] = 0.0
                 position = 0
             else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25 if position == -1 else 0.0
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short: breakout above S2 or reversal at R1
+            if price > r2 or (price < r1 and price > s2):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
