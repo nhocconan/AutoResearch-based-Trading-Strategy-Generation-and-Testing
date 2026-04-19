@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1S1_Breakout_Volume_Trend_v1"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Spike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,26 +38,22 @@ def generate_signals(prices):
     # S1 = C - (H - L) * 1.1 / 12
     s1_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12.0
     
-    # Align to 12h timeframe
-    pivot_1d_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align to 4h timeframe
+    pivot_1d_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # EMA trend filter: 12h EMA34 for trend direction
-    close_series = pd.Series(close)
-    ema_34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need EMA34 warmup
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_1d_12h[i]) or np.isnan(r1_1d_12h[i]) or np.isnan(s1_1d_12h[i]) or \
-           np.isnan(vol_ma_20[i]) or np.isnan(ema_34[i]):
+        if np.isnan(pivot_1d_4h[i]) or np.isnan(r1_1d_4h[i]) or np.isnan(s1_1d_4h[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -65,34 +61,30 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 1.8x average
-        volume_spike = vol > 1.8 * vol_ma
-        
-        # Trend filter: price above EMA34 for long, below for short
-        trend_up = price > ema_34[i]
-        trend_down = price < ema_34[i]
+        # Volume spike: current volume > 2.0x average
+        volume_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike and uptrend
-            if price > r1_1d_12h[i] and volume_spike and trend_up:
+            # Long: Price breaks above 1d R1 with volume spike
+            if price > r1_1d_4h[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume spike and downtrend
-            elif price < s1_1d_12h[i] and volume_spike and trend_down:
+            # Short: Price breaks below 1d S1 with volume spike
+            elif price < s1_1d_4h[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below S1 (reversal signal)
-            if price < s1_1d_12h[i]:
+            # Exit: Price returns below 1d S1 (reversal signal)
+            if price < s1_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above R1 (reversal signal)
-            if price > r1_1d_12h[i]:
+            # Exit: Price returns above 1d R1 (reversal signal)
+            if price > r1_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
