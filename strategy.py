@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with weekly pivot context and volume confirmation
-# Uses weekly pivot levels to define long-term support/resistance zones
-# In ranging markets: price reverses at weekly S1/R1 (mean reversion)
-# In trending markets: price breaks weekly S2/R2 with volume (continuation)
-# Volume filter confirms breakout strength
-# Works in both bull and bear markets by adapting to volatility regime
+# Hypothesis: 4h Donchian breakout with 1d pivot reversal zones and volume confirmation
+# In ranging markets, price tends to reverse at daily pivot S1/R1 (mean reversion)
+# In trending markets, price breaks through daily pivot S2/R2 with volume (breakout)
+# Uses 1d pivots as dynamic support/resistance with volume filter to distinguish
+# between breakouts and reversals. Works in both bull and bear markets by
+# adapting to volatility regime via ATR filter.
 # Target: 20-40 trades/year per symbol (~80-160 total over 4 years)
 
-name = "6h_WkPivot_S1R1_S2R2_VolumeATR"
-timeframe = "6h"
+name = "4h_1dPivot_S1R1_S2R2_VolumeATR"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for ATR calculation (better resolution than 6h)
+    # Get 1h data for ATR calculation (better resolution than 4h)
     df_1h = get_htf_data(prices, '1h')
     high_1h = df_1h['high'].values
     low_1h = df_1h['low'].values
@@ -39,26 +39,26 @@ def generate_signals(prices):
     atr_1h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1h_aligned = align_htf_to_ltf(prices, df_1h, atr_1h)
     
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Calculate daily pivot points: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     # Support and resistance levels
-    s1_1w = 2 * pivot_1w - high_1w
-    r1_1w = 2 * pivot_1w - low_1w
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r2_1w = pivot_1w + (high_1w - low_1w)
+    s1_1d = 2 * pivot_1d - high_1d
+    r1_1d = 2 * pivot_1d - low_1d
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r2_1d = pivot_1d + (high_1d - low_1d)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    # Align pivot levels to 4h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,9 +70,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or 
-            np.isnan(r2_1w_aligned[i]) or np.isnan(atr_1h_aligned[i]) or 
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
+            np.isnan(r2_1d_aligned[i]) or np.isnan(atr_1h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -86,12 +86,12 @@ def generate_signals(prices):
         volume_confirmed = vol > 1.5 * vol_ma
         volatility_filter = atr > 0  # Always true but keeps structure
         
-        # Weekly pivot levels
-        s1 = s1_1w_aligned[i]
-        r1 = r1_1w_aligned[i]
-        s2 = s2_1w_aligned[i]
-        r2 = r2_1w_aligned[i]
-        pivot = pivot_1w_aligned[i]
+        # Pivot levels
+        s1 = s1_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s2 = s2_1d_aligned[i]
+        r2 = r2_1d_aligned[i]
+        pivot = pivot_1d_aligned[i]
         
         if position == 0:
             # Long conditions:
@@ -118,7 +118,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: breakout above S2 or reversal at S2
+            # Exit short: breakout above S2 or reversal at R1
             if price > r2 or (price < r1 and price > s2):
                 signals[i] = 0.0
                 position = 0
