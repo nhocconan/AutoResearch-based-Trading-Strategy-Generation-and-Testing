@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_KAMA_Trend_Filter_RSI_Entry"
-timeframe = "4h"
+name = "12h_1d_KAMA_RSI_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,30 +19,21 @@ def generate_signals(prices):
     
     # Get daily data once before loop
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     
-    # KAMA on daily: ER = |close - close[10]| / sum(|close - close[-1]| over 10)
-    change = np.abs(close_1d - np.roll(close_1d, 10))
-    change[np.isnan(change)] = 0
-    volatility = np.abs(np.diff(close_1d, prepend=np.nan))
-    volatility = np.concatenate([[np.nan], volatility[:-1]])
-    vol_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
-    er = np.where(vol_sum != 0, change / vol_sum, 0)
-    # Smooth constants: fast = 2/(2+1), slow = 2/(30+1)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close_1d, np.nan)
+    # KAMA on daily for trend
+    close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    direction = np.abs(np.diff(close_1d, n=9, prepend=close_1d[:9]))
+    er = np.where(change != 0, direction / change, 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close_1d)
     kama[0] = close_1d[0]
     for i in range(1, len(close_1d)):
-        if not np.isnan(close_1d[i]) and not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Align KAMA to 4h
-    kama_4h = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # RSI on 4h
-    delta = np.diff(close, prepend=np.nan)
+    # RSI(14) on 12h
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
@@ -50,15 +41,15 @@ def generate_signals(prices):
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation on 12h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Time filter: 08-20 UTC (active hours)
+    # Time filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     time_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
     start_idx = 50
     
@@ -67,38 +58,31 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        if np.isnan(kama_4h[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(kama_12h[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
-        
+            
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma_val = vol_ma[i]
         
-        # Volume filter
-        volume_ok = vol > 1.5 * vol_ma
+        volume_ok = vol > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: price above KAMA + RSI < 40 (oversold in uptrend)
-            if price > kama_4h[i] and rsi[i] < 40 and volume_ok:
+            if price > kama_12h[i] and rsi[i] > 50 and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + RSI > 60 (overbought in downtrend)
-            elif price < kama_4h[i] and rsi[i] > 60 and volume_ok:
+            elif price < kama_12h[i] and rsi[i] < 50 and volume_ok:
                 signals[i] = -0.25
                 position = -1
-        
         elif position == 1:
-            # Exit: price crosses below KAMA OR RSI > 70 (overbought)
-            if price < kama_4h[i] or rsi[i] > 70:
+            if price < kama_12h[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Exit: price crosses above KAMA OR RSI < 30 (oversold)
-            if price > kama_4h[i] or rsi[i] < 30:
+            if price > kama_12h[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
