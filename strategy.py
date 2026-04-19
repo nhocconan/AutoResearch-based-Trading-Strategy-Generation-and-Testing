@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Camarilla_R1S1_Breakout_Volume_Filter_v2"
-timeframe = "4h"
+name = "12h_1d_1w_Camarilla_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,26 +48,21 @@ def generate_signals(prices):
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # 4h ATR for position sizing and stops
+    # 12h Camarilla pivot levels (R1, S1)
+    high_12h = high
+    low_12h = low
+    close_12h = close
+    prev_high_12h = np.concatenate([[np.nan], high_12h[:-1]])
+    prev_low_12h = np.concatenate([[np.nan], low_12h[:-1]])
+    prev_close_12h = np.concatenate([[np.nan], close_12h[:-1]])
+    pivot_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3
+    r1_12h = pivot_12h + (high_12h - low_12h) * 1.1 / 12
+    s1_12h = pivot_12h - (high_12h - low_12h) * 1.1 / 12
+    
+    # 12h ATR for position sizing and stops
     tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
     tr[0] = high[0] - low[0]
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Camarilla levels from previous day
-    prev_close = np.concatenate([[np.nan], close[:-1]])
-    prev_high = np.concatenate([[np.nan], high[:-1]])
-    prev_low = np.concatenate([[np.nan], low[:-1]])
-    
-    # Camarilla levels: R4, R3, R2, R1, S1, S2, S3, S4
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    # R4 = close + (high - low) * 1.1/2
-    # S4 = close - (high - low) * 1.1/2
-    cam_multiplier = 1.1 / 12
-    r1 = prev_close + (prev_high - prev_low) * cam_multiplier
-    s1 = prev_close - (prev_high - prev_low) * cam_multiplier
-    r4 = prev_close + (prev_high - prev_low) * (1.1 / 2)
-    s4 = prev_close - (prev_high - prev_low) * (1.1 / 2)
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,42 +72,39 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if np.isnan(atr_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or \
            np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or \
-           np.isnan(s1_1w_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or \
-           np.isnan(r4[i]) or np.isnan(s4[i]) or np.isnan(atr_4h[i]):
+           np.isnan(s1_1w_aligned[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(atr_12h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        avg_vol = np.mean(volume[max(0, i-20):i+1])  # 20-period average volume
-        vol_filter = vol > 1.5 * avg_vol  # Volume spike filter
+        atr = atr_12h[i]
         
-        # Entry conditions
-        # Long: price breaks above R1 with volume and trend bias
-        # Short: price breaks below S1 with volume and trend bias
+        # Volume filter: current volume > 1.5x average volume
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_filter = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
-        long_breakout = price > r1[i-1] and vol_filter and price > ema200_1d_aligned[i] and price > pivot_1w_aligned[i]
-        short_breakout = price < s1[i-1] and vol_filter and price < ema200_1d_aligned[i] and price < pivot_1w_aligned[i]
-        
+        # Entry conditions: Camarilla R1/S1 breakout with trend and volume
         if position == 0:
-            if long_breakout:
+            # Long: price breaks above R1 with uptrend bias and volume
+            if price > r1_12h[i] and price > ema200_1d_aligned[i] and price > pivot_1w_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            elif short_breakout:
+            # Short: price breaks below S1 with downtrend bias and volume
+            elif price < s1_12h[i] and price < ema200_1d_aligned[i] and price < pivot_1w_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price reaches R4 or stops below S1
-            if price >= r4[i] or price < s1[i]:
+            # Exit: price returns to pivot or stops below entry
+            if price <= pivot_12h[i] or price < close[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches S4 or stops above R1
-            if price <= s4[i] or price > r1[i]:
+            # Exit: price returns to pivot or stops above entry
+            if price >= pivot_12h[i] or price > close[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
