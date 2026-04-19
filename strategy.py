@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_Camarilla_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "4h_1d_1w_Three_Screen_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,48 +21,28 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # 1d ATR for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA200 for trend filter (weekly timeframe proxy)
     close_1d = df_1d['close'].values
-    tr_1d = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)), np.absolute(low_1d - np.roll(close_1d, 1)))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # 1d EMA200 for trend filter
     ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 1w pivot levels for directional bias
+    # 1w RSI(14) for overbought/oversold filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    prev_high_1w = np.concatenate([[np.nan], high_1w[:-1]])
-    prev_low_1w = np.concatenate([[np.nan], low_1w[:-1]])
-    prev_close_1w = np.concatenate([[np.nan], close_1w[:-1]])
-    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    r1_1w = 2 * pivot_1w - prev_low_1w
-    s1_1w = 2 * pivot_1w - prev_high_1w
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # 12h Camarilla pivot levels (R1, S1)
-    high_12h = high
-    low_12h = low
-    close_12h = close
-    prev_high_12h = np.concatenate([[np.nan], high_12h[:-1]])
-    prev_low_12h = np.concatenate([[np.nan], low_12h[:-1]])
-    prev_close_12h = np.concatenate([[np.nan], close_12h[:-1]])
-    pivot_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3
-    r1_12h = pivot_12h + (high_12h - low_12h) * 1.1 / 12
-    s1_12h = pivot_12h - (high_12h - low_12h) * 1.1 / 12
-    
-    # 12h ATR for position sizing and stops
-    tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
-    tr[0] = high[0] - low[0]
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h Williams %R(14) for entry timing
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    willr = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,41 +50,43 @@ def generate_signals(prices):
     start_idx = 200
     
     for i in range(start_idx, n):
-        if np.isnan(atr_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or \
-           np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or \
-           np.isnan(s1_1w_aligned[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(atr_12h[i]):
+        if np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or \
+           np.isnan(willr[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_12h[i]
         
-        # Volume filter: current volume > 1.5x average volume
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_filter = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        # Trend filter: 1d EMA200
+        bullish_trend = price > ema200_1d_aligned[i]
+        bearish_trend = price < ema200_1d_aligned[i]
         
-        # Entry conditions: Camarilla R1/S1 breakout with trend and volume
+        # 1w RSI filter: avoid extremes
+        rsi_not_overbought = rsi_1w_aligned[i] < 70
+        rsi_not_oversold = rsi_1w_aligned[i] > 30
+        
+        # Entry conditions
         if position == 0:
-            # Long: price breaks above R1 with uptrend bias and volume
-            if price > r1_12h[i] and price > ema200_1d_aligned[i] and price > pivot_1w_aligned[i] and vol_filter:
+            # Long: bullish trend, not overbought weekly, Williams %R oversold bounce
+            if bullish_trend and rsi_not_overbought and willr[i] < -80 and willr[i] > willr[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with downtrend bias and volume
-            elif price < s1_12h[i] and price < ema200_1d_aligned[i] and price < pivot_1w_aligned[i] and vol_filter:
+            # Short: bearish trend, not oversold weekly, Williams %R overbought bounce
+            elif bearish_trend and rsi_not_oversold and willr[i] > -20 and willr[i] < willr[i-1]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to pivot or stops below entry
-            if price <= pivot_12h[i] or price < close[i-1]:
+            # Exit: trend reversal or Williams %R overbought
+            if not bullish_trend or willr[i] > -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to pivot or stops above entry
-            if price >= pivot_12h[i] or price > close[i-1]:
+            # Exit: trend reversal or Williams %R oversold
+            if not bearish_trend or willr[i] < -80:
                 signals[i] = 0.0
                 position = 0
             else:
