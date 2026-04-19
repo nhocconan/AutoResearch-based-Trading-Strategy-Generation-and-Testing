@@ -1,19 +1,16 @@
-#!/usr/bin/env python3
-# 4h_MultiTimeframe_VolatilityBreakout
-# Hypothesis: Multi-timeframe volatility breakout with volume confirmation and regime filter.
-# Uses 4h as primary timeframe, with 12h for trend direction and 1d for volatility regime.
-# Volatility breakout triggers when price breaks beyond ATR-based bands with volume surge.
-# Regime filter uses 12h ADX to avoid false signals in low-volatility environments.
-# Designed to work in both bull and bear markets by adapting to volatility regimes.
-# Target: 20-50 trades/year to minimize fee drag while capturing significant moves.
+# 1d_WeeklyPivot_Trend_Follow
+# Hypothesis: 1d strategy using weekly pivot levels with trend following. Weekly pivots provide strong support/resistance from weekly price action.
+# Trend filter (ADX > 20) ensures we only trade in trending markets to avoid false breakouts in chop.
+# Works in bull/bear via trend filter and pivot-based breakouts.
+# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
 
-name = "4h_MultiTimeframe_VolatilityBreakout"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Trend_Follow"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,33 +22,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ATR(14) for volatility measurement
-    def calculate_atr(high, low, close, period=14):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        
-        atr = np.full_like(close, np.nan)
-        for i in range(len(close)):
-            if i < period:
-                if i == 0:
-                    atr[i] = tr[i]
-                else:
-                    atr[i] = (atr[i-1] * (i) + tr[i]) / (i + 1)
-            else:
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
-    
-    # ADX(14) for trend strength
+    # ADX(14) for trend strength filter - calculated on 1d data
     def calculate_adx(high, low, close, period=14):
+        # True Range
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
+        tr[0] = tr1[0]  # First period
         
+        # Directional Movement
         dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
                            np.maximum(high - np.roll(high, 1), 0), 0)
         dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
@@ -59,23 +39,25 @@ def generate_signals(prices):
         dm_plus[0] = 0
         dm_minus[0] = 0
         
+        # Smoothed values using Wilder's smoothing (EMA-like)
         def WilderSmooth(data, period):
             result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
-            result[period-1] = np.nanmean(data[:period])
             alpha = 1.0 / period
-            for i in range(period, len(data)):
-                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                    result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-                else:
-                    result[i] = np.nan
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
             return result
         
         atr = WilderSmooth(tr, period)
         dm_plus_smooth = WilderSmooth(dm_plus, period)
         dm_minus_smooth = WilderSmooth(dm_minus, period)
         
+        # Avoid division by zero
         dx = np.full_like(close, np.nan)
         mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
         dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
@@ -83,81 +65,85 @@ def generate_signals(prices):
         adx = WilderSmooth(dx, period)
         return adx
     
-    # Get multi-timeframe data
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    # 1d data for ADX and other indicators
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 30 or len(df_12h) < 20 or len(df_1d) < 2:
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate indicators on respective timeframes
-    atr_4h = calculate_atr(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 14)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Calculate ADX on 1d data
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Volatility regime: use 1d ATR ratio (current vs 20-day average)
-    atr_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    vol_regime = atr_1d / atr_ma_1d  # >1 = high volatility regime
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
+    # Calculate weekly pivot levels (using previous week)
+    ph = df_1w['high'].shift(1).values  # Previous week high
+    pl = df_1w['low'].shift(1).values   # Previous week low
+    pc = df_1w['close'].shift(1).values # Previous week close
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Standard pivot point calculation
+    pp = (ph + pl + pc) / 3.0
+    r1 = 2 * pp - pl
+    s1 = 2 * pp - ph
+    r2 = pp + (ph - pl)
+    s2 = pp - (ph - pl)
+    
+    # Align weekly pivot levels to 1d timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Volume confirmation: volume > 1.3 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (volume_ma * 2.0)
-    
-    # Dynamic breakout bands based on ATR
-    upper_band = df_4h['close'].values + (atr_4h * 1.5)
-    lower_band = df_4h['close'].values - (atr_4h * 1.5)
-    upper_band_aligned = align_htf_to_ltf(prices, df_4h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_4h, lower_band)
+    volume_confirm = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(30, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_4h_aligned[i]) or np.isnan(adx_12h_aligned[i]) or 
-            np.isnan(vol_regime_aligned[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filters: trade only in strong trend (ADX > 25) AND high volatility (vol_ratio > 1.2)
-        strong_trend = adx_12h_aligned[i] > 25
-        high_vol = vol_regime_aligned[i] > 1.2
+        # ADX filter: only trade when ADX > 20 (trending market)
+        strong_trend = adx_1d_aligned[i] > 20
         
         if position == 0:
-            # Long: price breaks above upper band with volume surge and regime filters
-            if (close[i] > upper_band_aligned[i] and 
-                volume_surge[i] and 
-                strong_trend and 
-                high_vol):
+            # Long: price breaks above R1 with volume and strong trend
+            if (close[i] > r1_aligned[i] and 
+                volume_confirm[i] and 
+                strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band with volume surge and regime filters
-            elif (close[i] < lower_band_aligned[i] and 
-                  volume_surge[i] and 
-                  strong_trend and 
-                  high_vol):
+            # Short: price breaks below S1 with volume and strong trend
+            elif (close[i] < s1_aligned[i] and 
+                  volume_confirm[i] and 
+                  strong_trend):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below lower band or regime deteriorates
-            if (close[i] < lower_band_aligned[i]) or (adx_12h_aligned[i] < 20) or (vol_regime_aligned[i] < 0.8):
+            # Long: exit if price breaks below S1 or trend weakens (ADX < 15)
+            if (close[i] < s1_aligned[i]) or (adx_1d_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above upper band or regime deteriorates
-            if (close[i] > upper_band_aligned[i]) or (adx_12h_aligned[i] < 20) or (vol_regime_aligned[i] < 0.8):
+            # Short: exit if price breaks above R1 or trend weakens (ADX < 15)
+            if (close[i] > r1_aligned[i]) or (adx_1d_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
