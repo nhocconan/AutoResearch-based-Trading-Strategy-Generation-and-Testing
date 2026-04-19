@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining 12-hour momentum (ROC25) with volume confirmation and trend filter from 1-day EMA34.
-# Uses 12h ROC25 for momentum signal, confirmed by volume spike, and filtered by daily EMA34 trend.
-# Designed to work in both bull and bear markets by requiring alignment between daily trend
-# and 12h momentum direction, reducing false signals in choppy conditions.
-# Target: 15-25 trades/year per symbol with disciplined entries.
-name = "6h_EMA34_1d_ROC25_12h_Volume"
-timeframe = "6h"
+# Hypothesis: 4h strategy combining 1-day ATR-based volatility filter with 4h Donchian breakout
+# and volume confirmation. Uses 1-day ATR to filter out low volatility periods, reducing false
+# breakouts in choppy markets. Donchian(20) breakout provides clear entry/exit levels.
+# Volume spike confirms breakout strength. Designed to work in both bull and bear markets
+# by capturing directional moves with volatility filtering to avoid whipsaws.
+# Target: 20-30 trades/year per symbol with disciplined entries.
+name = "4h_ATR1d_Donchian20_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,21 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily EMA34 for trend bias
+    # 1-day ATR for volatility filter (ATR > 20-period average = high volatility regime)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    high_vol = atr_1d_aligned > atr_ma_1d_aligned
     
-    # 12-hour ROC25 for momentum
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 25:
-        return np.zeros(n)
-    
-    roc_25_12h = pd.Series(df_12h['close']).pct_change(periods=25).values
-    roc_25_12h_aligned = align_htf_to_ltf(prices, df_12h, roc_25_12h)
+    # 4-hour Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,40 +49,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(roc_25_12h_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(atr_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: positive ROC25 from 12h, above daily EMA34, with volume spike
-            if (roc_25_12h_aligned[i] > 0 and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # Long: price breaks above Donchian high, high volatility regime, with volume spike
+            if (close[i] > donch_high[i] and 
+                high_vol[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: negative ROC25 from 12h, below daily EMA34, with volume spike
-            elif (roc_25_12h_aligned[i] < 0 and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # Short: price breaks below Donchian low, high volatility regime, with volume spike
+            elif (close[i] < donch_low[i] and 
+                  high_vol[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if ROC25 turns negative or price breaks below daily EMA34
-            if (roc_25_12h_aligned[i] < 0) or (close[i] < ema_34_1d_aligned[i]):
+            # Long: exit if price breaks below Donchian low or volatility drops
+            if (close[i] < donch_low[i]) or (not high_vol[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if ROC25 turns positive or price breaks above daily EMA34
-            if (roc_25_12h_aligned[i] > 0) or (close[i] > ema_34_1d_aligned[i]):
+            # Short: exit if price breaks above Donchian high or volatility drops
+            if (close[i] > donch_high[i]) or (not high_vol[i]):
                 signals[i] = 0.0
                 position = 0
             else:
