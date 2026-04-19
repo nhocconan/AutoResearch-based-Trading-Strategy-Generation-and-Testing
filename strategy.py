@@ -3,11 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and daily ATR filter.
-# Works in bull markets by capturing breakouts and in bear markets by avoiding false breakouts
-# via volume confirmation and ATR-based regime filter. Targets 20-40 trades/year.
-name = "4h_Donchian20_Volume_ATRFilter_v1"
-timeframe = "4h"
+# Hypothesis: Daily KAMA trend + RSI momentum + chop regime filter for 1d timeframe.
+# KAMA adapts to market noise, reducing false signals in choppy markets.
+# RSI(14) confirms momentum direction. Choppiness Index > 61.8 filters range-bound conditions.
+# Designed for 1d to capture multi-day trends with low frequency, suitable for bull and bear markets.
+# Entry: Long when KAMA rising, RSI > 50, and CHOP > 61.8 (range) for mean-reversion longs at support.
+#        Short when KAMA falling, RSI < 50, and CHOP > 61.8 for mean-reversion shorts at resistance.
+# Exit: Opposite KAMA direction or RSI reversal.
+# Uses strict conditions to limit trades (~10-20/year) and avoid overtrading.
+name = "1d_KAMA_RSI_Chop_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,75 +23,79 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily ATR for regime filter (ATR(14) < 20-period median = low volatility regime)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # KAMA ( Kaufman Adaptive Moving Average ) - 10-period ER, 2/30 SC
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(10))
+    volatility = close_s.diff().abs().rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = [np.nan] * len(close)
+    kama[9] = close_s.iloc[9]  # seed
+    for i in range(10, len(close)):
+        if not np.isnan(sc.iloc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close_s.iloc[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    kama = np.array(kama)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # RSI(14)
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # True range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first period
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_median_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
-    low_volatility = atr_1d < atr_median_1d  # low volatility regime
-    
-    # Align to 4h timeframe
-    low_volatility_aligned = align_htf_to_ltf(prices, df_1d, low_volatility)
-    
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    # Choppiness Index (14-period)
+    atr = []
+    tr = np.maximum(high[1:] - low[1:], np.maximum(abs(high[1:] - close[:-1]), abs(low[1:] - close[:-1])))
+    tr = np.insert(tr, 0, high[0] - low[0])
+    atr_s = pd.Series(tr).rolling(window=14, min_periods=14).mean()
+    atr = atr_s.values
+    high_roll = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    low_roll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_s * 14 / (high_roll - low_roll)) / np.log10(2)
+    chop = np.nan_to_num(chop, nan=50.0)  # default to neutral if undefined
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for all indicators
+    start_idx = 30  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(low_volatility_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            i == 0 or np.isnan(kama[i-1])):
             signals[i] = 0.0
             continue
         
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
+        
         if position == 0:
-            # Long: break above Donchian high with volume confirmation in low volatility regime
-            if (close[i] > highest_high[i] and 
-                volume_confirm[i] and 
-                low_volatility_aligned[i]):
+            # Long: KAMA rising, bullish momentum, in chop (range) for mean-reversion at support
+            if kama_rising and rsi[i] > 50 and chop[i] > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume confirmation in low volatility regime
-            elif (close[i] < lowest_low[i] and 
-                  volume_confirm[i] and 
-                  low_volatility_aligned[i]):
+            # Short: KAMA falling, bearish momentum, in chop (range) for mean-reversion at resistance
+            elif kama_falling and rsi[i] < 50 and chop[i] > 61.8:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price touches Donchian low or volatility increases
-            if (close[i] < lowest_low[i]) or (not low_volatility_aligned[i]):
+            # Long: exit if KAMA falls or RSI turns bearish
+            if not kama_rising or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price touches Donchian high or volatility increases
-            if (close[i] > highest_high[i]) or (not low_volatility_aligned[i]):
+            # Short: exit if KAMA rises or RSI turns bullish
+            if not kama_falling or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
