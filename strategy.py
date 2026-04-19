@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Pivot_R1S1_Breakout_VolumeATR_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_TrailingStop_Minimal_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation (once before loop)
+    # Daily data for volatility regime filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily high, low, close for Camarilla pivot calculation
+    # Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Daily ATR for volatility regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate daily pivot point
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate R1 and S1 using Camarilla formula
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align daily pivot levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Daily ATR for volatility filter (14-period)
     tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
     tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
     tr1 = np.concatenate([[np.nan], tr1])
+    atr_10_1d = pd.Series(tr1).rolling(window=10, min_periods=10).mean().values
+    atr_10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
+    
+    # Daily ATR for stop loss
     atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average (12h)
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Trend filter: price above/below 20-period EMA
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    start_idx = 30
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_20[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(atr_10_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        pivot = pivot_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        atr = atr_14_1d_aligned[i]
-        ema = ema_20[i]
+        atr_vol = atr_10_1d_aligned[i]
+        atr_stop = atr_14_1d_aligned[i]
         
         volume_confirmed = vol > 1.5 * vol_ma
+        low_vol_regime = atr_vol < np.nanmedian(atr_10_1d_aligned[:i+1])  # Below median ATR = low volatility
         
         if position == 0:
-            # Long: break above R1 with volume and above EMA
-            if price > r1 and volume_confirmed and price > ema:
+            # Enter long on upper breakout with volume confirmation in low volatility
+            if price > upper[i] and volume_confirmed and low_vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume and below EMA
-            elif price < s1 and volume_confirmed and price < ema:
+                highest_since_entry = price
+            # Enter short on lower breakdown with volume confirmation in low volatility
+            elif price < lower[i] and volume_confirmed and low_vol_regime:
                 signals[i] = -0.25
                 position = -1
+                lowest_since_entry = price
         
         elif position == 1:
-            # Exit: price below pivot or EMA
-            if price < pivot or price < ema:
+            # Track highest price since entry for trailing stop
+            highest_since_entry = max(highest_since_entry, price)
+            # Exit if price drops 2.5x ATR from high or breaks below lower band
+            if price < highest_since_entry - 2.5 * atr_stop or price < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above pivot or EMA
-            if price > pivot or price > ema:
+            # Track lowest price since entry for trailing stop
+            lowest_since_entry = min(lowest_since_entry, price)
+            # Exit if price rises 2.5x ATR from low or breaks above upper band
+            if price > lowest_since_entry + 2.5 * atr_stop or price > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
