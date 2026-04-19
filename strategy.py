@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and ADX trend filter.
-# Long when price breaks above 20-period Donchian high, ADX > 25, volume > 1.5x 20-period average.
-# Short when price breaks below 20-period Donchian low, ADX > 25, volume > 1.5x 20-period average.
-# Exit when price crosses the opposite Donchian band or ADX falls below 20.
-# Uses discrete position size (0.25) to minimize churn. Designed for 4h timeframe
-# to capture medium-term trends while avoiding whipsaws in both bull and bear markets.
-# Target: 20-50 trades/year per symbol (~80-200 total over 4 years).
-name = "4h_Donchian20_Volume_ADX_v3"
-timeframe = "4h"
+# Hypothesis: 1d Ichimoku Cloud breakout with weekly trend filter and volume confirmation.
+# Long when price > Senkou Span A & B, weekly EMA > previous weekly EMA, volume > 1.5x 20-day average.
+# Short when price < Senkou Span A & B, weekly EMA < previous weekly EMA, volume > 1.5x 20-day average.
+# Uses Ichimoku for multi-timeframe trend structure, weekly EMA for long-term trend filter, volume for confirmation.
+# Designed for 1d timeframe to capture major trend changes while avoiding whipsaws.
+# Target: 20-40 trades/year per symbol (~80-160 total over 4 years).
+name = "1d_Ichimoku_Cloud_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 260:  # Need enough data for Ichimoku (52 periods) and weekly EMA
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,107 +23,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-                
-            tr[i] = max(high[i] - low[i], 
-                       abs(high[i] - close[i-1]), 
-                       abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        
-        atr[period] = np.mean(tr[1:period+1])
-        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        dx = np.zeros_like(close)
-        valid = (plus_di[period:] + minus_di[period:]) > 0
-        dx[period:] = np.where(valid, 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:]), 0)
-        
-        adx = np.zeros_like(close)
-        if len(dx) >= 2*period+1:
-            adx[2*period] = np.mean(dx[period:2*period+1])
-            for i in range(2*period+1, len(dx)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Calculate weekly EMA21 for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    adx = calculate_adx(high, low, close, 14)
+    # Ichimoku Cloud components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align weekly EMA21 to daily
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 28)  # Ensure Donchian and ADX are ready
+    start_idx = max(52, 21)  # Ensure Ichimoku and weekly EMA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or 
+            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper_band = donchian_high[i]
-        lower_band = donchian_low[i]
-        adx_val = adx[i]
+        senkou_a = senkou_span_a[i]
+        senkou_b = senkou_span_b[i]
+        ema_21_1w_val = ema_21_1w_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # ADX trend strength filter
-        strong_trend = adx_val > 25
+        # Weekly trend: current EMA > previous EMA (upward) or < previous EMA (downward)
+        # Need previous weekly EMA value
+        if i > 0:
+            prev_ema_21_1w = ema_21_1w_aligned[i-1]
+            weekly_uptrend = ema_21_1w_val > prev_ema_21_1w
+            weekly_downtrend = ema_21_1w_val < prev_ema_21_1w
+        else:
+            weekly_uptrend = False
+            weekly_downtrend = False
         
         if position == 0:
-            # Enter long if price breaks above upper band, strong trend, and volume confirmation
-            if price > upper_band and strong_trend and volume_confirmed:
+            # Enter long if price above both Senkou Spans, weekly uptrend, and volume confirmation
+            if price > senkou_a and price > senkou_b and weekly_uptrend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price breaks below lower band, strong trend, and volume confirmation
-            elif price < lower_band and strong_trend and volume_confirmed:
+            # Enter short if price below both Senkou Spans, weekly downtrend, and volume confirmation
+            elif price < senkou_a and price < senkou_b and weekly_downtrend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price crosses below lower band or trend weakens
-            if price < lower_band or adx_val < 20:  # Trend weakening
+            # Exit long when price crosses below either Senkou Span or weekly trend turns down
+            if price < senkou_a or price < senkou_b or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above upper band or trend weakens
-            if price > upper_band or adx_val < 20:  # Trend weakening
+            # Exit short when price crosses above either Senkou Span or weekly trend turns up
+            if price > senkou_a or price > senkou_b or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
