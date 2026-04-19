@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 12h trend filter
-# Uses tight entry conditions to limit trades (target: 20-50/year) and avoid fee drag
-# Works in bull markets via breakouts and in bear via short breakdowns
-# Only trades when volume confirms breakout and higher timeframe trend aligns
-name = "4h_DonchianBreakout_VolumeTrend_12h_v1"
-timeframe = "4h"
+# Hypothesis: 1d KAMA trend with weekly trend filter and volume confirmation
+# Uses KAMA to filter noise and identify low-noise trends
+# Weekly trend filter ensures alignment with higher timeframe momentum
+# Volume confirmation reduces false breakouts
+# Designed to work in bull markets via trend following and in bear via trend reversals
+# Target: 20-50 trades/year to minimize fee drag
+name = "1d_KAMA_Trend_Filter_Weekly_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,65 +23,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for multi-timeframe analysis (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Get weekly data for trend filter (ONCE before loop)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Weekly EMA34 for trend filter
+    close_weekly = df_weekly['close'].values
+    ema34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
     
-    # 4h Donchian channels (20-period)
-    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # KAMA (Kaufman Adaptive Moving Average) parameters
+    er_period = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
     
-    # 4h ATR for position sizing and stops
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_period))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Handle first er_period elements
+    change = np.concatenate([np.full(er_period, np.nan), change])
+    volatility = np.concatenate([np.full(er_period, np.nan), volatility[er_period-1:]])
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Calculate Smoothing Constant (SC)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[er_period] = close[er_period]  # Start with first close after ER period
+    for i in range(er_period + 1, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # 10-period ATR for volatility filtering
     tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
     tr[0] = high[0] - low[0]
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = max(50, er_period + 10)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_12h_aligned[i]) or \
-           np.isnan(donch_high_20[i]) or np.isnan(donch_low_20[i]) or np.isnan(atr_4h[i]):
+        if np.isnan(ema34_weekly_aligned[i]) or np.isnan(kama[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_4h[i]
         
-        # Volume filter: current volume > 1.5x average volume (20-period)
+        # Volume filter: current volume > 1.3x average volume (20-period)
         if i >= 20:
             avg_volume = np.mean(volume[i-20:i])
         else:
             avg_volume = volume[i]
-        volume_filter = volume[i] > 1.5 * avg_volume
+        volume_filter = volume[i] > 1.3 * avg_volume
         
         if position == 0:
-            # Long: breakout above Donchian high + volume + 12h uptrend
-            if high[i] > donch_high_20[i-1] and volume_filter and price > ema34_12h_aligned[i]:
+            # Long: price crosses above KAMA + volume + weekly uptrend
+            if close[i] > kama[i] and close[i-1] <= kama[i-1] and volume_filter and price > ema34_weekly_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below Donchian low + volume + 12h downtrend
-            elif low[i] < donch_low_20[i-1] and volume_filter and price < ema34_12h_aligned[i]:
+            # Short: price crosses below KAMA + volume + weekly downtrend
+            elif close[i] < kama[i] and close[i-1] >= kama[i-1] and volume_filter and price < ema34_weekly_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below Donchian low or ATR-based stop
-            if close[i] < donch_low_20[i] or close[i] < close[i-1] - 1.5 * atr:
+            # Exit: price crosses below KAMA or volatility filter fails
+            if close[i] < kama[i] or volume[i] < 0.7 * np.mean(volume[max(0, i-20):i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above Donchian high or ATR-based stop
-            if close[i] > donch_high_20[i] or close[i] > close[i-1] + 1.5 * atr:
+            # Exit: price crosses above KAMA or volatility filter fails
+            if close[i] > kama[i] or volume[i] < 0.7 * np.mean(volume[max(0, i-20):i]):
                 signals[i] = 0.0
                 position = 0
             else:
