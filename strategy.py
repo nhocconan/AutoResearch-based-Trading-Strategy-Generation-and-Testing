@@ -1,21 +1,22 @@
+# Tested by: 2025-06-03
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above 20-period high with price above weekly EMA50 and volume spike (>2x average).
-# Short when price breaks below 20-period low with price below weekly EMA50 and volume spike.
-# Weekly EMA50 filters counter-trend trades, reducing whipsaw in sideways markets.
+# Hypothesis: 12h Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Long when price breaks above 20-period high with price above 1w EMA20 and volume spike (>2.0x average).
+# Short when price breaks below 20-period low with price below 1w EMA20 and volume spike.
+# Uses 1w EMA20 as trend filter to avoid counter-trend trades, reducing whipsaw in sideways markets.
 # Volume confirmation ensures breakouts have institutional participation.
 # Target: 12-37 trades/year per symbol (~50-150 total over 4 years).
-name = "6h_Donchian20_WeeklyEMA50_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA20_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,17 +24,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 calculation
+    # Get weekly data for EMA20 calculation
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate EMA50 on weekly close
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA20 on weekly close
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align weekly EMA50 to 6h timeframe (wait for weekly close)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1w EMA20 to 12h timeframe (wait for weekly close)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate Donchian channels (20-period high/low)
+    # Calculate Donchian(20) channels on 12h data
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -43,19 +44,19 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Need Donchian and EMA data
+    start_idx = max(20, 20)  # Need Donchian and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_20_aligned[i]) or np.isnan(high_roll[i]) or 
+            np.isnan(low_roll[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        donch_high = high_roll[i]
-        donch_low = low_roll[i]
-        ema_trend = ema_50_aligned[i]
+        upper_channel = high_roll[i]
+        lower_channel = low_roll[i]
+        ema_trend = ema_20_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
@@ -63,26 +64,26 @@ def generate_signals(prices):
         volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Enter long: price breaks above Donchian high AND above weekly EMA50
-            if price > donch_high and price > ema_trend and volume_confirmed:
+            # Enter long: price breaks above upper channel AND above 1w EMA20
+            if price > upper_channel and price > ema_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low AND below weekly EMA50
-            elif price < donch_low and price < ema_trend and volume_confirmed:
+            # Enter short: price breaks below lower channel AND below 1w EMA20
+            elif price < lower_channel and price < ema_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price breaks below Donchian low or below weekly EMA50
-            if price < donch_low or price < ema_trend:
+            # Exit long when price breaks below lower channel or below 1w EMA20
+            if price < lower_channel or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price breaks above Donchian high or above weekly EMA50
-            if price > donch_high or price > ema_trend:
+            # Exit short when price breaks above upper channel or above 1w EMA20
+            if price > upper_channel or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
