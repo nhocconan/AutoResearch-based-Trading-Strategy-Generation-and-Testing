@@ -1,21 +1,15 @@
-# 4h_HighLow_Pullback_Strategy_v1
-# Hypothesis: Price tends to pull back to recent highs/lows during trends. Enter on pullbacks to 4h swing points
-# in the direction of the 1-week trend. Use volume confirmation to avoid false breakouts.
-# Works in bull/bear by following higher timeframe trend and using mean-reversion entries.
-# Target: 20-40 trades/year per symbol with clear entry/exit rules.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_HighLow_Pullback_Strategy_v1"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_Volume_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,75 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Get 1w data for Chop filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 50-period EMA on 1w close for trend filter
+    # Calculate Camarilla pivot levels from 1d OHLC
+    # Pivot = (H + L + C) / 3
+    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    r1 = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.1 / 12
+    s1 = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.1 / 12
+    
+    # Calculate Chop(14) on 1w high/low/close
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_1w.sum() / (highest_high - lowest_low)) / np.log10(14)
     
-    # Calculate 4-period EMA on 4h for entry timing
-    ema_4_4h = pd.Series(close).ewm(span=4, adjust=False, min_periods=4).mean().values
-    
-    # Calculate rolling max/min for swing points (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align indicators to 1d timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=0)
     
     # Volume average for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 30  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_4_4h[i]) or 
-            np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
             
-        # Trend filter: 1-week EMA50 direction
-        if i >= 51:
-            trend_up = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
-            trend_down = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]
-        else:
-            trend_up = trend_down = False
+        # Chop filter: avoid trending markets (Chop < 38.2) and extreme chop (Chop > 61.8)
+        # Trade only in moderate chop: 38.2 <= Chop <= 61.8
+        chop_filter = (chop_aligned[i] >= 38.2) and (chop_aligned[i] <= 61.8)
         
         # Volume confirmation: current volume > 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        volume_filter = volume[i] > 1.5 * vol_avg[i]
         
-        # Entry conditions
         if position == 0:
-            # Long: pullback to recent low in uptrend
-            if (trend_up and vol_confirm and 
-                close[i] <= low_min_20[i] * 1.005 and  # Within 0.5% of 20-period low
-                ema_4_4h[i] > ema_4_4h[i-1]):  # Short-term momentum turning up
+            # Long when price crosses above S1 with volume and chop filter
+            if (close[i] > s1_aligned[i] and 
+                chop_filter and 
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: pullback to recent high in downtrend
-            elif (trend_down and vol_confirm and 
-                  close[i] >= high_max_20[i] * 0.995 and  # Within 0.5% of 20-period high
-                  ema_4_4h[i] < ema_4_4h[i-1]):  # Short-term momentum turning down
+            # Short when price crosses below R1 with volume and chop filter
+            elif (close[i] < r1_aligned[i] and 
+                  chop_filter and 
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long exit: price reaches recent high or momentum fails
-            if (close[i] >= high_max_20[i] * 0.995 or  # Near 20-period high
-                ema_4_4h[i] < ema_4_4h[i-1]):  # Short-term momentum turns down
+            # Long position: exit when price crosses below pivot
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short exit: price reaches recent low or momentum fails
-            if (close[i] <= low_min_20[i] * 1.005 or  # Near 20-period low
-                ema_4_4h[i] > ema_4_4h[i-1]):  # Short-term momentum turns up
+            # Short position: exit when price crosses above pivot
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
