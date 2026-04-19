@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_ADX_v1"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Volume_ADX_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,41 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d ATR(14) for Camarilla width
-    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate weekly ATR(14) for Camarilla width
+    tr1 = np.maximum(high_1w[1:], close_1w[:-1]) - np.minimum(low_1w[1:], close_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels using previous day's data
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    # Calculate weekly Camarilla levels using previous week's data
+    prev_close = np.concatenate([[np.nan], close_1w[:-1]])
+    prev_high = np.concatenate([[np.nan], high_1w[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1w[:-1]])
     
     camarilla_H4 = prev_close + 1.1/2 * (prev_high - prev_low)
     camarilla_L4 = prev_close - 1.1/2 * (prev_high - prev_low)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    # Align Camarilla levels to daily timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_L4)
     
-    # ADX(14) calculation on 4h data
-    tr4 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
-    tr4 = np.maximum(tr4, np.abs(high[1:] - close[:-1]))
-    tr4 = np.maximum(tr4, np.abs(low[1:] - close[:-1]))
-    tr4 = np.concatenate([[np.nan], tr4])
+    # ADX(14) calculation on daily data
+    tr_d = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
+    tr_d = np.maximum(tr_d, np.abs(high[1:] - close[:-1]))
+    tr_d = np.maximum(tr_d, np.abs(low[1:] - close[:-1]))
+    tr_d = np.concatenate([[np.nan], tr_d])
     
     plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
     minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
     
-    tr14 = pd.Series(tr4).rolling(window=14, min_periods=14).sum().values
+    tr14 = pd.Series(tr_d).rolling(window=14, min_periods=14).sum().values
     plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
     minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
