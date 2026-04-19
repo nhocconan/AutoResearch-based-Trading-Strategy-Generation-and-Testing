@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot R1/S1 Breakout with Volume Confirmation and Daily Trend Filter
-# Uses 12h as primary timeframe with daily pivot levels and 1d EMA34 trend filter
-# Long when: price breaks above R1 with volume > 1.5x average and above 1d EMA34
-# Short when: price breaks below S1 with volume > 1.5x average and below 1d EMA34
-# Camarilla levels provide institutional support/resistance; volume confirms participation
-# Target: 15-35 trades/year per symbol (~60-140 total over 4 years)
+# Hypothesis: 4h price action combined with 12h momentum and volume confirmation
+# Uses price crossing above/below 12h EMA34 with volume spike (>2x average) for entry
+# Exit when price crosses back or volume drops
+# Designed to capture strong momentum moves in both bull and bear markets
+# Target: 20-40 trades/year per symbol (~80-160 total over 4 years)
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_12hEMA34_VolumeBreakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,78 +23,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate daily Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # R1 = C + (H-L) * 1.1/12
-    r1 = close_1d + range_1d * 1.1 / 12
-    # S1 = C - (H-L) * 1.1/12
-    s1 = close_1d - range_1d * 1.1 / 12
+    # Calculate 12h EMA34
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align daily levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 2.0x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need volume MA and EMA data
+    start_idx = 30  # Need volume MA data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma_30[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_trend = ema_34_aligned[i]
-        vol_ma = vol_ma_20[i]
+        ema_trend = ema_34_12h_aligned[i]
+        vol_ma = vol_ma_30[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Enter long: price breaks above R1 with volume and above 1d EMA34
-            if price > r1_val and volume_confirmed and price > ema_trend:
+            # Enter long: price crosses above 12h EMA34 with volume
+            if price > ema_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 with volume and below 1d EMA34
-            elif price < s1_val and volume_confirmed and price < ema_trend:
+            # Enter short: price crosses below 12h EMA34 with volume
+            elif price < ema_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns to pivot or below 1d EMA34
-            if price < pivot_aligned[i] or price < ema_trend:
+            # Exit long when price crosses below 12h EMA34
+            if price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns to pivot or above 1d EMA34
-            if price > pivot_aligned[i] or price > ema_trend:
+            # Exit short when price crosses above 12h EMA34
+            if price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
