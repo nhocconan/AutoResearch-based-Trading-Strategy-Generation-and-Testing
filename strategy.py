@@ -1,14 +1,24 @@
-# 6h_RSI_Momentum_Volume_Breakout
-# Uses RSI momentum + volume spike + 1-day trend filter for breakout entries
-# Works in both bull and bear markets by capturing momentum bursts with confirmation
-# Target: 20-30 trades/year per symbol
-name = "6h_RSI_Momentum_Volume_Breakout"
-timeframe = "6h"
+# #!/usr/bin/env python3
+# Strategy: 12h_1w_Camarilla_Pivot_R1S1_Breakout_Volume
+# Hypothesis: Weekly Camarilla pivot levels (R1/S1) act as strong support/resistance.
+# Long when price breaks above weekly R1 with volume > 1.5x daily average volume.
+# Short when price breaks below weekly S1 with volume > 1.5x daily average volume.
+# Exit when price crosses back through the Camarilla pivot point (CP).
+# Uses weekly timeframe for structure to avoid whipsaw, daily volume for confirmation.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+# Works in bull markets (breakouts continue) and bear markets (reversions at weak levels).
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "12h_1w_Camarilla_Pivot_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,75 +26,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter and volume average
+    # Get weekly data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels from previous week
+    # Formula: CP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    # We use the previous week's values (shifted by 1)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    cp = (high_1w + low_1w + close_1w) / 3
+    r1 = close_1w + (high_1w - low_1w) * 1.1 / 12
+    s1 = close_1w - (high_1w - low_1w) * 1.1 / 12
+    
+    # Align to 12h timeframe (these levels are valid for the entire week after it closes)
+    cp_aligned = align_htf_to_ltf(prices, df_1w, cp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Get daily average volume for confirmation (20-day average)
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1-day EMA200 for trend filter
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Calculate 1-day average volume (20-period) for volume spike detection
     vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Calculate 6-period RSI for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/6, adjust=False, min_periods=6).mean()
-    avg_loss = loss.ewm(alpha=1/6, adjust=False, min_periods=6).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Calculate 6-period price rate of change for momentum confirmation
-    roc = ((close - np.roll(close, 6)) / np.roll(close, 6)) * 100
-    roc[:6] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # Ensure EMA200 and ROC are ready
+    start_idx = max(20, 1)  # Need volume MA and at least one week of data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(roc[i])):
+        if (np.isnan(cp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema200 = ema200_1d_aligned[i]
         vol_ma = vol_ma_1d_aligned[i]
         vol = volume[i]
-        rsi_val = rsi[i]
-        roc_val = roc[i]
+        cp_val = cp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
-        # Trend filter: only long in uptrend (price > EMA200), only short in downtrend (price < EMA200)
-        uptrend = price > ema200
-        downtrend = price < ema200
+        # Volume confirmation: current volume > 1.5x daily average
+        volume_confirm = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long entry: RSI > 50 (bullish momentum) + ROC > 0 (positive momentum) + volume spike + uptrend
-            if rsi_val > 50 and roc_val > 0 and vol > 2.0 * vol_ma and uptrend:
+            # Long entry: break above weekly R1 with volume confirmation
+            if price > r1_val and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI < 50 (bearish momentum) + ROC < 0 (negative momentum) + volume spike + downtrend
-            elif rsi_val < 50 and roc_val < 0 and vol > 2.0 * vol_ma and downtrend:
+            # Short entry: break below weekly S1 with volume confirmation
+            elif price < s1_val and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI < 40 (loss of momentum) or trend reversal
-            if rsi_val < 40 or price < ema200:
+            # Long exit: price crosses back below Camarilla pivot point
+            if price < cp_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI > 60 (loss of bearish momentum) or trend reversal
-            if rsi_val > 60 or price > ema200:
+            # Short exit: price crosses back above Camarilla pivot point
+            if price > cp_val:
                 signals[i] = 0.0
                 position = 0
             else:
