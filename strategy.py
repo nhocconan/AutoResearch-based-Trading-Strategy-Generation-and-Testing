@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1_S1_Breakout_Volume_EMA34Filter"
-timeframe = "12h"
+name = "4h_1d_Ichimoku_Kumo_Twist_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,29 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Pivot points and EMA
+    # Get 1d data for Ichimoku
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate previous day's Pivot, R1, S1 (classic formula)
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Align daily pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Get 1d EMA34 for trend filter (using daily close)
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Senkou Span B (Leading Span B): (52-period high + low)/2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 4h
+    tenkan_a = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_a = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_a = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_a = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Kumo (Cloud) top and bottom
+    kumo_top = np.maximum(senkou_a_a, senkou_b_a)
+    kumo_bottom = np.minimum(senkou_a_a, senkou_b_a)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,10 +56,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)  # Ensure enough data for indicators
+    start_idx = max(60, 20)  # Ensure enough data
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(tenkan_a[i]) or np.isnan(kijun_a[i]) or np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -61,31 +70,31 @@ def generate_signals(prices):
         # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
-        # Trend filter: price relative to daily EMA34
-        price_above_ema = price > ema34_1d_aligned[i]
-        price_below_ema = price < ema34_1d_aligned[i]
+        # Kumo twist: Senkou A crossing above/below Senkou B
+        kumo_twist_up = senkou_a_a[i] > senkou_b_a[i] and senkou_a_a[i-1] <= senkou_b_a[i-1]
+        kumo_twist_down = senkou_a_a[i] < senkou_b_a[i] and senkou_a_a[i-1] >= senkou_b_a[i-1]
         
         if position == 0:
-            # Long: price breaks above R1 with volume and uptrend (price > EMA34)
-            if price > r1_aligned[i] and volume_ok and price_above_ema:
+            # Long: price above cloud, Tenkan > Kijun, Kumo twisting up, volume
+            if price > kumo_top[i] and tenkan_a[i] > kijun_a[i] and kumo_twist_up and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and downtrend (price < EMA34)
-            elif price < s1_aligned[i] and volume_ok and price_below_ema:
+            # Short: price below cloud, Tenkan < Kijun, Kumo twisting down, volume
+            elif price < kumo_bottom[i] and tenkan_a[i] < kijun_a[i] and kumo_twist_down and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below S1 (mean reversion to opposite level)
-            if price < s1_aligned[i]:
+            # Exit: price drops below cloud bottom or Tenkan < Kijun
+            if price < kumo_bottom[i] or tenkan_a[i] < kijun_a[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above R1 (mean reversion to opposite level)
-            if price > r1_aligned[i]:
+            # Exit: price rises above cloud top or Tenkan > Kijun
+            if price > kumo_top[i] or tenkan_a[i] > kijun_a[i]:
                 signals[i] = 0.0
                 position = 0
             else:
