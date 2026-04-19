@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot R1/S1 breakout with weekly volume confirmation and 1d ADX trend filter.
-# Long when price breaks above R1 AND weekly volume > 1.8x 4-week average AND ADX > 25 (trending market)
-# Short when price breaks below S1 AND weekly volume > 1.8x 4-week average AND ADX > 25
-# Exit when price crosses back through the Camarilla midpoint (close of previous day)
-# Uses Camarilla for intraday pivot structure, weekly volume for conviction, ADX to avoid chop.
-# Target: 15-25 trades/year per symbol.
-name = "12h_Camarilla_R1S1_Volume_ADXFilter"
-timeframe = "12h"
+# Hypothesis: 4h Williams %R mean reversion with weekly trend filter and volume confirmation.
+# Long when weekly trend up (price > weekly EMA50) AND Williams %R(14) < -80 (oversold) AND volume > 1.3x daily average volume
+# Short when weekly trend down (price < weekly EMA50) AND Williams %R(14) > -20 (overbought) AND volume > 1.3x daily average volume
+# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short)
+# Williams %R identifies overextended moves, weekly EMA50 filters trend direction, volume confirms strength.
+# Target: 20-30 trades/year per symbol.
+name = "4h_WilliamsR_WeeklyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,103 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for volume confirmation
+    # Get weekly data for trend filter (EMA50)
     df_weekly = get_htf_data(prices, '1w')
-    vol_ma_weekly = pd.Series(df_weekly['volume']).rolling(window=4, min_periods=4).mean().values
-    vol_ma_weekly_aligned = align_htf_to_ltf(prices, df_weekly, vol_ma_weekly)
+    # Calculate EMA50 on weekly close
+    weekly_close = df_weekly['close'].values
+    ema50_weekly = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     
-    # Get daily data for Camarilla pivot and ADX
+    # Get daily Williams %R (14-period)
     df_daily = get_htf_data(prices, '1d')
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_daily['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_daily['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - df_daily['close'].values) / (highest_high - lowest_low)) * -100
+    williams_r_aligned = align_htf_to_ltf(prices, df_daily, williams_r)
     
-    # Calculate Camarilla pivot levels (based on previous day)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C, H, L are from previous day
-    prev_close = df_daily['close'].shift(1).values
-    prev_high = df_daily['high'].shift(1).values
-    prev_low = df_daily['low'].shift(1).values
-    camarilla_mid = prev_close  # Using close as pivot point
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_mid_aligned = align_htf_to_ltf(prices, df_daily, camarilla_mid)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s1)
-    
-    # Calculate ADX(14) on daily timeframe for trend filter
-    # True Range
-    tr1 = df_daily['high'] - df_daily['low']
-    tr2 = np.abs(df_daily['high'] - df_daily['close'].shift(1))
-    tr3 = np.abs(df_daily['low'] - df_daily['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = df_daily['high'].diff(1).values
-    down_move = df_daily['low'].diff(1).values
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    # Get daily average volume for confirmation
+    vol_ma_daily = pd.Series(df_daily['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 50)  # Ensure indicators are ready
+    start_idx = max(50, 14, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vol_ma_weekly_aligned[i]) or 
-            np.isnan(camarilla_mid_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(ema50_weekly_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma_daily_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ma = vol_ma_weekly_aligned[i]
+        wr = williams_r_aligned[i]
+        vol_ma = vol_ma_daily_aligned[i]
         vol = volume[i]
-        mid = camarilla_mid_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        adx_val = adx_aligned[i]
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        trend_filter = adx_val > 25
+        # Trend filter: weekly EMA50 direction
+        trend_up = price > ema50_weekly_aligned[i]
+        trend_down = price < ema50_weekly_aligned[i]
         
         if position == 0:
-            # Long entry: break above R1 + volume spike + trend
-            if price > r1 and vol > 1.8 * vol_ma and trend_filter:
+            # Long entry: weekly trend up + Williams %R oversold + volume confirmation
+            if trend_up and wr < -80 and vol > 1.3 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below S1 + volume spike + trend
-            elif price < s1 and vol > 1.8 * vol_ma and trend_filter:
+            # Short entry: weekly trend down + Williams %R overbought + volume confirmation
+            elif trend_down and wr > -20 and vol > 1.3 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below midpoint
-            if price < mid:
+            # Long exit: Williams %R crosses back above -50
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above midpoint
-            if price > mid:
+            # Short exit: Williams %R crosses back below -50
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
