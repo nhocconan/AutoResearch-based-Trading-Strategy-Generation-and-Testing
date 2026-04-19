@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Bollinger Band squeeze breakout with 1d EMA50 trend filter and volume confirmation.
-# Bollinger Band squeeze identifies low volatility periods preceding explosive moves.
-# We trade breakouts in the direction of the weekly trend (EMA50) with volume confirmation.
-# Works in bull/bear markets: avoids false breakouts in ranging markets, captures true breakouts.
-# Target: 7-25 trades/year per symbol.
-name = "1d_Weekly_BB_Squeeze_EMA50_Volume_Breakout"
-timeframe = "1d"
+# Hypothesis: 12h Donchian breakout with 1d EMA200 trend filter and volume confirmation.
+# Donchian channels identify trend strength via breakouts of recent high/low.
+# We trade breakouts in the direction of the long-term trend (EMA200) to avoid counter-trend trades.
+# Volume confirmation ensures breakouts have conviction. Works in bull/bear markets.
+# Target: 15-35 trades/year per symbol.
+name = "12h_Donchian20_EMA200_Volume_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,28 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on weekly
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA200 on daily
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Bollinger Bands (20, 2) on 1d
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_20 + (bb_std * std_20)
-    lower_band = sma_20 - (bb_std * std_20)
-    bb_width = (upper_band - lower_band) / sma_20  # Normalized bandwidth
+    # Donchian Channel (20-period) on 12h
+    dc_period = 20
+    upper_channel = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
+    lower_channel = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
     
-    # Bollinger Band squeeze detection: bandwidth below 20-period mean
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_condition = bb_width < bb_width_ma  # Bandwidth below average = squeeze
-    
-    # Align weekly EMA50 to 1d
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d EMA200 to 12h
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,53 +43,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 50, 20)  # Ensure BB, EMA50, and volume MA are ready
+    start_idx = max(dc_period, 200, 20)  # Ensure Donchian, EMA200, and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(bb_width[i]) or np.isnan(bb_width_ma[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        ema_50_val = ema_50_aligned[i]
+        upper = upper_channel[i]
+        lower = lower_channel[i]
+        ema_200_val = ema_200_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
-        is_squeeze = squeeze_condition[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
         # Breakout conditions
-        bullish_breakout = price > upper  # Price breaks above upper band
-        bearish_breakout = price < lower  # Price breaks below lower band
+        bullish_breakout = price > upper  # Price breaks above upper channel
+        bearish_breakout = price < lower  # Price breaks below lower channel
         
         if position == 0:
-            # Look for entry after Bollinger Band squeeze, in direction of weekly trend
-            if is_squeeze and bullish_breakout and (price > ema_50_val) and volume_confirmed:
+            # Look for breakout in direction of long-term trend (EMA200)
+            if bullish_breakout and (price > ema_200_val) and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            elif is_squeeze and bearish_breakout and (price < ema_50_val) and volume_confirmed:
+            elif bearish_breakout and (price < ema_200_val) and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns to middle band (mean reversion) or volatility expands
-            middle_band = sma_20[i]
-            if price < middle_band:  # Return to mean
+            # Exit long when price returns to lower channel (mean reversion)
+            if price < lower_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns to middle band
-            middle_band = sma_20[i]
-            if price > middle_band:  # Return to mean
+            # Exit short when price returns to upper channel
+            if price > upper_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
