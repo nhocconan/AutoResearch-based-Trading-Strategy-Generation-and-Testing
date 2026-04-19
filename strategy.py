@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 12h ADX trend filter.
-# Long when: price breaks above Donchian(20) high, volume > 1.2x 20-period avg, 12h ADX > 25 (trending)
-# Short when: price breaks below Donchian(20) low, volume > 1.2x 20-period avg, 12h ADX > 25
-# Exit when price crosses the Donchian midpoint or ADX < 20 (range).
-# Designed for ~25-40 trades/year per symbol.
-name = "4h_Donchian20_Volume_ADX"
-timeframe = "4h"
+# Hypothesis: 1d momentum with 1w trend filter and 1d volatility filter.
+# Long when: 1d RSI(14) > 55, price > 1w EMA(34), and 1d ATR ratio < 0.7 (low volatility)
+# Short when: 1d RSI(14) < 45, price < 1w EMA(34), and 1d ATR ratio < 0.7
+# Exit when RSI crosses back to 50 or volatility increases.
+# Designed for ~10-20 trades/year per symbol to avoid fee drag.
+name = "1d_RSI_EMA34_ATRFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,91 +20,80 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
+    # 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
-    # Volume filter: 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d data for ATR volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate ADX(14) on 12h
-    # True Range
-    tr1 = np.abs(high_12h - low_12h)
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # Calculate ATR(14) on 1d
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Smooth TR, DM+, DM-
-    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 10-period SMA of ATR for ratio
+    atr_ma_10 = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
+    atr_ratio = atr_1d / (atr_ma_10 + 1e-10)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
+    # 1d RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(ema_1w_34_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        donch_high_val = donch_high[i]
-        donch_low_val = donch_low[i]
-        donch_mid_val = donch_mid[i]
-        adx_val = adx_aligned[i]
+        ema_1w = ema_1w_34_aligned[i]
+        atr_ratio_val = atr_ratio_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: break above Donchian high, volume > 1.2x avg, ADX > 25 (trending)
-            if price > donch_high_val and vol > 1.2 * vol_avg[i] and adx_val > 25:
+            # Long: RSI > 55, price above 1w EMA34, low volatility (ATR ratio < 0.7)
+            if rsi_val > 55 and price > ema_1w and atr_ratio_val < 0.7:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low, volume > 1.2x avg, ADX > 25
-            elif price < donch_low_val and vol > 1.2 * vol_avg[i] and adx_val > 25:
+            # Short: RSI < 45, price below 1w EMA34, low volatility (ATR ratio < 0.7)
+            elif rsi_val < 45 and price < ema_1w and atr_ratio_val < 0.7:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below Donchian midpoint or ADX < 20 (range)
-            if price < donch_mid_val or adx_val < 20:
+            # Long exit: RSI < 50 or volatility increases (ATR ratio > 1.3)
+            if rsi_val < 50 or atr_ratio_val > 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Donchian midpoint or ADX < 20
-            if price > donch_mid_val or adx_val < 20:
+            # Short exit: RSI > 50 or volatility increases (ATR ratio > 1.3)
+            if rsi_val > 50 or atr_ratio_val > 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
