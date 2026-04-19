@@ -3,20 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1d ADX and 6h Bollinger Bands squeeze
-# ADX > 25 indicates trending market (works in bull/bear), Bollinger Band width < 50th percentile indicates low volatility/squeeze
-# Enter long when price breaks above upper BB in trending regime, short when breaks below lower BB
-# Exit when BB width expands above 70th percentile (end of squeeze) or opposite signal
-# This captures breakouts from low volatility periods in trending markets, which works in both bull and bear regimes
-# Target: 50-150 total trades over 4 years (12-37/year)
-
-name = "6h_ADX_BB_Squeeze_Breakout_v1"
-timeframe = "6h"
+name = "12h_Pivot_R1S1_Breakout_VolumeTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,103 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX calculation (once before loop)
+    # Get daily data for pivot calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ADX (14-period) on daily data
+    # Daily high, low, close for Camarilla pivot calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
+    # Calculate daily pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate R1 and S1 using Camarilla formula
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align daily pivot levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Daily ATR for volatility filter (14-period)
     tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
     tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
     tr1 = np.concatenate([[np.nan], tr1])
+    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # Volume confirmation: current volume > 2.0x 20-period average (12h) - tighter filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Smoothed values
-    tr14 = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm14 / tr14
-    minus_di = 100 * minus_dm14 / tr14
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.absolute(plus_di - minus_di) / (plus_di + minus_di), 0.0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align daily ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Bollinger Bands (20, 2) on 6h data
+    # Trend filter: price above/below 34-period EMA (faster than 50)
     close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
-    
-    # Bollinger Band width percentile (50-period lookback for regime)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
+    ema_34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(bb_middle[i]) or 
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(bb_width_percentile[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_34[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_aligned[i]
-        bb_width_pct = bb_width_percentile[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        atr = atr_14_1d_aligned[i]
+        ema = ema_34[i]
         
-        # Trending market filter: ADX > 25
-        is_trending = adx_val > 25
-        
-        # Low volatility squeeze: BB width below 50th percentile
-        is_squeeze = bb_width_pct < 0.5
-        
-        # High volatility expansion: BB width above 70th percentile (exit condition)
-        is_expansion = bb_width_pct > 0.7
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Enter long: break above upper BB in trending squeeze
-            if price > bb_upper[i] and is_trending and is_squeeze:
+            # Long: break above R1 with volume and above EMA
+            if price > r1 and volume_confirmed and price > ema:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower BB in trending squeeze
-            elif price < bb_lower[i] and is_trending and is_squeeze:
+            # Short: break below S1 with volume and below EMA
+            elif price < s1 and volume_confirmed and price < ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: BB expansion or price below lower BB
-            if is_expansion or price < bb_lower[i]:
+            # Exit: price below pivot or EMA
+            if price < pivot or price < ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: BB expansion or price above upper BB
-            if is_expansion or price > bb_upper[i]:
+            # Exit: price above pivot or EMA
+            if price > pivot or price > ema:
                 signals[i] = 0.0
                 position = 0
             else:
