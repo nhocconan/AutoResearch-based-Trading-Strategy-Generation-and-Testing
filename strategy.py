@@ -1,20 +1,15 @@
-# 6h_1w_Pivot_Zone_Breakout
-# Hypothesis: Weekly pivot levels act as strong support/resistance zones. Breakouts above R1 or below S1 with volume confirmation capture institutional order flow.
-# Works in both bull/bear markets: In bull markets, breaks above R1 continue upward; in bear markets, breaks below S1 continue downward.
-# Uses weekly pivots (more stable than daily) to reduce noise. Targets 15-30 trades/year to avoid fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_Pivot_Zone_Breakout"
-timeframe = "6h"
+name = "12h_1d_RSI_MeanReversion_With_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,80 +17,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # R2 = P + (H - L)
-    # S2 = P - (H - L)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
+    # Calculate 1d RSI (14-period) with Wilder's smoothing
+    delta = np.diff(close_1d)
+    delta = np.insert(delta, 0, np.nan)
+    up = np.where(delta > 0, delta, 0)
+    down = np.where(delta < 0, -delta, 0)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    rsi_len = 14
+    avg_up = np.full_like(close_1d, np.nan)
+    avg_down = np.full_like(close_1d, np.nan)
     
-    # Volume filter: current volume > 1.8x 24-period average (4 days worth)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Initial simple average
+    if len(up) >= rsi_len:
+        avg_up[rsi_len-1] = np.nanmean(up[1:rsi_len+1])
+        avg_down[rsi_len-1] = np.nanmean(down[1:rsi_len+1])
+        
+        # Wilder's smoothing
+        for i in range(rsi_len, len(up)):
+            avg_up[i] = (avg_up[i-1] * (rsi_len-1) + up[i]) / rsi_len
+            avg_down[i] = (avg_down[i-1] * (rsi_len-1) + down[i]) / rsi_len
+    
+    rs = np.divide(avg_up, avg_down, out=np.full_like(avg_up, np.nan), where=avg_down!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Align RSI to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate 1d volume moving average (20-period)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Calculate 12h price moving averages for trend filter
+    close_s = pd.Series(close)
+    ma_fast = close_s.ewm(span=25, adjust=False, min_periods=25).mean().values
+    ma_slow = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = max(50, 25)
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or \
-           np.isnan(s1_1w_aligned[i]) or np.isnan(vol_ma_24[i]):
+        if np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or \
+           np.isnan(ma_fast[i]) or np.isnan(ma_slow[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_24[i]
+        rsi = rsi_1d_aligned[i]
+        vol_ma = vol_ma_1d_aligned[i]
         
-        # Volume filter
-        volume_ok = vol > 1.8 * vol_ma
+        # Volume filter: current volume > 1.3x 20-day average
+        volume_ok = vol > 1.3 * vol_ma
         
-        # Get current weekly levels
-        pivot = pivot_1w_aligned[i]
-        r1 = r1_1w_aligned[i]
-        s1 = s1_1w_aligned[i]
-        r2 = r2_1w_aligned[i]
-        s2 = s2_1w_aligned[i]
+        # Trend filter: bullish when fast MA > slow MA
+        bullish_trend = ma_fast[i] > ma_slow[i]
+        bearish_trend = ma_fast[i] < ma_slow[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume, target R2
-            if price > r1 and volume_ok:
+            # Long: RSI oversold (<30) in bullish trend with volume confirmation
+            if rsi < 30 and bullish_trend and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume, target S2
-            elif price < s1 and volume_ok:
+            # Short: RSI overbought (>70) in bearish trend with volume confirmation
+            elif rsi > 70 and bearish_trend and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long: exit when price reaches R2 or falls back below pivot
-            if price >= r2 or price < pivot:
+            # Exit: RSI returns to neutral (50) or trend changes to bearish
+            if rsi >= 50 or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short: exit when price reaches S2 or rises back above pivot
-            if price <= s2 or price > pivot:
+            # Exit: RSI returns to neutral (50) or trend changes to bullish
+            if rsi <= 50 or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
