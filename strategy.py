@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with daily volume confirmation and 1d ATR filter.
+# Hypothesis: 4h Donchian breakout with daily volume confirmation and volatility regime filter.
 # Long when price breaks above 20-period Donchian high AND volume > 1.5x daily average volume AND ATR(14) < ATR(50) (low volatility regime)
 # Short when price breaks below 20-period Donchian low AND volume > 1.5x daily average volume AND ATR(14) < ATR(50)
 # Exit when price crosses back through the Donchian midpoint
 # Uses Donchian for trend following structure, volume for confirmation, ATR regime filter to avoid chop.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
-name = "12h_Donchian_Volume_ATRRegime"
-timeframe = "12h"
+# Target: 20-30 trades/year per symbol.
+name = "4h_Donchian_Volume_ATRRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +32,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    # Align ATR arrays to 12h timeframe
+    # Align ATR arrays to 4h timeframe
     atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
     atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
     
@@ -40,7 +40,7 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_mid = (high_roll + low_roll) / 2
