@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA direction with weekly RSI filter and volume confirmation.
-# Long when KAMA(14) is rising (bullish) and weekly RSI(14) > 50 with volume > 1.5x average.
-# Short when KAMA(14) is falling (bearish) and weekly RSI(14) < 50 with volume > 1.5x average.
-# Uses weekly RSI to filter out counter-trend trades and avoid whipsaw in sideways markets.
-# Volume confirmation ensures momentum has institutional participation.
-# Target: 15-25 trades/year per symbol (~60-100 total over 4 years).
-name = "1d_KAMA14_WeeklyRSI_Volume"
-timeframe = "1d"
+# Hypothesis: 6h Ehlers Fisher Transform with daily trend filter and volume confirmation.
+# Fisher Transform (period=9) catches reversals in overbought/oversold conditions.
+# Long when Fisher crosses above -1.5 AND price above daily EMA34 AND volume spike (>1.8x average).
+# Short when Fisher crosses below +1.5 AND price below daily EMA34 AND volume spike.
+# Uses daily EMA34 as trend filter to avoid counter-trend trades.
+# Volume confirmation ensures reversals have institutional participation.
+# Target: 12-37 trades/year per symbol (~50-150 total over 4 years).
+name = "6h_FisherTransform_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,85 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get daily data for EMA34 calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly RSI(14)
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Calculate EMA34 on daily close
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align weekly RSI to daily timeframe (wait for weekly close)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Align 1d EMA34 to 6h timeframe (wait for daily close)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily KAMA(14)
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, k=14, prepend=close[:14]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])).reshape(-1, 14), axis=1)
-    er = change / (volatility + 1e-10)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate Fisher Transform on 6h price (period=9)
+    # Fisher Transform formula: 0.5 * ln((1+X)/(1-X)) where X is normalized price
+    high_low = high - low
+    highest_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    lowest_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Avoid division by zero
+    range_hl = highest_high - lowest_low
+    range_hl = np.where(range_hl == 0, 1, range_hl)
+    
+    # Normalize price to [-1, 1] range
+    value = 2 * ((close - lowest_low) / range_hl) - 1
+    value = np.clip(value, -0.999, 0.999)  # Prevent log(0)
+    
+    # Fisher Transform
+    fisher = 0.5 * np.log((1 + value) / (1 - value))
+    # Smooth with 2-period EMA as per Ehlers
+    fisher_smooth = pd.Series(fisher).ewm(span=2, adjust=False).values
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20)  # Need KAMA and volume MA data
+    start_idx = max(20, 34, 9)  # Need volume MA, EMA, and Fisher data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(vol_ma_20[i]) or i < 14):  # KAMA needs at least 14 periods
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(fisher_smooth[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi_val = rsi_1w_aligned[i]
-        kama_val = kama[i]
-        kama_prev = kama[i-1]
+        ema_trend = ema_34_aligned[i]
+        fisher_val = fisher_smooth[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 1.8 * vol_ma
         
-        # KAMA direction: rising if current > previous
-        kama_rising = kama_val > kama_prev
-        kama_falling = kama_val < kama_prev
+        # Fisher thresholds for reversal signals
+        fisher_long_signal = fisher_val > -1.5
+        fisher_short_signal = fisher_val < 1.5
         
         if position == 0:
-            # Enter long: KAMA rising AND weekly RSI > 50 AND volume confirmed
-            if kama_rising and rsi_val > 50 and volume_confirmed:
+            # Enter long: Fisher crosses above -1.5 AND price above daily EMA34
+            if (i > start_idx and 
+                fisher_smooth[i-1] <= -1.5 and fisher_val > -1.5 and  # Cross above -1.5
+                price > ema_trend and volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA falling AND weekly RSI < 50 AND volume confirmed
-            elif kama_falling and rsi_val < 50 and volume_confirmed:
+            # Enter short: Fisher crosses below +1.5 AND price below daily EMA34
+            elif (i > start_idx and 
+                  fisher_smooth[i-1] >= 1.5 and fisher_val < 1.5 and  # Cross below 1.5
+                  price < ema_trend and volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when KAMA falls or weekly RSI < 50
-            if kama_falling or rsi_val < 50:
+            # Exit long when Fisher crosses below +1.5 or price below daily EMA34
+            if (fisher_val < 1.5 or price < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when KAMA rises or weekly RSI > 50
-            if kama_rising or rsi_val > 50:
+            # Exit short when Fisher crosses above -1.5 or price above daily EMA34
+            if (fisher_val > -1.5 or price > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
