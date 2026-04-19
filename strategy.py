@@ -1,88 +1,19 @@
+# 1d_Weekly_KAMA_RSI_Trend_Follow
+# Hypothesis: Use weekly KAMA direction (trend) with daily RSI for entries.
+# In weekly bullish regime (KAMA rising): go long when daily RSI crosses above 50.
+# In weekly bearish regime (KAMA falling): go short when daily RSI crosses below 50.
+# Weekly timeframe ensures fewer trades (7-25/year), reducing fee drag.
+# RSI provides timely entries within the trend. Works in both bull and bear markets.
+# Uses daily timeframe for signal generation with weekly trend filter.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Fractal breakout with weekly ADX trend filter and volume confirmation.
-# Uses weekly ADX to filter trend strength (ADX > 25) and daily Williams Fractals for breakout signals.
-# In strong trend (ADX > 25): buy when price breaks above recent bullish fractal, sell when breaks below bearish fractal.
-# In weak trend (ADX <= 25): no trades to avoid whipsaws.
-# Volume confirmation: volume > 1.5x 20-period average to avoid false breakouts.
-# Target: 20-40 trades/year per symbol to stay within frequency limits.
-name = "4h_WilliamsFractal_ADXTrend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_KAMA_RSI_Trend_Follow"
+timeframe = "1d"
 leverage = 1.0
-
-def williams_fractal(high, low):
-    """Calculate Williams Fractals: bearish (high) and bullish (low)"""
-    n = len(high)
-    bearish = np.full(n, np.nan)
-    bullish = np.full(n, np.nan)
-    
-    for i in range(2, n-2):
-        # Bearish fractal: high[i] is highest of 5 bars
-        if (high[i] > high[i-1] and high[i] > high[i-2] and 
-            high[i] > high[i+1] and high[i] > high[i+2]):
-            bearish[i] = high[i]
-        # Bullish fractal: low[i] is lowest of 5 bars
-        if (low[i] < low[i-1] and low[i] < low[i-2] and 
-            low[i] < low[i+1] and low[i] < low[i+2]):
-            bullish[i] = low[i]
-            
-    return bearish, bullish
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    plus_dm = np.zeros_like(high)
-    minus_dm = np.zeros_like(high)
-    
-    for i in range(1, len(high)):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        else:
-            plus_dm[i] = 0
-            
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-        else:
-            minus_dm[i] = 0
-    
-    # Smoothed TR, +DM, -DM using Wilder's smoothing
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    tr_smooth = wilder_smooth(tr, period)
-    plus_dm_smooth = wilder_smooth(plus_dm, period)
-    minus_dm_smooth = wilder_smooth(minus_dm, period)
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = np.zeros_like(close)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    
-    adx = wilder_smooth(dx, period)
-    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -90,88 +21,90 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for ADX trend filter
+    # Get weekly data for KAMA trend
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly ADX (14-period)
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    def kama(close, period=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=period))
+        abs_change = np.abs(np.diff(close, n=1))
+        er = np.zeros_like(close)
+        er[period:] = change[period-1:] / np.where(np.sum(abs_change.reshape(-1, period), axis=1) == 0, 1, np.sum(abs_change.reshape(-1, period), axis=1))
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # KAMA calculation
+        kama_vals = np.zeros_like(close)
+        kama_vals[period] = close[period]
+        for i in range(period+1, len(close)):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        return kama_vals
     
-    # Get daily data for Williams Fractals
+    kama_1w = kama(close_1w, period=10, fast=2, slow=30)
+    # Weekly trend: rising KAMA = bullish, falling KAMA = bearish
+    kama_rising = np.diff(kama_1w, prepend=kama_1w[0]) > 0
+    
+    # Get daily data for RSI
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily Williams Fractals
-    bearish_fractal, bullish_fractal = williams_fractal(high_1d, low_1d)
+    # Calculate RSI (14-period)
+    def rsi(close, period=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        # Wilder's smoothing
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
     
-    # Williams Fractals need 2 extra bars for confirmation (wait for 2 candles after fractal)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    rsi_1d = rsi(close_1d, period=14)
     
-    # Align weekly ADX to 4h timeframe
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Get 4h average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly KAMA trend to daily
+    kama_rising_aligned = align_htf_to_ltf(prices, df_1w, kama_rising.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure ADX (14*2+6) and Williams Fractals are ready
+    start_idx = 15  # Ensure RSI and KAMA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if np.isnan(kama_rising_aligned[i]) or np.isnan(rsi_1d[i]):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        adx_val = adx_1w_aligned[i]
-        bearish_fractal_val = bearish_fractal_aligned[i]
-        bullish_fractal_val = bullish_fractal_aligned[i]
-        vol_ma = vol_ma_20[i]
-        vol = volume[i]
+        kama_bullish = kama_rising_aligned[i] > 0.5
+        rsi_val = rsi_1d[i]
         
-        # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
-        
-        # Trend strength filter: only trade in strong trends (ADX > 25)
-        strong_trend = adx_val > 25
-        
+        # Entry logic
         if position == 0:
-            # Enter long when price breaks above bullish fractal in strong trend
-            if strong_trend and volume_confirmed and not np.isnan(bullish_fractal_val):
-                if price > bullish_fractal_val:
-                    signals[i] = 0.25
-                    position = 1
-            # Enter short when price breaks below bearish fractal in strong trend
-            elif strong_trend and volume_confirmed and not np.isnan(bearish_fractal_val):
-                if price < bearish_fractal_val:
-                    signals[i] = -0.25
-                    position = -1
-        
-        elif position == 1:
-            # Exit long when price breaks below bearish fractal or ADX weakens
-            if not strong_trend or (not np.isnan(bearish_fractal_val) and price < bearish_fractal_val):
-                signals[i] = 0.0
-                position = 0
-            else:
+            if kama_bullish and rsi_val > 50:
+                # Weekly bullish + RSI > 50 → long
                 signals[i] = 0.25
+                position = 1
+            elif not kama_bullish and rsi_val < 50:
+                # Weekly bearish + RSI < 50 → short
+                signals[i] = -0.25
+                position = -1
         
-        elif position == -1:
-            # Exit short when price breaks above bullish fractal or ADX weakens
-            if not strong_trend or (not np.isnan(bullish_fractal_val) and price > bullish_fractal_val):
+        # Exit logic: opposite RSI cross
+        elif position == 1:
+            if rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
+        elif position == -1:
+            if rsi_val > 50:
+                signals[i] = 0.0
+                position = 0
     
     return signals
