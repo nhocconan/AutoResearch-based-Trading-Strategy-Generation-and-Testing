@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with daily VWAP and Bollinger Bands for mean reversion
-# - Long when price touches lower Bollinger Band (20,2) and is below daily VWAP (oversold)
-# - Short when price touches upper Bollinger Band (20,2) and is above daily VWAP (overbought)
-# - Exit when price crosses back to daily VWAP or reaches opposite band
-# - Volume filter: require volume > 1.5x 20-period average to confirm momentum
-# - Works in both bull/bear markets by fading extremes at Bollinger Bands with VWAP as dynamic support/resistance
-# - Target: 20-50 trades/year (80-200 total over 4 years)
-name = "4h_VWAP_Bollinger_MeanReversion"
-timeframe = "4h"
+# Hypothesis: 1d timeframe with 1-week ATR-based breakout and volume confirmation.
+# Uses weekly ATR to set dynamic breakout bands from weekly open.
+# Long when price breaks above weekly open + 1.5*weekly ATR with volume confirmation.
+# Short when price breaks below weekly open - 1.5*weekly ATR with volume confirmation.
+# Exits when price returns to weekly open or opposite band is touched.
+# Works in both bull and bear markets by capturing breakouts with volatility filter.
+# Target: 30-100 total trades over 4 years (7-25/year).
+name = "1d_1w_ATRBreakout_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,71 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP and Bollinger Bands (called ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get weekly data for ATR and open calculation (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
     
-    # Calculate daily VWAP: cumulative (price * volume) / cumulative volume
-    # Typical price = (high + low + close) / 3
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    pv_1d = typical_price_1d * volume_1d
-    cum_pv_1d = np.cumsum(pv_1d)
-    cum_vol_1d = np.cumsum(volume_1d)
-    vwap_1d = np.divide(cum_pv_1d, cum_vol_1d, out=np.full_like(cum_pv_1d, np.nan), where=cum_vol_1d!=0)
+    # Calculate weekly ATR (14-period)
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily Bollinger Bands (20,2)
-    close_ma_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    close_std_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = close_ma_1d + (2 * close_std_1d)
-    lower_bb_1d = close_ma_1d - (2 * close_std_1d)
+    # Calculate breakout bands: weekly open ± 1.5 * weekly ATR
+    upper_band = open_1w + 1.5 * atr_1w
+    lower_band = open_1w - 1.5 * atr_1w
     
-    # Align daily indicators to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
-    close_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, close_ma_1d)
+    # Align weekly bands to daily timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    open_1w_aligned = align_htf_to_ltf(prices, df_1w, open_1w)
     
-    # Volume filter on 4h: volume > 1.5 * 20-period average
-    volume_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma_4h * 1.5)
+    # Volume filter: volume > 1.5 * 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for indicators
+    start_idx = 20  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(upper_bb_1d_aligned[i]) or 
-            np.isnan(lower_bb_1d_aligned[i]) or np.isnan(close_ma_1d_aligned[i]) or
-            np.isnan(volume_ma_4h[i])):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
+            np.isnan(open_1w_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price at or below lower BB AND below daily VWAP (oversold)
-            if close[i] <= lower_bb_1d_aligned[i] and close[i] < vwap_1d_aligned[i] and volume_filter[i]:
+            # Long breakout
+            if close[i] > upper_band_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price at or above upper BB AND above daily VWAP (overbought)
-            elif close[i] >= upper_bb_1d_aligned[i] and close[i] > vwap_1d_aligned[i] and volume_filter[i]:
+            # Short breakout
+            elif close[i] < lower_band_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price crosses back to VWAP or reaches upper BB
-            if close[i] >= vwap_1d_aligned[i] or close[i] >= upper_bb_1d_aligned[i]:
+            # Long position: exit when price returns to weekly open or touches lower band
+            if close[i] <= open_1w_aligned[i] or close[i] < lower_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price crosses back to VWAP or reaches lower BB
-            if close[i] <= vwap_1d_aligned[i] or close[i] <= lower_bb_1d_aligned[i]:
+            # Short position: exit when price returns to weekly open or touches upper band
+            if close[i] >= open_1w_aligned[i] or close[i] > upper_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
