@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyPivot_R1S1_Breakout_Volume_v2"
-timeframe = "1d"
+name = "12h_1d_WeeklyPivot_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,55 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for weekly pivot (once before loop)
-    df_w = get_htf_data(prices, '1w')
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Get 1d data for weekly pivot (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly pivot calculation (using weekly high/low/close)
-    pivot = (high_w + low_w + close_w) / 3.0
-    r1 = 2 * pivot - low_w
-    s1 = 2 * pivot - high_w
+    # Calculate weekly pivot points (using last 5 days: Monday-Friday)
+    # Rolling window of 5 days for high/low/close
+    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
+    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
     
-    # Align weekly pivot levels to daily timeframe
-    pivot_d = align_htf_to_ltf(prices, df_w, pivot)
-    r1_d = align_htf_to_ltf(prices, df_w, r1)
-    s1_d = align_htf_to_ltf(prices, df_w, s1)
+    # Weekly pivot calculation
+    pivot = (high_5d + low_5d + close_5d) / 3.0
+    r1 = 2 * pivot - low_5d
+    s1 = 2 * pivot - high_5d
     
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly pivot levels to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume confirmation: current volume > 2.0x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_d[i]) or np.isnan(r1_d[i]) or np.isnan(s1_d[i]) or \
-           np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or \
+           np.isnan(vol_ma_30[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_30[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
             # Long: Price breaks above R1 with volume
-            if price > r1_d[i] and volume_confirmed:
+            if price > r1_12h[i] and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 with volume
-            elif price < s1_d[i] and volume_confirmed:
+            elif price < s1_12h[i] and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below pivot
-            if price < pivot_d[i]:
+            if price < pivot_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -73,7 +79,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: Price returns above pivot
-            if price > pivot_d[i]:
+            if price > pivot_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
