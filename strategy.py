@@ -1,22 +1,28 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d/1w trend filter (EMA50), volume confirmation, and ATR-based stop.
-# Long when price breaks above Donchian(20) high, EMA50_1d/1w > price (bullish), and volume > 1.5x 20-bar avg.
-# Short when price breaks below Donchian(20) low, EMA50_1d/1w < price (bearish), and volume > 1.5x 20-bar avg.
-# Exit on opposite Donchian break or when EMA50 trend flips.
-# Uses strict conditions to limit trades to ~20-30/year and avoid overtrading.
-# Works in both bull and bear markets by using EMA50 trend filter on higher timeframes.
+# Hypothesis: 6h price action relative to 1-day Volume-Weighted Average Price (VWAP)
+# combined with 6h RSI(14) for momentum and 6h volume spike filter.
+# VWAP acts as dynamic support/resistance: price above VWAP = bullish bias,
+# price below VWAP = bearish bias. RSI filters for overbought/oversold conditions
+# to avoid chasing extremes. Volume spike confirms institutional interest.
+# Designed for 6h timeframe to capture institutional flows with low trade frequency.
+# Works in both bull and bear markets by adapting to VWAP as dynamic fair value.
+# Entry: Price crosses above VWAP with RSI<70 and volume spike (long).
+# Entry: Price crosses below VWAP with RSI>30 and volume spike (short).
+# Exit: Price crosses back across VWAP in opposite direction.
+# Target: 15-30 trades/year (~60-120 over 4 years) to minimize fee drag.
 
-name = "4h_Donchian_EMA50_1d1w_Volume"
-timeframe = "4h"
+name = "6h_VWAP_RSI_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,67 +30,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate VWAP for each 6h bar using intraday approximation
+    # VWAP = sum(price * volume) / sum(volume) where price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
     
-    # Volume filter: volume > 1.5 * 20-period average
+    # Cumulative sums for VWAP calculation (reset daily)
+    # We'll use rolling window of 4 bars (24h/6h) to approximate daily VWAP
+    vwap = pd.Series(vwap_numerator).rolling(window=4, min_periods=1).sum().values / \
+           pd.Series(vwap_denominator).rolling(window=4, min_periods=1).sum().values
+    
+    # RSI(14) on 6h timeframe
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume spike: volume > 1.8 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
-    
-    # Get 1d and 1w EMA50 trends
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    df_1w = get_htf_data(prices, '1w')
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    volume_spike = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 20  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price > Donchian high, EMA50_1d/1w > price (bullish trend), volume filter
-            if (close[i] > donch_high[i] and 
-                ema50_1d_aligned[i] > close[i] and 
-                ema50_1w_aligned[i] > close[i] and 
-                volume_filter[i]):
+            # Long: price crosses above VWAP + RSI not overbought + volume spike
+            if (close[i] > vwap[i] and close[i-1] <= vwap[i-1] and  # crossed above
+                rsi[i] < 70 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Donchian low, EMA50_1d/1w < price (bearish trend), volume filter
-            elif (close[i] < donch_low[i] and 
-                  ema50_1d_aligned[i] < close[i] and 
-                  ema50_1w_aligned[i] < close[i] and 
-                  volume_filter[i]):
+            # Short: price crosses below VWAP + RSI not oversold + volume spike
+            elif (close[i] < vwap[i] and close[i-1] >= vwap[i-1] and  # crossed below
+                  rsi[i] > 30 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price < Donchian low OR EMA50 trend turns bearish
-            if (close[i] < donch_low[i] or 
-                ema50_1d_aligned[i] < close[i] or 
-                ema50_1w_aligned[i] < close[i]):
+            # Long: exit if price crosses back below VWAP
+            if close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price > Donchian high OR EMA50 trend turns bullish
-            if (close[i] > donch_high[i] or 
-                ema50_1d_aligned[i] > close[i] or 
-                ema50_1w_aligned[i] > close[i]):
+            # Short: exit if price crosses back above VWAP
+            if close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
