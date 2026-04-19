@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d Donchian breakout and volume confirmation.
-# Uses 1d Donchian channels (20-period high/low) to define breakout levels,
-# with 12h close breaking above/below previous period's high/low.
-# Volume filter ensures breakout strength. Works in both bull and bear markets
-# by capturing breakouts in either direction.
-# Target: 50-150 total trades over 4 years (12-37/year).
-name = "12h_1d_Donchian20_Breakout_VolumeFilter"
-timeframe = "12h"
+# Hypothesis: 4h timeframe with 12h Supertrend (ATR=10, mult=3) for trend direction,
+# 4h Donchian(20) breakout for entry timing, and volume confirmation.
+# Only take long in uptrend (price > Supertrend) when breaking above Donchian high,
+# only short in downtrend (price < Supertrend) when breaking below Donchian low.
+# Volume filter ensures breakout strength. Designed to work in both bull and bear
+# markets by following the trend and catching breakouts in trend direction.
+# Target: 60-120 total trades over 4 years (15-30/year).
+name = "4h_12h_Supertrend_Donchian20_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,19 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation (called ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for Supertrend calculation (called ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian channels on 1d timeframe (20-period high/low)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate ATR for Supertrend (12h timeframe)
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_period = 10
+    atr = np.zeros_like(tr)
+    for i in range(len(tr)):
+        if i < atr_period:
+            atr[i] = np.nan
+        elif i == atr_period:
+            atr[i] = np.nanmean(tr[1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    # Align Donchian channels to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    # Supertrend calculation
+    upper_band = (high_12h + low_12h) / 2 + 3 * atr
+    lower_band = (high_12h + low_12h) / 2 - 3 * atr
+    supertrend = np.full_like(close_12h, np.nan)
+    direction = np.full_like(close_12h, 1)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_12h)):
+        if np.isnan(atr[i-1]):
+            supertrend[i] = np.nan
+            continue
+        if close_12h[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close_12h[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
+    
+    # Align Supertrend and direction to 4h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+    
+    # 4h Donchian channels (20-period high/low)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,35 +93,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(volume_ma[i]) or np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # Use previous 12h period high/low for breakout levels
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        
         if position == 0:
-            # Long when price breaks above previous high with volume
-            if close[i] > prev_high and volume_filter[i]:
+            # Long when: uptrend (direction=1) AND price breaks above Donchian high WITH volume
+            if direction_aligned[i] == 1 and close[i] > donch_high[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below previous low with volume
-            elif close[i] < prev_low and volume_filter[i]:
+            # Short when: downtrend (direction=-1) AND price breaks below Donchian low WITH volume
+            elif direction_aligned[i] == -1 and close[i] < donch_low[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price breaks below previous low
-            if close[i] < prev_low:
+            # Long position: exit when trend changes to downtrend OR price breaks below Donchian low
+            if direction_aligned[i] == -1 or close[i] < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price breaks above previous high
-            if close[i] > prev_high:
+            # Short position: exit when trend changes to uptrend OR price breaks above Donchian high
+            if direction_aligned[i] == 1 or close[i] > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
