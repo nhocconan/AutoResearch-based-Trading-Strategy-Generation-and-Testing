@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1w ADX regime filter and volume confirmation
-# Elder Ray measures bullish/bearish power relative to EMA(13). Strong bullish/bearish power + high ADX (>25) indicates trending markets.
-# Volume spike (>1.5x 20-period average) confirms momentum.
-# Target: 15-25 trades/year per symbol with disciplined entries
-# Works in both bull and bear markets by filtering for strong trends via ADX
-name = "6h_ElderRay_1wADX_Volume"
-timeframe = "6h"
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
+# Uses 1d EMA50 for trend bias and Donchian(20) breakouts for entry timing
+# Volume spike (>1.5x 20-period average) confirms momentum
+# Designed for low trade frequency (~15-25 trades/year) to minimize fee drag
+# Works in bull markets via breakouts and bear markets via trend-filtered shorts
+name = "12h_Donchian20_1dEMA_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,58 +22,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w ADX for regime filter (trending strength)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # 1d EMA50 for trend bias
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate ADX on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align length
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR, DM+ with Wilder's smoothing (alpha=1/period)
-    def wilder_smooth(data, period):
-        smoothed = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            smoothed[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                smoothed[i] = smoothed[i-1] - (smoothed[i-1]/period) + data[i]
-        return smoothed
-    
-    atr_1w = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr_1w
-    di_minus = 100 * dm_minus_smooth / atr_1w
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = wilder_smooth(dx, 14)
-    
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Elder Ray components on 6h data
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Donchian channels (20-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -86,41 +45,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        if adx_1w_aligned[i] <= 25:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: Strong bullish power + volume spike
-            if bull_power[i] > 0 and volume_spike[i]:
+            # Long: price breaks above Donchian high + above 1d EMA + volume spike
+            if (close[i] > highest_high[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Strong bearish power + volume spike
-            elif bear_power[i] < 0 and volume_spike[i]:
+            # Short: price breaks below Donchian low + below 1d EMA + volume spike
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if bullish power weakens or bearish power becomes positive
-            if bull_power[i] <= 0 or bear_power[i] >= 0:
+            # Long: exit if price breaks below Donchian low or falls below 1d EMA
+            if (close[i] < lowest_low[i]) or (close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if bearish power weakens or bullish power becomes negative
-            if bear_power[i] >= 0 or bull_power[i] <= 0:
+            # Short: exit if price breaks above Donchian high or rises above 1d EMA
+            if (close[i] > highest_high[i]) or (close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
