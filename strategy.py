@@ -3,59 +3,54 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d Williams Alligator + Elder Ray + Volume spike.
-# Uses Williams Alligator (Jaw/Teeth/Lips) for trend direction and Elder Ray (Bull/Bear Power) for momentum.
-# Enters only when price is aligned with Alligator and Elder Ray confirms direction with volume confirmation.
-# Designed to work in both bull and bear markets by following the 1d trend structure.
-# Targets 20-50 trades/year (80-200 total over 4 years) with strict entry conditions.
-name = "4h_1d_WilliamsAlligator_ElderRay_Volume"
-timeframe = "4h"
+# Hypothesis: 12h timeframe with 1d RSI momentum and 1w trend filter.
+# Uses 1d RSI(14) for momentum signals and 1w EMA50 for trend direction.
+# Enters long when RSI crosses above 30 (oversold recovery) in uptrend (price > 1w EMA50).
+# Enters short when RSI crosses below 70 (overbought rejection) in downtrend (price < 1w EMA50).
+# Includes volume confirmation (volume > 1.5x 20-period average) to filter low-quality signals.
+# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag.
+# Works in bull/bear by following higher timeframe trend while capturing mean-reversion swings.
+name = "12h_1dRSI_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 1d data for Williams Alligator and Elder Ray (called ONCE before loop)
+    # Pre-compute session filter (00-23 UTC - 12h timeframe less sensitive to intraday sessions)
+    hours = pd.DatetimeIndex(open_time).hour
+    session_filter = (hours >= 0) & (hours <= 23)  # Always active for 12h
+    
+    # Get 1d data for RSI(14) (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Calculate RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) - all SMMA
-    def smoothed_moving_average(data, period):
-        sma = np.zeros_like(data)
-        sma[:period-1] = np.nan
-        sma[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            sma[i] = (sma[i-1] * (period-1) + data[i]) / period
-        return sma
+    # Get 1w data for EMA50 trend (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    jaw = smoothed_moving_average(close_1d, 13)
-    teeth = smoothed_moving_average(close_1d, 8)
-    lips = smoothed_moving_average(close_1d, 5)
-    
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema_13_1d
-    bear_power = low_1d - ema_13_1d
-    
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Volume filter: volume > 2.0 * 20-period average
+    # Volume filter: volume > 1.5 * 20-period average (using 12h data)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 2.0)
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,37 +59,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(rsi_14_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND Volume spike
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
-                bull_power_aligned[i] > 0 and 
-                volume_filter[i]):
+            # Long: RSI crosses above 30 (oversold recovery) AND price above 1w EMA50 (uptrend) with volume
+            if (rsi_14_aligned[i] > 30 and rsi_14_aligned[i-1] <= 30 and 
+                close[i] > ema_50_1w_aligned[i] and volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaw > Teeth > Lips (bearish alignment) AND Bear Power < 0 AND Volume spike
-            elif (jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i] and 
-                  bear_power_aligned[i] < 0 and 
-                  volume_filter[i]):
+            # Short: RSI crosses below 70 (overbought rejection) AND price below 1w EMA50 (downtrend) with volume
+            elif (rsi_14_aligned[i] < 70 and rsi_14_aligned[i-1] >= 70 and 
+                  close[i] < ema_50_1w_aligned[i] and volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if alignment breaks (Lips <= Teeth) OR Bear Power becomes negative
-            if lips_aligned[i] <= teeth_aligned[i] or bear_power_aligned[i] < 0:
+            # Long: exit if RSI crosses below 50 (momentum loss) or price breaks below 1w EMA50
+            if (rsi_14_aligned[i] < 50 and rsi_14_aligned[i-1] >= 50) or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if alignment breaks (Jaw <= Teeth) OR Bull Power becomes positive
-            if jaw_aligned[i] <= teeth_aligned[i] or bull_power_aligned[i] > 0:
+            # Short: exit if RSI crosses above 50 (momentum loss) or price breaks above 1w EMA50
+            if (rsi_14_aligned[i] > 50 and rsi_14_aligned[i-1] <= 50) or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
