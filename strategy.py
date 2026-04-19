@@ -3,103 +3,83 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator (Jaw/Teeth/Lips) with 1w trend filter.
-# Uses smoothed SMAs (13,8,5 periods) to identify trend direction and strength.
-# Long when Lips > Teeth > Jaw (bullish alignment), short when reverse.
-# Weekly trend filter ensures alignment with higher timeframe direction.
-# Target: 50-150 total trades over 4 years (12-37/year) with low churn.
-name = "6h_Alligator_1wTrend"
-timeframe = "6h"
+# Hypothesis: 12h breakout above/below 20-period high/low with 1d trend filter (EMA50) and volume confirmation.
+# Uses price channel breakouts for trend capture, EMA50 for trend direction filter, and volume for confirmation.
+# Designed to work in both bull and bear markets by requiring alignment with higher timeframe trend.
+# Target: 20-40 trades/year per symbol.
+name = "12h_ChannelBreakout_EMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator components (13,8,5 smoothed SMAs)
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    def smoothed_sma(data, period):
-        # Smoothed Moving Average (SMMA) - Wilder's smoothing
-        sma = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            sma[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
-        return sma
+    # Calculate EMA50 on daily
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    jaw_raw = smoothed_sma(close, 13)
-    teeth_raw = smoothed_sma(close, 8)
-    lips_raw = smoothed_sma(close, 5)
+    # Calculate 20-period high/low for price channel (using 12h data)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Apply shifts (Alligator specific)
-    jaw = np.roll(jaw_raw, 8)  # shift 8 bars forward
-    teeth = np.roll(teeth_raw, 5)  # shift 5 bars forward
-    lips = np.roll(lips_raw, 3)  # shift 3 bars forward
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Weekly trend filter: EMA34 on weekly close
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Additional delay for weekly EMA (needs confirmation)
-    # For EMA, 1-bar delay from align_htf_to_ltf is sufficient
+    # Align 1d EMA50 to 12h
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient data for Alligator calculation
-    start_idx = max(13 + 8, 34)  # Jaw needs 13+8=21, plus weekly EMA warmup
+    start_idx = max(50, 20)  # Ensure EMA50 and channel are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment conditions
-        lips_gt_teeth = lips[i] > teeth[i]
-        teeth_gt_jaw = teeth[i] > jaw[i]
-        bullish_alignment = lips_gt_teeth and teeth_gt_jaw
+        price = close[i]
+        ema_50_val = ema_50_aligned[i]
+        high_20_val = high_20[i]
+        low_20_val = low_20[i]
+        vol_ma = vol_ma_20[i]
+        vol = volume[i]
         
-        lips_lt_teeth = lips[i] < teeth[i]
-        teeth_lt_jaw = teeth[i] < jaw[i]
-        bearish_alignment = lips_lt_teeth and teeth_lt_jaw
-        
-        # Weekly trend filter
-        price_vs_weekly_ema = close[i] > ema_34_1w_aligned[i]
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter long: bullish alignment AND price above weekly EMA (uptrend)
-            if bullish_alignment and price_vs_weekly_ema:
+            # Enter long if price breaks above 20-period high, above EMA50, and volume confirmation
+            if price > high_20_val and price > ema_50_val and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish alignment AND price below weekly EMA (downtrend)
-            elif bearish_alignment and not price_vs_weekly_ema:
+            # Enter short if price breaks below 20-period low, below EMA50, and volume confirmation
+            elif price < low_20_val and price < ema_50_val and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish alignment or price crosses below weekly EMA
-            if bearish_alignment or not price_vs_weekly_ema:
+            # Exit long when price crosses below 20-period low or below EMA50
+            if price < low_20_val or price < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish alignment or price crosses above weekly EMA
-            if bullish_alignment or price_vs_weekly_ema:
+            # Exit short when price crosses above 20-period high or above EMA50
+            if price > high_20_val or price > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
