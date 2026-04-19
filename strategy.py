@@ -1,15 +1,18 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour breakout from daily Donchian channels with volume confirmation and ADX trend filter.
-# Uses daily Donchian(20) breakouts as the primary signal, filtered by ADX(14) > 25 to ensure
-# trending markets and volume spike > 1.5x 20-period average to confirm breakout strength.
-# Designed for 6h timeframe to capture medium-term trends with controlled frequency (~15-25 trades/year).
-# Exit on opposite Donchian touch or ADX weakening (< 20) to avoid whipsaws in ranging markets.
-name = "6h_DailyDonchian20_ADX_Volume"
-timeframe = "6h"
+# Hypothesis: 1h 4-hour Donchian breakout with 1-day volume filter and session filter (08-20 UTC).
+# Uses 4h Donchian(20) for trend direction, 1d volume spike for confirmation, 1h for entry timing.
+# Designed for 1h timeframe to capture medium-term breakouts with low frequency (~15-25 trades/year).
+# Entry: Long when 1h close > 4h Donchian upper band and volume > 1.5x 20-day avg and session active.
+# Short when 1h close < 4h Donchian lower band and volume > 1.5x 20-day avg and session active.
+# Exit: Opposite Donchian band touch or volume drop below average.
+# Uses strict conditions to limit trades and avoid overtrading.
+
+name = "1h_Donchian20_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,107 +25,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channels (20-period)
+    # 4h Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian bands on 4h data
+    donchian_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 1h timeframe (waits for completed 4h bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # 1-day volume spike filter: volume > 1.5x 20-day average
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels on daily data
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    volume_20d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = df_1d['volume'].values > (volume_20d * 1.5)
     
-    # Align to 6h timeframe (waits for prior day close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align volume spike to 1h timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # ADX(14) for trend strength
-    plus_dm = np.zeros_like(high)
-    minus_dm = np.zeros_like(high)
-    tr = np.zeros_like(high)
-    
-    for i in range(1, n):
-        plus_dm[i] = max(0, high[i] - high[i-1]) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i-1] - low[i]) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    # Smooth with Wilder's smoothing (alpha = 1/14)
-    atr = np.zeros(n)
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    adx = np.zeros(n)
-    
-    atr[13] = np.mean(tr[1:14]) if n > 13 else 0
-    plus_dm_smoothed = np.zeros(n)
-    minus_dm_smoothed = np.zeros(n)
-    
-    if n > 13:
-        plus_dm_smoothed[13] = np.sum(plus_dm[1:14])
-        minus_dm_smoothed[13] = np.sum(minus_dm[1:14])
-    
-    for i in range(14, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-        plus_dm_smoothed[i] = (plus_dm_smoothed[i-1] * 13 + plus_dm[i]) / 14
-        minus_dm_smoothed[i] = (minus_dm_smoothed[i-1] * 13 + minus_dm[i]) / 14
-        
-        if atr[i] > 0:
-            plus_di[i] = 100 * plus_dm_smoothed[i] / atr[i]
-            minus_di[i] = 100 * minus_dm_smoothed[i] / atr[i]
-            dx = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) > 0 else 0
-        else:
-            plus_di[i] = 0
-            minus_di[i] = 0
-            dx = 0
-        
-        if i >= 27:  # Need 14 periods of DX for ADX
-            if i == 27:
-                adx[i] = np.mean(dx[14:28])
-            else:
-                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Volume spike: volume > 1.5 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Session filter: 08-20 UTC (precompute for efficiency)
+    session_hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (session_hours >= 8) & (session_hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
+        # Skip if any required data is NaN or not in session
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(volume_ma[i])):
+            np.isnan(volume_spike_aligned[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above Donchian high with strong trend and volume
-            if (close[i] > donchian_high_aligned[i] and 
-                adx[i] > 25 and 
-                volume_spike[i]):
-                signals[i] = 0.25
+            # Long: break above 4h Donchian high with volume confirmation
+            if (close[i] > donchian_high_aligned[i] and volume_spike_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: break below Donchian low with strong trend and volume
-            elif (close[i] < donchian_low_aligned[i] and 
-                  adx[i] > 25 and 
-                  volume_spike[i]):
-                signals[i] = -0.25
+            # Short: break below 4h Donchian low with volume confirmation
+            elif (close[i] < donchian_low_aligned[i] and volume_spike_aligned[i]):
+                signals[i] = -0.20
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price touches Donchian low or trend weakens
-            if (close[i] < donchian_low_aligned[i]) or (adx[i] < 20):
+            # Long: exit if price touches 4h Donchian low or volume drops
+            if (close[i] < donchian_low_aligned[i]) or (not volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:
-            # Short: exit if price touches Donchian high or trend weakens
-            if (close[i] > donchian_high_aligned[i]) or (adx[i] < 20):
+            # Short: exit if price touches 4h Donchian high or volume drops
+            if (close[i] > donchian_high_aligned[i]) or (not volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
