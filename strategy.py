@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Pivot_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_VolumeTrend_1d"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot and S1/R1 levels
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    r1_1w = close_1w + range_1w * 1.1 / 12.0
-    s1_1w = close_1w - range_1w * 1.1 / 12.0
+    # 1d EMA34 trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align weekly levels to daily timeframe
-    pivot_1d = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1d = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1d = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # 12h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily ATR for volatility and stop loss
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for stop loss (12h)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = max(100, 20, 34)  # warmup
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_1d[i]) or np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or \
-           np.isnan(atr_1d[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
+           np.isnan(vol_ma_20[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_1d[i]
-        pivot = pivot_1d[i]
-        r1 = r1_1d[i]
-        s1 = s1_1d[i]
+        atr_val = atr[i]
+        ema_trend = ema34_1d_aligned[i]
+        upper = highest_high[i]
+        lower = lowest_low[i]
         
         volume_confirmed = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above weekly R1 + volume
-            if price > r1 and volume_confirmed:
+            # Long: Price breaks above Donchian high + volume + 1d uptrend
+            if price > upper and volume_confirmed and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly S1 + volume
-            elif price < s1 and volume_confirmed:
+            # Short: Price breaks below Donchian low + volume + 1d downtrend
+            elif price < lower and volume_confirmed and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below weekly pivot OR ATR stop (1.5x ATR from entry)
-            if price < pivot or price < (high[i] - 1.5 * atr):
+            # Exit: Price returns below Donchian low OR ATR stop (2.5x ATR from entry)
+            if price < lower or price < (high[i] - 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above weekly pivot OR ATR stop (1.5x ATR from entry)
-            if price > pivot or price > (low[i] + 1.5 * atr):
+            # Exit: Price returns above Donchian high OR ATR stop (2.5x ATR from entry)
+            if price > upper or price > (low[i] + 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
