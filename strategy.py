@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_1w_Pivot_R1S1_Breakout_Volume_Trend
-Hypothesis: 1d price breaks above/below weekly R1/S1 with volume confirmation and weekly trend filter
-- Weekly Pivot levels provide institutional reference points
-- Volume confirmation filters for institutional participation
-- Weekly EMA50 trend filter avoids counter-trend trades in reversals
-- Designed for 1d timeframe to target 30-100 trades over 4 years (7-25/year)
-- Works in bull/bear via trend filter and volatility-adjusted breakouts
+6h_EMA_Ribbon_RSI_Filter
+Hypothesis: EMA ribbon (8/21/55) alignment with RSI(14) filter on 6h timeframe
+- Bullish: EMA8 > EMA21 > EMA55 AND RSI between 40-60 (avoid overbought/oversold)
+- Bearish: EMA8 < EMA21 < EMA55 AND RSI between 40-60
+- Uses 1d ADX(14) > 20 to filter for trending markets, avoids chop
+- Designed for low frequency (target 50-150 trades over 4 years) with clear trend signals
+- Works in bull/bear via ADX filter and EMA ribbon direction
 """
 
-name = "1d_1w_Pivot_R1S1_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "6h_EMA_Ribbon_RSI_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,77 +27,124 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter and pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA calculation
+    # EMA calculation
+    def calculate_ema(data, span):
+        return pd.Series(data).ewm(span=span, adjust=False, min_periods=span).mean().values
+    
+    # RSI calculation
+    def calculate_rsi(data, period=14):
+        delta = np.diff(data, prepend=data[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+        avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    # ADX calculation
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Wilder's smoothing
+        def WilderSmooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                        result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+                    else:
+                        result[i] = np.nan
+            return result
+        
+        atr = WilderSmooth(tr, period)
+        dm_plus_smooth = WilderSmooth(dm_plus, period)
+        dm_minus_smooth = WilderSmooth(dm_minus, period)
+        
+        dx = np.full_like(close, np.nan)
+        mask = (atr > 0) & ~np.isnan(atr) & ~np.isnan(dm_plus_smooth) & ~np.isnan(dm_minus_smooth)
+        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
+        
+        adx = WilderSmooth(dx, period)
+        return adx
+    
+    # Calculate EMAs on 6h data
+    ema8 = calculate_ema(close, 8)
+    ema21 = calculate_ema(close, 21)
+    ema55 = calculate_ema(close, 55)
+    
+    # Calculate RSI on 6h data
+    rsi = calculate_rsi(close, 14)
+    
+    # Get 1d data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Previous week's OHLC for Pivot calculation
-    pw_high = df_1w['high'].shift(1).values  # Previous week high
-    pw_low = df_1w['low'].shift(1).values    # Previous week low
-    pw_close = df_1w['close'].shift(1).values # Previous week close
-    
-    # Calculate Weekly Pivot levels
-    pw_pivot = (pw_high + pw_low + pw_close) / 3
-    pw_range = pw_high - pw_low
-    
-    # Weekly R1 and S1 (most significant levels)
-    r1 = pw_pivot + (pw_range * 1.0)  # Standard pivot R1
-    s1 = pw_pivot - (pw_range * 1.0)  # Standard pivot S1
-    
-    # Align Pivot levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Volume confirmation: volume > 1.5 * 20-day average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    # Calculate ADX on 1d data
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure enough data for all indicators
+    start_idx = 55  # Need enough data for EMA55
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(ema55[i]) or 
+            np.isnan(rsi[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        price_above_ema = close[i] > ema50_1w_aligned[i]
-        price_below_ema = close[i] < ema50_1w_aligned[i]
+        # EMA ribbon conditions
+        ema_bullish = ema8[i] > ema21[i] > ema55[i]
+        ema_bearish = ema8[i] < ema21[i] < ema55[i]
+        
+        # RSI filter: avoid extremes (40-60 range)
+        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
+        
+        # ADX filter: trending market
+        trending = adx_1d_aligned[i] > 20
         
         if position == 0:
-            # Long: price breaks above R1 with volume and uptrend
-            if (close[i] > r1_aligned[i] and 
-                volume_confirm[i] and 
-                price_above_ema):
+            # Long: bullish EMA ribbon + RSI neutral + trending
+            if ema_bullish and rsi_neutral and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  volume_confirm[i] and 
-                  price_below_ema):
+            # Short: bearish EMA ribbon + RSI neutral + trending
+            elif ema_bearish and rsi_neutral and trending:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 or trend reverses
-            if (close[i] < s1_aligned[i]) or (not price_above_ema):
+            # Long: exit if EMA ribbon breaks down or RSI goes overbought
+            if not ema_bullish or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 or trend reverses
-            if (close[i] > r1_aligned[i]) or (not price_below_ema):
+            # Short: exit if EMA ribbon breaks up or RSI goes oversold
+            if not ema_bearish or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
