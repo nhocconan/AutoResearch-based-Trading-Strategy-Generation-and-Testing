@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion using 4h Bollinger Bands with 1d trend filter and volume confirmation.
-# Long when price touches lower BB (20,2) and closes above it, price > 1d EMA50, volume > 1.5x 4h avg volume.
-# Short when price touches upper BB (20,2) and closes below it, price < 1d EMA50, volume > 1.5x 4h avg volume.
-# Exit when price crosses 4h SMA20 (mean reversion complete) or reverses to opposite band.
-# Uses Bollinger Bands for mean reversion zones, EMA for trend filter, volume for confirmation.
+# Hypothesis: 6h Williams %R mean reversion with weekly trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) and weekly trend is bullish (price > weekly EMA50) and volume > 1.5x average.
+# Short when Williams %R > -20 (overbought) and weekly trend is bearish (price < weekly EMA50) and volume > 1.5x average.
+# Exit when Williams %R crosses -50 (mean reversion complete) or when weekly trend changes.
+# Uses Williams %R for overextended conditions, weekly EMA for trend filter, volume for confirmation.
 # Target: 15-30 trades/year per symbol to stay within frequency limits.
-name = "1h_Bollinger_MeanReversion_EMA50_Volume"
-timeframe = "1h"
+name = "6h_WilliamsR_MeanReversion_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,81 +23,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Bollinger Bands
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Calculate Williams %R (14-period)
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate Bollinger Bands on 4h close
-    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align Bollinger Bands to 1h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_4h, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_4h, lower_bb)
-    sma_20_aligned = align_htf_to_ltf(prices, df_4h, sma_20)
-    
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Get 4h average volume for confirmation
-    vol_4h = df_4h['volume'].values
-    vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # Get 6h average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure EMA50 is ready
+    start_idx = 50  # Ensure Williams %R and weekly EMA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(sma_20_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper_bb = upper_bb_aligned[i]
-        lower_bb = lower_bb_aligned[i]
-        sma_20 = sma_20_aligned[i]
-        ema_50 = ema_50_aligned[i]
-        vol_ma = vol_ma_aligned[i]
+        wr = williams_r[i]
+        weekly_ema = ema_50_1w_aligned[i]
+        vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long entry: price touches lower BB, closes above it, above EMA50, with volume confirmation
-            if i > 0 and low[i-1] <= lower_bb_aligned[i-1] and close[i-1] < lower_bb_aligned[i-1] and \
-               price > lower_bb and price > ema_50 and volume_confirmed:
-                signals[i] = 0.20
+            # Long entry: Williams %R oversold (< -80), weekly trend bullish (price > weekly EMA), volume confirmation
+            if wr < -80 and price > weekly_ema and volume_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: price touches upper BB, closes below it, below EMA50, with volume confirmation
-            elif i > 0 and high[i-1] >= upper_bb_aligned[i-1] and close[i-1] > upper_bb_aligned[i-1] and \
-                 price < upper_bb and price < ema_50 and volume_confirmed:
-                signals[i] = -0.20
+            # Short entry: Williams %R overbought (> -20), weekly trend bearish (price < weekly EMA), volume confirmation
+            elif wr > -20 and price < weekly_ema and volume_confirmed:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below SMA20 (mean reversion) or touches upper BB (reversal)
-            if price < sma_20 or price >= upper_bb:
+            # Long exit: Williams %R crosses above -50 (mean reversion) or weekly trend turns bearish
+            if wr > -50 or price < weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above SMA20 (mean reversion) or touches lower BB (reversal)
-            if price > sma_20 or price <= lower_bb:
+            # Short exit: Williams %R crosses below -50 (mean reversion) or weekly trend turns bullish
+            if wr < -50 or price > weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
