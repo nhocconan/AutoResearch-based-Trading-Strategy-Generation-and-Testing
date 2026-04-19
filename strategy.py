@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_Pivot_R1_S1_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1w_Pivot_R1_S1_Breakout_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align weekly pivot levels to 6h timeframe
+    # Align weekly pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
