@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter_v1"
-timeframe = "6h"
+name = "12h_Daily_Pivot_R1S1_Breakout_VolumeATR_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Ichimoku calculation (once before loop)
+    # Get daily data for pivot calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Ichimoku components (9, 26, 52)
+    # Daily high, low, close for pivot calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2.0
+    # Calculate daily pivot points: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2.0
+    # Align daily pivot levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2.0
+    # Daily ATR for volatility filter (14-period)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])
+    atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2.0
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average (6h)
+    # Volume confirmation: current volume > 2.0x 20-period average (12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
-            np.isnan(senkou_span_a_6h[i]) or np.isnan(senkou_span_b_6h[i]) or 
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -66,41 +61,37 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        tenkan = tenkan_sen_6h[i]
-        kijun = kijun_sen_6h[i]
-        span_a = senkou_span_a_6h[i]
-        span_b = senkou_span_b_6h[i]
-        
-        # Determine cloud top and bottom
-        cloud_top = max(span_a, span_b)
-        cloud_bottom = min(span_a, span_b)
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        atr = atr_14_1d_aligned[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: TK cross above AND price above cloud
-            if tenkan > kijun and price > cloud_top and volume_confirmed:
-                signals[i] = 0.25
+            # Long: break above R1 with volume
+            if price > r1 and volume_confirmed:
+                signals[i] = 0.30
                 position = 1
-            # Short: TK cross below AND price below cloud
-            elif tenkan < kijun and price < cloud_bottom and volume_confirmed:
-                signals[i] = -0.25
+            # Short: break below S1 with volume
+            elif price < s1 and volume_confirmed:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit: TK cross below OR price below cloud
-            if tenkan < kijun or price < cloud_bottom:
+            # Exit: price below pivot or ATR-based stop
+            if price < pivot or price < close[i-1] - 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit: TK cross above OR price above cloud
-            if tenkan > kijun or price > cloud_top:
+            # Exit: price above pivot or ATR-based stop
+            if price > pivot or price > close[i-1] + 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
