@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1_S1_Breakout_Volume_ADXFilter"
-timeframe = "4h"
+name = "12h_1d_Pivot_R1_S1_Breakout_Volume_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align daily pivot levels to 4h timeframe
+    # Align daily pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
