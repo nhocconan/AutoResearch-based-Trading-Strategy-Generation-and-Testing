@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with daily volume confirmation and 1d ATR filter.
-# Long when price breaks above 20-period Donchian high AND volume > 1.5x daily average volume AND ATR(14) < ATR(50) (low volatility regime)
-# Short when price breaks below 20-period Donchian low AND volume > 1.5x daily average volume AND ATR(14) < ATR(50)
-# Exit when price crosses back through the Donchian midpoint
-# Uses Donchian for trend following structure, volume for confirmation, ATR regime filter to avoid chop.
-# Target: 20-30 trades/year per symbol.
-name = "4h_Donchian_Volume_ATRRegime"
-timeframe = "4h"
+# Hypothesis: 6h Camarilla pivot reversal with weekly trend filter and volume confirmation.
+# Long when price breaks below S3 and closes back above S3 (mean reversion) AND weekly close > weekly open (bullish trend) AND volume > 1.3x 6h average volume.
+# Short when price breaks above R3 and closes back below R3 (mean reversion) AND weekly close < weekly open (bearish trend) AND volume > 1.3x 6h average volume.
+# Exit when price crosses the 6h VWAP (volume-weighted average price).
+# Uses Camarilla for mean reversion levels, weekly trend for direction filter, volume for confirmation.
+# Target: 15-30 trades/year per symbol.
+
+name = "6h_Camarilla_WeeklyTrend_Volume_Reversion"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,27 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d ATR for regime filter (use 14 and 50 periods)
+    # Get weekly data for trend filter (bullish/bearish based on open-close)
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    weekly_open = df_1w['open'].values
+    weekly_bullish = weekly_close > weekly_open  # True if bullish week
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    
+    # Get daily data for Camarilla levels (using previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    # Calculate True Range components
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    # Align ATR arrays to 4h timeframe
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
+    # Calculate Camarilla levels for each day using previous day's OHLC
+    # H, L, C from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    # Camarilla formulas
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Align to 6s timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Get 1d average volume for confirmation
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Get 6s average volume for confirmation (20-period)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_roll + low_roll) / 2
+    # Calculate 6s VWAP for exit (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3
+    vwap_num = pd.Series(typical_price * volume).rolling(window=50, min_periods=1).sum().values
+    vwap_den = pd.Series(volume).rolling(window=50, min_periods=1).sum().values
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,45 +65,47 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr14_aligned[i]) or np.isnan(atr50_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(donchian_mid[i])):
+        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(vol_ma_6h[i]) or np.isnan(vwap[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr14_val = atr14_aligned[i]
-        atr50_val = atr50_aligned[i]
-        vol_ma = vol_ma_1d_aligned[i]
         vol = volume[i]
-        upper = high_roll[i]
-        lower = low_roll[i]
-        mid = donchian_mid[i]
+        vol_ma = vol_ma_6h[i]
+        r3 = R3_aligned[i]
+        s3 = S3_aligned[i]
+        r4 = R4_aligned[i]
+        s4 = S4_aligned[i]
+        weekly_bull = weekly_bullish_aligned[i] > 0.5  # Convert back to boolean
+        vwap_val = vwap[i]
         
-        # Regime filter: only trade in low volatility (ATR14 < ATR50)
-        vol_regime = atr14_val < atr50_val
+        # Volume confirmation: at least 1.3x average volume
+        vol_confirmed = vol > 1.3 * vol_ma
         
         if position == 0:
-            # Long entry: break above upper band + volume spike + low vol regime
-            if price > upper and vol > 1.5 * vol_ma and vol_regime:
+            # Long entry: price breaks below S3 but closes back above S3 (rejection of lower level)
+            # Only in weekly bullish trend
+            if price < s3 and close[i] > s3 and vol_confirmed and weekly_bull:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below lower band + volume spike + low vol regime
-            elif price < lower and vol > 1.5 * vol_ma and vol_regime:
+            # Short entry: price breaks above R3 but closes back below R3 (rejection of higher level)
+            # Only in weekly bearish trend
+            elif price > r3 and close[i] < r3 and vol_confirmed and not weekly_bull:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below midpoint
-            if price < mid:
+            # Long exit: price crosses below 6s VWAP
+            if price < vwap_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above midpoint
-            if price > mid:
+            # Short exit: price crosses above 6s VWAP
+            if price > vwap_val:
                 signals[i] = 0.0
                 position = 0
             else:
