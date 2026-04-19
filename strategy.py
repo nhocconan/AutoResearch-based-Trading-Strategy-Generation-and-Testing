@@ -3,7 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_And_Trend_v1"
+# Hypothesis: 4h price breaking above/below 1d Camarilla H4/L4 with volume confirmation
+# and 1d trend filter (EMA34 slope) will capture institutional breakouts in both bull and bear markets.
+# Tight entry conditions (volume > 1.5x avg + trend alignment) reduce overtrading.
+# Position size 0.25 balances risk and return.
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,16 +27,14 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for Camarilla width
+    # Calculate 1d ATR(14) for risk management (not used in entry but kept for potential exit)
     tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels using previous day's data
-    # Camarilla: H4 = C + 1.1/2 * (H-L), L4 = C - 1.1/2 * (H-L)
-    # We use shifted values to avoid look-ahead
+    # Calculate Camarilla levels using previous day's data (H4, L4)
     prev_close = np.concatenate([[np.nan], close_1d[:-1]])
     prev_high = np.concatenate([[np.nan], high_1d[:-1]])
     prev_low = np.concatenate([[np.nan], low_1d[:-1]])
@@ -44,13 +46,14 @@ def generate_signals(prices):
     camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
     camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
-    # 4h trend filter: EMA(34) slope
-    close_s = pd.Series(close)
-    ema_34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_slope = ema_34 - np.roll(ema_34, 1)
+    # 1d trend filter: EMA(34) slope
+    close_1d_s = pd.Series(close_1d)
+    ema_34_1d = close_1d_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_slope = ema_34_1d - np.roll(ema_34_1d, 1)
     ema_34_slope[0] = 0
+    ema_34_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_34_slope)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -60,7 +63,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or \
-           np.isnan(ema_34_slope[i]) or np.isnan(vol_ma_20[i]):
+           np.isnan(ema_34_slope_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -72,8 +75,8 @@ def generate_signals(prices):
         volume_ok = vol > 1.5 * vol_ma
         
         # Trend filter: bullish when EMA slope > 0
-        bullish_trend = ema_34_slope[i] > 0
-        bearish_trend = ema_34_slope[i] < 0
+        bullish_trend = ema_34_slope_aligned[i] > 0
+        bearish_trend = ema_34_slope_aligned[i] < 0
         
         if position == 0:
             # Long: price breaks above H4 with volume and bullish trend
