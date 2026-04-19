@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1dPivot_R1S1_Breakout_VolumeATR_Tight_v7"
+name = "4h_1dPivot_R1S1_Breakout_VolumeATR_Tight_v8"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -43,13 +43,13 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (4h)
+    # Volume confirmation: current volume > 2.5x 20-period average (4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Increased from 20 to reduce early noise
+    start_idx = 20
     
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
@@ -66,29 +66,29 @@ def generate_signals(prices):
         s1 = s1_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
         
-        volume_confirmed = vol > 2.0 * vol_ma
+        volume_confirmed = vol > 2.5 * vol_ma
         
         if position == 0:
-            # Long: break above R1 with volume (more conservative)
+            # Long: break above R1 with volume
             if price > r1 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume (more conservative)
+            # Short: break below S1 with volume
             elif price < s1 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price below pivot OR ATR-based stop (tighter)
-            if price < pivot or price < close[i-1] - 1.5 * atr:
+            # Exit: price below pivot or ATR-based stop
+            if price < pivot or price < close[i-1] - 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above pivot OR ATR-based stop (tighter)
-            if price > pivot or price > close[i-1] + 1.5 * atr:
+            # Exit: price above pivot or ATR-based stop
+            if price > pivot or price > close[i-1] + 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
