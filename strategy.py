@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout (20) + 1d volume spike (>2x) + 1d EMA trend filter
-# Enter long when price breaks above 20-period high with volume confirmation and above 1d EMA50
-# Enter short when price breaks below 20-period low with volume confirmation and below 1d EMA50
-# Exit when price crosses back through the 10-period Donchian midpoint
-# Uses discrete position sizing (0.25) to minimize fee churn
-# Designed for 12h timeframe to target 15-30 trades/year, avoiding excessive turnover
-name = "12h_Donchian20_1dVol_EMA50_v1"
-timeframe = "12h"
+# Hypothesis: 4h EMA crossover + 1d ADX trend filter + volume confirmation
+# EMA(21) and EMA(55) for trend direction
+# 1d ADX(14) > 25 to filter strong trends (avoid chop)
+# Volume > 1.5x 20-period average for conviction
+# Long when fast EMA > slow EMA, ADX > 25, volume filter
+# Short when fast EMA < slow EMA, ADX > 25, volume filter
+# Exit when EMA crossover reverses
+# Designed to capture strong trends with volume confirmation in both bull and bear markets
+# Target: 25-40 trades/year to avoid fee drag
+name = "4h_EMA_ADX_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,60 +26,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and EMA filters
+    # Get 1d data for ADX
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d Volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # 1d ADX calculation
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Directional Movement
+    dm_plus = df_1d['high'] - df_1d['high'].shift(1)
+    dm_minus = df_1d['low'].shift(1) - df_1d['low']
+    dm_plus = np.where((dm_plus > dm_minus) & (dm_plus > 0), dm_plus, 0)
+    dm_minus = np.where((dm_minus > dm_plus) & (dm_minus > 0), dm_minus, 0)
     
-    # 12h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2  # 10-period midpoint for exit
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    dm_plus_ma = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean()
+    dm_minus_ma = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean()
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_ma / tr_ma
+    di_minus = 100 * dm_minus_ma / tr_ma
+    
+    # DX and ADX
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean()
+    adx_values = adx.values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # 4x EMA calculations
+    ema_fast = pd.Series(close).ewm(span=21, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=55, adjust=False).mean().values
+    
+    # Volume filter: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 60  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 12h volume > 2x 1d average volume (scaled to 12h)
-        # Approximate 12h volume from 1d: 1d volume / 2 (since 12h is half a day)
-        vol_threshold = 2 * vol_ma_1d_aligned[i] / 2  # Adjust for timeframe difference
-        volume_filter = volume[i] > vol_threshold if vol_threshold > 0 else False
+        # Volume filter: current volume > 1.5x average
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: break above 20-period high + volume + above 1d EMA50
-            if close[i] > high_20[i] and volume_filter and close[i] > ema_50_1d_aligned[i]:
+            # Long entry: EMA crossover up + ADX > 25 + volume
+            if ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1] and adx_1d_aligned[i] > 25 and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below 20-period low + volume + below 1d EMA50
-            elif close[i] < low_20[i] and volume_filter and close[i] < ema_50_1d_aligned[i]:
+            # Short entry: EMA crossover down + ADX > 25 + volume
+            elif ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1] and adx_1d_aligned[i] > 25 and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below Donchian midpoint (10-period)
-            if close[i] < donchian_mid[i]:
+            # Long exit: EMA crossover down
+            if ema_fast[i] < ema_slow[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Donchian midpoint (10-period)
-            if close[i] > donchian_mid[i]:
+            # Short exit: EMA crossover up
+            if ema_fast[i] > ema_slow[i]:
                 signals[i] = 0.0
                 position = 0
             else:
