@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA (Kaufman Adaptive Moving Average) with 1w trend filter and volume confirmation
-# - KAMA adapts to market noise: follows price closely in trending markets, stays flat in ranging markets
-# - Only take long when price > KAMA AND price > 1w EMA50 (uptrend on both timeframes)
-# - Only take short when price < KAMA AND price < 1w EMA50 (downtrend on both timeframes)
-# - Volume confirmation: current 1d volume > 1.5x 20-period average volume
-# - Designed to reduce whipsaws in ranging markets while capturing trends in both bull and bear markets
-# - Target: 15-25 trades/year to minimize fee drag
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above 4h Donchian upper channel (20-period) + volume > 1.5x 1d average + price > 1w EMA50
+# - Short when price breaks below 4h Donchian lower channel (20-period) + volume > 1.5x 1d average + price < 1w EMA50
+# - Exit when price crosses back through the Donchian channel midpoint or trend reverses
+# - Trend filter ensures we trade with higher timeframe direction, reducing whipsaw in sideways markets
+# - Volume confirmation ensures breakouts have conviction
+# - Target: 20-40 trades/year to stay within fee limits
 
-name = "1d_KAMA_1wTrend_Volume_v1"
-timeframe = "1d"
+name = "4h_DonchianBreakout_1dVolume_1wTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,6 +25,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
     # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
     
@@ -32,71 +40,47 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # KAMA (Kaufman Adaptive Moving Average) parameters
-    er_period = 10  # Efficiency Ratio period
-    fast_sc = 2/(2+1)  # smoothing constant for fastest EMA
-    slow_sc = 2/(30+1)  # smoothing constant for slowest EMA
-    
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_period))  # absolute change over er_period periods
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # sum of absolute changes over er_period
-    
-    # Avoid division by zero
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
-    
-    # Calculate smoothing constant (SC)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[er_period] = close[er_period]  # seed value
-    
-    for i in range(er_period + 1, n):
-        if not np.isnan(sc[i-er_period]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i-er_period] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, er_period + 20)  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-period average volume
-        volume_filter = vol_ma_20[i] > 0 and volume[i] > 1.5 * vol_ma_20[i]
+        # Volume filter: current 4h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d average to 4h: 1d has 6x 4h bars, so divide by 6
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 6.0)
         
         if position == 0:
-            # Look for long entry: uptrend on both timeframes + volume
-            if close[i] > kama[i] and close[i] > ema_50_1w_aligned[i] and volume_filter:
+            # Look for long entry: price breaks above Donchian upper + uptrend + volume
+            if close[i] > donchian_high[i] and close[i] > ema_50_1w_aligned[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: downtrend on both timeframes + volume
-            elif close[i] < kama[i] and close[i] < ema_50_1w_aligned[i] and volume_filter:
+            # Look for short entry: price breaks below Donchian lower + downtrend + volume
+            elif close[i] < donchian_low[i] and close[i] < ema_50_1w_aligned[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when trend breaks on either timeframe
-            if close[i] <= kama[i] or close[i] <= ema_50_1w_aligned[i]:
+            # Long position: exit when price crosses below Donchian midpoint or trend reverses
+            if close[i] < donchian_mid[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when trend breaks on either timeframe
-            if close[i] >= kama[i] or close[i] >= ema_50_1w_aligned[i]:
+            # Short position: exit when price crosses above Donchian midpoint or trend reverses
+            if close[i] > donchian_mid[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
