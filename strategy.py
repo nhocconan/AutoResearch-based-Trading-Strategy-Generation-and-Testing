@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_ConservativeBreakout_V1"
-timeframe = "1h"
+name = "6h_1d_Camarilla_Pivot_Breakout_V1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,87 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data once before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    # 4h trend filter: EMA50 > EMA200
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    trend_4h = ema50_4h > ema200_4h
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    
-    # 1d volatility filter: ATR(14) percentile < 70 (avoid extreme volatility)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla pivot levels for 1d
+    # Formula: 
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + Range * 1.500
+    # R3 = C + Range * 1.250
+    # R2 = C + Range * 1.166
+    # R1 = C + Range * 1.083
+    # S1 = C - Range * 1.083
+    # S2 = C - Range * 1.166
+    # S3 = C - Range * 1.250
+    # S4 = C - Range * 1.500
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # ATR percentile over 50 days
-    atr_series = pd.Series(atr_14)
-    atr_percentile = atr_series.rolling(window=50, min_periods=20).rank(pct=True).values
-    vol_ok = atr_percentile < 0.7  # Only trade when volatility is not extreme
-    vol_ok_aligned = align_htf_to_ltf(prices, df_1d, vol_ok)
+    R3 = close_1d + range_1d * 1.250
+    S3 = close_1d - range_1d * 1.250
+    R4 = close_1d + range_1d * 1.500
+    S4 = close_1d - range_1d * 1.500
     
-    # 1h entry: Donchian breakout (20-period) with volume confirmation
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 6h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Volume filter: current volume > 1.5x 24-period average (6h * 4 = 24h)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 50, 20)
+    start_idx = 150
     
     for i in range(start_idx, n):
-        if np.isnan(trend_4h_aligned[i]) or np.isnan(vol_ok_aligned[i]) or \
-           np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_20[i]):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
+        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
+           np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or \
+           np.isnan(vol_ma_24[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_24[i]
         
-        # Volume filter: current volume > 1.5x 20-period average
+        # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above 20-period high with volume, in uptrend, normal volatility
-            if price > high_20[i] and volume_ok and trend_4h_aligned[i] and vol_ok_aligned[i]:
-                signals[i] = 0.20
+            # Long breakout: price breaks above R4 with volume
+            if price > R4_aligned[i] and volume_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low with volume, in downtrend, normal volatility
-            elif price < low_20[i] and volume_ok and not trend_4h_aligned[i] and vol_ok_aligned[i]:
-                signals[i] = -0.20
+            # Short breakdown: price breaks below S4 with volume
+            elif price < S4_aligned[i] and volume_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below 20-period high
-            if price < high_20[i]:
+            # Exit: price returns below R3 (mean reversion)
+            if price < R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above 20-period low
-            if price > low_20[i]:
+            # Exit: price returns above S3 (mean reversion)
+            if price > S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
