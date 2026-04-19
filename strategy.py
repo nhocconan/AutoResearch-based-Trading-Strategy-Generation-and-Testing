@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_EMA200_Trend_v2"
-timeframe = "6h"
+name = "1d_Pivot_R1_S1_Breakout_Volume_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,20 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA200 calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1d data for pivot calculation (same timeframe)
+    df_1d = prices.copy()  # Already daily data
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate daily pivot points (R1, S1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA200
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12.0
+    s1_1d = close_1d - range_1d * 1.1 / 12.0
     
-    # Calculate 13-period EMA for Bull/Bear Power
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate weekly EMA34 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -41,41 +50,45 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(ema200_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or \
-           np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_1d[i]) or np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or \
+           np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        ema200 = ema200_1d_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        ema34_1w = ema34_1w_aligned[i]
+        pivot = pivot_1d[i]
+        r1 = r1_1d[i]
+        s1 = s1_1d[i]
         
         volume_confirmed = vol > 1.5 * vol_ma
+        # Trend filter: price above/below weekly EMA34
+        uptrend = price > ema34_1w
+        downtrend = price < ema34_1w
         
         if position == 0:
-            # Long: Bull Power > 0, price above EMA200, volume confirmation
-            if bull > 0 and price > ema200 and volume_confirmed:
+            # Long: Price breaks above R1 + volume + uptrend
+            if price > r1 and volume_confirmed and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0, price below EMA200, volume confirmation
-            elif bear < 0 and price < ema200 and volume_confirmed:
+            # Short: Price breaks below S1 + volume + downtrend
+            elif price < s1 and volume_confirmed and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Bull Power turns negative or price crosses below EMA200
-            if bull <= 0 or price < ema200:
+            # Exit: Price returns below pivot
+            if price < pivot:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Bear Power turns positive or price crosses above EMA200
-            if bear >= 0 or price > ema200:
+            # Exit: Price returns above pivot
+            if price > pivot:
                 signals[i] = 0.0
                 position = 0
             else:
