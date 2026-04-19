@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 12h RSI for momentum, 1d volatility regime filter (ATR ratio), and volume confirmation.
-# Uses tight entry conditions to limit trades (~20-30/year) and avoid overtrading.
-# RSI > 55 for long, < 45 for short on 12h timeframe ensures momentum alignment.
-# ATR ratio < 0.8 indicates low volatility regime for better breakout quality.
-# Volume > 1.5x 20-period average confirms institutional participation.
-name = "4h_12hRSI_1dATRratio_Volume"
-timeframe = "4h"
+# Hypothesis: 12h timeframe with 1-day trend filter (EMA34) and 12-hour Donchian breakout (20-period) with volume confirmation.
+# Enters only during 08-20 UTC session. Uses strict conditions to limit trades (~15-25/year) and avoid overtrading.
+# Trend-following in bull markets, avoids false signals in bear/chop via EMA34 filter and volume spike requirement.
+name = "12h_1d_EMA34_Donchian20_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,52 +19,31 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 12h data for RSI (called ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    # RSI(14) calculation
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ATR (called ONCE before loop)
+    # Get 1d data for EMA34 trend (called ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # ATR(14) calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = high_1d[0] - close_1d[0]
-    tr3[0] = low_1d[0] - close_1d[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Current ATR for volatility regime (4h ATR)
-    tr_4h1 = high - low
-    tr_4h2 = np.abs(high - np.roll(close, 1))
-    tr_4h3 = np.abs(low - np.roll(close, 1))
-    tr_4h1[0] = high[0] - low[0]
-    tr_4h2[0] = high[0] - close[0]
-    tr_4h3[0] = low[0] - close[0]
-    tr_4h = np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))
-    atr_4h = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Get 12h data for Donchian20 breakout (called ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    # Donchian channels: 20-period high/low
+    high_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    high_20_12h_aligned = align_htf_to_ltf(prices, df_12h, high_20_12h)
+    low_20_12h_aligned = align_htf_to_ltf(prices, df_12h, low_20_12h)
     
-    # Volatility regime filter: current ATR / 1d ATR < 0.8 (low vol regime)
-    vol_regime = atr_4h / (atr_1d_aligned + 1e-10) < 0.8
-    
-    # Volume filter: volume > 1.5 * 20-period average
+    # Volume filter: volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    volume_filter = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,39 +51,38 @@ def generate_signals(prices):
     start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(rsi_12h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr_4h[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20_12h_aligned[i]) or 
+            np.isnan(low_20_12h_aligned[i]) or np.isnan(volume_ma[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI > 55 (bullish momentum) + low vol regime + volume confirmation
-            if (rsi_12h_aligned[i] > 55 and 
-                vol_regime[i] and 
+            # Long: price above 1d EMA34 AND breaks 12h Donchian high with volume
+            if (close[i] > ema_34_1d_aligned[i] and 
+                close[i] > high_20_12h_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45 (bearish momentum) + low vol regime + volume confirmation
-            elif (rsi_12h_aligned[i] < 45 and 
-                  vol_regime[i] and 
+            # Short: price below 1d EMA34 AND breaks 12h Donchian low with volume
+            elif (close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < low_20_12h_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if RSI drops below 50 (momentum fade) or volatility spikes
-            if (rsi_12h_aligned[i] < 50 or 
-                vol_regime[i] == False):
+            # Long: exit if price breaks below 1d EMA34 or 12h Donchian low
+            if close[i] < ema_34_1d_aligned[i] or close[i] < low_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if RSI rises above 50 (momentum fade) or volatility spikes
-            if (rsi_12h_aligned[i] > 50 or 
-                vol_regime[i] == False):
+            # Short: exit if price breaks above 1d EMA34 or 12h Donchian high
+            if close[i] > ema_34_1d_aligned[i] or close[i] > high_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
