@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band squeeze breakout with 1d EMA50 trend filter and volume confirmation.
-# Bollinger Band squeeze identifies low volatility periods preceding explosive moves.
-# We trade breakouts in the direction of the daily trend (EMA50) with volume confirmation.
-# Works in bull/bear markets: avoids false breakouts in ranging markets, captures true breakouts.
-# Target: 15-35 trades/year per symbol.
-name = "12h_BB_Squeeze_EMA50_Volume_Breakout"
-timeframe = "12h"
+# Hypothesis: 1h breakout strategy using 4h Donchian channels with 1d trend filter and volume confirmation.
+# Uses higher timeframes for signal direction (4h trend, 1d Donchian breakout) and 1h for entry timing.
+# Volume confirmation reduces false breakouts. Designed for 15-35 trades/year to avoid fee drag.
+# Works in bull/bear markets: trend filter ensures we only trade with higher timeframe momentum.
+name = "1h_Donchian_Trend_Filter_Volume_Breakout"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,85 +21,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 4h data for trend filter (Donchian middle)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h Donchian channel (20-period)
+    donchian_period = 20
+    upper_4h = pd.Series(high_4h).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_4h = pd.Series(low_4h).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    middle_4h = (upper_4h + lower_4h) / 2.0
+    
+    # Get 1d data for breakout direction filter
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate EMA50 on daily
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d Donchian breakout levels (15-period)
+    donchian_1d_period = 15
+    upper_1d = pd.Series(high_1d).rolling(window=donchian_1d_period, min_periods=donchian_1d_period).max().values
+    lower_1d = pd.Series(low_1d).rolling(window=donchian_1d_period, min_periods=donchian_1d_period).min().values
     
-    # Bollinger Bands (20, 2) on 12h
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_20 + (bb_std * std_20)
-    lower_band = sma_20 - (bb_std * std_20)
-    bb_width = (upper_band - lower_band) / sma_20  # Normalized bandwidth
+    # Align HTF indicators to 1h
+    middle_4h_aligned = align_htf_to_ltf(prices, df_4h, middle_4h)
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
-    # Bollinger Band squeeze detection: bandwidth below 20-period mean
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_condition = bb_width < bb_width_ma  # Bandwidth below average = squeeze
-    
-    # Align 1d EMA50 to 12h
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 1.8x 24-period average (to reduce noise)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 50, 20)  # Ensure BB, EMA50, and volume MA are ready
+    start_idx = max(donchian_period, donchian_1d_period, 24)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(bb_width[i]) or np.isnan(bb_width_ma[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(middle_4h_aligned[i]) or np.isnan(upper_1d_aligned[i]) or 
+            np.isnan(lower_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        ema_50_val = ema_50_aligned[i]
-        vol_ma = vol_ma_20[i]
         vol = volume[i]
-        is_squeeze = squeeze_condition[i]
+        vol_ma = vol_ma_24[i]
+        middle_4h_val = middle_4h_aligned[i]
+        upper_1d_val = upper_1d_aligned[i]
+        lower_1d_val = lower_1d_aligned[i]
         
         # Volume confirmation threshold
-        volume_confirmed = vol > 1.5 * vol_ma
-        
-        # Breakout conditions
-        bullish_breakout = price > upper  # Price breaks above upper band
-        bearish_breakout = price < lower  # Price breaks below lower band
+        volume_confirmed = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Look for entry after Bollinger Band squeeze, in direction of daily trend
-            if is_squeeze and bullish_breakout and (price > ema_50_val) and volume_confirmed:
-                signals[i] = 0.25
+            # Long: price above 4h Donchian middle AND breaks above 1d upper band with volume
+            if price > middle_4h_val and price > upper_1d_val and volume_confirmed:
+                signals[i] = 0.20
                 position = 1
-            elif is_squeeze and bearish_breakout and (price < ema_50_val) and volume_confirmed:
-                signals[i] = -0.25
+            # Short: price below 4h Donchian middle AND breaks below 1d lower band with volume
+            elif price < middle_4h_val and price < lower_1d_val and volume_confirmed:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long when price returns to middle band (mean reversion) or volatility expands
-            middle_band = sma_20[i]
-            if price < middle_band:  # Return to mean
+            # Exit long when price returns to 4h Donchian middle (mean reversion)
+            if price < middle_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short when price returns to middle band
-            middle_band = sma_20[i]
-            if price > middle_band:  # Return to mean
+            # Exit short when price returns to 4h Donchian middle
+            if price > middle_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
