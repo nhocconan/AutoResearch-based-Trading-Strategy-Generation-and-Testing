@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R (14) with 1d EMA50 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions: values below -80 = oversold, above -20 = overbought
-# In trending markets, we buy oversold dips in uptrends and sell overbought bounces in downtrends
-# 1d EMA50 provides higher timeframe trend bias to avoid counter-trend trades
-# Volume confirmation filters weak signals
-# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
-name = "12h_WilliamsR_1dEMA50_Volume"
-timeframe = "12h"
+# Hypothesis: 6h Williams Alligator + 1d ATR filter + volume confirmation
+# Alligator uses three SMAs (Jaw=13, Teeth=8, Lips=5) to identify trends
+# When lines are intertwined (no trend), stay out; when aligned, trade in direction
+# 1d ATR filter avoids trading in low volatility conditions
+# Volume confirmation ensures participation
+# Designed for 50-150 total trades over 4 years (12-37/year)
+name = "6h_Alligator_1dATR_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,60 +23,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA50 for trend filter
+    # 1d ATR for volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    atr_1d_ma = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_ma)
     
-    # Williams %R (14) on 12h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Alligator on 6h: Jaw (13), Teeth (8), Lips (5) SMAs
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
     
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Alligator alignment: jaws < teeth < lips for down, jaws > teeth > lips for up
+    ma_aligned_up = (jaw > teeth) & (teeth > lips)
+    ma_aligned_down = (jaw < teeth) & (teeth < lips)
+    
+    # Volume confirmation: volume > 1.2 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    volume_confirm = volume > (volume_ma * 1.2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 30  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade when ATR indicates sufficient volatility (> 80% of MA)
+        vol_filter = atr_1d[i] > (atr_1d_aligned[i] * 0.8)
+        
         if position == 0:
-            # Long: Williams %R < -80 (oversold) + above 1d EMA50 + volume confirmation
-            if (williams_r[i] < -80 and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_confirm[i]):
+            # Long: Alligator aligned up + volume + volatility filter
+            if (ma_aligned_up[i] and volume_confirm[i] and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) + below 1d EMA50 + volume confirmation
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_confirm[i]):
+            # Short: Alligator aligned down + volume + volatility filter
+            elif (ma_aligned_down[i] and volume_confirm[i] and vol_filter):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Williams %R > -20 (overbought) or breaks below 1d EMA50
-            if (williams_r[i] > -20) or (close[i] < ema_50_1d_aligned[i]):
+            # Long: exit if Alligator alignment breaks down
+            if not ma_aligned_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Williams %R < -80 (oversold) or breaks above 1d EMA50
-            if (williams_r[i] < -80) or (close[i] > ema_50_1d_aligned[i]):
+            # Short: exit if Alligator alignment breaks up
+            if not ma_aligned_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
