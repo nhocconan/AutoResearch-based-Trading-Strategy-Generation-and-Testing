@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour EMA crossover with 12-hour RSI filter and volume confirmation.
-# Long when: EMA9 crosses above EMA21 AND RSI12h > 50 AND volume > 1.2x 20-period average
-# Short when: EMA9 crosses below EMA21 AND RSI12h < 50 AND volume > 1.2x 20-period average
-# Exit when: EMA crossover reverses OR RSI12h crosses 50 in opposite direction
-# Uses 12h RSI as trend filter to avoid counter-trend trades. EMA9/21 for entry timing.
-# Volume confirms momentum. Designed for 12-25 trades/year per symbol.
-name = "6h_EMA9x21_RSI12h_Volume"
-timeframe = "6h"
+# Hypothesis: 12-hour Williams %R with 1-day EMA trend filter and volume confirmation.
+# Williams %R measures overbought/oversold levels; EMA100 on daily trend filters direction.
+# Long when: Williams %R < -80 (oversold) and daily EMA100 rising, volume > 1.5x average
+# Short when: Williams %R > -20 (overbought) and daily EMA100 falling, volume > 1.5x average
+# Exit when: Williams %R crosses back above -50 (for long) or below -50 (for short)
+# Works in ranging markets (mean reversion) and trends (pullbacks). Target: 15-25 trades/year per symbol.
+name = "12h_WilliamsR_EMA100_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,24 +23,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMAs for entry signals
-    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate EMA100 on daily timeframe
+    df_1d = get_htf_data(prices, '1d')
+    ema100_1d = pd.Series(df_1d['close']).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Load 12h data ONCE before loop (Rule 1 compliance)
-    df_12h = get_htf_data(prices, '12h')
-    # Calculate RSI on 12h closes
-    rsi_period = 14
-    delta = pd.Series(df_12h['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h = rsi_12h.fillna(50).values  # Neutral when undefined
-    # Align 12h RSI to 6h timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,46 +39,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(21, 20)  # Wait for EMA21 and volume MA
+    start_idx = 100  # Wait for EMA100 calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema9[i]) or np.isnan(ema21[i]) or 
-            np.isnan(rsi_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema100_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # EMA crossover signals
-        ema9_above = ema9[i] > ema21[i]
-        ema9_above_prev = ema9[i-1] > ema21[i-1]
-        ema_cross_up = ema9_above and not ema9_above_prev
-        ema_cross_down = not ema9_above and ema9_above_prev
-        
-        rsi = rsi_12h_aligned[i]
+        wr = williams_r[i]
+        ema100 = ema100_1d_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Long entry: EMA9 crosses above EMA21 AND RSI12h > 50 AND volume spike
-            if ema_cross_up and rsi > 50 and vol > 1.2 * vol_ma:
+            # Long entry: Oversold, daily EMA rising, volume spike
+            if (wr < -80 and ema100 > ema100_1d_aligned[i-1] and vol > 1.5 * vol_ma):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: EMA9 crosses below EMA21 AND RSI12h < 50 AND volume spike
-            elif ema_cross_down and rsi < 50 and vol > 1.2 * vol_ma:
+            # Short entry: Overbought, daily EMA falling, volume spike
+            elif (wr > -20 and ema100 < ema100_1d_aligned[i-1] and vol > 1.5 * vol_ma):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: EMA9 crosses below EMA21 OR RSI12h drops below 50
-            if ema_cross_down or rsi < 50:
+            # Long exit: Williams %R crosses above -50
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: EMA9 crosses above EMA21 OR RSI12h rises above 50
-            if ema_cross_up or rsi > 50:
+            # Short exit: Williams %R crosses below -50
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
