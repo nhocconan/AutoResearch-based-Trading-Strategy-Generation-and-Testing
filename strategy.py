@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Triple EMA crossover with 1d volume confirmation and 1w ADX trend filter
-# - Triple EMA (8,21,55) for trend changes: long when EMA8>EMA21>EMA55, short when EMA8<EMA21<EMA55
-# - 1d volume > 1.5x 20-period average for conviction
-# - 1w ADX(14) > 25 for strong trend (avoid ranging markets)
-# - Exit when EMA8 crosses back below/above EMA21
-# - Designed to capture strong trends while avoiding choppy markets
-# - Target: 25-40 trades/year to minimize fee drag
+# Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation
+# - Long when price breaks above 20-day high + price above 1w EMA50 + volume > 1.5x 20-day average
+# - Short when price breaks below 20-day low + price below 1w EMA50 + volume > 1.5x 20-day average
+# - Exit on opposite Donchian break (10-day) or trend reversal
+# - Designed to capture trends in both bull and bear markets by following higher timeframe trend
+# - Target: 10-25 trades/year to minimize fee drag
 
-name = "4h_TripleEMA_1dVolume_1wADX_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wTrend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,89 +24,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    
-    # 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Get 1w data for ADX trend filter
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate ADX(14) on 1w data
-    # True Range
-    tr1 = np.abs(df_1w['high'] - df_1w['low'])
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1w EMA(50) for trend direction
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Directional Movement
-    up_move = df_1w['high'] - df_1w['high'].shift(1)
-    down_move = df_1w['low'].shift(1) - df_1w['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Donchian channels (20-period for entry, 10-period for exit)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
+    highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max()
+    lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min()
     
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Triple EMA (8,21,55) on 4h data
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # 20-day volume average for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 55  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(ema55[i]) or \
-           np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 4h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d average to 4h: 1d has 6x 4h bars, so divide by 6
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 6.0)
-        
-        # Trend filter: 1w ADX > 25
-        trend_filter = adx_aligned[i] > 25
+        # Volume filter: current volume > 1.5x 20-day average
+        volume_filter = vol_ma_20[i] > 0 and volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Look for long entry: bullish EMA alignment + volume + trend
-            if ema8[i] > ema21[i] > ema55[i] and volume_filter and trend_filter:
+            # Look for long entry: uptrend + breakout + volume
+            if close[i] > highest_high_20[i] and close[i] > ema_50_1w_aligned[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: bearish EMA alignment + volume + trend
-            elif ema8[i] < ema21[i] < ema55[i] and volume_filter and trend_filter:
+            # Look for short entry: downtrend + breakdown + volume
+            elif close[i] < lowest_low_20[i] and close[i] < ema_50_1w_aligned[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when EMA8 crosses below EMA21
-            if ema8[i] < ema21[i]:
+            # Long position: exit on breakdown (10-day) or trend reversal
+            if close[i] < lowest_low_10[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when EMA8 crosses above EMA21
-            if ema8[i] > ema21[i]:
+            # Short position: exit on breakout (10-day) or trend reversal
+            if close[i] > highest_high_10[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
