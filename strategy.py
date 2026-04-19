@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_R1S1_Breakout_Volume_Session_v2"
-timeframe = "1h"
+name = "6h_1w_200dma_ema21_breakout_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,99 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h ATR(14) for Camarilla width
-    tr4h = np.maximum(df_4h['high'][1:], df_4h['close'][:-1]) - np.minimum(df_4h['low'][1:], df_4h['close'][:-1])
-    tr4h = np.maximum(tr4h, np.abs(df_4h['high'][1:] - df_4h['close'][:-1]))
-    tr4h = np.maximum(tr4h, np.abs(df_4h['low'][1:] - df_4h['close'][:-1]))
-    tr4h = np.concatenate([[np.nan], tr4h])
-    atr_14_4h = pd.Series(tr4h).rolling(window=14, min_periods=14).mean().values
+    # Calculate weekly 200-period EMA (requires ~200 weeks)
+    close_1w_series = pd.Series(close_1w)
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Calculate 1d ATR(14) for Camarilla width
-    tr1d = np.maximum(df_1d['high'][1:], df_1d['close'][:-1]) - np.minimum(df_1d['low'][1:], df_1d['close'][:-1])
-    tr1d = np.maximum(tr1d, np.abs(df_1d['high'][1:] - df_1d['close'][:-1]))
-    tr1d = np.maximum(tr1d, np.abs(df_1d['low'][1:] - df_1d['close'][:-1]))
-    tr1d = np.concatenate([[np.nan], tr1d])
-    atr_14_1d = pd.Series(tr1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate 6h EMA21 for entry timing
+    close_series = pd.Series(close)
+    ema21_6h = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 4h Camarilla levels using previous 4h bar's data
-    prev_close_4h = np.concatenate([[np.nan], df_4h['close'][:-1]])
-    prev_high_4h = np.concatenate([[np.nan], df_4h['high'][:-1]])
-    prev_low_4h = np.concatenate([[np.nan], df_4h['low'][:-1]])
-    
-    camarilla_H4_4h = prev_close_4h + 1.1/2 * (prev_high_4h - prev_low_4h)
-    camarilla_L4_4h = prev_close_4h - 1.1/2 * (prev_high_4h - prev_low_4h)
-    
-    # Calculate 1d Camarilla levels using previous day's data
-    prev_close_1d = np.concatenate([[np.nan], df_1d['close'][:-1]])
-    prev_high_1d = np.concatenate([[np.nan], df_1d['high'][:-1]])
-    prev_low_1d = np.concatenate([[np.nan], df_1d['low'][:-1]])
-    
-    camarilla_H4_1d = prev_close_1d + 1.1/2 * (prev_high_1d - prev_low_1d)
-    camarilla_L4_1d = prev_close_1d - 1.1/2 * (prev_high_1d - prev_low_1d)
-    
-    # Align Camarilla levels to 1h timeframe
-    camarilla_H4_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_H4_4h)
-    camarilla_L4_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_L4_4h)
-    camarilla_H4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4_1d)
-    camarilla_L4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4_1d)
-    
-    # Volume filter: current volume > 2.0x 24-period average (more stringent)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 24)
+    start_idx = max(200, 21, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_H4_4h_aligned[i]) or np.isnan(camarilla_L4_4h_aligned[i]) or \
-           np.isnan(camarilla_H4_1d_aligned[i]) or np.isnan(camarilla_L4_1d_aligned[i]) or \
-           np.isnan(vol_ma_24[i]):
+        if np.isnan(ema200_1w_aligned[i]) or np.isnan(ema21_6h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_24[i]
-        hour = hours[i]
-        
-        # Session filter: 08-20 UTC
-        in_session = (8 <= hour <= 20)
+        vol_ma = vol_ma_20[i]
         
         # Volume filter
-        volume_ok = vol > 2.0 * vol_ma
+        volume_ok = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above both 4h and 1d H4 with volume and in session
-            if price > camarilla_H4_4h_aligned[i] and price > camarilla_H4_1d_aligned[i] and volume_ok and in_session:
-                signals[i] = 0.20
+            # Long: price above weekly 200EMA and breaks above 6h EMA21 with volume
+            if price > ema200_1w_aligned[i] and price > ema21_6h[i] and volume_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below both 4h and 1d L4 with volume and in session
-            elif price < camarilla_L4_4h_aligned[i] and price < camarilla_L4_1d_aligned[i] and volume_ok and in_session:
-                signals[i] = -0.20
+            # Short: price below weekly 200EMA and breaks below 6h EMA21 with volume
+            elif price < ema200_1w_aligned[i] and price < ema21_6h[i] and volume_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below either 4h or 1d H4
-            if price < camarilla_H4_4h_aligned[i] or price < camarilla_H4_1d_aligned[i]:
+            # Exit: price crosses below 6h EMA21
+            if price < ema21_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above either 4h or 1d L4
-            if price > camarilla_L4_4h_aligned[i] or price > camarilla_L4_1d_aligned[i]:
+            # Exit: price crosses above 6h EMA21
+            if price > ema21_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
