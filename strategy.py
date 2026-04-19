@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_4H_1D_Donchian_20_Volume_Trend_v1"
+name = "4h_1d_Camarilla_Pivot_Volume_Squeeze"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,52 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for Donchian channels (once before loop)
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for Camarilla levels (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels on 4h and 1d
-    high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for previous day
+    # R4 = Close + (High - Low) * 1.1/2
+    # R3 = Close + (High - Low) * 1.1/4
+    # R2 = Close + (High - Low) * 1.1/6
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    # S2 = Close - (High - Low) * 1.1/6
+    # S3 = Close - (High - Low) * 1.1/4
+    # S4 = Close - (High - Low) * 1.1/2
+    range_1d = high_1d - low_1d
+    r1 = close_1d + range_1d * 1.1 / 12
+    r2 = close_1d + range_1d * 1.1 / 6
+    r3 = close_1d + range_1d * 1.1 / 4
+    r4 = close_1d + range_1d * 1.1 / 2
+    s1 = close_1d - range_1d * 1.1 / 12
+    s2 = close_1d - range_1d * 1.1 / 6
+    s3 = close_1d - range_1d * 1.1 / 4
+    s4 = close_1d - range_1d * 1.1 / 2
     
-    # Align Donchian channels to 4h timeframe
-    high_20_4h_aligned = align_htf_to_ltf(prices, df_4h, high_20_4h)
-    low_20_4h_aligned = align_htf_to_ltf(prices, df_4h, low_20_4h)
-    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
-    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
-    
-    # 4h ADX for trend strength (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    di_plus = 100 * dm_plus14 / tr14
-    di_minus = 100 * dm_minus14 / tr14
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Bollinger Band width for squeeze detection (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    bb_width = (bb_upper - bb_lower) / sma_20
+    bb_width_ma_50 = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    squeeze_condition = bb_width < 0.8 * bb_width_ma_50  # Bollinger squeeze
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,49 +70,39 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(high_20_4h_aligned[i]) or np.isnan(low_20_4h_aligned[i]) or \
-           np.isnan(high_20_1d_aligned[i]) or np.isnan(low_20_1d_aligned[i]) or \
-           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or \
+           np.isnan(vol_ma_20[i]) or np.isnan(squeeze_condition[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx[i]
-        
-        # Multi-timeframe Donchian conditions
-        upper_4h = high_20_4h_aligned[i]
-        lower_4h = low_20_4h_aligned[i]
-        upper_1d = high_20_1d_aligned[i]
-        lower_1d = low_20_1d_aligned[i]
+        squeeze = squeeze_condition[i]
         
         volume_confirmed = vol > 1.5 * vol_ma
-        trending = adx_val > 22  # Strong trend filter
         
         if position == 0:
-            # Long: Price breaks above both 4h and 1d upper bands + volume + trending
-            if price > upper_4h and price > upper_1d and volume_confirmed and trending:
+            # Long: Price breaks above S1 with volume and volatility squeeze
+            if price > s1_4h[i] and volume_confirmed and squeeze:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below both 4h and 1d lower bands + volume + trending
-            elif price < lower_4h and price < lower_1d and volume_confirmed and trending:
+            # Short: Price breaks below R1 with volume and volatility squeeze
+            elif price < r1_4h[i] and volume_confirmed and squeeze:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below 4h midpoint
-            midpoint_4h = (upper_4h + lower_4h) / 2
-            if price < midpoint_4h:
+            # Exit: Price reaches R3 or closes below S1
+            if price >= r3_4h[i] or price < s1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above 4h midpoint
-            midpoint_4h = (upper_4h + lower_4h) / 2
-            if price > midpoint_4h:
+            # Exit: Price reaches S3 or closes above R1
+            if price <= s3_4h[i] or price > r1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
