@@ -1,17 +1,16 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d RSI trend filter and volume confirmation.
-# Long when price breaks above R3 and 1d RSI > 55 and volume > 1.5x 6h average volume.
-# Short when price breaks below S3 and 1d RSI < 45 and volume > 1.5x 6h average volume.
-# Exit when price crosses back below/above H4/L4.
-# Uses Camarilla pivots for intraday support/resistance, RSI for trend filter, volume for confirmation.
-# Target: 15-35 trades/year per symbol (60-140 total over 4 years).
-name = "6h_Camarilla_RSI_Volume"
-timeframe = "6h"
+# Hypothesis: 12h Camarilla Pivot R1/S1 breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above Camarilla R1, volume > 1.5x average, and ADX > 25.
+# Short when price breaks below Camarilla S1, volume > 1.5x average, and ADX > 25.
+# Exit when price crosses back below/above Camarilla pivot point.
+# Uses 12h timeframe with daily pivot levels and ADX for trend strength.
+# Target: 15-35 trades/year per symbol to stay within frequency limits.
+name = "12h_Camarilla_R1_S1_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,76 +23,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using previous day's high, low, close
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # First value: use current day's values (no previous day available)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    R4 = prev_close + range_hl * 1.500
-    R3 = prev_close + range_hl * 1.250
-    R2 = prev_close + range_hl * 1.166
-    R1 = prev_close + range_hl * 1.083
-    S1 = prev_close - range_hl * 1.083
-    S2 = prev_close - range_hl * 1.166
-    S3 = prev_close - range_hl * 1.250
-    S4 = prev_close - range_hl * 1.500
-    H4 = R3  # Commonly used exit level
-    L4 = S3
-    
-    # Get daily data for RSI calculation
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla pivot levels using previous day's OHLC
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
+    
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    range_prev = high_prev - low_prev
+    
+    R1 = pivot + (range_prev * 1.1 / 12)
+    S1 = pivot - (range_prev * 1.1 / 12)
+    
+    # Get daily data for ADX calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Wilder's smoothing for RSI
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
     def wilder_smooth(data, period):
         result = np.zeros_like(data)
         if len(data) < period:
             return result
-        result[period-1] = np.mean(data[:period])
+        result[period-1] = np.nansum(data[:period])
         for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
     period = 14
-    avg_gain = wilder_smooth(gain, period)
-    avg_loss = wilder_smooth(loss, period)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    atr_1d = wilder_smooth(tr, period)
+    # Avoid division by zero
+    atr_1d = np.where(atr_1d == 0, np.finfo(float).eps, atr_1d)
+    plus_di_1d = 100 * wilder_smooth(plus_dm, period) / atr_1d
+    minus_di_1d = 100 * wilder_smooth(minus_dm, period) / atr_1d
+    dx_denom = plus_di_1d + minus_di_1d
+    dx_denom = np.where(dx_denom == 0, np.finfo(float).eps, dx_denom)
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / dx_denom
+    adx_1d = wilder_smooth(dx_1d, period)
     
-    # Align RSI to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align Camarilla levels and ADX to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Get 6h average volume for confirmation
+    # Get 12h average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure volume MA and pivots are ready
+    start_idx = max(20, 30)  # Ensure volume MA and ADX are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(H4[i]) or np.isnan(L4[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi = rsi_1d_aligned[i]
+        R1 = R1_aligned[i]
+        S1 = S1_aligned[i]
+        pivot_pt = pivot_aligned[i]
+        adx = adx_1d_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
@@ -101,26 +110,26 @@ def generate_signals(prices):
         volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long entry: price breaks above R3, RSI > 55, volume confirmation
-            if price > R3[i] and rsi > 55 and volume_confirmed:
+            # Long entry: price breaks above R1, ADX > 25, volume confirmation
+            if price > R1 and adx > 25 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3, RSI < 45, volume confirmation
-            elif price < S3[i] and rsi < 45 and volume_confirmed:
+            # Short entry: price breaks below S1, ADX > 25, volume confirmation
+            elif price < S1 and adx > 25 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below H4 (R3)
-            if price < H4[i]:
+            # Long exit: price crosses below pivot point
+            if price < pivot_pt:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above L4 (S3)
-            if price > L4[i]:
+            # Short exit: price crosses above pivot point
+            if price > pivot_pt:
                 signals[i] = 0.0
                 position = 0
             else:
