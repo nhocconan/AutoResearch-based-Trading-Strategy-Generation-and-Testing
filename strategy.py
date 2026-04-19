@@ -1,22 +1,15 @@
-# 12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter
-# Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
-# In bull markets, price breaks above R1 with volume; in bear markets, breaks below S1.
-# Volume confirmation filters false breakouts. ATR-based stop loss manages risk.
-# Works in both bull and bear by trading breakouts in direction of 12h trend.
-# Target: 20-50 trades over 4 years (5-12/year) to avoid fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "12h"
+name = "6h_Donchian20_1d_WeeklyPivot_Direction"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,84 +17,132 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop
+    # Get daily data once before loop
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on 12h for stop loss
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]  # First TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Get weekly data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels from previous day
-    # R1 = C + (H-L) * 1.1/12
-    # S1 = C - (H-L) * 1.1/12
-    rang = high_1d - low_1d
-    camarilla_r1 = close_1d + rang * 1.1 / 12
-    camarilla_s1 = close_1d - rang * 1.1 / 12
+    # Calculate 6-period ATR for Donchian filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=6, adjust=False, min_periods=6).mean().values
     
-    # Align Camarilla levels to 12h timeframe (previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate 12h EMA(34) for trend filter
-    close_s = pd.Series(close)
-    ema_34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly pivot points (using previous week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # R2 = P + (H - L)
+    # S2 = P - (H - L)
+    # R3 = H + 2*(P - L)
+    # S3 = L - 2*(H - P)
     
-    # Volume filter: current volume > 2.0 x 20-period average
+    # For weekly data, calculate pivot from previous week
+    pp_1w = (high_1w[:-1] + low_1w[:-1] + close_1w[:-1]) / 3
+    r1_1w = 2 * pp_1w - low_1w[:-1]
+    s1_1w = 2 * pp_1w - high_1w[:-1]
+    r2_1w = pp_1w + (high_1w[:-1] - low_1w[:-1])
+    s2_1w = pp_1w - (high_1w[:-1] - low_1w[:-1])
+    r3_1w = high_1w[:-1] + 2 * (pp_1w - low_1w[:-1])
+    s3_1w = low_1w[:-1] - 2 * (high_1w[:-1] - pp_1w)
+    
+    # Align weekly pivot levels to 6h
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # Calculate daily pivot points (using previous day's OHLC)
+    pp_1d = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3
+    r1_1d = 2 * pp_1d - low_1d[:-1]
+    s1_1d = 2 * pp_1d - high_1d[:-1]
+    r2_1d = pp_1d + (high_1d[:-1] - low_1d[:-1])
+    s2_1d = pp_1d - (high_1d[:-1] - low_1d[:-1])
+    r3_1d = high_1d[:-1] + 2 * (pp_1d - low_1d[:-1])
+    s3_1d = low_1d[:-1] - 2 * (high_1d[:-1] - pp_1d)
+    
+    # Align daily pivot levels to 6h
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(34, 20)  # Ensure indicators are ready
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or \
-           np.isnan(ema_34[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or \
+           np.isnan(s1_1w_aligned[i]) or np.isnan(pp_1d_aligned[i]) or \
+           np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr_val = atr[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        ema_val = ema_34[i]
         
         # Volume filter
-        volume_ok = vol > 2.0 * vol_ma
+        volume_ok = vol > 1.3 * vol_ma
+        
+        # Determine weekly pivot direction: bullish if price > weekly pivot
+        weekly_bullish = price > pp_1w_aligned[i]
+        weekly_bearish = price < pp_1w_aligned[i]
+        
+        # Determine daily pivot direction: bullish if price > daily pivot
+        daily_bullish = price > pp_1d_aligned[i]
+        daily_bearish = price < pp_1d_aligned[i]
         
         if position == 0:
-            # Long breakout above R1 with volume and above EMA34 (uptrend)
-            if price > r1 and volume_ok and price > ema_val:
+            # Long conditions: price breaks above Donchian high + weekly/daily bullish + volume
+            if (price > donchian_high[i] and 
+                weekly_bullish and daily_bullish and volume_ok):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short breakdown below S1 with volume and below EMA34 (downtrend)
-            elif price < s1 and volume_ok and price < ema_val:
+            # Short conditions: price breaks below Donchian low + weekly/daily bearish + volume
+            elif (price < donchian_low[i] and 
+                  weekly_bearish and daily_bearish and volume_ok):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: price drops below entry - 2*ATR (stop loss) or reverses below S1
-            if price < entry_price - 2.0 * atr_val or price < s1:
+            # Exit: price returns to Donchian midpoint or weekly/daily turns bearish
+            if (price < donchian_mid[i] or 
+                not weekly_bullish or not daily_bullish):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above entry + 2*ATR (stop loss) or reverses above R1
-            if price > entry_price + 2.0 * atr_val or price > r1:
+            # Exit: price returns to Donchian midpoint or weekly/daily turns bullish
+            if (price > donchian_mid[i] or 
+                not weekly_bearish or not daily_bearish):
                 signals[i] = 0.0
                 position = 0
             else:
