@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_Camarilla_Breakout_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1d_VolumeSpike_V1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,97 +21,73 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Previous day's high, low, close
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # Set first value to nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate 1d ATR(14) for volatility filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Calculate 1d ATR ratio (current / 20-period average) for volatility expansion
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / atr_ma_20
     
-    # Camarilla levels
-    R1 = pivot + (range_hl * 1.1 / 12)
-    R2 = pivot + (range_hl * 1.1 / 6)
-    R3 = pivot + (range_hl * 1.1 / 4)
-    R4 = pivot + (range_hl * 1.1 / 2)
-    S1 = pivot - (range_hl * 1.1 / 12)
-    S2 = pivot - (range_hl * 1.1 / 6)
-    S3 = pivot - (range_hl * 1.1 / 4)
-    S4 = pivot - (range_hl * 1.1 / 2)
+    # Align ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Align levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    R1_6h = align_htf_to_ltf(prices, df_1d, R1)
-    R2_6h = align_htf_to_ltf(prices, df_1d, R2)
-    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
-    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
-    S1_6h = align_htf_to_ltf(prices, df_1d, S1)
-    S2_6h = align_htf_to_ltf(prices, df_1d, S2)
-    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
-    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    # Calculate Donchian channels (20-period) on 4h data
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA for trend
-    close_1w_series = pd.Series(close_1w)
-    ema_20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 2.0 x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_6h[i]) or np.isnan(R4_6h[i]) or np.isnan(S4_6h[i]) or \
-           np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(atr_ratio_aligned[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or \
+           np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        atr_ratio_val = atr_ratio_aligned[i]
+        
+        # Volatility filter: ATR ratio > 1.5 (volatility expansion)
+        vol_expansion = atr_ratio_val > 1.5
         
         # Volume filter
-        volume_ok = vol > 1.3 * vol_ma
-        
-        # Weekly trend filter
-        weekly_uptrend = price > ema_20_1w_aligned[i]
-        weekly_downtrend = price < ema_20_1w_aligned[i]
+        volume_ok = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long breakout: price breaks above R4 with volume in weekly uptrend
-            if price > R4_6h[i] and volume_ok and weekly_uptrend:
+            # Long: price breaks above upper Donchian band with volume and volatility expansion
+            if price > high_roll[i] and volume_ok and vol_expansion:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S4 with volume in weekly downtrend
-            elif price < S4_6h[i] and volume_ok and weekly_downtrend:
+            # Short: price breaks below lower Donchian band with volume and volatility expansion
+            elif price < low_roll[i] and volume_ok and vol_expansion:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to pivot or weekly trend changes
-            if price <= pivot_6h[i] or not weekly_uptrend:
+            # Exit: price returns to middle of Donchian channel or volatility contracts
+            mid = (high_roll[i] + low_roll[i]) / 2
+            if price < mid or atr_ratio_val < 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to pivot or weekly trend changes
-            if price >= pivot_6h[i] or not weekly_downtrend:
+            # Exit: price returns to middle of Donchian channel or volatility contracts
+            mid = (high_roll[i] + low_roll[i]) / 2
+            if price > mid or atr_ratio_val < 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
