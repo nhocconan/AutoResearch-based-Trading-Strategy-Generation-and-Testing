@@ -3,23 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d trend filter and volume confirmation
-# - 1d EMA(34) defines trend direction (long when close > EMA34, short when close < EMA34)
-# - 1d volume > 1.5x 20-period average for conviction
-# - 12h RSI(14) for entry timing: long when RSI < 30 in uptrend, short when RSI > 70 in downtrend
-# - Exit on opposite RSI extreme (RSI > 70 for long, RSI < 30 for short) or trend reversal
-# - Session filter: only trade 08:00-20:00 UTC to avoid low-volume periods
-# - Position size: 0.25 (25%) to balance return and drawdown
-# - Designed to work in both bull and bear markets by following higher timeframe trend
-# - Target: 12-37 trades/year to avoid excessive fee drag
+# Hypothesis: 4h Williams %R + 1d volume spike + 1w trend filter
+# - Williams %R(14) identifies overbought/oversold conditions
+# - Entry when %R crosses above -50 in uptrend or below -50 in downtrend
+# - 1d volume > 2.0x 20-period average for conviction
+# - 1w EMA(50) defines long-term trend (only trade in direction of weekly trend)
+# - Exit when %R reaches opposite extreme (-20 for long, -80 for short)
+# - Position size: 0.25 to balance risk and return
+# - Target: 20-40 trades/year to avoid excessive fee drag
 
-name = "12h_EMA34_RSI_1dVolume_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_1dVolume_1wTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,31 +26,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume confirmation
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    
-    # 1d EMA(34) for trend direction
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # 1d volume average (20-period)
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # 12h RSI(14) for entry timing
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Pre-compute session filter (08:00-20:00 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # 1w EMA(50) for trend direction
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Williams %R(14) on 4h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,40 +53,40 @@ def generate_signals(prices):
     start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is NaN
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(rsi_values[i]):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1d volume > 1.5x average
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * vol_ma_1d_aligned[i]
+        # Volume filter: current volume > 2.0x 1d average
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 2.0 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Look for long entry: uptrend (close > 1d EMA34) + oversold RSI + volume
-            if close[i] > ema_34_1d_aligned[i] and rsi_values[i] < 30 and volume_filter:
+            # Look for long entry: uptrend (price > 1w EMA50) + Williams %R crosses above -50 + volume
+            if (close[i] > ema_50_1w_aligned[i] and 
+                williams_r[i] > -50 and williams_r[i-1] <= -50 and 
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: downtrend (close < 1d EMA34) + overbought RSI + volume
-            elif close[i] < ema_34_1d_aligned[i] and rsi_values[i] > 70 and volume_filter:
+            # Look for short entry: downtrend (price < 1w EMA50) + Williams %R crosses below -50 + volume
+            elif (close[i] < ema_50_1w_aligned[i] and 
+                  williams_r[i] < -50 and williams_r[i-1] >= -50 and 
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on overbought RSI or trend reversal
-            if rsi_values[i] > 70 or close[i] < ema_34_1d_aligned[i]:
+            # Long position: exit when Williams %R reaches overbought (-20) or trend reversal
+            if williams_r[i] >= -20 or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on oversold RSI or trend reversal
-            if rsi_values[i] < 30 or close[i] > ema_34_1d_aligned[i]:
+            # Short position: exit when Williams %R reaches oversold (-80) or trend reversal
+            if williams_r[i] <= -80 or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
