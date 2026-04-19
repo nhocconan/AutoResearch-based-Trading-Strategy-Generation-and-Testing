@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Donchian_20_WeeklyPivot_Direction"
-timeframe = "6h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume_ADX_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,29 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian and weekly pivot calculation (once before loop)
+    # Get 1d data for pivot calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channel (20-period) on 1d
-    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid_20 = (donch_high_20 + donch_low_20) / 2.0
+    # Calculate Camarilla pivot levels for 1d
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12.0
+    s1_1d = close_1d - range_1d * 1.1 / 12.0
     
-    # Calculate weekly pivot (using last 5 days)
-    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Align Camarilla levels to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Align to 6h timeframe
-    donch_high_6h = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_6h = align_htf_to_ltf(prices, df_1d, donch_low_20)
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # 12h ADX for trend strength (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    di_plus = 100 * dm_plus14 / tr14
+    di_minus = 100 * dm_minus14 / tr14
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -48,48 +66,46 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(donch_high_6h[i]) or np.isnan(donch_low_6h[i]) or np.isnan(weekly_pivot_6h[i]) or \
-           np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or \
+           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        donch_high = donch_high_6h[i]
-        donch_low = donch_low_6h[i]
-        weekly_pivot = weekly_pivot_6h[i]
+        adx_val = adx[i]
+        pivot = pivot_12h[i]
+        r1 = r1_12h[i]
+        s1 = s1_12h[i]
         
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
+        trending = adx_val > 25  # Strong trend filter
         
         if position == 0:
-            # Long: Price breaks above Donchian high AND above weekly pivot
-            if price > donch_high and price > weekly_pivot and volume_confirmed:
-                signals[i] = 0.25
+            # Long: Price breaks above R1 + volume + trending
+            if price > r1 and volume_confirmed and trending:
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below Donchian low AND below weekly pivot
-            elif price < donch_low and price < weekly_pivot and volume_confirmed:
-                signals[i] = -0.25
+            # Short: Price breaks below S1 + volume + trending
+            elif price < s1 and volume_confirmed and trending:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below Donchian midpoint or weekly pivot
-            if price < donch_mid_20[i] or price < weekly_pivot:
+            # Exit: Price returns below pivot
+            if price < pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit: Price returns above Donchian midpoint or weekly pivot
-            if price > donch_mid_20[i] or price > weekly_pivot:
+            # Exit: Price returns above pivot
+            if price > pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
-
-# Note: Donchian midpoint array needs to be aligned as well
-    # Fix: Calculate and align Donchian midpoint
-    donch_mid_20_6h = align_htf_to_ltf(prices, df_1d, donch_mid_20)
