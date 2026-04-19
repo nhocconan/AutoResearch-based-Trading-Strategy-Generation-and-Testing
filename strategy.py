@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h ATR-based breakout with volume confirmation and 12h EMA trend filter
-# Uses volatility-adjusted breakouts to capture strong moves in both bull and bear markets
-# Volume filter ensures breakouts have participation, 12h EMA aligns with intermediate trend
-# Target: 20-50 trades/year to minimize fee drag while maintaining edge
-name = "4h_ATRBreakout_VolumeTrend_v1"
-timeframe = "4h"
+# Hypothesis: 1d Weekly 52-Week High Breakout with Volume Confirmation and Weekly Trend Filter
+# Targets long-term breakouts in both bull and bear markets using weekly structure.
+# In bull markets: buys breakouts above weekly 52-week high with volume confirmation.
+# In bear markets: shorts breakdowns below weekly 52-week low with volume confirmation.
+# Uses weekly EMA200 as trend filter to avoid counter-trend trades.
+# Weekly timeframe reduces trade frequency to avoid fee drag (target: 10-30 trades/year).
+name = "1d_Weekly52WeekHighBreakout_VolumeTrend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,76 +23,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for multi-timeframe analysis (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Get weekly data for multi-timeframe analysis (ONCE before loop)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Weekly close for 52-week high/low and EMA200
+    close_weekly = df_weekly['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    # 4h ATR for volatility-based breakout levels
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    # 52-week high and low (approximately 252 trading days / 5 = ~50 weeks)
+    # Using 50-week lookback for 52-week high/low
+    lookback_weeks = 50
+    high_52w = pd.Series(high_weekly).rolling(window=lookback_weeks, min_periods=lookback_weeks).max().values
+    low_52w = pd.Series(low_weekly).rolling(window=lookback_weeks, min_periods=lookback_weeks).min().values
+    
+    # Weekly EMA200 for trend filter
+    ema200_weekly = pd.Series(close_weekly).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align weekly indicators to daily timeframe
+    high_52w_aligned = align_htf_to_ltf(prices, df_weekly, high_52w)
+    low_52w_aligned = align_htf_to_ltf(prices, df_weekly, low_52w)
+    ema200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema200_weekly)
+    
+    # Daily ATR for position sizing and stops
+    tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
     tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 4-period ATR multiplier for breakout threshold
-    atr_mult = 0.5
+    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 200  # Ensure enough data for weekly indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_12h_aligned[i]) or np.isnan(atr[i]):
+        if np.isnan(high_52w_aligned[i]) or np.isnan(low_52w_aligned[i]) or \
+           np.isnan(ema200_weekly_aligned[i]) or np.isnan(atr_daily[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr_val = atr[i]
+        atr = atr_daily[i]
         
-        # Volume filter: current volume > 1.3x average volume (20-period)
-        if i >= 20:
-            avg_volume = np.mean(volume[i-20:i])
+        # Volume filter: current volume > 2.0x average volume (50-day)
+        if i >= 50:
+            avg_volume = np.mean(volume[i-50:i])
         else:
             avg_volume = volume[i]
-        volume_filter = volume[i] > 1.3 * avg_volume
+        volume_filter = volume[i] > 2.0 * avg_volume
         
         if position == 0:
-            # Long: breakout above previous close + ATR multiple + volume + 12h uptrend
-            if high[i] > close[i-1] + atr_mult * atr_val and volume_filter and price > ema34_12h_aligned[i]:
+            # Long: breakout above 52-week high + volume + weekly uptrend
+            if high[i] > high_52w_aligned[i-1] and volume_filter and price > ema200_weekly_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below previous close - ATR multiple + volume + 12h downtrend
-            elif low[i] < close[i-1] - atr_mult * atr_val and volume_filter and price < ema34_12h_aligned[i]:
+            # Short: breakdown below 52-week low + volume + weekly downtrend
+            elif low[i] < low_52w_aligned[i-1] and volume_filter and price < ema200_weekly_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below previous close - ATR multiple or trailing stop
-            if close[i] < close[i-1] - atr_mult * atr_val or close[i] < highest_since_entry - 1.0 * atr_val:
+            # Exit: price closes below 52-week low or ATR-based stop
+            if close[i] < low_52w_aligned[i] or close[i] < close[i-1] - 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                # Update highest close since entry for trailing stop
-                if 'highest_since_entry' not in locals():
-                    highest_since_entry = close[i]
-                else:
-                    highest_since_entry = max(highest_since_entry, close[i])
         
         elif position == -1:
-            # Exit: price closes above previous close + ATR multiple or trailing stop
-            if close[i] > close[i-1] + atr_mult * atr_val or close[i] > lowest_since_entry + 1.0 * atr_val:
+            # Exit: price closes above 52-week high or ATR-based stop
+            if close[i] > high_52w_aligned[i] or close[i] > close[i-1] + 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
-                # Update lowest close since entry for trailing stop
-                if 'lowest_since_entry' not in locals():
-                    lowest_since_entry = close[i]
-                else:
-                    lowest_since_entry = min(lowest_since_entry, close[i])
     
     return signals
