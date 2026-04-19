@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h Supertrend(ATR=10,mult=3) + volume confirmation
-# Donchian breakout captures trend momentum; Supertrend filters counter-trend moves
-# Volume confirmation ensures breakouts have institutional participation
-# Works in both bull/bear: breakouts work in trends, Supertrend avoids false signals in ranges
-# Target: 75-200 total trades over 4 years (19-50/year)
-name = "4h_Donchian20_12hSupertrend_Volume"
-timeframe = "4h"
+# Hypothesis: 1d Choppiness Index with 1-week EMA20 trend filter and volume confirmation
+# Choppiness Index > 61.8 indicates ranging market (mean reversion opportunity)
+# Choppiness Index < 38.2 indicates trending market (trend following)
+# Combined with 1-week EMA20 to filter trades in direction of higher timeframe trend
+# Volume confirmation ensures institutional participation
+# Target: 30-100 total trades over 4 years (7-25/year)
+name = "1d_Choppiness_1wEMA20_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,57 +23,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Supertrend for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # 1-week EMA20 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate ATR for Supertrend
-    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with close_12h
+    # Calculate Choppiness Index (14-period)
+    atr_list = []
+    for i in range(n):
+        tr = max(high[i] - low[i], abs(high[i] - close[i-1]) if i > 0 else 0, abs(low[i] - close[i-1]) if i > 0 else 0)
+        atr_list.append(tr)
+    atr = np.array(atr_list)
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
     
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Supertrend calculation
-    upperband = (high_12h + low_12h) / 2 + 3 * atr
-    lowerband = (high_12h + low_12h) / 2 - 3 * atr
-    
-    supertrend = np.full_like(close_12h, np.nan, dtype=float)
-    direction = np.full_like(close_12h, 1, dtype=int)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_12h)):
-        if np.isnan(atr[i-1]) or np.isnan(close_12h[i-1]):
-            continue
-            
-        if close_12h[i] > upperband[i-1]:
-            direction[i] = 1
-        elif close_12h[i] < lowerband[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            if direction[i] == -1 and upperband[i] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lowerband[i]
-        else:
-            supertrend[i] = upperband[i]
-    
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    
-    # Donchian(20) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Avoid division by zero
+    range_hl = hh - ll
+    chop = np.where(range_hl != 0, -100 * np.log10(atr_sum / range_hl) / np.log10(14), 50)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -81,40 +53,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20)  # Ensure enough data
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(supertrend_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(chop[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + above Supertrend + volume confirmation
-            if (close[i] > highest_high[i] and 
-                close[i] > supertrend_aligned[i] and 
+            # In ranging market (CHOP > 61.8): mean reversion at extremes
+            if (chop[i] > 61.8 and 
+                close[i] < ll[i] and  # Near low of range - look for bounce
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + below Supertrend + volume confirmation
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < supertrend_aligned[i] and 
+            elif (chop[i] > 61.8 and 
+                  close[i] > hh[i] and  # Near high of range - look for reversal
+                  volume_confirm[i]):
+                signals[i] = -0.25
+                position = -1
+            # In trending market (CHOP < 38.2): follow trend with 1-week EMA
+            elif (chop[i] < 38.2 and 
+                  close[i] > ema_20_1w_aligned[i] and  # Uptrend
+                  volume_confirm[i]):
+                signals[i] = 0.25
+                position = 1
+            elif (chop[i] < 38.2 and 
+                  close[i] < ema_20_1w_aligned[i] and  # Downtrend
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below Donchian low or below Supertrend
-            if (close[i] < lowest_low[i]) or (close[i] < supertrend_aligned[i]):
+            # Long exit: chop shifts to trending down OR price crosses below weekly EMA
+            if (chop[i] < 38.2 and close[i] < ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above Donchian high or above Supertrend
-            if (close[i] > highest_high[i]) or (close[i] > supertrend_aligned[i]):
+            # Short exit: chop shifts to trending up OR price crosses above weekly EMA
+            if (chop[i] < 38.2 and close[i] > ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
