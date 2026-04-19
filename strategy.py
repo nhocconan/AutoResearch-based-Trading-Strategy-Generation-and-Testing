@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_WaveTrend_Signal_With_Volume_Confirmation
-Hypothesis: WaveTrend oscillator on 1d timeframe with volume confirmation and 1w trend filter
-WaveTrend identifies overbought/oversold conditions with reduced lag
-Volume confirmation ensures institutional participation
-1w trend filter (EMA34) avoids counter-trend trades
-Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year)
-Works in bull/bear via trend filter and mean-reversion logic
+6h_Pivot_R1S1_Breakout_Volume_ATR_Filter
+Hypothesis: 6-hour chart with daily Pivot R1/S1 breakout, volume confirmation, and ATR filter.
+- Daily Pivot points provide significant support/resistance levels for institutional traders
+- Breakouts above R1 or below S1 with volume confirm institutional participation
+- ATR filter ensures trades occur in sufficient volatility environments
+- Works in both bull/bear markets by focusing on breakout direction rather than trend bias
+- Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 """
 
-name = "1d_WaveTrend_Signal_With_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_Pivot_R1S1_Breakout_Volume_ATR_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,145 +27,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # WaveTrend Oscillator (WT) - similar to double smoothed stochastic
-    def wave_trend(high, low, close, channel_length=10, average_length=21):
-        # Typical Price
-        tp = (high + low + close) / 3.0
+    # ATR(14) for volatility filter - calculated on 6h data
+    def calculate_atr(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
         
-        # ESA: Exponential Smoothed Average of TP
-        esa = np.full_like(tp, np.nan)
-        alpha_esa = 2.0 / (channel_length + 1)
-        for i in range(len(tp)):
-            if i == 0:
-                esa[i] = tp[i]
-            elif not np.isnan(tp[i]) and not np.isnan(esa[i-1]):
-                esa[i] = esa[i-1] + alpha_esa * (tp[i] - esa[i-1])
-            else:
-                esa[i] = np.nan
-        
-        # D: Deviation of TP from ESA
-        d = np.full_like(tp, np.nan)
-        for i in range(len(tp)):
-            if not np.isnan(tp[i]) and not np.isnan(esa[i]):
-                d[i] = abs(tp[i] - esa[i])
-        
-        # DE: Double Smoothed D
-        de = np.full_like(tp, np.nan)
-        alpha_de = 2.0 / (channel_length + 1)
-        for i in range(len(d)):
-            if i == 0:
-                de[i] = d[i] if not np.isnan(d[i]) else 0
-            elif not np.isnan(d[i]) and not np.isnan(de[i-1]):
-                de[i] = de[i-1] + alpha_de * (d[i] - de[i-1])
-            else:
-                de[i] = np.nan
-        
-        # Avoid division by zero
-        ci = np.full_like(tp, np.nan)
-        mask = (de > 0) & ~np.isnan(de)
-        ci[mask] = (tp[mask] - esa[mask]) / (0.015 * de[mask])
-        
-        # TCI: Trend Channel Index
-        tci = np.full_like(tp, np.nan)
-        alpha_tci = 2.0 / (average_length + 1)
-        for i in range(len(ci)):
-            if i == 0:
-                tci[i] = ci[i] if not np.isnan(ci[i]) else 0
-            elif not np.isnan(ci[i]) and not np.isnan(tci[i-1]):
-                tci[i] = tci[i-1] + alpha_tci * (ci[i] - tci[i-1])
-            else:
-                tci[i] = np.nan
-        
-        # WT1 and WT2
-        wt1 = tci
-        wt2 = np.full_like(tp, np.nan)
-        for i in range(len(wt1)):
-            if i < 4:
-                wt2[i] = np.nan
-            else:
-                wt2[i] = np.nanmean(wt1[i-3:i+1])  # 4-period average
-        
-        return wt1, wt2
+        atr = np.full_like(tr, np.nan, dtype=np.float64)
+        if len(tr) >= period:
+            atr[period-1] = np.mean(tr[:period])
+            for i in range(period, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    # 1d data for WaveTrend and volume
+    atr_6h = calculate_atr(high, low, close, 14)
+    
+    # Daily data for Pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate WaveTrend on 1d data
-    wt1, wt2 = wave_trend(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    # Previous day's OHLC for Pivot calculation
+    ph = df_1d['high'].shift(1).values  # Previous day high
+    pl = df_1d['low'].shift(1).values   # Previous day low
+    pc = df_1d['close'].shift(1).values # Previous day close
     
-    # Align WaveTrend to 1d timeframe (already aligned since we're using 1d data directly)
-    wt1_1d = wt1
-    wt2_1d = wt2
+    # Standard Pivot Point calculation
+    pp = (ph + pl + pc) / 3.0           # Pivot Point
+    r1 = 2 * pp - pl                    # Resistance 1
+    s1 = 2 * pp - ph                    # Support 1
+    r2 = pp + (ph - pl)                 # Resistance 2
+    s2 = pp - (ph - pl)                 # Support 2
     
-    # 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate EMA34 on 1w close
-    ema_34_1w = np.full_like(df_1w['close'].values, np.nan)
-    alpha_ewma = 2.0 / (34 + 1)
-    for i in range(len(df_1w)):
-        if i == 0:
-            ema_34_1w[i] = df_1w['close'].values[i]
-        elif not np.isnan(df_1w['close'].values[i]) and not np.isnan(ema_34_1w[i-1]):
-            ema_34_1w[i] = ema_34_1w[i-1] + alpha_ewma * (df_1w['close'].values[i] - ema_34_1w[i-1])
-        else:
-            ema_34_1w[i] = np.nan
-    
-    # Align EMA34 to 1d timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align Pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
     
+    # ATR filter: ATR > 0.5 * 50-period average ATR (ensures sufficient volatility)
+    atr_ma = pd.Series(atr_6h).rolling(window=50, min_periods=50).mean().values
+    atr_filter = atr_6h > (atr_ma * 0.5)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = max(30, 20, 50)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(wt1_1d[i]) or np.isnan(wt2_1d[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(volume_ma[i]) or
+            np.isnan(atr_ma[i]) or np.isnan(atr_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade long when price > weekly EMA34, short when price < weekly EMA34
-        # This ensures we trade with the higher timeframe trend
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
-        
         if position == 0:
-            # Long: WT1 crosses above WT2 from oversold (WT1 < -60) with volume and uptrend
-            if (wt1[i] > wt2[i] and wt1[i-1] <= wt2[i-1] and 
-                wt1[i] < -60 and  # Oversold condition
+            # Long: price breaks above R1 with volume and sufficient volatility
+            if (close[i] > r1_aligned[i] and 
                 volume_confirm[i] and 
-                uptrend):
+                atr_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: WT1 crosses below WT2 from overbought (WT1 > 60) with volume and downtrend
-            elif (wt1[i] < wt2[i] and wt1[i-1] >= wt2[i-1] and 
-                  wt1[i] > 60 and   # Overbought condition
+            # Short: price breaks below S1 with volume and sufficient volatility
+            elif (close[i] < s1_aligned[i] and 
                   volume_confirm[i] and 
-                  downtrend):
+                  atr_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if WT1 crosses below WT2 or trend changes
-            if (wt1[i] < wt2[i] and wt1[i-1] >= wt2[i-1]) or not uptrend:
+            # Long: exit if price breaks below S1 or volatility drops
+            if (close[i] < s1_aligned[i]) or (not atr_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if WT1 crosses above WT2 or trend changes
-            if (wt1[i] > wt2[i] and wt1[i-1] <= wt2[i-1]) or not downtrend:
+            # Short: exit if price breaks above R1 or volatility drops
+            if (close[i] > r1_aligned[i]) or (not atr_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
