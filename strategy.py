@@ -1,59 +1,39 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_Momentum_Breakout
-Hypothesis: Weekly pivot levels (calculated from prior week's OHLC) act as strong support/resistance.
-Breakout above weekly R1 or below weekly S1 with volume confirmation and ADX trend filter
-captures momentum moves. Works in bull/bear via breakout logic and ADX filter to avoid whipsaw.
-Designed for 1d timeframe targeting 30-100 total trades over 4 years (7-25/year).
+6h_WeeklyPivot_RangeBreakout
+Hypothesis: Weekly pivot levels act as strong support/resistance. 
+- In ranging markets: price tends to revert from weekly R3/S3 (fade)
+- In trending markets: breakout beyond weekly R4/S4 signals continuation
+- Uses 1d timeframe to calculate weekly pivots (more stable than intraday)
+- Volume confirmation filters false breakouts
+- Works in bull/bear via adaptive logic: fade in range, breakout in trend
+- Target: 50-150 total trades over 4 years (12-37/year)
 """
 
-name = "1d_WeeklyPivot_Momentum_Breakout"
-timeframe = "1d"
+name = "6h_WeeklyPivot_RangeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_ohlc
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index"""
-    plus_dm = np.zeros_like(high)
-    minus_dm = np.zeros_like(high)
-    tr = np.zeros_like(high)
+def calculate_weekly_pivots(high, low, close):
+    """Calculate weekly pivot points from prior week's OHLC"""
+    # Typical price
+    pp = (high + low + close) / 3.0
     
-    for i in range(1, len(high)):
-        plus_dm[i] = max(high[i] - high[i-1], 0)
-        minus_dm[i] = max(low[i-1] - low[i], 0)
-        if plus_dm[i] < minus_dm[i]:
-            plus_dm[i] = 0
-        if minus_dm[i] < plus_dm[i]:
-            minus_dm[i] = 0
-            
-        tr[i] = max(high[i] - low[i], 
-                   abs(high[i] - close[i-1]), 
-                   abs(low[i] - close[i-1]))
+    # Support and resistance levels
+    r1 = 2 * pp - low
+    s1 = 2 * pp - high
+    r2 = pp + (high - low)
+    s2 = pp - (high - low)
+    r3 = high + 2 * (pp - low)
+    s3 = low - 2 * (high - pp)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
     
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values / atr
-    
-    dx = np.zeros_like(high)
-    dx_sum = plus_di + minus_di
-    mask = dx_sum > 0
-    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / dx_sum[mask]
-    
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
-    return adx
-
-def calculate_pivot_points(high, low, close):
-    """Calculate standard pivot points: P, R1, S1, R2, S2"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    return pivot, r1, s1, r2, s2
+    return pp, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -65,63 +45,128 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
+    # Get daily data for weekly pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate weekly pivot points
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate weekly pivots on daily data (using prior week's close)
+    # We need to align the weekly pivot calculation to weekly boundaries
+    # For simplicity, we'll calculate pivots from daily OHLC and assume
+    # they represent the weekly levels (this is an approximation)
+    # In practice, we'd want true weekly data, but 1d is acceptable proxy
     
-    _, weekly_r1, weekly_s1, _, _ = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
+    # Calculate pivots using rolling window of 5 days (1 week)
+    high_5d = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    low_5d = pd.Series(low).rolling(window=5, min_periods=5).min().values
+    close_5d = pd.Series(close).rolling(window=5, min_periods=5).last().values
     
-    # Align weekly pivot levels to daily
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    # Calculate pivots for each point using prior week's data
+    pp = np.full_like(close, np.nan)
+    r1 = np.full_like(close, np.nan)
+    r2 = np.full_like(close, np.nan)
+    r3 = np.full_like(close, np.nan)
+    r4 = np.full_like(close, np.nan)
+    s1 = np.full_like(close, np.nan)
+    s2 = np.full_like(close, np.nan)
+    s3 = np.full_like(close, np.nan)
+    s4 = np.full_like(close, np.nan)
     
-    # Volume confirmation: volume > 1.5 * 20-day average
+    for i in range(5, len(close)):
+        if not (np.isnan(high_5d[i]) or np.isnan(low_5d[i]) or np.isnan(close_5d[i])):
+            pp[i], r1[i], r2[i], r3[i], r4[i], s1[i], s2[i], s3[i], s4[i] = \
+                calculate_weekly_pivots(high_5d[i], low_5d[i], close_5d[i])
+    
+    # Align weekly pivot levels to 6h timeframe
+    pp_6h = align_ltf_to_ohlc(prices, df_1d, pp)
+    r1_6h = align_ltf_to_ohlc(prices, df_1d, r1)
+    r2_6h = align_ltf_to_ohlc(prices, df_1d, r2)
+    r3_6h = align_ltf_to_ohlc(prices, df_1d, r3)
+    r4_6h = align_ltf_to_ohlc(prices, df_1d, r4)
+    s1_6h = align_ltf_to_ohlc(prices, df_1d, s1)
+    s2_6h = align_ltf_to_ohlc(prices, df_1d, s2)
+    s3_6h = align_ltf_to_ohlc(prices, df_1d, s3)
+    s4_6h = align_ltf_to_ohlc(prices, df_1d, s4)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma * 1.5)
     
-    # ADX trend filter: only trade when ADX > 25
-    adx = calculate_adx(high, low, close, 14)
-    trend_filter = adx > 25
+    # Choppy market detection: use price position relative to pivots
+    # If price is between S3 and R3, we're in a range -> mean reversion
+    # If price breaks beyond S4 or R4, we're in a trend -> breakout
+    in_range = (close > s3_6h) & (close < r3_6h)
+    breakout_long = close > r4_6h
+    breakout_short = close < s4_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(20, 5)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(adx[i])):
+        if (np.isnan(pp_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above weekly R1 with volume and trend
-            if (close[i] > weekly_r1_aligned[i] and volume_confirm[i] and trend_filter[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: break below weekly S1 with volume and trend
-            elif (close[i] < weekly_s1_aligned[i] and volume_confirm[i] and trend_filter[i]):
-                signals[i] = -0.25
-                position = -1
-                
+            # Look for entry conditions
+            if in_range[i]:
+                # In range: fade at R3/S3 levels
+                if close[i] <= r3_6h[i] and close[i-1] > r3_6h[i-1]:
+                    # Price rejected at R3 -> short
+                    if volume_confirm[i]:
+                        signals[i] = -0.25
+                        position = -1
+                elif close[i] >= s3_6h[i] and close[i-1] < s3_6h[i-1]:
+                    # Price rejected at S3 -> long
+                    if volume_confirm[i]:
+                        signals[i] = 0.25
+                        position = 1
+            else:
+                # Trending: look for breakouts
+                if breakout_long[i] and volume_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif breakout_short[i] and volume_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
+                    
         elif position == 1:
-            # Long: exit if price crosses below weekly S1 or trend weakens
-            if (close[i] < weekly_s1_aligned[i]) or (adx[i] < 20):
+            # Long exit conditions
+            exit_condition = False
+            # Exit if price returns to pivot point (mean reversion)
+            if close[i] <= pp_6h[i]:
+                exit_condition = True
+            # Exit if price reaches R2 and shows weakness
+            elif close[i] >= r2_6h[i] and close[i] < close[i-1]:
+                exit_condition = True
+            # Exit on volume divergence
+            elif not volume_confirm[i] and close[i] < close[i-1]:
+                exit_condition = True
+                
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses above weekly R1 or trend weakens
-            if (close[i] > weekly_r1_aligned[i]) or (adx[i] < 20):
+            # Short exit conditions
+            exit_condition = False
+            # Exit if price returns to pivot point (mean reversion)
+            if close[i] >= pp_6h[i]:
+                exit_condition = True
+            # Exit if price reaches S2 and shows strength
+            elif close[i] <= s2_6h[i] and close[i] > close[i-1]:
+                exit_condition = True
+            # Exit on volume divergence
+            elif not volume_confirm[i] and close[i] > close[i-1]:
+                exit_condition = True
+                
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
