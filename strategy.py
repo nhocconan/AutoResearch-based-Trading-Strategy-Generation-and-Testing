@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Daily chart strategy using 1-week HTF pivot levels with volume confirmation
-# Target: Capture trend continuation at weekly support/resistance with volume validation
-# Works in bull/bear: Weekly pivots act as dynamic support/resistance; volume filters false breakouts
-name = "1d_1w_Pivot_R1S1_Breakout_Volume_Confirmation_v1"
-timeframe = "1d"
+name = "6h_1d_RollingRangeBreakout_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,33 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot levels from previous week (non-lookahead)
-    prev_close_w = np.roll(close_1w, 1)
-    prev_close_w[0] = np.nan
-    prev_high_w = np.roll(high_1w, 1)
-    prev_high_w[0] = np.nan
-    prev_low_w = np.roll(low_1w, 1)
-    prev_low_w[0] = np.nan
+    # Calculate 20-day rolling high/low from previous days (avoid look-ahead)
+    # Use previous day's data to calculate the range
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
     
-    # Pivot = (H + L + C) / 3
-    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3.0
-    # R1 = C + (H - L) * 1.1 / 12
-    r1_w = prev_close_w + (prev_high_w - prev_low_w) * 1.1 / 12.0
-    # S1 = C - (H - L) * 1.1 / 12
-    s1_w = prev_close_w - (prev_high_w - prev_low_w) * 1.1 / 12.0
+    # Calculate rolling max/min over previous 20 days
+    rolling_high_20 = pd.Series(prev_high_1d).rolling(window=20, min_periods=20).max().values
+    rolling_low_20 = pd.Series(prev_low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align to daily timeframe (waits for weekly bar close)
-    pivot_w_daily = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r1_w_daily = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_daily = align_htf_to_ltf(prices, df_1w, s1_w)
+    # Align to 6h timeframe
+    rolling_high_20_6h = align_htf_to_ltf(prices, df_1d, rolling_high_20)
+    rolling_low_20_6h = align_htf_to_ltf(prices, df_1d, rolling_low_20)
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Volume confirmation: current 6h volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,8 +48,7 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_w_daily[i]) or np.isnan(r1_w_daily[i]) or np.isnan(s1_w_daily[i]) or \
-           np.isnan(vol_ma_20[i]):
+        if np.isnan(rolling_high_20_6h[i]) or np.isnan(rolling_low_20_6h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -68,26 +60,26 @@ def generate_signals(prices):
         volume_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: Price breaks above weekly R1 with volume confirmation
-            if price > r1_w_daily[i] and volume_spike:
+            # Long: Price breaks above 20-day rolling high with volume confirmation
+            if price > rolling_high_20_6h[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly S1 with volume confirmation
-            elif price < s1_w_daily[i] and volume_spike:
+            # Short: Price breaks below 20-day rolling low with volume confirmation
+            elif price < rolling_low_20_6h[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns below weekly pivot (mean reversion)
-            if price < pivot_w_daily[i]:
+            # Exit: Price returns below 20-day rolling low (reversal signal)
+            if price < rolling_low_20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns above weekly pivot (mean reversion)
-            if price > pivot_w_daily[i]:
+            # Exit: Price returns above 20-day rolling high (reversal signal)
+            if price > rolling_high_20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
