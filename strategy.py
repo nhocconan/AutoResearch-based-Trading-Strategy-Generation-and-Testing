@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_S1R1_Breakout_VolumeATR_Tight"
-timeframe = "12h"
+name = "4h_1dPivot_S1R1_Breakout_VolumeATR_Tight_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,7 +36,7 @@ def generate_signals(prices):
     s1_1d = 2 * pivot_1d - high_1d
     r1_1d = 2 * pivot_1d - low_1d
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
@@ -68,11 +68,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Break above R1 with volume
             if price > r1 and volume_confirmed:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: Break below S1 with volume
             elif price < s1 and volume_confirmed:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -81,7 +81,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit: price closes above R1 or ATR stop (2.0x ATR)
@@ -89,6 +89,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
