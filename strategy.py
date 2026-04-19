@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_R1_S1_Breakout_Volume_T3_v1"
-timeframe = "4h"
+name = "1h_4h1d_Pivot_R1S1_Breakout_VolumeSession"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,43 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get daily data for Pivot points (more stable than weekly)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate previous 12h bar's Camarilla pivot levels
-    prev_high = np.concatenate([[np.nan], high_12h[:-1]])
-    prev_low = np.concatenate([[np.nan], low_12h[:-1]])
-    prev_close = np.concatenate([[np.nan], close_12h[:-1]])
+    # Calculate previous day's Pivot, R1, S1
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
     
     pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
-    r2 = pivot + (range_ * 1.1 / 6)
-    s2 = pivot - (range_ * 1.1 / 6)
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
     
-    # Align 12h Camarilla levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
+    # Align daily pivot levels to 1h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # T3 filter: momentum filter to reduce whipsaw
-    price_series = pd.Series(close)
-    ema1 = price_series.ewm(span=3, adjust=False).values
-    ema2 = ema1.ewm(span=3, adjust=False).values
-    ema3 = ema2.ewm(span=3, adjust=False).values
-    ema4 = ema3.ewm(span=3, adjust=False).values
-    ema5 = ema4.ewm(span=3, adjust=False).values
-    ema6 = ema5.ewm(span=3, adjust=False).values
-    t3 = -(ema6 * 0.7) + (3 * (ema5 + ema4) * 0.6) - (3 * (ema3 + ema2) * 0.6) + ema1
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,8 +50,11 @@ def generate_signals(prices):
     start_idx = max(30, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(t3[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma_20[i]):
+            signals[i] = 0.0
+            continue
+        
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
@@ -73,34 +65,30 @@ def generate_signals(prices):
         # Volume filter
         volume_ok = vol > 1.5 * vol_ma
         
-        # T3 momentum filter: only take long when T3 rising, short when falling
-        t3_rising = t3[i] > t3[i-1]
-        t3_falling = t3[i] < t3[i-1]
-        
         if position == 0:
-            # Long: price breaks above R1 with volume and T3 rising
-            if price > r1_aligned[i] and volume_ok and t3_rising:
-                signals[i] = 0.25
+            # Long: price breaks above R1 with volume
+            if price > r1_aligned[i] and volume_ok:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 with volume and T3 falling
-            elif price < s1_aligned[i] and volume_ok and t3_falling:
-                signals[i] = -0.25
+            # Short: price breaks below S1 with volume
+            elif price < s1_aligned[i] and volume_ok:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to pivot or T3 turns down
-            if price < pivot_aligned[i] or not t3_rising:
+            # Exit: price returns below S1 (mean reversion to opposite level)
+            if price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: price returns to pivot or T3 turns up
-            if price > pivot_aligned[i] or not t3_falling:
+            # Exit: price returns above R1 (mean reversion to opposite level)
+            if price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
