@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and 1w ADX trend filter
-# - Long: price breaks above Donchian(20) high + volume surge + ADX > 25 (trending)
-# - Short: price breaks below Donchian(20) low + volume surge + ADX > 25
-# - Exit: opposite Donchian breakout or ADX < 20 (range)
-# - Uses 1d volume surge (>1.5x 20-day average) for conviction
-# - Designed to capture strong trends in both bull and bear markets
-# - Target: 20-40 trades/year to avoid excessive fee drag
+# Hypothesis: 12h Bollinger Band squeeze breakout with 1d volume confirmation and 1w trend filter
+# - Bollinger Band width < 20th percentile indicates squeeze (low volatility)
+# - Breakout: price crosses above upper BB (long) or below lower BB (short)
+# - Volume filter: 12h volume > 1.5x 20-period 1d average volume (scaled)
+# - Trend filter: 1w EMA(50) - only long when price > EMA50, short when price < EMA50
+# - Designed for low-frequency, high-conviction trades in both bull and bear markets
+# - Target: 15-30 trades/year to minimize fee drag
 
-name = "4h_DonchianBreakout_1dVolume_1wADX_v1"
-timeframe = "4h"
+name = "12h_BBSqueeze_Breakout_1dVolume_1wTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,6 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Bollinger Bands (20, 2) on 12h
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = upper_bb - lower_bb
+    
+    # Bollinger Band width percentile (lookback 50 periods)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).rank(pct=True)
+    
     # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
@@ -33,45 +43,12 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Get 1w data for ADX trend filter
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate ADX(14) on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_1w = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
-    minus_di_1w = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
-    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
-    adx_1w = pd.Series(dx_1w).rolling(window=14, min_periods=14).mean().values
-    
-    # Handle division by zero and NaN
-    plus_di_1w = np.nan_to_num(plus_di_1w, nan=0.0)
-    minus_di_1w = np.nan_to_num(minus_di_1w, nan=0.0)
-    dx_1w = np.nan_to_num(dx_1w, nan=0.0)
-    adx_1w = np.nan_to_num(adx_1w, nan=0.0)
-    
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Donchian channels (20-period) on 4h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1w EMA(50) for trend direction
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,43 +56,49 @@ def generate_signals(prices):
     start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or invalid
-        if np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or \
-           np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(bb_width_percentile[i]) or np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 4h volume > 1.5x scaled 1d average volume
-        # Scale 1d average to 4h: 1d has 6x 4h bars, so divide by 6
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 6.0)
+        # Squeeze condition: BB width < 20th percentile (low volatility)
+        squeeze_condition = bb_width_percentile[i] < 0.20
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1w_aligned[i] > 25
-        
-        # Range filter: ADX < 20 indicates ranging market (exit condition)
-        ranging = adx_1w_aligned[i] < 20
+        # Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d average to 12h: 1d has 2x 12h bars, so divide by 2
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 2.0)
         
         if position == 0:
-            # Look for long entry: breakout above Donchian high + volume + trending
-            if close[i] > donchian_high[i] and volume_filter and trending:
+            # Look for long entry: squeeze + breakout above upper BB + uptrend + volume
+            if (squeeze_condition and 
+                close[i] > upper_bb[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: breakout below Donchian low + volume + trending
-            elif close[i] < donchian_low[i] and volume_filter and trending:
+            # Look for short entry: squeeze + breakout below lower BB + downtrend + volume
+            elif (squeeze_condition and 
+                  close[i] < lower_bb[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on breakdown below Donchian low or ranging market
-            if close[i] < donchian_low[i] or ranging:
+            # Long position: exit when price returns to middle BB or trend reversal
+            middle_bb = sma_20.iloc[i]
+            if close[i] < middle_bb or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on breakout above Donchian high or ranging market
-            if close[i] > donchian_high[i] or ranging:
+            # Short position: exit when price returns to middle BB or trend reversal
+            middle_bb = sma_20.iloc[i]
+            if close[i] > middle_bb or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
