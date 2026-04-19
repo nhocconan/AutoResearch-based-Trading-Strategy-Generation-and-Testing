@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with daily pivot reversal filter and volume confirmation
-# - 6h Donchian(20) breakout: long when price breaks above 20-period high, short when breaks below 20-period low
-# - Daily pivot reversal filter: only take long if price < daily pivot point, short if price > daily pivot point
-#   This filters breakouts that go against the intraday bias, improving win rate in ranging markets
-# - Volume confirmation: 6h volume > 1.5x 20-period average volume to ensure conviction
-# - Designed to work in both bull and bear markets by following price action with volume confirmation
-# - Target: 15-30 trades/year (~60-120 total over 4 years) to avoid excessive fee drag
+# Hypothesis: 12h Donchian breakout with 1d volume confirmation and 1w trend filter
+# - Breakout above/below 20-period Donchian channel on 12h chart
+# - Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
+# - Trend filter: 1w EMA(50) direction - only long when price > weekly EMA50, short when price < weekly EMA50
+# - Exit when price crosses back through Donchian channel or trend reverses
+# - Designed to capture trends while avoiding false breakouts in low volume
+# - Target: 15-30 trades/year to minimize fee drag on 12h timeframe
 
-name = "6h_DonchianBreakout_1dPivotReversal_Volume_v1"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1dVolume_1wTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,56 +25,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily pivot point: (H + L + C) / 3
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    pivot_1d = typical_price_1d.values
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Volume confirmation: 20-period average volume on 6h
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Donchian channels (20-period) on 6h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1w EMA(50) for trend direction
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Donchian Channel (20-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for Donchian channels
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(pivot_1d_aligned[i]) or np.isnan(vol_ma_6h[i]):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 6h volume > 1.5x 20-period average
-        volume_filter = vol_ma_6h[i] > 0 and volume[i] > 1.5 * vol_ma_6h[i]
+        # Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d average to 12h: 1d has 2x 12h bars, so divide by 2
+        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 2.0)
         
         if position == 0:
-            # Long entry: price breaks above Donchian high AND price < daily pivot (bullish bias)
-            if close[i] > donchian_high[i] and close[i] < pivot_1d_aligned[i] and volume_filter:
+            # Look for long entry: uptrend + breakout above upper Donchian + volume
+            if close[i] > ema_50_1w_aligned[i] and close[i] > highest_high[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low AND price > daily pivot (bearish bias)
-            elif close[i] < donchian_low[i] and close[i] > pivot_1d_aligned[i] and volume_filter:
+            # Look for short entry: downtrend + breakdown below lower Donchian + volume
+            elif close[i] < ema_50_1w_aligned[i] and close[i] < lowest_low[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit on Donchian low break or reversal above pivot
-            if close[i] < donchian_low[i] or close[i] > pivot_1d_aligned[i]:
+            # Long position: exit when price breaks below lower Donchian or trend reverses
+            if close[i] < lowest_low[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit on Donchian high break or reversal below pivot
-            if close[i] > donchian_high[i] or close[i] < pivot_1d_aligned[i]:
+            # Short position: exit when price breaks above upper Donchian or trend reverses
+            if close[i] > highest_high[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
