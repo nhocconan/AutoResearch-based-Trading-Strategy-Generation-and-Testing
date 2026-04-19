@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and 1d trend filter
-# - Long when price breaks above Donchian(20) high + volume > 1.5x 20-period average + price > 1d EMA50
-# - Short when price breaks below Donchian(20) low + volume > 1.5x 20-period average + price < 1d EMA50
-# - Exit when price crosses back through Donchian midpoint or trend reverses
-# - Designed to capture trending moves while avoiding whipsaws in ranging markets
-# - Target: 15-30 trades/year to minimize fee drag on 12h timeframe
+# Hypothesis: 4h Keltner Channel breakout with 1d volume confirmation and 1d trend filter
+# - Keltner Channel: EMA(20) ± 2*ATR(10) for volatility-based breakout
+# - Long when price breaks above upper band in uptrend (price > 1d EMA50)
+# - Short when price breaks below lower band in downtrend (price < 1d EMA50)
+# - Volume confirmation: current 4h volume > 1.5x 20-period average 1d volume (scaled)
+# - Exit when price crosses back through EMA(20) middle band
+# - Designed to capture volatility expansion moves in both bull and bear markets
+# - Target: 20-35 trades/year to stay within fee limits
 
-name = "12h_Donchian20_1dVolume_1dTrend_v1"
-timeframe = "12h"
+name = "4h_KeltnerBreakout_1dVolume_1dTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,14 +34,22 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # 1d EMA(50) for trend direction
+    # 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channel (20-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Keltner Channel components (using 4h data)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_10 = pd.Series(np.maximum.reduce([
+        high[1:] - low[:-1],
+        np.abs(high[1:] - close[:-1]),
+        np.abs(low[:-1] - close[:-1])
+    ])).ewm(span=10, adjust=False, min_periods=10).mean()
+    # Prepend first ATR value to match length
+    atr_10 = np.concatenate([[np.nan], atr_10.values]) if len(atr_10) > 0 else np.array([np.nan])
+    
+    upper_keltner = ema_20 + 2 * atr_10
+    lower_keltner = ema_20 - 2 * atr_10
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,36 +58,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or \
-           np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(ema_20[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d average to 12h: 1d has 2x 12h bars, so divide by 2
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * (vol_ma_1d_aligned[i] / 2.0)
+        # Volume filter: current 4h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d average to 4h: 1d has 6x 4h bars, so divide by 6
+        volume_factor = vol_ma_1d_aligned[i] / 6.0 if vol_ma_1d_aligned[i] > 0 else 0
+        volume_filter = volume[i] > 1.5 * volume_factor
         
         if position == 0:
-            # Look for long entry: price breaks above Donchian high + volume + uptrend
-            if close[i] > highest_high[i] and volume_filter and close[i] > ema_50_1d_aligned[i]:
+            # Look for long entry: uptrend + price breaks above upper Keltner + volume
+            if close[i] > ema_50_1d_aligned[i] and close[i] > upper_keltner[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: price breaks below Donchian low + volume + downtrend
-            elif close[i] < lowest_low[i] and volume_filter and close[i] < ema_50_1d_aligned[i]:
+            # Look for short entry: downtrend + price breaks below lower Keltner + volume
+            elif close[i] < ema_50_1d_aligned[i] and close[i] < lower_keltner[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price crosses below Donchian midpoint or trend reverses
-            if close[i] < donchian_mid[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long position: exit when price crosses back below EMA(20) middle band
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price crosses above Donchian midpoint or trend reverses
-            if close[i] > donchian_mid[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short position: exit when price crosses back above EMA(20) middle band
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
