@@ -3,109 +3,94 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1w trend filter and volume confirmation
-# - Williams Alligator (13,8,5 SMAs on median price) defines trend: Jaw(13), Teeth(8), Lips(5)
-# - Trend up when Lips > Teeth > Jaw, down when Lips < Teeth < Jaw
-# - 1w trend filter: only trade in direction of weekly EMA(20) for higher timeframe bias
-# - Volume confirmation: current 6h volume > 1.5x 20-period average for conviction
-# - Entry on Alligator alignment in trend direction with volume
-# - Exit when Alligator lines intertwine (loss of trend structure) or opposite alignment
-# - Session filter: 08:00-20:00 UTC to avoid low-volume periods
-# - Position size: 0.25 to manage drawdown in volatile 6h timeframe
-# - Designed to capture strong trends while avoiding whipsaws in ranging markets
-# - Target: 20-40 trades/year to stay within fee drag limits
+# Hypothesis: 12h timeframe with 1d Camarilla pivot reversal + volume confirmation
+# - Uses 1d Camarilla pivot levels (R1, S1) for reversal signals
+# - Long when price crosses below S1 with bullish rejection (close > open)
+# - Short when price crosses above R1 with bearish rejection (close < open)
+# - Volume confirmation: current 12h volume > 1.5x 20-period average
+# - Trend filter: price > 1d EMA50 for longs, price < 1d EMA50 for shorts
+# - Designed to work in both bull and bear markets by capturing reversals at key levels
+# - Target: 15-30 trades/year to avoid excessive fee drag
 
-name = "6h_WilliamsAlligator_1wTrend_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Reversal_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # 1w EMA(20) for trend direction
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Williams Alligator components (13,8,5 SMAs on median price)
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # 13-period
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # 8-period
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values     # 5-period
-    
-    # Get 1d data for volume confirmation
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d volume average (20-period) aligned to 6s
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate 1d Camarilla pivot levels
+    # Formula: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C = (H+L+C)/3 (typical price)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    rang = df_1d['high'] - df_1d['low']
+    r1 = typical_price + rang * 1.1 / 12
+    s1 = typical_price - rang * 1.1 / 12
     
-    # Pre-compute session filter (08:00-20:00 UTC)
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 12h volume average (20-period)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute session filter (00:00-24:00 UTC - trade all hours for 12h)
     hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Always trade for 12h timeframe (no session filter needed)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for Alligator and volume
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_12h[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 6h volume > 1.5x 1d average
-        volume_filter = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.5 * vol_ma_1d_aligned[i]
-        
-        # Alligator alignment checks
-        lips_above_teeth = lips[i] > teeth[i]
-        teeth_above_jaw = teeth[i] > jaw[i]
-        lips_below_teeth = lips[i] < teeth[i]
-        teeth_below_jaw = teeth[i] < jaw[i]
-        
-        # Trend up: Lips > Teeth > Jaw
-        alligator_up = lips_above_teeth and teeth_above_jaw
-        # Trend down: Lips < Teeth < Jaw
-        alligator_down = lips_below_teeth and teeth_below_jaw
+        # Volume filter: current 12h volume > 1.5x average
+        volume_filter = vol_ma_12h[i] > 0 and volume[i] > 1.5 * vol_ma_12h[i]
         
         if position == 0:
-            # Look for long entry: uptrend alignment + weekly trend up + volume
-            if alligator_up and close[i] > ema_20_1w_aligned[i] and volume_filter:
+            # Look for long entry: price crosses below S1 with bullish rejection + uptrend + volume
+            if (low[i] <= s1_aligned[i] and close[i] > open_price[i] and  # bullish rejection
+                close[i] > ema_50_1d_aligned[i] and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: downtrend alignment + weekly trend down + volume
-            elif alligator_down and close[i] < ema_20_1w_aligned[i] and volume_filter:
+            # Look for short entry: price crosses above R1 with bearish rejection + downtrend + volume
+            elif (high[i] >= r1_aligned[i] and close[i] < open_price[i] and  # bearish rejection
+                  close[i] < ema_50_1d_aligned[i] and volume_filter):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when Alligator loses alignment or weekly trend fails
-            if not alligator_up or close[i] < ema_20_1w_aligned[i]:
+            # Long position: exit on bearish rejection at R1 or trend reversal
+            if (high[i] >= r1_aligned[i] and close[i] < open_price[i]) or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when Alligator loses alignment or weekly trend fails
-            if not alligator_down or close[i] > ema_20_1w_aligned[i]:
+            # Short position: exit on bullish rejection at S1 or trend reversal
+            if (low[i] <= s1_aligned[i] and close[i] > open_price[i]) or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
