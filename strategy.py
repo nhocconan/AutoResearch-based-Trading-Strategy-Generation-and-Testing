@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_WeeklyPivot_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "1h_4d_Camarilla_R1S1_Breakout_Volume_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,18 +17,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once before loop
+    # Get daily data once before loop for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Weekly Pivot levels from previous week (using daily data)
-    # We'll use the last 5 days to approximate weekly OHLC
-    # For simplicity, we use daily close of previous day as proxy for weekly close
-    # In practice, we'd need weekly data, but using daily with 5-day aggregation
-    # Since we don't have weekly data directly, we use the most recent available daily
-    # and assume it represents the weekly close for pivot calculation
+    # Calculate Camarilla pivot levels from previous day
     prev_close = np.roll(close_1d, 1)
     prev_close[0] = np.nan
     prev_high = np.roll(high_1d, 1)
@@ -36,19 +31,25 @@ def generate_signals(prices):
     prev_low = np.roll(low_1d, 1)
     prev_low[0] = np.nan
     
-    # Weekly Pivot = (H + L + C) / 3
+    # Pivot = (H + L + C) / 3
     pivot = (prev_high + prev_low + prev_close) / 3.0
     # R1 = C + (H - L) * 1.1 / 12
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
     # S1 = C - (H - L) * 1.1 / 12
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
+    # R4 = C + (H - L) * 1.1 / 2
+    r4 = prev_close + (prev_high - prev_low) * 1.1 / 2.0
+    # S4 = C - (H - L) * 1.1 / 2
+    s4 = prev_close - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 1h timeframe
+    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    r4_1h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_1h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Time filter: 08-20 UTC (active hours)
@@ -65,7 +66,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        if np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pivot_1h[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or \
+           np.isnan(r4_1h[i]) or np.isnan(s4_1h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -73,33 +75,33 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 1.5x average
-        volume_spike = vol > 1.5 * vol_ma
+        # Volume spike: current volume > 1.8x average
+        volume_spike = vol > 1.8 * vol_ma
         
         if position == 0:
             # Long: Price breaks above R1 with volume spike
-            if price > r1_12h[i] and volume_spike:
-                signals[i] = 0.25
+            if price > r1_1h[i] and volume_spike:
+                signals[i] = 0.20
                 position = 1
             # Short: Price breaks below S1 with volume spike
-            elif price < s1_12h[i] and volume_spike:
-                signals[i] = -0.25
+            elif price < s1_1h[i] and volume_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below S1 (reversal signal)
-            if price < s1_12h[i]:
+            if price < s1_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit: Price returns above R1 (reversal signal)
-            if price > r1_12h[i]:
+            if price > r1_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
