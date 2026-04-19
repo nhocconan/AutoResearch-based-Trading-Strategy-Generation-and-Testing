@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Choppiness Index regime filter + Donchian(20) breakout + volume confirmation.
-# Long when: CHOP(14) > 61.8 (range) + price breaks above Donchian upper + volume > 1.5x 20-period avg
-# Short when: CHOP(14) > 61.8 (range) + price breaks below Donchian lower + volume > 1.5x 20-period avg
-# Exit when: price crosses back through Donchian median (mean of upper/lower)
-# Choppiness Index identifies ranging markets where mean reversion works; Donchian provides breakout levels.
-# Works in bull (buy range highs) and bear (sell range lows). Target: 20-30 trades/year per symbol.
-name = "4h_Choppiness_Range_Donchian_Breakout_Volume"
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day ATR filter and volume confirmation.
+# Long when: Price breaks above 20-period high, daily ATR < 10-day ATR mean, volume > 1.3x 20-period average
+# Short when: Price breaks below 20-period low, daily ATR < 10-day ATR mean, volume > 1.3x 20-period average
+# Exit when: Price crosses back through the 20-period midpoint
+# ATR filter avoids breakouts during high volatility (false breakouts), volume confirms strength.
+# Target: 20-30 trades/year per symbol. Works in bull (buy breakouts) and bear (sell breakdowns).
+name = "4h_Donchian20_ATRFilter_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,104 +23,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for Choppiness Index calculation
+    # 1-day data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range for 1-day data
-    # TR = max[(H-L), abs(H-PC), abs(L-PC)]
-    tr1 = np.zeros(len(high_1d))
-    tr1[0] = high_1d[0] - low_1d[0]  # First TR is just high-low
-    for i in range(1, len(high_1d)):
-        hl = high_1d[i] - low_1d[i]
-        hc = abs(high_1d[i] - close_1d[i-1])
-        lc = abs(low_1d[i] - close_1d[i-1])
-        tr1[i] = max(hl, hc, lc)
+    # Calculate 20-period Donchian channels on 4h data
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max_20 + low_min_20) / 2.0
     
-    # Calculate ATR(14) for 1-day data
-    atr14_1d = np.zeros(len(tr1))
-    for i in range(len(tr1)):
-        if i < 13:
-            atr14_1d[i] = np.nan
-        else:
-            atr14_1d[i] = np.mean(tr1[i-13:i+1])
+    # Calculate ATR on daily data (14-period)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_10 = pd.Series(atr_14).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (n * ATR)) / log10(n)
-    chop14_1d = np.zeros(len(high_1d))
-    n_period = 14
-    for i in range(n_period, len(high_1d)):
-        if np.isnan(atr14_1d[i]):
-            chop14_1d[i] = np.nan
-            continue
-        sum_atr = np.sum(atr14_1d[i-n_period+1:i+1])
-        max_high = np.max(high_1d[i-n_period+1:i+1])
-        min_low = np.min(low_1d[i-n_period+1:i+1])
-        if max_high == min_low or atr14_1d[i] == 0:
-            chop14_1d[i] = 50.0  # Neutral when no range
-        else:
-            chop14_1d[i] = 100 * np.log10(sum_atr / (n_period * (max_high - min_low))) / np.log10(n_period)
-    
-    # Calculate Donchian channels on 4H data
-    donch_len = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(donch_len-1, n):
-        upper[i] = np.max(high[i-donch_len+1:i+1])
-        lower[i] = np.min(low[i-donch_len+1:i+1])
-    median = (upper + lower) / 2.0
+    # Align 1D data to 4H timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_ma_10_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_10)
     
     # 20-period volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1D Choppiness Index to 4H timeframe
-    chop14_1d_aligned = align_htf_to_ltf(prices, df_1d, chop14_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for Choppiness and Donchian calculations
+    start_idx = 20  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(chop14_1d_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(median[i]) or 
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_ma_10_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        chop = chop14_1d_aligned[i]
-        up = upper[i]
-        low = lower[i]
-        med = median[i]
+        high_max = high_max_20[i]
+        low_min = low_min_20[i]
+        midpoint = donchian_mid[i]
+        atr = atr_14_aligned[i]
+        atr_ma = atr_ma_10_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
         if position == 0:
-            # Only trade in ranging markets (CHOP > 61.8 indicates range)
-            if chop > 61.8:
-                # Long entry: Price breaks above Donchian upper with volume
-                if price > up and close[i-1] <= up and vol > 1.5 * vol_ma:
-                    signals[i] = 0.25
-                    position = 1
-                # Short entry: Price breaks below Donchian lower with volume
-                elif price < low and close[i-1] >= low and vol > 1.5 * vol_ma:
-                    signals[i] = -0.25
-                    position = -1
+            # Long entry: Price breaks above 20-period high, low ATR regime, volume spike
+            if (price > high_max and close[i-1] <= high_max and 
+                atr < atr_ma and vol > 1.3 * vol_ma):
+                signals[i] = 0.25
+                position = 1
+            # Short entry: Price breaks below 20-period low, low ATR regime, volume spike
+            elif (price < low_min and close[i-1] >= low_min and 
+                  atr < atr_ma and vol > 1.3 * vol_ma):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: Price crosses back below Donchian median
-            if price < med:
+            # Long exit: Price crosses back below midpoint
+            if price < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses back above Donchian median
-            if price > med:
+            # Short exit: Price crosses back above midpoint
+            if price > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
