@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WeeklyPivot_R1S1_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1d_WeeklyPivot_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,14 +38,14 @@ def generate_signals(prices):
     r3 = high_5d + 2 * (pivot - low_5d)
     s3 = low_5d - 2 * (high_5d - pivot)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align weekly pivot levels to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,8 +56,8 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
-           np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or \
+        if np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or \
+           np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or \
            np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
@@ -70,17 +70,17 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R1 with volume
-            if price > r1_6h[i] and volume_confirmed:
+            if price > r1_12h[i] and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 with volume
-            elif price < s1_6h[i] and volume_confirmed:
+            elif price < s1_12h[i] and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: Price returns below pivot
-            if price < pivot_6h[i]:
+            if price < pivot_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,7 +88,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: Price returns above pivot
-            if price > pivot_6h[i]:
+            if price > pivot_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
