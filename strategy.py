@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h price action near 1-day VWAP with volume confirmation and ATR-based stops.
-# Uses 1-day VWAP as dynamic support/resistance, works in both trending and ranging markets.
-# Targets 20-40 trades/year to avoid fee drag, with clear entry/exit rules.
-name = "4h_1d_VWAP_Bounce_Volume_ATR_v1"
-timeframe = "4h"
+name = "1d_1w_Pivot_R1S1_Breakout_VolumeATR_v3"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,26 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for VWAP calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d VWAP: typical price * volume / cumulative volume
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    vp = typical_price * df_1d['volume']
-    cum_vp = vp.cumsum()
-    cum_vol = df_1d['volume'].cumsum()
-    vwap = (cum_vp / cum_vol).replace([np.inf, -np.inf], np.nan).ffill().values
+    # Weekly high, low, close for pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 1d VWAP to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # 4h ATR for volatility and stop calculation (14-period)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
-    tr = np.maximum(tr, np.absolute(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly pivot levels to daily timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Weekly ATR for volatility filter (14-period)
+    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.absolute(high_1w[1:] - close_1w[:-1]))
+    tr1 = np.maximum(tr1, np.absolute(low_1w[1:] - close_1w[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])
+    atr_14_1w = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average (daily)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -48,39 +52,43 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(vwap_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(atr_14_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        vwap = vwap_aligned[i]
-        atr_val = atr[i]
+        pivot = pivot_1w_aligned[i]
+        r1 = r1_1w_aligned[i]
+        s1 = s1_1w_aligned[i]
+        atr = atr_14_1w_aligned[i]
         
-        volume_confirmed = vol > 1.5 * vol_ma
+        volume_confirmed = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: bounce off VWAP support with volume
-            if price > vwap and price < vwap + 0.5 * atr_val and volume_confirmed:
+            # Long: break above R1 with volume
+            if price > r1 and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: rejection at VWAP resistance with volume
-            elif price < vwap and price > vwap - 0.5 * atr_val and volume_confirmed:
+            # Short: break below S1 with volume
+            elif price < s1 and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price moves below VWAP or ATR stop
-            if price < vwap or price < vwap + 2.0 * atr_val:  # trailing stop from entry area
+            # Exit: price below pivot or ATR-based stop
+            if price < pivot or price < close[i-1] - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price moves above VWAP or ATR stop
-            if price > vwap or price > vwap - 2.0 * atr_val:  # trailing stop from entry area
+            # Exit: price above pivot or ATR-based stop
+            if price > pivot or price > close[i-1] + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
             else:
