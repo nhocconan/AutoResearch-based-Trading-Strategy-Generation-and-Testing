@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator + Elder Ray + Volume Spike
-# Uses Williams Alligator (SMAs with offset) for trend direction,
-# Elder Ray (bull/bear power) for momentum confirmation,
-# Volume spike for entry confirmation.
-# Works in bull/bear by following Alligator trend and filtering with Elder Ray.
-# Targets 20-50 trades/year (80-200 total over 4 years) with strict entry conditions.
-name = "4h_WilliamsAlligator_ElderRay_Volume"
-timeframe = "4h"
+# Hypothesis: 1d timeframe with 1w EMA50 trend and 1d Donchian breakout.
+# Uses weekly EMA50 for trend direction and daily Donchian breakout for momentum.
+# Enters only during 08-20 UTC session to avoid low-volume noise.
+# Targets 10-25 trades/year (40-100 total over 4 years) with strict entry conditions.
+# Works in bull/bear by following higher timeframe trends.
+name = "1d_1w_EMA50_Donchian20_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,57 +21,70 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Williams Alligator: Jaw (13-period SMA offset 8), Teeth (8-period SMA offset 5), Lips (5-period SMA offset 3)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean()
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Get 1w data for EMA50 trend (called ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter: volume > 2.0 * 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_filter = volume > (volume_ma * 2.0)
+    # Get 1d data for Donchian20 breakout (called ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    # Donchian channels: 20-period high/low
+    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
+    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
+    
+    # Volume filter: volume > 1.5 * 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(volume_ma[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_20_1d_aligned[i]) or 
+            np.isnan(low_20_1d_aligned[i]) or np.isnan(volume_ma[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND Volume spike
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
-                bull_power[i] > 0 and volume_filter[i]):
+            # Long: price above 1w EMA50 AND breaks 1d Donchian high with volume
+            if (close[i] > ema_50_1w_aligned[i] and 
+                close[i] > high_20_1d_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaw > Teeth > Lips (bearish alignment) AND Bear Power < 0 AND Volume spike
-            elif (jaw[i] > teeth[i] and teeth[i] > lips[i] and 
-                  bear_power[i] < 0 and volume_filter[i]):
+            # Short: price below 1w EMA50 AND breaks 1d Donchian low with volume
+            elif (close[i] < ema_50_1w_aligned[i] and 
+                  close[i] < low_20_1d_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Alligator turns bearish (Lips < Teeth OR Teeth < Jaw) OR Bear Power < 0
-            if lips[i] < teeth[i] or teeth[i] < jaw[i] or bear_power[i] < 0:
+            # Long: exit if price breaks below 1w EMA50 or 1d Donchian low
+            if close[i] < ema_50_1w_aligned[i] or close[i] < low_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Alligator turns bullish (Lips > Teeth OR Teeth > Jaw) OR Bull Power > 0
-            if lips[i] > teeth[i] or teeth[i] > jaw[i] or bull_power[i] > 0:
+            # Short: exit if price breaks above 1w EMA50 or 1d Donchian high
+            if close[i] > ema_50_1w_aligned[i] or close[i] > high_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
