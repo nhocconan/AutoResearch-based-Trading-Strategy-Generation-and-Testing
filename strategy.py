@@ -3,94 +3,78 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot R1/S1 breakout with 12h EMA trend filter and volume confirmation.
-# Long when price breaks above R1 (bullish) AND price > 12h EMA34 (uptrend) AND volume > 1.5x daily average volume.
-# Short when price breaks below S1 (bearish) AND price < 12h EMA34 (downtrend) AND volume > 1.5x daily average volume.
-# Exit when price crosses back through the pivot point (PP).
-# Uses Camarilla for precise intraday levels, EMA for trend filter, volume for confirmation.
-# Target: 20-30 trades/year per symbol.
-name = "4h_Camarilla_Pivot_R1S1_EMA_Trend"
-timeframe = "4h"
+# Hypothesis: 1h momentum with 4h trend filter and session filter.
+# Long when price > 1h EMA50 AND 4h close > 4h EMA200 (bullish trend) AND hour between 08-20 UTC
+# Short when price < 1h EMA50 AND 4h close < 4h EMA200 (bearish trend) AND hour between 08-20 UTC
+# Exit when price crosses back through 1h EMA50
+# Uses 4h EMA200 for trend direction (avoid counter-trend trades), 1h EMA50 for entry/exit timing.
+# Session filter reduces noise during low-liquidity hours.
+# Target: 15-35 trades/year per symbol.
+name = "1h_EMA50_4hEMA200_Trend_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate Camarilla levels using previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12, PP = (H+L+C)/3
-    prev_close = df_1d['close'].shift(1)
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    pp = (prev_high + prev_low + prev_close) / 3
-    # Align to 4h timeframe (wait for previous day's close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    # Get 4h EMA200 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema200_4h = pd.Series(df_4h['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
     
-    # Get 12h EMA34 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Calculate 1h EMA50 for entry/exit
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get daily average volume for confirmation (20-day average)
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # already datetime64[ms], .hour works
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure EMA and volume MA are ready
+    start_idx = 200  # Wait for EMA200 to be ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(pp_aligned[i]) or
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if np.isnan(ema200_4h_aligned[i]) or np.isnan(ema50[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema34 = ema34_aligned[i]
-        vol_ma = vol_ma_1d_aligned[i]
-        vol = volume[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        pp = pp_aligned[i]
+        ema200 = ema200_4h_aligned[i]
+        ema50_val = ema50[i]
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Long entry: break above R1 + uptrend + volume spike
-            if price > r1 and price > ema34 and vol > 1.5 * vol_ma:
-                signals[i] = 0.25
+            # Long entry: price above EMA50 AND 4h trend bullish AND in session
+            if price > ema50_val and close[i] > ema200 and in_session:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: break below S1 + downtrend + volume spike
-            elif price < s1 and price < ema34 and vol > 1.5 * vol_ma:
-                signals[i] = -0.25
+            # Short entry: price below EMA50 AND 4h trend bearish AND in session
+            elif price < ema50_val and close[i] < ema200 and in_session:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below pivot point
-            if price < pp:
+            # Long exit: price crosses below EMA50
+            if price < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price crosses above pivot point
-            if price > pp:
+            # Short exit: price crosses above EMA50
+            if price > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
