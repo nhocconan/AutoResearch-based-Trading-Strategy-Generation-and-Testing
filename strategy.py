@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and ADX trend filter.
-# Long when price breaks above 20-period high + volume > 1.5x avg + ADX > 25.
-# Short when price breaks below 20-period low + volume > 1.5x avg + ADX > 25.
-# Uses 1d EMA200 as trend filter to avoid counter-trend trades in strong regimes.
-# Discrete position size 0.25 to minimize churn. Target: 20-40 trades/year per symbol.
-name = "4h_Donchian20_Volume_ADX_EMA200"
+# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation.
+# Long when Alligator jaws (13-period SMA shifted 8) < teeth (8-period SMA shifted 5) < lips (5-period SMA shifted 3),
+# price above lips, and 1d close > 1d EMA50, volume > 1.5x 20-period average.
+# Short when jaws > teeth > lips, price below lips, and same filters.
+# Uses discrete position size 0.25 to minimize churn. Designed for 4h to capture trends
+# while avoiding whipsaws in both bull and bear markets via Alligator alignment and 1d trend filter.
+# Target: 20-50 trades/year per symbol (~80-200 total over 4 years).
+name = "4h_WilliamsAlligator_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 220:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,74 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA200 trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA200 on daily
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate EMA50 on daily
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-                
-            tr[i] = max(high[i] - low[i], 
-                       abs(high[i] - close[i-1]), 
-                       abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        
-        atr[period] = np.mean(tr[1:period+1])
-        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        dx = np.zeros_like(close)
-        valid = (plus_di[period:] + minus_di[period:]) > 0
-        dx[period:] = np.where(valid, 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:]), 0)
-        
-        adx = np.zeros_like(close)
-        if len(dx) >= 2*period+1:
-            adx[2*period] = np.mean(dx[period:2*period+1])
-            for i in range(2*period+1, len(dx)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Williams Alligator components on 4h
+    # Jaws: 13-period SMMA shifted 8 bars forward
+    # Teeth: 8-period SMMA shifted 5 bars forward
+    # Lips: 5-period SMMA shifted 3 bars forward
+    # Using SMA for simplicity (close to SMMA for trend identification)
+    jaws = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    adx = calculate_adx(high, low, close, 14)
-    
-    # Align 1d EMA200 to 4h
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # Donchian channels (20-period)
-    def calculate_donchian(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(high, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
-    
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    # Align 1d EMA50 to 4h
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -97,51 +49,71 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # Ensure EMA200 and Donchian are ready
+    start_idx = max(13+8, 8+5, 5+3, 50, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(adx[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_200_val = ema_200_aligned[i]
-        adx_val = adx[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
+        jaw_val = jaws[i]
+        tooth_val = teeth[i]
+        lip_val = lips[i]
+        ema_50_val = ema_50_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         
         # Volume confirmation threshold
         volume_confirmed = vol > 1.5 * vol_ma
         
-        # ADX trend strength filter
-        strong_trend = adx_val > 25
+        # 1d trend filter
+        uptrend_1d = close_1d[-1] > ema_50_1d[-1] if len(close_1d) > 0 else False  # Simplified: use last known 1d value
+        # Better: use the aligned EMA50 value to determine trend at this 4h bar
+        # Since we can't access future 1d data, we use the fact that ema_50_aligned represents the 1d EMA50
+        # value that was known at the close of the previous 1d bar
+        # We'll determine trend by comparing close price to the 1d EMA50 (approximated)
+        # Actually, we need to determine if we are in a 1d uptrend or downtrend
+        # We can use the slope of the 1d EMA50, but simpler: use the 1d close vs EMA50 from the last completed 1d bar
+        # For now, we'll use a simplified approach: if the current price is above the 1d EMA50 (aligned), consider uptrend
+        # This is not perfect but avoids lookahead
+        # Better approach: we'll determine 1d trend based on whether the 1d EMA50 is rising or falling
+        # Since we can't do that easily without lookahead, we'll use price vs EMA50 as a proxy
+        # Actually, let's use the aligned EMA50 value to get the 1d EMA50 value at this point in time
+        # and compare it to what it was earlier to determine slope - but that's complex
+        # Simpler and effective: use the 1d EMA50 value as dynamic support/resistance
+        # Uptrend when price > 1d EMA50, downtrend when price < 1d EMA50
+        uptrend_1d = price > ema_50_val
+        downtrend_1d = price < ema_50_val
+        
+        # Alligator alignment: jaws < teeth < lips = uptrend alignment
+        # jaws > teeth > lips = downtrend alignment
+        alligator_long = jaw_val < tooth_val < lip_val
+        alligator_short = jaw_val > tooth_val > lip_val
         
         if position == 0:
-            # Enter long if price breaks above Donchian upper, strong trend, volume confirmation, and above EMA200
-            if price > upper and strong_trend and volume_confirmed and price > ema_200_val:
+            # Enter long if Alligator aligned for uptrend, price above lips, 1d uptrend, and volume confirmation
+            if alligator_long and price > lip_val and uptrend_1d and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short if price breaks below Donchian lower, strong trend, volume confirmation, and below EMA200
-            elif price < lower and strong_trend and volume_confirmed and price < ema_200_val:
+            # Enter short if Alligator aligned for downtrend, price below lips, 1d downtrend, and volume confirmation
+            elif alligator_short and price < lip_val and downtrend_1d and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price breaks below Donchian lower or trend weakens
-            if price < lower or adx_val < 20:  # Trend weakening
+            # Exit long when Alligator alignment breaks (jaws > teeth) or price crosses below lips
+            if jaw_val > tooth_val or price < lip_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price breaks above Donchian upper or trend weakens
-            if price > upper or adx_val < 20:  # Trend weakening
+            # Exit short when Alligator alignment breaks (jaws < teeth) or price crosses above lips
+            if jaw_val < tooth_val or price > lip_val:
                 signals[i] = 0.0
                 position = 0
             else:
