@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d ADX trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions. ADX filters for trending vs ranging markets.
-# In trending markets (ADX > 25), we take Williams %R reversals from extreme levels.
-# In ranging markets (ADX < 20), we mean revert at Williams %R overbought/oversold levels.
-# Volume confirmation ensures momentum behind moves. Works in both bull and bear markets by
-# adapting to market regime via ADX filter. Target: 15-30 trades/year per symbol.
+# Hypothesis: 12h Camarilla pivot R1/S1 breakout with volume confirmation and ATR filter
+# In trending markets, price breaks through pivot R1/S1 with volume (continuation)
+# In ranging markets, price reverts from R1/S1 with volume (mean reversion)
+# Uses 1d pivots as dynamic support/resistance with volume filter to distinguish
+# between breakouts and reversals. Works in both bull and bear markets by
+# adapting to volatility regime via ATR filter.
+# Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
 
-name = "6h_WilliamsR_ADX_Volume_Regime"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_ATR"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,69 +25,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX and Williams %R calculation
+    # Get 1d data for pivot points and ATR calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX(14) on 1d
-    # True Range
+    # Calculate ATR(14) on 1d
     tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    # Calculate daily pivot points: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    r2_1d = close_1d + (high_1d - low_1d) * 1.1 / 6
+    s2_1d = close_1d - (high_1d - low_1d) * 1.1 / 6
+    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4
+    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4
+    r4_1d = close_1d + (high_1d - low_1d) * 1.1 / 2
+    s4_1d = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(arr[:period])
-            # Subsequent values: Wilder smoothing
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Align pivot levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    tr_smooth = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # Directional Indicators
-    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    # Calculate Williams %R(14) on 1d
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) != 0, williams_r, -50)  # Avoid division by zero
-    
-    # Align indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Need Williams %R and ADX data (14+14+7 for smoothing)
+    start_idx = 20  # Need volume MA and ATR data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
+            np.isnan(s2_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -94,43 +82,50 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx_aligned[i]
-        williams_r_val = williams_r_aligned[i]
+        atr = atr_1d_aligned[i]
         
-        # Volume and regime filters
-        volume_confirmed = vol > 1.3 * vol_ma
-        trending_market = adx_val > 25
-        ranging_market = adx_val < 20
+        # Volume and volatility filters
+        volume_confirmed = vol > 1.5 * vol_ma
+        volatility_filter = atr > 0  # Always true but keeps structure
+        
+        # Pivot levels
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        r2 = r2_1d_aligned[i]
+        s2 = s2_1d_aligned[i]
+        r3 = r3_1d_aligned[i]
+        s3 = s3_1d_aligned[i]
+        r4 = r4_1d_aligned[i]
+        s4 = s4_1d_aligned[i]
+        pivot = pivot_1d_aligned[i]
         
         if position == 0:
             # Long conditions:
-            # Trending market: Williams %R crosses above -80 from oversold
-            # Ranging market: Williams %R below -80 (oversold) with volume
-            if ((trending_market and williams_r_val > -80 and 
-                 williams_r_aligned[i-1] <= -80 and volume_confirmed) or
-                (ranging_market and williams_r_val < -80 and volume_confirmed)):
+            # 1. Breakout above R1 with volume (bullish continuation)
+            # 2. Mean reversion from S1 with volume (bullish bounce)
+            if ((price > r1 and volume_confirmed) or 
+                (price < s1 and price > s2 and volume_confirmed)):
                 signals[i] = 0.25
                 position = 1
             # Short conditions:
-            # Trending market: Williams %R crosses below -20 from overbought
-            # Ranging market: Williams %R above -20 (overbought) with volume
-            elif ((trending_market and williams_r_val < -20 and 
-                   williams_r_aligned[i-1] >= -20 and volume_confirmed) or
-                  (ranging_market and williams_r_val > -20 and volume_confirmed)):
+            # 1. Breakdown below S1 with volume (bearish continuation)
+            # 2. Mean reversion from R1 with volume (bearish rejection)
+            elif ((price < s1 and volume_confirmed) or 
+                  (price > r1 and price < r2 and volume_confirmed)):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R crosses below -50 or overbought in ranging market
-            if williams_r_val < -50 or (ranging_market and williams_r_val > -20):
+            # Exit long: breakdown below S1 or reversal at R1
+            if price < s1 or (price > r1 and price < r2):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R crosses above -50 or oversold in ranging market
-            if williams_r_val > -50 or (ranging_market and williams_r_val < -80):
+            # Exit short: breakout above S1 or reversal at S1
+            if price > s1 or (price < r1 and price > s2):
                 signals[i] = 0.0
                 position = 0
             else:
