@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Turtle Soup + daily ATR filter for mean reversion in range-bound markets.
-# Long when price makes a new 20-bar low but closes above the low + 0.5*ATR(14) (false breakdown).
-# Short when price makes a new 20-bar high but closes below the high - 0.5*ATR(14) (false breakout).
-# Uses 1d ATR(14) as volatility filter to avoid low-volatility chop.
-# Works in both bull and bear by capturing mean reversion after false breakouts.
-# Target: 12-37 trades/year per symbol (~50-150 total over 4 years).
-name = "6h_TurtleSoup_DailyATRFilter"
-timeframe = "6h"
+# Hypothesis: 12h Williams Alligator with weekly trend filter and volume confirmation.
+# Long when green line > red line (bullish alignment) AND price above weekly EMA50 AND volume spike (>1.5x average).
+# Short when green line < red line (bearish alignment) AND price below weekly EMA50 AND volume spike.
+# Uses Williams Alligator (Jaw/Teeth/Lips) to identify trend alignment, weekly EMA50 for higher timeframe trend filter.
+# Volume confirmation ensures moves have institutional participation. Target: 12-37 trades/year per symbol.
+name = "12h_WilliamsAlligator_WeeklyEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,70 +20,87 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for ATR calculation
+    # Get weekly data for Williams Alligator calculation
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Williams Alligator lines (Jaw=13, Teeth=8, Lips=5 SMAs of median price)
+    median_price_1w = (high_1w + low_1w) / 2
+    jaw = pd.Series(median_price_1w).rolling(window=13, min_periods=13).mean().values  # Jaw (blue)
+    teeth = pd.Series(median_price_1w).rolling(window=8, min_periods=8).mean().values    # Teeth (red)
+    lips = pd.Series(median_price_1w).rolling(window=5, min_periods=5).mean().values     # Lips (green)
+    
+    # Align Alligator lines to 12h timeframe (wait for weekly close)
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    
+    # Get daily data for weekly EMA50 calculation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period high/low for Turtle Soup
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly EMA50 on daily close (proxy for weekly trend)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate ATR(14) on daily timeframe
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly EMA50 to 12h timeframe (wait for daily close)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align daily ATR to 6h timeframe (wait for daily close)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Volume confirmation: current volume > 1.5x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20-period high/low data
+    start_idx = max(30, 50)  # Need volume MA and EMA data
     
     for i in range(start_idx, n):
-        # Skip if ATR data is not available
-        if np.isnan(atr_14_aligned[i]):
+        # Skip if any required data is not available
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_14_aligned[i]
-        high_20_val = high_20[i]
-        low_20_val = low_20[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema_trend = ema_50_aligned[i]
+        vol_ma = vol_ma_30[i]
+        vol = volume[i]
         
-        # Skip if ATR is too low (avoid choppy markets)
-        if atr <= 0:
-            signals[i] = 0.0
-            continue
+        # Williams Alligator signals: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
+        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
+        
+        # Volume confirmation threshold
+        volume_confirmed = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter long: false breakdown below 20-day low
-            if low[i] < low_20_val and close[i] > low_20_val + 0.5 * atr:
+            # Enter long: bullish Alligator alignment AND price above weekly EMA50 AND volume confirmation
+            if bullish_alignment and price > ema_trend and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: false breakout above 20-day high
-            elif high[i] > high_20_val and close[i] < high_20_val - 0.5 * atr:
+            # Enter short: bearish Alligator alignment AND price below weekly EMA50 AND volume confirmation
+            elif bearish_alignment and price < ema_trend and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long when price reaches 20-day high or closes below entry area
-            if high[i] >= high_20_val or close[i] < low_20_val:
+            # Exit long when Alligator alignment turns bearish or price below weekly EMA50
+            if not bullish_alignment or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price reaches 20-day low or closes above entry area
-            if low[i] <= low_20_val or close[i] > high_20_val:
+            # Exit short when Alligator alignment turns bullish or price above weekly EMA50
+            if not bearish_alignment or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
