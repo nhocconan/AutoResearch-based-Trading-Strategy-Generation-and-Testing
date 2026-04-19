@@ -3,21 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Bollinger Bands and RSI for mean reversion
-# - Weekly Bollinger Bands (20, 2) identify overbought/oversold conditions
-# - Daily RSI(14) provides entry timing: long when RSI < 30 near lower BB, short when RSI > 70 near upper BB
-# - Weekly trend filter: only take longs when price > weekly SMA(50), shorts when price < weekly SMA(50)
-# - Volume confirmation: daily volume > 1.5x 20-day average for conviction
-# - Designed to work in ranging markets (mean reversion) and trending markets (with trend filter)
-# - Target: 10-20 trades/year to minimize fee drag
+# Hypothesis: 12h timeframe with 1d Camarilla pivot reversal strategy
+# - Uses 1d Camarilla pivot levels (R1, S1) for reversal entries
+# - Enters long when price crosses above S1 in uptrend (1d EMA34 filter)
+# - Enters short when price crosses below R1 in downtrend (1d EMA34 filter)
+# - Requires volume confirmation: current 12h volume > 1.5x 20-period average
+# - Uses 12h RSI(14) for entry timing: long when RSI < 40, short when RSI > 60
+# - Exits on opposite RSI threshold or trend reversal
+# - Designed for low-frequency, high-conviction trades in both bull and bear markets
+# - Target: 20-40 trades/year to minimize fee drag
 
-name = "1d_WeeklyBB_RSI_TrendFilter_v1"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_Reversal_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,26 +27,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands and trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly Bollinger Bands (20, 2)
-    weekly_close = df_weekly['close'].values
-    weekly_ma = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean().values
-    weekly_std = pd.Series(weekly_close).rolling(window=20, min_periods=20).std().values
-    upper_band = weekly_ma + 2 * weekly_std
-    lower_band = weekly_ma - 2 * weekly_std
+    # Calculate 1d Camarilla pivot levels
+    # Formula: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C = (H+L+CLOSE)/3 (typical price)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    hl_range = df_1d['high'] - df_1d['low']
+    r1 = typical_price + hl_range * 1.1 / 12
+    s1 = typical_price - hl_range * 1.1 / 12
     
-    # Align weekly bands to daily
-    upper_band_aligned = align_htf_to_ltf(prices, df_weekly, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_weekly, lower_band)
-    weekly_ma_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ma)
+    # Align 1d R1 and S1 to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Weekly SMA(50) for trend filter
-    weekly_sma50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
-    weekly_sma50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_sma50)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily RSI(14)
+    # 12h volume average (20-period)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # 12h RSI(14) for entry timing
     delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -54,52 +59,53 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     rsi_values = rsi.values
     
-    # Daily volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(weekly_ma_aligned[i]) or np.isnan(weekly_sma50_aligned[i]) or 
-            np.isnan(rsi_values[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_12h[i]) or 
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-day average
-        volume_filter = vol_ma[i] > 0 and volume[i] > 1.5 * vol_ma[i]
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = vol_ma_12h[i] > 0 and volume[i] > 1.5 * vol_ma_12h[i]
         
         if position == 0:
-            # Look for long entry: price near lower BB, RSI oversold, uptrend filter
-            if (close[i] <= lower_band_aligned[i] * 1.02 and  # Within 2% of lower band
-                rsi_values[i] < 30 and 
-                close[i] > weekly_sma50_aligned[i] and  # Uptrend filter
+            # Look for long entry: uptrend (price > 1d EMA34) + price > S1 + RSI < 40 + volume
+            if (close[i] > ema_34_1d_aligned[i] and 
+                close[i] > s1_aligned[i] and 
+                rsi_values[i] < 40 and 
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Look for short entry: price near upper BB, RSI overbought, downtrend filter
-            elif (close[i] >= upper_band_aligned[i] * 0.98 and  # Within 2% of upper band
-                  rsi_values[i] > 70 and 
-                  close[i] < weekly_sma50_aligned[i] and  # Downtrend filter
+            # Look for short entry: downtrend (price < 1d EMA34) + price < R1 + RSI > 60 + volume
+            elif (close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < r1_aligned[i] and 
+                  rsi_values[i] > 60 and 
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long position: exit when price reaches weekly mean or RSI overbought
-            if close[i] >= weekly_ma_aligned[i] or rsi_values[i] > 70:
+            # Long position: exit on RSI > 60 or trend reversal or price < S1
+            if (rsi_values[i] > 60 or 
+                close[i] < ema_34_1d_aligned[i] or 
+                close[i] < s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short position: exit when price reaches weekly mean or RSI oversold
-            if close[i] <= weekly_ma_aligned[i] or rsi_values[i] < 30:
+            # Short position: exit on RSI < 40 or trend reversal or price > R1
+            if (rsi_values[i] < 40 or 
+                close[i] > ema_34_1d_aligned[i] or 
+                close[i] > r1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
