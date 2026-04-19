@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume confirmation + 1d ADX trend filter
-# Entry: Price breaks above Donchian upper (long) or below Donchian lower (short)
-#        Confirmed by 1d volume > 1.5x 20-period average and 1d ADX > 25
-# Exit: Opposite Donchian break or 2x ATR stop
-# Designed to work in trending markets (both bull and bear) by capturing breakouts
-# Target: 15-25 trades/year to minimize fee drag
-name = "12h_Donchian20_1dVolADX_v1"
-timeframe = "12h"
+# Hypothesis: 4h Choppiness Index regime filter + 1d Donchian breakout with volume confirmation
+# Choppiness Index > 61.8 = range (mean revert), < 38.2 = trending (trend follow)
+# In trending regime: Donchian breakout (20-period) with volume spike
+# In ranging regime: Mean reversion at Donchian bands (buy lower band, sell upper band)
+# Uses 1d Donchian for structure, 4h Choppiness for regime, volume for confirmation
+# Designed to work in both bull (trend following) and bear (mean reversion in ranges)
+# Target: 20-35 trades/year to avoid fee drag
+name = "4h_Chop_Donchian1d_Regime_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,50 +24,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and ADX filters (ONCE before loop)
+    # Get 1d data for Donchian channels (structure)
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d volume average
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
-    
-    # 1d ADX calculation
+    # 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = high_1d[0] - low_1d[0]
+    # 4h Choppiness Index (14-period) for regime detection
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # True Range sum over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Max(high) - Min(low) over 14 periods
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range_hl = max_high - min_low
     
-    # Smoothed values
-    tr_period = 14
-    atr_1d = pd.Series(tr_1d).ewm(alpha=1/tr_period, adjust=False).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(alpha=1/tr_period, adjust=False).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Avoid division by zero
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    chop = 100 * np.log10(tr_sum / range_hl) / np.log10(14)
     
-    # 12h Donchian channels (20-period)
-    donch_len = 20
-    donch_high = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
-    donch_low = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
-    
-    # 12h ATR for stops
-    tr_12h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_12h[0] = high[0] - low[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    # 4h ATR for stops
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,41 +63,72 @@ def generate_signals(prices):
     start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(vol_avg_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or \
-           np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(atr_12h[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
+           np.isnan(chop[i]) or np.isnan(atr_4h[i]):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 1d volume > 1.5x 20-period average
-        vol_filter = vol_1d[i] > 1.5 * vol_avg_1d[i] if not np.isnan(vol_avg_1d[i]) else False
+        # Volume filter: current volume > 1.5x average volume (20-period)
+        if i >= 20:
+            avg_volume = np.mean(volume[i-20:i])
+        else:
+            avg_volume = volume[i]
+        volume_filter = volume[i] > 1.5 * avg_volume
         
-        # ADX filter: trend strength
-        adx_filter = adx_1d[i] > 25
+        # Regime detection
+        is_trending = chop[i] < 38.2  # Trending market
+        is_ranging = chop[i] > 61.8   # Ranging market
         
         if position == 0:
-            # Long: Price breaks above Donchian high + volume + ADX
-            if close[i] > donch_high[i-1] and vol_filter and adx_filter:
-                signals[i] = 0.25
-                position = 1
-            # Short: Price breaks below Donchian low + volume + ADX
-            elif close[i] < donch_low[i-1] and vol_filter and adx_filter:
-                signals[i] = -0.25
-                position = -1
+            if is_trending:
+                # Trending regime: Donchian breakout with volume
+                if close[i] > donchian_high_aligned[i] and volume_filter:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < donchian_low_aligned[i] and volume_filter:
+                    signals[i] = -0.25
+                    position = -1
+            elif is_ranging:
+                # Ranging regime: Mean reversion at Donchian bands
+                if close[i] <= donchian_low_aligned[i] and volume_filter:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] >= donchian_high_aligned[i] and volume_filter:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit: Price breaks below Donchian low or 2x ATR stop
-            if close[i] < donch_low[i-1] or close[i] < close[i-1] - 2.0 * atr_12h[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions
+            if is_trending:
+                # In trending regime: exit on Donchian reversal or 2x ATR stop
+                if close[i] < donchian_low_aligned[i] or close[i] < close[i-1] - 2.0 * atr_4h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                # In ranging regime: exit at opposite Donchian band or 2x ATR stop
+                if close[i] >= donchian_high_aligned[i] or close[i] < close[i-1] - 2.0 * atr_4h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price breaks above Donchian high or 2x ATR stop
-            if close[i] > donch_high[i-1] or close[i] > close[i-1] + 2.0 * atr_12h[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions
+            if is_trending:
+                # In trending regime: exit on Donchian reversal or 2x ATR stop
+                if close[i] > donchian_high_aligned[i] or close[i] > close[i-1] + 2.0 * atr_4h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # In ranging regime: exit at opposite Donchian band or 2x ATR stop
+                if close[i] <= donchian_low_aligned[i] or close[i] > close[i-1] + 2.0 * atr_4h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
