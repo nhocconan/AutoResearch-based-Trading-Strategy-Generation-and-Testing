@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1w trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions for mean reversion entries
-# 1w EMA200 provides strong trend bias to avoid counter-trend trades in strong trends
-# Volume confirmation ensures breakouts have conviction
-# Target: 20-30 trades/year per symbol with disciplined entries
-name = "12h_WilliamsR_1wEMA200_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1d VWAP filter and volume confirmation
+# Uses 1d VWAP as dynamic support/resistance to filter false breakouts
+# Donchian(20) identifies key support/resistance from 4h price action
+# Breakout above upper band or below lower band with volume > 1.5x average and price on correct side of 1d VWAP
+# VWAP filter ensures trades align with institutional flow direction
+# Target: 20-40 trades/year per symbol with disciplined entries
+name = "4h_Donchian20_1dVWAP_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,23 +23,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w EMA200 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # 1d VWAP for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate VWAP: cumulative (price * volume) / cumulative volume
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_values = vwap.values
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_values)
     
-    # Williams %R (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Calculate Donchian channels (20-period) from 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_band = high_series.rolling(window=20, min_periods=20).max().values
+    lower_band = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,36 +51,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with volume confirmation and above 1w EMA200
-            if (williams_r[i] < -80 and 
+            # Long: break above upper band with volume confirmation and above 1d VWAP
+            if (close[i] > upper_band[i] and 
                 volume_confirm[i] and 
-                close[i] > ema_200_1w_aligned[i]):
+                close[i] > vwap_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) with volume confirmation and below 1w EMA200
-            elif (williams_r[i] > -20 and 
+            # Short: break below lower band with volume confirmation and below 1d VWAP
+            elif (close[i] < lower_band[i] and 
                   volume_confirm[i] and 
-                  close[i] < ema_200_1w_aligned[i]):
+                  close[i] < vwap_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Williams %R becomes overbought (> -20) or breaks below EMA200
-            if (williams_r[i] > -20) or (close[i] < ema_200_1w_aligned[i]):
+            # Long: exit if price breaks below lower band or breaks below 1d VWAP
+            if (close[i] < lower_band[i]) or (close[i] < vwap_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Williams %R becomes oversold (< -80) or breaks above EMA200
-            if (williams_r[i] < -80) or (close[i] > ema_200_1w_aligned[i]):
+            # Short: exit if price breaks above upper band or breaks above 1d VWAP
+            if (close[i] > upper_band[i]) or (close[i] > vwap_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
