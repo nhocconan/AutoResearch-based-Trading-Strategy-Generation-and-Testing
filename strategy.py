@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1dPivot_S1R1_Breakout_VolumeATR_Tight_v3"
-timeframe = "12h"
+name = "4h_12h_Pivot_S1R1_Breakout_VolumeATR_Tight_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,29 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and ATR
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for pivot points and ATR
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily ATR(14)
-    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate 12h ATR(14)
+    tr1 = np.maximum(high_12h[1:], close_12h[:-1]) - np.minimum(low_12h[1:], close_12h[:-1])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Daily pivot points: P = (H+L+C)/3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    s1_1d = 2 * pivot_1d - high_1d
-    r1_1d = 2 * pivot_1d - low_1d
+    # 12h pivot points: P = (H+L+C)/3
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    s1_12h = 2 * pivot_12h - high_12h
+    r1_12h = 2 * pivot_12h - low_12h
     
-    # Align to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    # Align to 4h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,8 +50,8 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(r1_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -59,11 +59,11 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_1d_aligned[i]
+        atr = atr_12h_aligned[i]
         
         volume_confirmed = vol > 2.0 * vol_ma
-        s1 = s1_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
+        s1 = s1_12h_aligned[i]
+        r1 = r1_12h_aligned[i]
         
         if position == 0:
             # Long: Break above R1 with volume
