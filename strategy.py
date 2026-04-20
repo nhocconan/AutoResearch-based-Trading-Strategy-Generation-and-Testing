@@ -1,61 +1,19 @@
 #!/usr/bin/env python3
-# 6h_1d_Momentum_Divergence_With_Volume
-# Hypothesis: Combine 1d momentum divergence (RSI) with 6s price action and volume confirmation.
-# In bull markets: Buy when price makes higher low but RSI makes lower low (bullish divergence) on 1d, confirmed by 6s breakout.
-# In bear markets: Sell when price makes lower high but RSI makes higher high (bearish divergence) on 1d, confirmed by 6s breakdown.
-# Uses volume surge to filter false signals. Targets 50-150 total trades over 4 years.
+# 12h_1d_Pivot_R2S2_VolumeBreakout_Tight
+# Hypothesis: Trade breakouts from 1d Camarilla R2/S2 levels on 12h timeframe with volume confirmation.
+# R2/S2 levels represent stronger intraday support/resistance than R1/S1, reducing false breakouts.
+# Uses volume surge (>2.5x 20-period average) to confirm institutional participation.
+# Tightened conditions to reduce trade frequency and avoid fee drag.
+# Works in bull markets (breakouts continue) and bear markets (mean reversion from extreme levels).
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete position sizing to minimize fee drag.
 
-name = "6h_1d_Momentum_Divergence_With_Volume"
-timeframe = "6h"
+name = "12h_1d_Pivot_R2S2_VolumeBreakout_Tight"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
-
-def rsi(close, period=14):
-    """Calculate RSI with proper Wilder's smoothing."""
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    
-    # Wilder's smoothing: alpha = 1/period
-    avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50).values  # Fill neutral for early periods
-
-def find_divergences(high, low, rsi_vals, lookback=5):
-    """
-    Find bullish and bearish divergences.
-    Bullish: price makes lower low, RSI makes higher low
-    Bearish: price makes higher high, RSI makes lower high
-    Returns arrays with 1 for bullish div, -1 for bearish div, 0 otherwise
-    """
-    n = len(high)
-    div_signal = np.zeros(n)
-    
-    for i in range(lookback, n):
-        # Check for bullish divergence: lower low in price, higher low in RSI
-        price_low_idx = np.argmin(low[i-lookback:i+1]) + i - lookback
-        rsi_low_idx = np.argmin(rsi_vals[i-lookback:i+1]) + i - lookback
-        
-        if (low[price_low_idx] < low[i-lookback:i].min() and 
-            rsi_vals[rsi_low_idx] > rsi_vals[i-lookback:i].min()):
-            div_signal[i] = 1  # Bullish divergence
-            
-        # Check for bearish divergence: higher high in price, lower high in RSI
-        price_high_idx = np.argmax(high[i-lookback:i+1]) + i - lookback
-        rsi_high_idx = np.argmax(rsi_vals[i-lookback:i+1]) + i - lookback
-        
-        if (high[price_high_idx] > high[i-lookback:i].max() and 
-            rsi_vals[rsi_high_idx] < rsi_vals[i-lookback:i].max()):
-            div_signal[i] = -1  # Bearish divergence
-            
-    return div_signal
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -69,66 +27,64 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough data for RSI
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d RSI for divergence detection
-    close_1d = df_1d['close'].values
-    rsi_1d = rsi(close_1d, 14)
-    
-    # Find divergences on 1d
+    # Calculate 1d pivot and Camarilla R2/S2 levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    div_signal_1d = find_divergences(high_1d, low_1d, rsi_1d, lookback=10)
+    close_1d = df_1d['close'].values
     
-    # Align divergence signal to 6h timeframe
-    div_aligned = align_htf_to_ltf(prices, df_1d, div_signal_1d)
+    # Pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # 6h breakout levels: 20-period high/low
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla R2 and S2 levels (stronger intraday support/resistance)
+    s2_1d = close_1d - (range_1d * 1.1 / 6)
+    r2_1d = close_1d + (range_1d * 1.1 / 6)
     
-    # Volume filter: 2x 20-period average
+    # Align 1d levels to 12h timeframe
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    
+    # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(div_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(volume_ma[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: bullish divergence on 1d + break above 20-period high + volume surge
-            if (div_aligned[i] == 1 and 
-                close[i] > high_20[i] * 1.002 and 
-                volume[i] > 1.8 * volume_ma[i]):
+            # Long: price above R2 with volume surge
+            if (close[i] > r2_aligned[i] * 1.003 and 
+                volume[i] > 2.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish divergence on 1d + break below 20-period low + volume surge
-            elif (div_aligned[i] == -1 and 
-                  close[i] < low_20[i] * 0.998 and 
-                  volume[i] > 1.8 * volume_ma[i]):
+            # Short: price below S2 with volume surge
+            elif (close[i] < s2_aligned[i] * 0.997 and 
+                  volume[i] > 2.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish divergence OR price breaks below 20-period low
-            if (div_aligned[i] == -1 or close[i] < low_20[i]):
+            # Long exit: price below S2
+            if close[i] < s2_aligned[i] * 0.997:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish divergence OR price breaks above 20-period high
-            if (div_aligned[i] == 1 or close[i] > high_20[i]):
+            # Short exit: price above R2
+            if close[i] > r2_aligned[i] * 1.003:
                 signals[i] = 0.0
                 position = 0
             else:
