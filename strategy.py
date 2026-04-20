@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + Elder Ray with Volume Confirmation
-# Long when: price > Alligator Jaw, Bull Power > 0, Bear Power < 0, volume > 1.5x avg
-# Short when: price < Alligator Jaw, Bull Power < 0, Bear Power > 0, volume > 1.5x avg
-# Exit when: price crosses Alligator Teeth or power signals reverse
-# Williams Alligator identifies trend, Elder Ray measures bull/bear power, volume confirms conviction.
-# Designed for 12h timeframe to capture multi-day moves with low frequency (target: 50-150 trades over 4 years).
+# Hypothesis: 12h Williams Fractal Breakout with Weekly Trend and Volume Confirmation
+# Enters long when price breaks above recent bearish fractal high with weekly uptrend and volume > 1.5x average.
+# Enters short when price breaks below recent bullish fractal low with weekly downtrend and volume > 1.5x average.
+# Exits when price returns to the opposite fractal level.
+# Williams Fractals identify key support/resistance levels, weekly trend filter avoids counter-trend trades.
+# Volume confirmation ensures institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "12h_Alligator_ElderRay_Volume"
+name = "12h_WilliamsFractal_1wTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,34 +19,46 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for Elder Ray
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # Get weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === Williams Alligator (13,8,5 SMAs shifted) ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Get daily data for Williams Fractals
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
+        return np.zeros(n)
     
-    # Jaw (13-period SMA, shifted 8 bars)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (8-period SMA, shifted 5 bars)
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (5-period SMA, shifted 3 bars)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # === Williams Fractals (5-bar window) ===
+    high = df_1d['high'].values
+    low = df_1d['low'].values
     
-    # === Elder Ray (13-period EMA) ===
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    ema13 = pd.Series(daily_close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
+    bearish_fractal = np.full(len(high), np.nan)
+    bullish_fractal = np.full(len(high), np.nan)
     
-    bull_power = daily_high - ema13
-    bear_power = daily_low - ema13
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Calculate fractals: need 2 bars on each side
+    for i in range(2, len(high) - 2):
+        # Bearish fractal: high[i] is highest among 5 bars
+        if (high[i] >= high[i-1] and high[i] >= high[i-2] and 
+            high[i] >= high[i+1] and high[i] >= high[i+2]):
+            bearish_fractal[i] = high[i]
+        # Bullish fractal: low[i] is lowest among 5 bars
+        if (low[i] <= low[i-1] and low[i] <= low[i-2] and 
+            low[i] <= low[i+1] and low[i] <= low[i+2]):
+            bullish_fractal[i] = low[i]
+    
+    # Williams fractals need 2 extra bars for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
+    # Forward fill to get most recent fractal levels
+    bearish_fractal_ffill = pd.Series(bearish_fractal_aligned).ffill().values
+    bullish_fractal_ffill = pd.Series(bullish_fractal_aligned).ffill().values
+    
+    # === Weekly EMA20 for trend filter ===
+    weekly_close = df_1w['close'].values
+    ema_20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
     # === Volume confirmation ===
     volume = prices['volume'].values
@@ -56,45 +68,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):
+    for i in range(50, n):  # Start after warmup
         # Get values
-        close_val = close[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
+        close_val = prices['close'].iloc[i]
+        bear_fractal = bearish_fractal_ffill[i]
+        bull_fractal = bullish_fractal_ffill[i]
+        ema_val = ema_20_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or 
-            np.isnan(bull_val) or np.isnan(bear_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(bear_fractal) or np.isnan(bull_fractal) or np.isnan(ema_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price > Jaw, Bull Power > 0, Bear Power < 0, volume confirmation
-            if close_val > jaw_val and bull_val > 0 and bear_val < 0 and vol_ratio_val > 1.5:
+            # Long entry: price breaks above recent bearish fractal, weekly uptrend, volume confirmation
+            if close_val > bear_fractal and close_val > ema_val and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price < Jaw, Bull Power < 0, Bear Power > 0, volume confirmation
-            elif close_val < jaw_val and bull_val < 0 and bear_val > 0 and vol_ratio_val > 1.5:
+            # Short entry: price breaks below recent bullish fractal, weekly downtrend, volume confirmation
+            elif close_val < bull_fractal and close_val < ema_val and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below Teeth or power signals reverse
-            if close_val < teeth_val or bull_val <= 0 or bear_val >= 0:
+            # Long exit: price returns to bullish fractal level or trend breaks
+            if close_val <= bull_fractal or close_val <= ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Teeth or power signals reverse
-            if close_val > teeth_val or bull_val >= 0 or bear_val <= 0:
+            # Short exit: price returns to bearish fractal level or trend breaks
+            if close_val >= bear_fractal or close_val >= ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
