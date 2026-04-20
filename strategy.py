@@ -3,53 +3,57 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
-# - Uses 1d EMA100 as trend filter: price must be above EMA100 for long, below for short
-# - Entry: price breaks above Donchian(20) high + volume > 1.5x 20-period average + EMA filter
-# - Exit: price breaks below Donchian(20) low OR ATR stop hit (2x ATR)
-# - Combines trend following (EMA), breakout (Donchian), volume confirmation, and risk control
-# - Target: 20-30 trades per year per symbol (80-120 total over 4 years)
+# Hypothesis: 12h Donchian channel breakout with volume confirmation and ATR stop
+# - Uses 1d Donchian (20-period) as trend filter: price must be above upper band for long, below lower for short
+# - Entry: price breaks above/below 1d Donchian + volume > 1.3x 20-period average
+# - Exit: price crosses back to opposite Donchian band or ATR-based stop (2x ATR from entry)
+# - Volume confirmation reduces false breakouts
+# - ATR stop manages risk during adverse moves
+# - Target: 20-35 trades per year per symbol (80-140 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
-    # Load 1d data for EMA calculation
+    # Load 1d data for Donchian and ATR calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA100 on 1d data
-    ema_100 = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_4h = align_htf_to_ltf(prices, df_1d, ema_100)
+    # Calculate Donchian channels (20-period) on 1d data
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_12h = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_12h = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Calculate ATR for stop loss
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate ATR for stop loss (using 1d data)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_1d_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
     # Volume confirmation: 20-period average
-    volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(40, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(ema_100_4h[i]) or np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donch_high_12h[i]) or np.isnan(donch_low_12h[i]) or np.isnan(atr_1d_12h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,28 +63,28 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long entry: price above EMA100 + breaks above Donchian high + volume surge
-            if price > ema_100_4h[i] and price > donch_high[i] and vol > 1.5 * vol_ma[i]:
+            # Long entry: price breaks above Donchian high + volume surge
+            if price > donch_high_12h[i] and price > donch_high_12h[i-1] and vol > 1.3 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: price below EMA100 + breaks below Donchian low + volume surge
-            elif price < ema_100_4h[i] and price < donch_low[i] and vol > 1.5 * vol_ma[i]:
+            # Short entry: price breaks below Donchian low + volume surge
+            elif price < donch_low_12h[i] and price < donch_low_12h[i-1] and vol > 1.3 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low OR ATR stop hit (2*ATR)
-            if price < donch_low[i] or price < entry_price - 2.0 * atr[i]:
+            # Long exit: price crosses below Donchian low OR ATR stop hit (2*ATR)
+            if price < donch_low_12h[i] or price < entry_price - 2.0 * atr_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high OR ATR stop hit (2*ATR)
-            if price > donch_high[i] or price > entry_price + 2.0 * atr[i]:
+            # Short exit: price crosses above Donchian high OR ATR stop hit (2*ATR)
+            if price > donch_high_12h[i] or price > entry_price + 2.0 * atr_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA100_Volume_ATRStop"
-timeframe = "4h"
+name = "12h_Donchian20_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
