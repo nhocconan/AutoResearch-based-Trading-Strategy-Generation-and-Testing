@@ -22,21 +22,19 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily EMA(50) and EMA(200)
+    # Daily EMA(20)
     close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Daily volume moving average (20-period)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily indicators to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align daily indicators to 12h timeframe
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    # 4h price data
+    # 12h price data
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -45,14 +43,13 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if NaN
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]):
+        if np.isnan(ema_20_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_50_val = ema_50_1d_aligned[i]
-        ema_200_val = ema_200_1d_aligned[i]
+        ema_20_val = ema_20_1d_aligned[i]
         atr_val = atr_14_1d_aligned[i]
         vol_ma_val = volume_ma_20_1d_aligned[i]
         price = close[i]
@@ -61,35 +58,27 @@ def generate_signals(prices):
         # Volume filter: current volume must be above 20-day average
         vol_filter = vol > vol_ma_val
         
-        # Volatility filter: ATR below 40th percentile (low volatility regime)
-        vol_pct = np.nanpercentile(atr_14_1d_aligned[:i+1], 40) if np.sum(~np.isnan(atr_14_1d_aligned[:i+1])) >= 40 else np.nan
-        low_vol = atr_val < vol_pct if not np.isnan(vol_pct) else False
-        
         if position == 0:
-            # Long: price above EMA200, volume confirmation, low volatility
-            if price > ema_200_val and vol_filter and low_vol:
+            # Long: price above EMA20, volume confirmation, and low volatility
+            if price > ema_20_val and vol_filter and atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 40):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA50, volume confirmation, low volatility
-            elif price < ema_50_val and vol_filter and low_vol:
+            # Short: price below EMA20, volume confirmation, and low volatility
+            elif price < ema_20_val and vol_filter and atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 40):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below EMA50 or volatility spikes (above 60th percentile)
-            vol_pct_exit = np.nanpercentile(atr_14_1d_aligned[:i+1], 60) if np.sum(~np.isnan(atr_14_1d_aligned[:i+1])) >= 60 else np.nan
-            high_vol = atr_val > vol_pct_exit if not np.isnan(vol_pct_exit) else False
-            if price < ema_50_val or high_vol:
+            # Long exit: price below EMA20 or volatility spikes
+            if price < ema_20_val or atr_val > np.nanpercentile(atr_14_1d_aligned[:i+1], 60):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above EMA200 or volatility spikes
-            vol_pct_exit = np.nanpercentile(atr_14_1d_aligned[:i+1], 60) if np.sum(~np.isnan(atr_14_1d_aligned[:i+1])) >= 60 else np.nan
-            high_vol = atr_val > vol_pct_exit if not np.isnan(vol_pct_exit) else False
-            if price > ema_200_val or high_vol:
+            # Short exit: price above EMA20 or volatility spikes
+            if price > ema_20_val or atr_val > np.nanpercentile(atr_14_1d_aligned[:i+1], 60):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA50_EMA200_VolumeVolatilityFilter"
-timeframe = "4h"
+name = "12h_EMA20_VolumeVolatilityFilter"
+timeframe = "12h"
 leverage = 1.0
