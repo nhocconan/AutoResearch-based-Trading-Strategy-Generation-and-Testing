@@ -3,102 +3,104 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian20_Breakout_VolumeTrend_v5"
+name = "4h_1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:
+    if n < 60:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d: 20-period EMA for trend direction ===
+    # === 1d: Calculate pivot points (standard) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # === 4h: Calculate Donchian channel (20-period) ===
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    
+    # Align all pivot levels
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # === 4h: ATR(14) for volatility and stop loss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # Calculate rolling max/min with min_periods
-    max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 4h: ATR(20) for volatility and stop loss ===
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
-    # === 4h: Volume condition: current volume > 1.5x 20-period average volume ===
-    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 60  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Get values
-        ema_trend = ema_20_1d_aligned[i]
-        upper = max_20[i]
-        lower = min_20[i]
+        # Get aligned values
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
         current_atr = atr[i]
         current_close = prices['close'].iloc[i]
-        current_vol = prices['volume'].iloc[i]
-        current_vol_ma = vol_ma[i]
+        current_volume = prices['volume'].iloc[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_trend) or np.isnan(upper) or np.isnan(lower) or 
-            np.isnan(current_atr) or np.isnan(current_vol_ma)):
+        if (np.isnan(pivot) or np.isnan(r1) or np.isnan(s1) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.5x 20-period average
-        vol_condition = current_vol > 1.5 * current_vol_ma
+        # === Volume condition: current volume > 1.3x 24-period 4h average volume ===
+        if i >= 24:
+            vol_ma = np.mean(prices['volume'].iloc[i-24:i].values)
+            vol_condition = current_volume > 1.3 * vol_ma
+        else:
+            vol_condition = False
         
         if position == 0:
             # Long conditions:
-            # 1. Price above 1d EMA20 (uptrend)
-            # 2. Price breaks above upper Donchian band with volume
-            if (current_close > ema_trend and
-                current_close > upper and
-                vol_condition):
+            # 1. Price breaks above R1 with volume
+            # 2. Price is below previous day's high (not overextended)
+            if (current_close > r1 and
+                vol_condition and
+                current_close < high_1d[i-1] if i > 0 else True):
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
             # Short conditions:
-            # 1. Price below 1d EMA20 (downtrend)
-            # 2. Price breaks below lower Donchian band with volume
-            elif (current_close < ema_trend and
-                  current_close < lower and
-                  vol_condition):
+            # 1. Price breaks below S1 with volume
+            # 2. Price is above previous day's low (not overextended)
+            elif (current_close < s1 and
+                  vol_condition and
+                  current_close > low_1d[i-1] if i > 0 else True):
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
             # Long exit conditions:
-            # 1. Price falls below 1d EMA20 (trend change)
-            # 2. Price hits lower Donchian band (mean reversion)
-            # 3. ATR-based stop loss
-            if (current_close < ema_trend or
-                current_close <= lower or
-                current_close < entry_price - 2.0 * current_atr):
+            # 1. Price falls below pivot (mean reversion)
+            # 2. ATR-based stop loss
+            if (current_close <= pivot or
+                current_close < entry_price - 2.5 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,12 +108,10 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit conditions:
-            # 1. Price rises above 1d EMA20 (trend change)
-            # 2. Price hits upper Donchian band (mean reversion)
-            # 3. ATR-based stop loss
-            if (current_close > ema_trend or
-                current_close >= upper or
-                current_close > entry_price + 2.0 * current_atr):
+            # 1. Price rises above pivot (mean reversion)
+            # 2. ATR-based stop loss
+            if (current_close >= pivot or
+                current_close > entry_price + 2.5 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
