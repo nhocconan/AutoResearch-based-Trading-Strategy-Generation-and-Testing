@@ -3,124 +3,104 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WickReversal_Pullback_V1"
-timeframe = "1d"
+name = "6h_1d_WilliamsAlligator_Signal_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for calculations
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily data
-    open_d = prices['open'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 1d: Williams Alligator ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Jaw (blue): 13-period SMMA, shifted 8 bars forward
+    # Teeth (red): 8-period SMMA, shifted 5 bars forward  
+    # Lips (green): 5-period SMMA, shifted 3 bars forward
+    def smma(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        sma = np.mean(data[:period])
+        result[period-1] = sma
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    jaw = smma(close_1d, 13)
+    teeth = smma(close_1d, 8)
+    lips = smma(close_1d, 5)
+    
+    # Shift jaws forward by 8, teeth by 5, lips by 3
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # For the shifted periods, use original values to avoid look-ahead
+    jaw_shifted[:8] = jaw[:8] if len(jaw) > 8 else np.nan
+    teeth_shifted[:5] = teeth[:5] if len(teeth) > 5 else np.nan
+    lips_shifted[:3] = lips[:3] if len(lips) > 3 else np.nan
+    
+    # Alligator signals: 
+    # Bullish: Lips > Teeth > Jaw (green > red > blue)
+    # Bearish: Jaw > Teeth > Lips (blue > red > green)
+    bullish = (lips_shifted > teeth_shifted) & (teeth_shifted > jaw_shifted)
+    bearish = (jaw_shifted > teeth_shifted) & (teeth_shifted > lips_shifted)
+    
+    # Align to 6h timeframe
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish.astype(float))
+    
+    # === 6h: Price action and volume confirmation ===
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Weekly trend: 20-week EMA on weekly closes
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Daily ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Daily volume ratio (current vs 20-day average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):
         # Get values
-        open_val = open_d[i]
-        high_val = high[i]
-        low_val = low[i]
-        close_val = close[i]
-        ema_val = ema_20_1w_aligned[i]
-        atr_val = atr[i]
-        vol_ratio_val = vol_ratio[i]
+        bullish_val = bullish_aligned[i]
+        bearish_val = bearish_aligned[i]
+        vol_ma = vol_ma20[i]
         
         # Skip if any value is NaN
-        if (np.isnan(open_val) or np.isnan(high_val) or np.isnan(low_val) or 
-            np.isnan(close_val) or np.isnan(ema_val) or np.isnan(atr_val) or 
-            np.isnan(vol_ratio_val)):
+        if np.isnan(bullish_val) or np.isnan(bearish_val) or np.isnan(vol_ma):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        # Calculate daily range and wick sizes
-        daily_range = high_val - low_val
-        if daily_range <= 0:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        upper_wick = high_val - max(open_val, close_val)
-        lower_wick = min(open_val, close_val) - low_val
-        body_size = abs(close_val - open_val)
-        
-        # Wick rejection conditions
-        long_wick_rejection = (
-            lower_wick > 0.6 * daily_range and  # Long lower wick (bullish rejection)
-            body_size < 0.3 * daily_range and   # Small body
-            upper_wick < 0.2 * daily_range      # Small upper wick
-        )
-        
-        short_wick_rejection = (
-            upper_wick > 0.6 * daily_range and  # Long upper wick (bearish rejection)
-            body_size < 0.3 * daily_range and   # Small body
-            lower_wick < 0.2 * daily_range      # Small lower wick
-        )
-        
-        # Pullback conditions (price near weekly EMA)
-        pullback_long = (
-            close_val > ema_val and                    # Above weekly EMA (uptrend bias)
-            close_val < ema_val + 0.5 * atr_val and    # But not too far above (pullback)
-            vol_ratio_val > 1.2                        # Volume confirmation
-        )
-        
-        pullback_short = (
-            close_val < ema_val and                    # Below weekly EMA (downtrend bias)
-            close_val > ema_val - 0.5 * atr_val and    # But not too far below (pullback)
-            vol_ratio_val > 1.2                        # Volume confirmation
-        )
         
         if position == 0:
-            # Long: Bullish wick rejection + pullback to weekly EMA
-            if long_wick_rejection and pullback_long:
+            # Long: Bullish alligator alignment + volume confirmation
+            if bullish_val > 0.5 and volume[i] > vol_ma * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish wick rejection + pullback to weekly EMA
-            elif short_wick_rejection and pullback_short:
+            # Short: Bearish alligator alignment + volume confirmation
+            elif bearish_val > 0.5 and volume[i] > vol_ma * 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bearish wick rejection or price breaks below weekly EMA
-            if short_wick_rejection or close_val < ema_val:
+            # Long exit: Bearish alignment or price closes below teeth
+            if bearish_val > 0.5 or close[i] < teeth_shifted[i] if not np.isnan(teeth_shifted[i]) else False:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bullish wick rejection or price breaks above weekly EMA
-            if long_wick_rejection or close_val > ema_val:
+            # Short exit: Bullish alignment or price closes above teeth
+            if bullish_val > 0.5 or close[i] > teeth_shifted[i] if not np.isnan(teeth_shifted[i]) else False:
                 signals[i] = 0.0
                 position = 0
             else:
