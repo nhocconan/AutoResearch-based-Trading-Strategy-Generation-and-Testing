@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 12h_1D_Pivot_R3S3_Volume_Confirmation_v3
-# Hypothesis: Fade at 12h Pivot R3/S3 levels with volume confirmation and 1d trend filter.
-# Uses 1d EMA trend to avoid counter-trend trades. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in bull/bear via 1d trend filter - only trade with the 1d trend.
+# 4h_1d_Vortex_Volume_Confirmation
+# Hypothesis: Vortex Indicator identifies trend direction on 1d timeframe, with entry on 4h when price pulls back to EMA21 in direction of trend, confirmed by volume spike. Works in bull/bear via 1d trend filter. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1D_Pivot_R3S3_Volume_Confirmation_v3"
-timeframe = "12h"
+name = "4h_1d_Vortex_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,90 +15,96 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for trend filter
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # === 1d: EMA trend filter (34-period) ===
+    # === 1d: Vortex Indicator (VI) for trend direction ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Calculate 12h pivot levels (R3, S3) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Pivot point and range
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # VM+ and VM-
+    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
+    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
     
-    # Camarilla levels: R3 = close + (range * 1.1/4), S3 = close - (range * 1.1/4)
-    r3_12h = close_12h + (range_12h * 1.1 / 4)
-    s3_12h = close_12h - (range_12h * 1.1 / 4)
+    # Smooth over 14 periods
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # === 12h: Volume ratio (current vs 20-period average) ===
+    # VI+ and VI-
+    vi_plus = vm_plus14 / tr14
+    vi_minus = vm_minus14 / tr14
+    
+    # Trend: VI+ > VI- = uptrend, VI- > VI+ = downtrend
+    vi_plus_vi_minus = vi_plus - vi_minus  # >0 = uptrend, <0 = downtrend
+    
+    # Align Vortex trend to 4h
+    vi_trend_aligned = align_htf_to_ltf(prices, df_1d, vi_plus_vi_minus)
+    
+    # === 4h: EMA21 for pullback entries ===
+    close = prices['close'].values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # === 4h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # Align all 12h levels to 12h
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after EMA warmup
+    for i in range(21, n):  # Start after EMA21 warmup
         # Get values
-        close_val = prices['close'].iloc[i]
-        ema_34_1d_val = ema_34_1d_aligned[i]
-        r3_12h_val = r3_12h_aligned[i]
-        s3_12h_val = s3_12h_aligned[i]
+        close_val = close[i]
+        ema21_val = ema21[i]
+        vi_trend_val = vi_trend_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_val) or np.isnan(r3_12h_val) or np.isnan(s3_12h_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(ema21_val) or np.isnan(vi_trend_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price rejects S3 (bounces off support) with volume confirmation and above 1d EMA
-            if (close_val < s3_12h_val and  # Price touched or went below S3
-                prices['low'].iloc[i] <= s3_12h_val and  # Confirmed touch of S3
-                close_val > s3_12h_val and  # Now bouncing back above S3
-                vol_ratio_val > 2.0 and  # Volume confirmation
-                close_val > ema_34_1d_val):  # Above 1d EMA (uptrend)
+            # Long: Uptrend (VI+ > VI-) + price at EMA21 (pullback) + volume confirmation
+            if (vi_trend_val > 0 and  # 1d uptrend
+                abs(close_val - ema21_val) / ema21_val < 0.005 and  # Within 0.5% of EMA21
+                vol_ratio_val > 2.0):  # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price rejects R3 (bounces off resistance) with volume confirmation and below 1d EMA
-            elif (close_val > r3_12h_val and  # Price touched or went above R3
-                  prices['high'].iloc[i] >= r3_12h_val and  # Confirmed touch of R3
-                  close_val < r3_12h_val and  # Now falling back below R3
-                  vol_ratio_val > 2.0 and  # Volume confirmation
-                  close_val < ema_34_1d_val):  # Below 1d EMA (downtrend)
+            # Short: Downtrend (VI- > VI+) + price at EMA21 (pullback) + volume confirmation
+            elif (vi_trend_val < 0 and  # 1d downtrend
+                  abs(close_val - ema21_val) / ema21_val < 0.005 and  # Within 0.5% of EMA21
+                  vol_ratio_val > 2.0):  # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price reaches R3 or breaks below 1d EMA
-            if close_val >= r3_12h_val or close_val < ema_34_1d_val:
+            # Long exit: Trend reversal or price extends too far from EMA
+            if (vi_trend_val < 0 or  # Trend turned down
+                close_val > ema21_val * 1.02):  # Extended >2% above EMA
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price reaches S3 or breaks above 1d EMA
-            if close_val <= s3_12h_val or close_val > ema_34_1d_val:
+            # Short exit: Trend reversal or price extends too far from EMA
+            if (vi_trend_val > 0 or  # Trend turned up
+                close_val < ema21_val * 0.98):  # Extended >2% below EMA
                 signals[i] = 0.0
                 position = 0
             else:
