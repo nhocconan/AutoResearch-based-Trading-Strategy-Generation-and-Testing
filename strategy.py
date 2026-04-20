@@ -1,75 +1,96 @@
-#!/usr/bin/env python3
+# 6H_1D_CAMARILLA_R3S3_FADE_R4S4_BREAKOUT_VOLUME_CONFIRM
+# Hypothesis: Use daily Camarilla pivot levels for 6h trading.
+# Fade at R3/S3 levels (mean reversion), breakout continuation at R4/S4 (trend following).
+# Add volume confirmation (>1.5x 20-period average) to avoid false signals.
+# Works in both bull and bear markets by adapting to price action at key levels.
+# Target: 50-150 total trades over 4 years (12-37/year)
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout with 1-week trend filter and volume confirmation
-# In bull market (close > weekly EMA50): buy breakout above 20-day high
-# In bear market (close < weekly EMA50): sell breakdown below 20-day low
-# Volume confirmation: require volume > 1.5x 20-day average to filter false breakouts
-# Designed to work in both bull and bear markets by adapting to trend direction
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 50-period EMA on weekly timeframe for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Load daily data for Donchian channels and volume
+    # Load daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channels on daily timeframe
-    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for previous day
+    # R4 = Close + 1.5 * (High - Low)
+    # R3 = Close + 1.0 * (High - Low)
+    # S3 = Close - 1.0 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    hl_range = high_1d - low_1d
+    r4_1d = close_1d + 1.5 * hl_range
+    r3_1d = close_1d + 1.0 * hl_range
+    s3_1d = close_1d - 1.0 * hl_range
+    s4_1d = close_1d - 1.5 * hl_range
     
-    # Calculate volume filter: volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume_1d > (vol_ma_20 * 1.5)
+    # Align to 6h timeframe (use previous day's levels)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market trend from weekly EMA50
-        is_bull = close_1d[i] > ema50_1w_aligned[i]
-        is_bear = close_1d[i] < ema50_1w_aligned[i]
-        
-        # Volume confirmation
+        price = close[i]
         has_volume = vol_filter[i]
         
-        price = close_1d[i]
+        # Get pivot levels
+        r4 = r4_1d_aligned[i]
+        r3 = r3_1d_aligned[i]
+        s3 = s3_1d_aligned[i]
+        s4 = s4_1d_aligned[i]
         
         if position == 0:
-            # Enter long: breakout above 20-day high in bull market
+            # Long conditions
             long_signal = False
-            if has_volume and is_bull:
-                if price > highest_high_20[i]:
+            # Fade at S3 (mean reversion) - price rejects S3 and moves back up
+            if price > s3 and has_volume:
+                # Check if we bounced from S3 (price was at or below S3 previous bar)
+                if i > 0 and low[i-1] <= s3:
                     long_signal = True
+            # Breakout above R4 (trend following)
+            elif price > r4 and has_volume:
+                long_signal = True
             
-            # Enter short: breakdown below 20-day low in bear market
+            # Short conditions
             short_signal = False
-            if has_volume and is_bear:
-                if price < lowest_low_20[i]:
+            # Fade at R3 (mean reversion) - price rejects R3 and moves back down
+            if price < r3 and has_volume:
+                # Check if we rejected R3 (price was at or above R3 previous bar)
+                if i > 0 and high[i-1] >= r3:
                     short_signal = True
+            # Breakdown below S4 (trend following)
+            elif price < s4 and has_volume:
+                short_signal = True
             
             if long_signal:
                 signals[i] = 0.25
@@ -79,9 +100,13 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below 20-day low or trend changes to bear
+            # Exit long: fade at R3 or stop loss
             exit_signal = False
-            if price < lowest_low_20[i] or is_bear:
+            # Take profit at R3 (fade level)
+            if price < r3:
+                exit_signal = True
+            # Stop loss if price breaks below S3
+            elif price < s3:
                 exit_signal = True
             
             if exit_signal:
@@ -91,9 +116,13 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above 20-day high or trend changes to bull
+            # Exit short: fade at S3 or stop loss
             exit_signal = False
-            if price > highest_high_20[i] or is_bull:
+            # Take profit at S3 (fade level)
+            if price > s3:
+                exit_signal = True
+            # Stop loss if price breaks above R3
+            elif price > r3:
                 exit_signal = True
             
             if exit_signal:
@@ -104,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_WeeklyTrend_VolumeFilter"
-timeframe = "1d"
+name = "6H_1D_CAMARILLA_R3S3_FADE_R4S4_BREAKOUT_VOLUME_CONFIRM"
+timeframe = "6h"
 leverage = 1.0
