@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter
-# Hypothesis: Daily pivot R1/S1 breakouts on 4h timeframe with volume confirmation and trend filter using 1d EMA34.
-# Uses daily pivots for structure, volume spike to confirm breakouts, and daily EMA for trend filter.
-# Designed to work in both bull and bear markets by following the trend while avoiding false breakouts.
-# Target: 20-40 trades/year per symbol.
+# 12h_1d_Camarilla_R1S1_Breakout_Volume_Spike
+# Hypothesis: Daily Camarilla R1/S1 breakouts on 12h timeframe with volume spike confirmation.
+# Uses daily pivot levels for structure, volume spike to avoid false breakouts, and 12h EMA for trend filter.
+# Designed to work in both bull and bear markets by filtering for trend alignment and requiring volume confirmation.
+# Target: 15-30 trades/year per symbol (~60-120 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,9 +23,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate daily pivot points
@@ -37,46 +37,44 @@ def generate_signals(prices):
     r1_1d = pivot_1d + (high_1d - low_1d) * 1.1 / 12
     s1_1d = pivot_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Calculate daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 12h EMA34 for trend filter
+    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate volume average for spike detection (48 periods = 2 days of 4h bars)
-    vol_ma = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    # Calculate volume average for spike detection (24 periods = 12 days of 12h data)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # Align 1d indicators to 4h timeframe
+    # Align daily indicators to 12h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are ready
+    start_idx = 40  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+            np.isnan(ema34[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.8 * average volume
-        volume_spike = volume[i] > 1.8 * vol_ma_aligned[i]
+        # Volume spike condition: current volume > 2.0 * 12-day average volume
+        volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: price > daily EMA34 (uptrend) and breaks above R1 with volume
-            if close[i] > ema34_1d_aligned[i] and close[i] > r1_1d_aligned[i] and volume_spike:
+            # Long: price > 12h EMA34 (uptrend) and breaks above R1 with volume
+            if close[i] > ema34[i] and close[i] > r1_1d_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < daily EMA34 (downtrend) and breaks below S1 with volume
-            elif close[i] < ema34_1d_aligned[i] and close[i] < s1_1d_aligned[i] and volume_spike:
+            # Short: price < 12h EMA34 (downtrend) and breaks below S1 with volume
+            elif close[i] < ema34[i] and close[i] < s1_1d_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
             # Long: exit if price breaks below S1 (reversal) or trend changes
-            if close[i] < s1_1d_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            if close[i] < s1_1d_aligned[i] or close[i] < ema34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,7 +82,7 @@ def generate_signals(prices):
                 
         elif position == -1:
             # Short: exit if price breaks above R1 (reversal) or trend changes
-            if close[i] > r1_1d_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            if close[i] > r1_1d_aligned[i] or close[i] > ema34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
