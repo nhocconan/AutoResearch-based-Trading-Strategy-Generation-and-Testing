@@ -1,11 +1,13 @@
-# 12h_Camarilla_Pivot_R1S1_Breakout_Volume_Filter
-# This strategy targets 12-37 trades per year on the 12h timeframe by combining daily Camarilla pivot breakouts
-# with volume confirmation and ATR-based risk management. Uses daily pivot levels as dynamic support/resistance
-# that adapt to recent price action, with volume filter ensuring breakouts have conviction.
-# Works in both bull and bear markets by using pivot levels that adapt to recent price action.
-# Target: ~30 trades/year on 12h timeframe, 120 total over 4 years.
-
 #!/usr/bin/env python3
+"""
+4h Pivot Point R1/S1 Breakout with Volume Confirmation and ATR Stop
+Hypothesis: In trending markets, price tends to retest and break previous day's pivot resistance (R1) or support (S1).
+In ranging markets, these levels act as strong support/resistance for mean reversion.
+Combined with volume confirmation (to avoid fakeouts) and ATR-based stops (to limit losses),
+this strategy works in both bull and bear markets by using adaptive daily pivot levels.
+Target: 20-50 trades per year by requiring volume confirmation and using wider stops.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -15,7 +17,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for Camarilla pivots and ATR
+    # Load daily data once for pivot points and ATR
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 2:
         return np.zeros(n)
@@ -34,21 +36,17 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily Camarilla pivot points
-    # Pivot = (H+L+C)/3
-    # R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12
+    # Calculate daily pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
     pivot_daily = (high_daily + low_daily + close_daily) / 3.0
-    range_daily = high_daily - low_daily
-    r1_daily = close_daily + range_daily * 1.1 / 12
-    s1_daily = close_daily - range_daily * 1.1 / 12
+    r1_daily = 2 * pivot_daily - low_daily
+    s1_daily = 2 * pivot_daily - high_daily
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
     r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
     s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
     
-    # Main timeframe data (12h)
+    # Main timeframe data (4h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -71,9 +69,9 @@ def generate_signals(prices):
         s1 = s1_daily_aligned[i]
         vol_current = volume[i]
         
-        # Volume filter: current volume > 2.0x 30-period average (more selective for 12h)
+        # Volume filter: current volume > 1.8x 30-period average (more selective)
         vol_ma = np.mean(volume[max(0, i-30):i]) if i >= 30 else volume[i]
-        vol_ok = vol_current > 2.0 * vol_ma
+        vol_ok = vol_current > 1.8 * vol_ma
         
         if position == 0:
             # Long breakout: price breaks above R1 with volume confirmation
@@ -103,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_Volume_Filter"
-timeframe = "12h"
+name = "4h_PivotPoint_R1S1_Breakout_Volume_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
