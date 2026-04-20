@@ -1,45 +1,18 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Direction_With_Volume_and_Chop_Filter
-# Hypothesis: KAMA adapts to market noise, providing reliable trend direction. In choppy markets (CHOP>61.8), avoid trades.
-# In trending markets (CHOP<=61.8), go long when price > KAMA(14) with volume > 1.5x average, short when price < KAMA(14).
-# Volume confirmation filters false signals. Designed to work in both bull and bear markets by following the trend.
+# 6h_WeeklyPivot_Breakout_Volume_TrendFilter
+# Hypothesis: Weekly pivot levels (R1, S1) derived from 1w OHLC provide key support/resistance.
+# Breakout above weekly R1 or below S1 with volume confirmation and trend filter (1d EMA50) signals institutional interest.
+# In bull markets: R1 breakouts lead to continuation. In bear markets: S1 breaks lead to continuation.
+# Volume filters false breakouts, trend filter ensures alignment with higher timeframe momentum.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "12h_KAMA_Direction_With_Volume_and_Chop_Filter"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Breakout_Volume_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_kama(close, er_length=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Fix: volatility should be rolling sum of absolute changes
-    volatility = pd.Series(change).rolling(window=er_length, min_periods=1).sum().values
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
-
-def calculate_chop(high, low, close, window=14):
-    """Calculate Choppiness Index"""
-    atr = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))).rolling(window=window, min_periods=window).mean().sum()
-    # Fix: True Range calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=window, min_periods=window).sum()
-    max_high = pd.Series(high).rolling(window=window, min_periods=window).max()
-    min_low = pd.Series(low).rolling(window=window, min_periods=window).min()
-    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(window)
-    return chop.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -51,17 +24,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Chop calculation
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Chop on daily timeframe
-    chop = calculate_chop(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate 1d EMA50 for trend filter
+    close_1d_series = pd.Series(df_1d['close'])
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate KAMA on 12h timeframe
-    kama = calculate_kama(close, er_length=10, fast=2, slow=30)
+    # Get 1w data for weekly pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot levels (R1, S1) from previous week's OHLC
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Where C, H, L are close, high, low of previous week
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Shift by 1 to use previous week's data (avoid look-ahead)
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    # First value will be invalid (no previous week), handled by alignment
+    
+    # Calculate weekly pivot R1 and S1
+    weekly_r1 = prev_close_1w + (prev_high_1w - prev_low_1w) * 1.1 / 12
+    weekly_s1 = prev_close_1w - (prev_high_1w - prev_low_1w) * 1.1 / 12
+    
+    # Align weekly pivot levels to 6h timeframe
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # Align 1d EMA50 to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,45 +69,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(50, 20)  # Ensure sufficient data for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in trending markets (CHOP <= 61.8)
-        if chop_aligned[i] > 61.8:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: price > KAMA with volume confirmation
-            if close[i] > kama[i] and volume_confirm[i]:
+            # Long: break above weekly R1 with volume confirmation and above 1d EMA50 (uptrend)
+            if (close[i] > weekly_r1_aligned[i] and volume_confirm[i] and close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA with volume confirmation
-            elif close[i] < kama[i] and volume_confirm[i]:
+            # Short: break below weekly S1 with volume confirmation and below 1d EMA50 (downtrend)
+            elif (close[i] < weekly_s1_aligned[i] and volume_confirm[i] and close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price < KAMA (trend change)
-            if close[i] < kama[i]:
+            # Long: exit if price breaks below weekly S1 (reversal) or below 1d EMA50 (trend change)
+            if close[i] < weekly_s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price > KAMA (trend change)
-            if close[i] > kama[i]:
+            # Short: exit if price breaks above weekly R1 (reversal) or above 1d EMA50 (trend change)
+            if close[i] > weekly_r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
