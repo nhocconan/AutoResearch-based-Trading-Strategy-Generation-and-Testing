@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_VolumeTrend_v3"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_VolumeTrend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -40,7 +40,7 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Price Trend Filter: 12h EMA50 > EMA200 for long, < for short ===
+    # === Price Trend Filter: 4h EMA50 > EMA200 for long, < for short ===
     close_series = pd.Series(prices['close'].values)
     ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
@@ -59,7 +59,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
