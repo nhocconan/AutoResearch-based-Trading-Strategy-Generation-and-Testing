@@ -34,7 +34,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all 1d indicators to 1h timeframe
+    # Align all 1d indicators to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -52,6 +52,10 @@ def generate_signals(prices):
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_filter = volume / np.where(vol_ma_30 == 0, 1, vol_ma_30) > 1.5
     
+    # Additional volume confirmation: require volume > 0.8 * 100-period average
+    vol_ma_100 = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
+    vol_filter_strong = volume / np.where(vol_ma_100 == 0, 1, vol_ma_100) > 0.8
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -59,7 +63,7 @@ def generate_signals(prices):
         # Skip if NaN in critical values
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_filter[i])):
+            np.isnan(vol_filter[i]) or np.isnan(vol_filter_strong[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,7 +78,7 @@ def generate_signals(prices):
         r2_val = r2_aligned[i]
         s2_val = s2_aligned[i]
         atr_val = atr_1d_aligned[i]
-        vol_ok = vol_filter[i]
+        vol_ok = vol_filter[i] and vol_filter_strong[i]
         
         # Volatility filter: only trade when ATR > 0
         vol_filter_ok = atr_val > 0
@@ -107,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1d_PivotMeanReversion_VolumeFilter_v1"
-timeframe = "1h"
+name = "12h_1d_PivotMeanReversion_VolumeFilter_v2"
+timeframe = "12h"
 leverage = 1.0
