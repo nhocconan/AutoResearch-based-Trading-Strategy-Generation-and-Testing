@@ -3,145 +3,168 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 4h trend filter and 1d regime filter to reduce noise.
-# Uses 4h EMA for trend direction, 1d ADX for trend strength, and 1h RSI for entry timing.
-# Only trades during 08-20 UTC to avoid low-liquidity hours.
-# Position size: 0.20 (20% of capital) to limit drawdown.
-# Target: 15-30 trades/year (~60-120 total over 4 years) to avoid fee drag.
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    # 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d ADX for trend strength (needs extra delay for Welles Wilder's smoothing)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 6h Supertrend (ATR=10, multiplier=3)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    tr[0] = tr1[0]  # First value
+    
+    # ATR
+    atr = np.zeros(n)
+    atr[9] = np.mean(tr[:10])
+    for i in range(10, n):
+        atr[i] = (atr[i-1] * 9 + tr[i]) / 10
+    
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    upper = hl2 + 3 * atr
+    lower = hl2 - 3 * atr
+    
+    # Initialize
+    supertrend = np.full(n, np.nan)
+    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, n):
+        if close[i-1] > supertrend[i-1]:
+            upper[i] = min(upper[i], upper[i-1])
+        else:
+            lower[i] = max(lower[i], lower[i-1])
+        
+        if close[i] > upper[i-1]:
+            direction[i] = 1
+        elif close[i] < lower[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower[i]
+        else:
+            supertrend[i] = upper[i]
+    
+    # Weekly ADX
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range for 1w
+    tr1w = high_1w - low_1w
+    tr2w = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3w = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1w, np.maximum(tr2w, tr3w))
+    tr_1w[0] = tr1w[0]
+    
+    # ATR 1w
+    atr_1w = np.zeros(len(high_1w))
+    if len(high_1w) >= 14:
+        atr_1w[13] = np.mean(tr_1w[:14])
+        for i in range(14, len(high_1w)):
+            atr_1w[i] = (atr_1w[i-1] * 13 + tr_1w[i]) / 14
     
     # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
     
-    # Smoothed values (Wilder's smoothing: alpha = 1/period)
-    def wildeer_smooth(x, period):
-        smoothed = np.full_like(x, np.nan, dtype=float)
-        smoothed[period-1] = np.nansum(x[:period])
-        for i in range(period, len(x)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + x[i]
-        return smoothed
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    atr = wildeer_smooth(tr, 14)
-    dm_plus_smooth = wildeer_smooth(dm_plus, 14)
-    dm_minus_smooth = wildeer_smooth(dm_minus, 14)
+    # Smoothed values
+    if len(high_1w) >= 14:
+        atr_1w_smooth = np.zeros(len(high_1w))
+        plus_dm_smooth = np.zeros(len(high_1w))
+        minus_dm_smooth = np.zeros(len(high_1w))
+        
+        atr_1w_smooth[13] = np.mean(atr_1w[:14])
+        plus_dm_smooth[13] = np.mean(plus_dm[:14])
+        minus_dm_smooth[13] = np.mean(minus_dm[:14])
+        
+        for i in range(14, len(high_1w)):
+            atr_1w_smooth[i] = (atr_1w_smooth[i-1] * 13 + atr_1w[i]) / 14
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * 13 + plus_dm[i]) / 14
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * 13 + minus_dm[i]) / 14
+        
+        # ADX calculation
+        plus_di = 100 * plus_dm_smooth / atr_1w_smooth
+        minus_di = 100 * minus_dm_smooth / atr_1w_smooth
+        dx = np.where((plus_di + minus_di) != 0, 
+                      100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        
+        adx = np.zeros(len(high_1w))
+        if len(high_1w) >= 28:
+            adx[27] = np.mean(dx[14:28])
+            for i in range(28, len(high_1w)):
+                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    else:
+        adx = np.zeros(len(high_1w))
     
-    # DI and DX
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = wildeer_smooth(dx, 14)
+    # Align weekly ADX to 6h
+    adx_6h = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Align ADX with extra delay (ADX needs confirmation)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx, additional_delay_bars=2)
-    
-    # 1h RSI for entry timing
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing for RSI
-    def rsi_wilder(gain, loss, period=14):
-        avg_gain = np.full_like(gain, np.nan, dtype=float)
-        avg_loss = np.full_like(loss, np.nan, dtype=float)
-        avg_gain[period-1] = np.mean(gain[1:period+1]) if period < len(gain) else np.nan
-        avg_loss[period-1] = np.mean(loss[1:period+1]) if period < len(loss) else np.nan
-        for i in range(period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        return 100 - (100 / (1 + rs))
-    
-    rsi = rsi_wilder(gain, loss, 14)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume average (20-period)
+    volume = prices['volume'].values
+    vol_ma = np.zeros(n)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_ma[:20] = np.nan
     
     # Generate signals
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    for i in range(100, n):  # warmup period
-        if not in_session[i]:
+    for i in range(20, n):
+        # Skip if NaN values
+        if np.isnan(supertrend[i]) or np.isnan(adx_6h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Skip if any NaN values
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(close[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Trend filter: price above/below 4h EMA
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
-        
-        # Trend strength filter: ADX > 25
-        strong_trend = adx_aligned[i] > 25
+        st_val = supertrend[i]
+        adx_val = adx_6h[i]
+        vol_val = volume[i]
+        vol_ma_val = vol_ma[i]
+        close_val = close[i]
         
         if position == 0:
-            # Long: uptrend, strong trend, RSI > 55 (momentum)
-            if uptrend and strong_trend and rsi[i] > 55:
-                signals[i] = 0.20
+            # Long: Supertrend uptrend, ADX > 25, volume spike
+            if direction[i] == 1 and adx_val > 25 and vol_val > 1.5 * vol_ma_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend, strong trend, RSI < 45 (momentum)
-            elif downtrend and strong_trend and rsi[i] < 45:
-                signals[i] = -0.20
+            # Short: Supertrend downtrend, ADX > 25, volume spike
+            elif direction[i] == -1 and adx_val > 25 and vol_val > 1.5 * vol_ma_val:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend weakens or RSI overbought
-            if not (uptrend and strong_trend) or rsi[i] > 75:
+            # Long exit: Supertrend downtrend
+            if direction[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend weakens or RSI oversold
-            if not (downtrend and strong_trend) or rsi[i] < 25:
+            # Short exit: Supertrend uptrend
+            if direction[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4hEMA_1dADX_RSI_Session"
-timeframe = "1h"
+name = "6h_Supertrend_ADX_Volume"
+timeframe = "6h"
 leverage = 1.0
