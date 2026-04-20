@@ -1,63 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_RSI_Stochastic_Divergence
-# Hypothesis: On 4h timeframe, trade reversals using 1d RSI and Stochastic divergences with volume confirmation.
-# In both bull and bear markets, momentum divergences at extreme levels signal reversals.
-# Uses 1d RSI(14) and Stochastic(14,3,3) to identify overbought/oversold conditions with bearish/bullish divergence.
-# Volume confirmation filters false signals. Targets 20-40 trades/year by requiring confluence of divergence, extreme levels, and volume.
+# 6h_1d_Supertrend_Follow_VolumeFilter
+# Hypothesis: On 6h timeframe, follow Supertrend from 1d timeframe with volume confirmation.
+# Supertrend identifies trend direction and provides dynamic support/resistance.
+# Volume confirmation ensures moves are backed by participation.
+# Targets 15-30 trades/year by requiring trend alignment and volume spike.
+# Works in bull (follow uptrend) and bear (follow downtrend) markets.
 
-name = "4h_1d_RSI_Stochastic_Divergence"
-timeframe = "4h"
+name = "6h_1d_Supertrend_Follow_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_rsi(prices, period=14):
-    delta = np.diff(prices)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(prices, np.nan)
-    avg_loss = np.full_like(prices, np.nan)
-    
-    if len(prices) < period:
-        return avg_gain
-    
-    # First average
-    avg_gain[period-1] = np.mean(gain[:period])
-    avg_loss[period-1] = np.mean(loss[:period])
-    
-    # Wilder smoothing
-    for i in range(period, len(prices)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_stochastic(high, low, close, k_period=14, d_period=3):
-    lowest_low = np.full_like(low, np.nan)
-    highest_high = np.full_like(high, np.nan)
-    
-    for i in range(len(close)):
-        if i < k_period - 1:
-            continue
-        lowest_low[i] = np.min(low[i-k_period+1:i+1])
-        highest_high[i] = np.max(high[i-k_period+1:i+1])
-    
-    k_percent = np.divide((close - lowest_low), (highest_high - lowest_low), 
-                          out=np.full_like(close, np.nan), where=(highest_high - lowest_low)!=0) * 100
-    
-    # D-period smoothing of K
-    d_percent = np.full_like(k_percent, np.nan)
-    for i in range(len(k_percent)):
-        if i < d_period - 1 or np.isnan(k_percent[i-d_period+1:i+1]).any():
-            continue
-        d_percent[i] = np.nanmean(k_percent[i-d_period+1:i+1])
-    
-    return k_percent, d_percent
 
 def generate_signals(prices):
     n = len(prices)
@@ -74,20 +29,68 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate 1d Supertrend (ATR=10, multiplier=3.0)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d RSI(14)
-    rsi_1d = calculate_rsi(close_1d, 14)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 1d Stochastic(14,3,3)
-    stoch_k_1d, stoch_d_1d = calculate_stochastic(high_1d, low_1d, close_1d, 14, 3)
+    # ATR using Wilder's smoothing
+    def atr_wilder(high, low, close, period):
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr = np.full_like(tr, np.nan)
+        if len(tr) < period:
+            return atr
+        # First value: simple average
+        atr[period-1] = np.nanmean(tr[1:period])
+        # Wilder smoothing
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    # Align 1d indicators to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    stoch_k_1d_aligned = align_htf_to_ltf(prices, df_1d, stoch_k_1d)
-    stoch_d_1d_aligned = align_htf_to_ltf(prices, df_1d, stoch_d_1d)
+    atr_val = atr_wilder(high_1d, low_1d, close_1d, 10)
+    
+    # Basic upper and lower bands
+    hl2 = (high_1d + low_1d) / 2
+    upper_band = hl2 + (3.0 * atr_val)
+    lower_band = hl2 - (3.0 * atr_val)
+    
+    # Supertrend calculation
+    supertrend = np.full_like(close_1d, np.nan)
+    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_1d)):
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(atr_val[i]):
+            continue
+            
+        if close_1d[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close_1d[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
+    
+    # Align Supertrend and direction to 6h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
     
     # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -99,58 +102,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(stoch_k_1d_aligned[i]) or 
-            np.isnan(stoch_d_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Bearish divergence: price makes higher high, RSI makes lower high (overbought)
-            # Bullish divergence: price makes lower low, RSI makes higher low (oversold)
-            
-            # Check for bearish RSI divergence (sell signal)
-            if (rsi_1d_aligned[i] > 70 and  # Overbought
-                i >= 2 and
-                close[i] > close[i-1] and close[i-1] > close[i-2] and  # Price making higher high
-                rsi_1d_aligned[i] < rsi_1d_aligned[i-1] and rsi_1d_aligned[i-1] < rsi_1d_aligned[i-2]):  # RSI making lower high
-                
-                # Confirm with Stochastic overbought
-                if stoch_k_1d_aligned[i] > 80 and stoch_d_1d_aligned[i] > 80:
-                    if volume[i] > 1.5 * volume_ma[i]:  # Volume confirmation
-                        signals[i] = -0.25
-                        position = -1
-            
-            # Check for bullish RSI divergence (buy signal)
-            elif (rsi_1d_aligned[i] < 30 and  # Oversold
-                  i >= 2 and
-                  close[i] < close[i-1] and close[i-1] < close[i-2] and  # Price making lower low
-                  rsi_1d_aligned[i] > rsi_1d_aligned[i-1] and rsi_1d_aligned[i-1] > rsi_1d_aligned[i-2]):  # RSI making higher low
-                
-                # Confirm with Stochastic oversold
-                if stoch_k_1d_aligned[i] < 20 and stoch_d_1d_aligned[i] < 20:
-                    if volume[i] > 1.5 * volume_ma[i]:  # Volume confirmation
-                        signals[i] = 0.25
-                        position = 1
+            # Enter long when Supertrend indicates uptrend and volume confirms
+            if direction_aligned[i] == 1 and close[i] > supertrend_aligned[i]:
+                if volume[i] > 1.5 * volume_ma[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short when Supertrend indicates downtrend and volume confirms
+            elif direction_aligned[i] == -1 and close[i] < supertrend_aligned[i]:
+                if volume[i] > 1.5 * volume_ma[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: RSI returns to neutral or bearish divergence
-            if (rsi_1d_aligned[i] >= 50 and rsi_1d_aligned[i-1] < 50) or \
-               (rsi_1d_aligned[i] > 70 and 
-                i >= 2 and
-                close[i] > close[i-1] and close[i-1] > close[i-2] and
-                rsi_1d_aligned[i] < rsi_1d_aligned[i-1] and rsi_1d_aligned[i-1] < rsi_1d_aligned[i-2]):
+            # Exit long when Supertrend flips to downtrend
+            if direction_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI returns to neutral or bullish divergence
-            if (rsi_1d_aligned[i] <= 50 and rsi_1d_aligned[i-1] > 50) or \
-               (rsi_1d_aligned[i] < 30 and 
-                i >= 2 and
-                close[i] < close[i-1] and close[i-1] < close[i-2] and
-                rsi_1d_aligned[i] > rsi_1d_aligned[i-1] and rsi_1d_aligned[i-1] > rsi_1d_aligned[i-2]):
+            # Exit short when Supertrend flips to uptrend
+            if direction_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
