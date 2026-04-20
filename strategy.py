@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R1S1_Breakout_VolumeTrend_v1"
-timeframe = "1d"
+name = "6h_1d_ElderRay_ForceIndex_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,100 +12,79 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # === Weekly Close Trend Filter ===
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Points (previous day) ===
+    # === Daily Elder Ray Index ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # EMA13 of daily high/low for Bull/Bear Power
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    ema13_high = high_series.ewm(span=13, min_periods=13, adjust=False).mean().values
+    ema13_low = low_series.ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Set first values to avoid look-ahead
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Bull Power = High - EMA13(High), Bear Power = EMA13(Low) - Low
+    bull_power = high_1d - ema13_high
+    bear_power = ema13_low - low_1d
     
-    # Classic pivot (same for Camarilla)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    # Align to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Camarilla R1 and S1 levels (core breakout levels)
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
-    
-    # Align to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # === Volume Trend Filter ===
+    # === 6h Force Index (EMA13 of price*volume change) ===
+    close = prices['close'].values
     volume = prices['volume'].values
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    
+    # Price change * volume
+    price_change = np.diff(close, prepend=close[0])
+    raw_force = price_change * volume
+    
+    # EMA13 of Force Index
+    force_series = pd.Series(raw_force)
+    force_index = force_series.ewm(span=13, min_periods=13, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(13, n):
         # Get values
-        close_val = prices['close'].iloc[i]
-        vol_ratio_val = vol_ratio[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        pivot_val = pivot_aligned[i]
-        ema50_1w_val = ema50_1w_aligned[i]
-        ema200_1w_val = ema200_1w_aligned[i]
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
+        force_val = force_index[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(pivot_val) or 
-            np.isnan(ema50_1w_val) or np.isnan(ema200_1w_val)):
+        if (np.isnan(bull_val) or np.isnan(bear_val) or np.isnan(force_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with volume confirmation and uptrend (EMA50 > EMA200 on weekly)
-            if close_val > r1_val and vol_ratio_val > 2.0 and ema50_1w_val > ema200_1w_val:
+            # Long: Bull Power > 0 (strong) AND Force Index turning up from negative
+            if bull_val > 0 and force_val > 0 and (i == 13 or force_index[i-1] <= 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume confirmation and downtrend (EMA50 < EMA200 on weekly)
-            elif close_val < s1_val and vol_ratio_val > 2.0 and ema50_1w_val < ema200_1w_val:
+            # Short: Bear Power > 0 (strong) AND Force Index turning down from positive
+            elif bear_val > 0 and force_val < 0 and (i == 13 or force_index[i-1] >= 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot OR weekly trend breaks down
-            if close_val < pivot_val or ema50_1w_val < ema200_1w_val:
+            # Long exit: Bull Power turns negative OR Force Index turns down
+            if bull_val <= 0 or (i > 13 and force_val < 0 and force_index[i-1] >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot OR weekly trend breaks up
-            if close_val > pivot_val or ema50_1w_val > ema200_1w_val:
+            # Short exit: Bear Power turns negative OR Force Index turns up
+            if bear_val <= 0 or (i > 13 and force_val > 0 and force_index[i-1] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
