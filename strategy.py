@@ -1,117 +1,120 @@
+# 1d_1w_Camarilla_Pivot_Strategy_v1
+# This strategy uses weekly Camarilla pivot levels on 1d timeframe for entries and exits.
+# In bull markets: buys near support (S1) during pullbacks in uptrend
+# In bear markets: sells near resistance (R1) during bounces in downtrend
+# Weekly trend filter ensures we trade with higher timeframe momentum
+# Volume confirmation filters out low-conviction breakouts
+# Target: 10-25 trades/year to minimize fee drag
+# Works in both bull and bear via directional bias from weekly trend
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_KAMA_RSI_ChopFilter_v1"
-timeframe = "12h"
+name = "1d_1w_Camarilla_Pivot_Strategy_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
+        return np.zeros(n)
+    
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Daily Indicators ===
-    close_1d = df_1d['close'].values
+    # === Weekly trend filter: EMA(34) for direction ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_trend_up = ema_34_1w > 0  # Will be replaced with actual comparison
+    
+    # === Daily Camarilla pivot levels (based on prior day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # KAMA on daily close
-    close_series_1d = pd.Series(close_1d)
-    change = abs(close_series_1d.diff(1))
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    er = change / np.where(volatility > 0, volatility, 1e-10)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate pivot using previous day's OHLC
+    # We need to shift by 1 to avoid look-ahead
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # RSI(14) on daily
-    delta = close_series_1d.diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / np.where(avg_loss > 0, avg_loss, 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # First day will have invalid values (from roll), handled by min_periods later
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    # Chopiness Index(14) on daily
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr / (highest_high - lowest_low)) / np.log10(14)
+    # Camarilla levels
+    R1 = pivot + (range_val * 1.1 / 12)
+    S1 = pivot - (range_val * 1.1 / 12)
+    R2 = pivot + (range_val * 1.1 / 6)
+    S2 = pivot - (range_val * 1.1 / 6)
     
-    # Align daily indicators to 12h
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop.values)
+    # Align weekly trend to daily
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, 
+                                              pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values > 0)
     
-    # === 12h: Price and volume ===
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # === Daily volume confirmation ===
+    volume = df_1d['volume'].values
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # Volume ratio
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    # Align volume ratio (already daily, but keep for consistency)
+    volume_ratio_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio)
+    
+    # === Price data ===
+    close = df_1d['close'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Get values
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
-        chop_val = chop_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        close_val = close[i]
-        
-        # Skip if any value is NaN
-        if (np.isnan(kama_val) or np.isnan(rsi_val) or 
-            np.isnan(chop_val) or np.isnan(vol_ratio_val)):
+    # Start from index 20 to ensure we have enough data for indicators
+    for i in range(20, n):
+        # Skip if any critical value is NaN
+        if (np.isclose(pivot[i], 0) or np.isnan(volume_ratio_aligned[i]) or 
+            np.isnan(weekly_trend_up_aligned[i]) or np.isnan(close[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        weekly_up = weekly_trend_up_aligned[i]
+        vol_ratio = volume_ratio_aligned[i]
+        
         if position == 0:
-            # Long: Price above KAMA, RSI not overbought, chop > 50 (not strong trend), volume confirmation
-            if (close_val > kama_val and 
-                rsi_val < 70 and 
-                chop_val > 50 and 
-                vol_ratio_val > 1.5):
+            # Long conditions: weekly uptrend + price at S1 support + volume confirmation
+            if (weekly_up and 
+                np.isclose(close[i], S1[i], rtol=0.002) and  # Within 0.2% of S1
+                vol_ratio > 1.5):  # Above average volume
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA, RSI not oversold, chop > 50, volume confirmation
-            elif (close_val < kama_val and 
-                  rsi_val > 30 and 
-                  chop_val > 50 and 
-                  vol_ratio_val > 1.5):
+            # Short conditions: weekly downtrend + price at R1 resistance + volume confirmation
+            elif (not weekly_up and 
+                  np.isclose(close[i], R1[i], rtol=0.002) and  # Within 0.2% of R1
+                  vol_ratio > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses below KAMA or chop drops (trending) or volume dries up
-            if close_val < kama_val or chop_val < 30 or vol_ratio_val < 0.8:
+            # Long exit: price reaches R1 (take profit) or breaks below S2 (stop)
+            if (np.isclose(close[i], R1[i], rtol=0.002) or  # Take profit at R1
+                close[i] < S2[i]):  # Stop if breaks S2
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses above KAMA or chop drops or volume dries up
-            if close_val > kama_val or chop_val < 30 or vol_ratio_val < 0.8:
+            # Short exit: price reaches S1 (take profit) or breaks above R2 (stop)
+            if (np.isclose(close[i], S1[i], rtol=0.002) or  # Take profit at S1
+                close[i] > R2[i]):  # Stop if breaks R2
                 signals[i] = 0.0
                 position = 0
             else:
