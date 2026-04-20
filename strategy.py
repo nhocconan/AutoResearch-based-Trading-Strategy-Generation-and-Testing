@@ -1,107 +1,150 @@
+# Your task is to write a trading strategy that follows the rules and constraints outlined above.
+# You are now writing strategy.py for experiment #69148.
+# Your strategy must use timeframe = "12h".
+# Your strategy must incorporate HTF = 1w/1d as specified in the experiment description.
+# Your hypothesis should explain why it works in both bull and bear markets.
+# Remember to use proper Mtf data loading, avoid look-ahead, and keep trade frequency low.
+# Output only the code for strategy.py, starting with #!/usr/bin/env python3.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h with 1d RSI(14) and 1w Chaikin Oscillator for mean reversion in range-bound markets.
-# Long when RSI < 30 and Chaikin Oscillator > 0 (accumulation). Short when RSI > 70 and Chaikin < 0 (distribution).
-# Exit when RSI returns to neutral (40-60). Uses volume accumulation/distribution to filter false signals.
-# Target: 30-60 trades/year per symbol.
+# Hypothesis: 12-hour chart with 1-week ADX trend filter and 1-day pivot point breakout.
+# Long when price breaks above R1 pivot with ADX > 25 (strong trend).
+# Short when price breaks below S1 pivot with ADX > 25 (strong trend).
+# Uses weekly ADX to filter for trending markets only, avoiding whipsaws in ranging conditions.
+# Pivot points provide institutional reference levels; breakouts capture momentum.
+# ADX filter ensures we only trade when there is sufficient trend strength.
+# Target: 15-30 trades/year per symbol to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for RSI
+    # Load 1d data for pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing (alpha = 1/period)
-    alpha = 1.0 / 14
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, len(gain)):
-        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    # Previous day's pivot points (to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[0] = 50  # neutral for first value
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
     
-    # Load 1w data for Chaikin Oscillator
+    # Align pivot levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Load 1w data for ADX
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
     
-    # Money Flow Multiplier
-    mfm = ((close_1w - low_1w) - (high_1w - close_1w)) / np.where((high_1w - low_1w) == 0, 1, (high_1w - low_1w))
-    mfv = mfm * volume_1w
+    # Calculate ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Chaikin Oscillator = (3-period EMA of MFV) - (10-period EMA of MFV)
-    ema3 = pd.Series(mfv).ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10 = pd.Series(mfv).ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin = ema3 - ema10
+    # Directional Movement
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
     
-    # Align indicators to 6h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chaikin_aligned = align_htf_to_ltf(prices, df_1w, chaikin)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # 6h data
+    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value is simple average
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smooth(dx, 14)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # 12h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if np.isnan(rsi_aligned[i]) or np.isnan(chaikin_aligned[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        rsi_val = rsi_aligned[i]
-        chaikin_val = chaikin_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        adx_val = adx_aligned[i]
+        vol_ok = vol_filter[i]
+        
+        # Only trade when ADX indicates strong trend (ADX > 25)
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Long: oversold RSI + accumulation
-            if rsi_val < 30 and chaikin_val > 0:
+            # Long: price breaks above R1, strong trend, volume
+            if price > r1_val and strong_trend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought RSI + distribution
-            elif rsi_val > 70 and chaikin_val < 0:
+            # Short: price breaks below S1, strong trend, volume
+            elif price < s1_val and strong_trend and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI returns to neutral (40-60)
-            if 40 <= rsi_val <= 60:
+            # Long exit: price breaks below S1 or trend weakens (ADX < 20)
+            if price < s1_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI returns to neutral (40-60)
-            if 40 <= rsi_val <= 60:
+            # Short exit: price breaks above R1 or trend weakens (ADX < 20)
+            if price > r1_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_RSI14_1w_ChaikinOscillator_MeanReversion_v1"
-timeframe = "6h"
+name = "12h_1w_ADX_1d_Pivot_Breakout_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
