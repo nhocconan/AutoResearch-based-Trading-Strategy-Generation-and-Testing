@@ -3,100 +3,74 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with weekly pivot direction filter
-# - Donchian(20) breakout on 6h for directional entry
-# - Weekly pivot levels (from 1w data) determine long/short bias
-# - Only go long when price > weekly pivot point, short when price < weekly pivot point
-# - Volume confirmation to avoid false breakouts
+# Hypothesis: 6h Williams %R + 1d EMA50 Trend Filter
+# - Williams %R (14) on 6h for overbought/oversold signals
+# - Long when %R < -80 and price > 1d EMA50 (oversold in uptrend)
+# - Short when %R > -20 and price < 1d EMA50 (overbought in downtrend)
+# - Williams %R captures momentum reversals; EMA50 filters for trend alignment
 # - Designed for 6h timeframe with selective entries to avoid overtrading
 # - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Load 1d data for EMA50 calculation
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (standard floor trader pivots)
-    # Pivot Point = (High + Low + Close) / 3
-    pp = (high_1w + low_1w + close_1w) / 3
-    # Resistance 1 = (2 * Pivot) - Low
-    r1 = (2 * pp) - low_1w
-    # Support 1 = (2 * Pivot) - High
-    s1 = (2 * pp) - high_1w
-    # Resistance 2 = Pivot + (High - Low)
-    r2 = pp + (high_1w - low_1w)
-    # Support 2 = Pivot - (High - Low)
-    s2 = pp - (high_1w - low_1w)
+    # Calculate EMA50 on 1d timeframe
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly pivot levels to 6h timeframe
-    pp_6h = align_htf_to_ltf(prices, df_1w, pp)
-    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
+    # Align 1d EMA50 to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels on 6h
+    # Calculate Williams %R on 6h timeframe
     high_6h = prices['high'].values
     low_6h = prices['low'].values
     close_6h = prices['close'].values
-    volume_6h = prices['volume'].values
     
-    # Donchian(20) upper and lower bands
-    donch_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_ok = volume_6h > (1.5 * vol_ma)
+    highest_high_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_6h) / (highest_high_14 - lowest_low_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
-           np.isnan(pp_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or \
-           np.isnan(vol_ma[i]):
+        if np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions
-        breakout_up = close_6h[i] > donch_high[i-1]  # Break above prior period high
-        breakout_down = close_6h[i] < donch_low[i-1]  # Break below prior period low
-        
-        # Weekly pivot bias
-        price_above_pivot = close_6h[i] > pp_6h[i]
-        price_below_pivot = close_6h[i] < pp_6h[i]
+        price = close_6h[i]
+        wr = williams_r[i]
+        ema50 = ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: upward breakout + price above weekly pivot + volume confirmation
-            if breakout_up and price_above_pivot and vol_ok[i]:
+            # Long entry: Williams %R oversold (< -80) + price above 1d EMA50
+            if wr < -80 and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downward breakout + price below weekly pivot + volume confirmation
-            elif breakout_down and price_below_pivot and vol_ok[i]:
+            # Short entry: Williams %R overbought (> -20) + price below 1d EMA50
+            elif wr > -20 and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below weekly pivot or reverse Donchian breakout
-            if close_6h[i] < pp_6h[i] or close_6h[i] < donch_low[i]:
+            # Long exit: Williams %R rises above -50 or price falls below EMA50
+            if wr > -50 or price < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above weekly pivot or reverse Donchian breakout
-            if close_6h[i] > pp_6h[i] or close_6h[i] > donch_high[i]:
+            # Short exit: Williams %R falls below -50 or price rises above EMA50
+            if wr < -50 or price > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_WeeklyPivot_DirectionFilter_Volume"
+name = "6h_WilliamsR_1dEMA50_TrendFilter"
 timeframe = "6h"
 leverage = 1.0
