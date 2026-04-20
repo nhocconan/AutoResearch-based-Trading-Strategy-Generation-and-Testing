@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_R1S1_Breakout_With_Trend_Filter
-Hypothesis: Trade daily price breakouts above/below weekly pivot resistance/support levels with volume confirmation and weekly trend filter.
-Long when price breaks above weekly R1 with volume spike and weekly uptrend; short when breaks below weekly S1 with volume spike and weekly downtrend.
-Uses weekly pivot levels (calculated from prior weekly bar) and volume > 1.5x 20-period average for confirmation.
-Designed for 1d timeframe to capture longer-term moves while reducing noise and transaction costs.
-Target: 30-100 total trades over 4 years (7-25/year) with position size 0.25.
-Works in bull/bear: weekly trend filter avoids counter-trend trades, volume filter reduces false breakouts.
+6h_WickReversal_With_Volume_and_Trend_Filter
+Hypothesis: Trade long when price rejects lower wicks with volume spike in uptrend, short when rejects upper wicks in downtrend.
+Uses 6h candle wicks (long lower shadow for long, long upper shadow for short) with volume > 1.5x 20-period average.
+Trend filter: 1d EMA50 (uptrend if close > EMA50, downtrend if close < EMA50).
+Designed for 6h to capture reversal points at support/resistance with confirmation.
+Works in bull/bear: trend filter ensures trading with higher timeframe momentum.
+Target: 50-120 total trades over 4 years (12-30/year) with position size 0.25.
 """
 
-name = "1d_WeeklyPivot_R1S1_Breakout_With_Trend_Filter"
-timeframe = "1d"
+name = "6h_WickReversal_With_Volume_and_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -27,26 +27,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior weekly bar's high, low, close)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Pivot point calculation: PP = (H + L + C) / 3
-    # R1 = 2*PP - L, S1 = 2*PP - H
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pp_1w - low_1w
-    s1_1w = 2 * pp_1w - high_1w
+    # Calculate 1d EMA50 for trend filter
+    def ema(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) >= period:
+            multiplier = 2.0 / (period + 1)
+            result[period-1] = np.mean(values[:period])
+            for i in range(period, len(values)):
+                result[i] = multiplier * values[i] + (1 - multiplier) * result[i-1]
+        return result
     
-    # Align weekly pivot levels to 1d timeframe (already delayed by one bar via align_htf_to_ltf)
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    ema50_1d = ema(close_1d, 50)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Calculate volume filter (volume > 1.5x 20-period average)
     vol_ma20 = np.full_like(volume, np.nan)
@@ -54,39 +53,53 @@ def generate_signals(prices):
         vol_ma20[i] = np.mean(volume[i-20:i])
     volume_filter = volume > (1.5 * vol_ma20)
     
+    # Calculate wick conditions
+    body_size = np.abs(close - open_) if 'open' in prices.columns else np.abs(close - np.roll(close, 1))
+    # For first bar, use close-open approximation
+    open_ = prices['open'].values if 'open' in prices.columns else np.roll(close, 1)
+    open_[0] = close[0]  # approximate
+    
+    body_size = np.abs(close - open_)
+    upper_wick = high - np.maximum(close, open_)
+    lower_wick = np.minimum(close, open_) - low
+    
+    # Long signal: long lower wick (> 2x body) with volume filter and uptrend
+    long_condition = (lower_wick > 2 * body_size) & volume_filter & (close > ema50_1d_aligned)
+    # Short signal: long upper wick (> 2x body) with volume filter and downtrend
+    short_condition = (upper_wick > 2 * body_size) & volume_filter & (close < ema50_1d_aligned)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure indicators are ready (20 for volume MA + buffer)
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(close[i]) or 
+            np.isnan(volume[i]) or np.isnan(lower_wick[i]) or np.isnan(upper_wick[i]) or
+            np.isnan(body_size[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R1 with volume filter AND weekly uptrend (close > weekly PP)
-            if close[i] > r1_1w_aligned[i] and volume_filter[i] and close[i] > pp_1w_aligned[i]:
+            if long_condition[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 with volume filter AND weekly downtrend (close < weekly PP)
-            elif close[i] < s1_1w_aligned[i] and volume_filter[i] and close[i] < pp_1w_aligned[i]:
+            elif short_condition[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below weekly pivot point
-            if close[i] < pp_1w_aligned[i]:
+            # Exit long: price closes below open (loss of bullish momentum) or trend turns down
+            if close[i] < open_[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above weekly pivot point
-            if close[i] > pp_1w_aligned[i]:
+            # Exit short: price closes above open (loss of bearish momentum) or trend turns up
+            if close[i] > open_[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
