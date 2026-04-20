@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_R1S1_Breakout_4HTrend_Filter_v1
-Concept: Daily pivot breakout on 12h with 4H EMA trend filter to improve win rate in both bull and bear markets.
-- Long when price breaks above R1 and 4H EMA20 is rising (trend filter)
-- Short when price breaks below S1 and 4H EMA20 is falling
-- Exit when price crosses back to previous day's close
-- Uses volume confirmation (vol > 1.5x average) to filter false breakouts
-- Conservative sizing (0.25) to manage drawdown
+4h_1d_Camarilla_R1S1_Breakout_Volume_TrendFilter_v1
+Concept: 4h timeframe, daily Camarilla pivot breakout with volume confirmation and daily EMA34 trend filter.
+- Long when price breaks above daily R1 with volume > 2x average and above daily EMA34
+- Short when price breaks below daily S1 with volume > 2x average and below daily EMA34
+- Exit when price returns to previous day's close
+- Conservative sizing (0.25) to manage drawdown in choppy markets
+- Designed for both bull (breakouts work) and bear (mean reversion to daily close works)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1S1_Breakout_4HTrend_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,39 +22,37 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for pivots (once before loop)
+    # Get daily data ONCE before loop for pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get 4H data for trend filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # === Daily Pivots ===
+    # === Calculate daily Camarilla pivots ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Pivot point and range
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
+    
+    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
     r1_1d = close_1d + (range_1d * 1.1 / 12)
     s1_1d = close_1d - (range_1d * 1.1 / 12)
+    # Previous day's close for exit
     prev_close_1d = np.roll(close_1d, 1)
     prev_close_1d[0] = np.nan
     
-    # Align daily pivots to 12h
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
     
-    # === 4H EMA20 trend filter ===
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # === 4h: EMA34 trend filter from daily ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === 12h Volume ratio ===
+    # === 4h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
@@ -62,43 +60,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for EMA20
+    start_idx = 34  # Ensure enough data for EMA34
     
     for i in range(start_idx, n):
         # Get values
-        ema20_val = ema20_4h_aligned[i]
+        ema34_val = ema34_aligned[i]
         close_val = prices['close'].iloc[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        prev_close_val = prev_close_aligned[i]
+        close_barrier_val = prev_close_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema20_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
-            np.isnan(prev_close_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(ema34_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
+            np.isnan(close_barrier_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Trend direction from 4H EMA slope
-            ema20_prev = ema20_4h_aligned[i-1]
-            ema_rising = ema20_val > ema20_prev
-            ema_falling = ema20_val < ema20_prev
+            # Long: Price breaks above R1 with volume confirmation and above EMA34
+            breakout_long = close_val > r1_val
+            vol_confirm = vol_ratio_val > 2.0
             
-            # Long: Break above R1 with volume and rising 4H EMA
-            if close_val > r1_val and vol_ratio_val > 1.5 and ema_rising:
+            if breakout_long and vol_confirm and close_val > ema34_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume and falling 4H EMA
-            elif close_val < s1_val and vol_ratio_val > 1.5 and ema_falling:
+            # Short: Price breaks below S1 with volume confirmation and below EMA34
+            elif close_val < s1_val and vol_confirm and close_val < ema34_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long exit: Price returns to or below previous day's close
-            if close_val <= prev_close_val:
+            if close_val <= close_barrier_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,7 +102,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: Price returns to or above previous day's close
-            if close_val >= prev_close_val:
+            if close_val >= close_barrier_val:
                 signals[i] = 0.0
                 position = 0
             else:
