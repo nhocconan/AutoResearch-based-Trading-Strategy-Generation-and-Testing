@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R3S3_Breakout_Volume_TrendFilter_v1"
+name = "4h_1d_Keltner_Breakout_Volume_Trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,22 +17,30 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d: Calculate Camarilla pivot points ===
+    # === 1d: Calculate EMA20 and ATR(10) for Keltner Channels ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    r3_1d = close_1d + range_1d * 1.1 / 2.0
-    s3_1d = close_1d - range_1d * 1.1 / 2.0
+    # EMA20 of close
+    close_series = pd.Series(close_1d)
+    ema20_1d = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Align Camarilla levels
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # ATR(10) for channel width
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    
+    # Keltner Channels: Upper = EMA20 + 2*ATR, Lower = EMA20 - 2*ATR
+    keltner_upper_1d = ema20_1d + 2 * atr_1d
+    keltner_lower_1d = ema20_1d - 2 * atr_1d
+    
+    # Align Keltner channels to 4h
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper_1d)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower_1d)
     
     # === 4h: Indicators ===
     high = prices['high'].values
@@ -40,9 +48,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA34 for trend filter
+    # EMA50 for trend filter
     close_s = pd.Series(close)
-    ema34 = close_s.ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # ATR(14) for stop loss
     tr1 = np.abs(high[1:] - low[1:])
@@ -60,51 +68,51 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Get aligned values
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        current_ema34 = ema34[i]
+        upper = keltner_upper_aligned[i]
+        lower = keltner_lower_aligned[i]
+        current_ema50 = ema50[i]
         current_atr = atr[i]
         current_close = close[i]
         current_volume = volume[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r3) or np.isnan(s3) or np.isnan(current_ema34) or np.isnan(current_atr)):
+        if (np.isnan(upper) or np.isnan(lower) or np.isnan(current_ema50) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.5x 20-period 4h average volume ===
+        # Volume condition: current volume > 1.8x 20-period 4h average volume
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            vol_condition = current_volume > 1.5 * vol_ma
+            vol_condition = current_volume > 1.8 * vol_ma
         else:
             vol_condition = False
         
         if position == 0:
-            # Long conditions: break above R3 with volume AND above EMA34 (uptrend)
-            if current_close > r3 and vol_condition and current_close > current_ema34:
+            # Long: break above upper Keltner band with volume AND above EMA50 (uptrend)
+            if current_close > upper and vol_condition and current_close > current_ema50:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short conditions: break below S3 with volume AND below EMA34 (downtrend)
-            elif current_close < s3 and vol_condition and current_close < current_ema34:
+            # Short: break below lower Keltner band with volume AND below EMA50 (downtrend)
+            elif current_close < lower and vol_condition and current_close < current_ema50:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price fails to hold above R3 OR stop loss
-            if current_close <= r3 or current_close < entry_price - 2.5 * current_atr:
+            # Long exit: price falls below lower Keltner band OR stop loss
+            if current_close < lower or current_close < entry_price - 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price fails to hold below S3 OR stop loss
-            if current_close >= s3 or current_close > entry_price + 2.5 * current_atr:
+            # Short exit: price rises above upper Keltner band OR stop loss
+            if current_close > upper or current_close > entry_price + 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
