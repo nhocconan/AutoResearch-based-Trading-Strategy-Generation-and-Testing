@@ -1,110 +1,118 @@
-# 12h_1d_Wick_Reversal_Volume_Filter
-# Wick reversal pattern with 1d trend filter and volume confirmation
-# Long: bullish wick (long lower shadow) in uptrend + volume spike
-# Short: bearish wick (long upper shadow) in downtrend + volume spike
-# Exit: trend reversal or wick failure
-# Designed for low trade frequency (<30/year) to minimize fee drag
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Wick_Reversal_Volume_Filter"
-timeframe = "12h"
+name = "4h_12h_Trix_Volume_Spike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 350:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # === 1d: EMA50 trend filter ===
-    close_1d = df_1d['close'].values
-    ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    # === 12h: TRIX with volume spike and regime filter ===
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # === 12h: Price and volume ===
+    # TRIX: Triple EMA of percentage change
+    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
+    pct_change = ema3.pct_change()
+    trix = pct_change * 100
+    trix_smooth = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    
+    # Volume spike detection (12h)
+    vol_ma20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_12h / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    
+    # Regime filter: 12h EMA50 vs EMA200 for trend strength
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    regime_strong = ema50_12h > ema200_12h  # Bull regime
+    regime_weak = ema50_12h < ema200_12h    # Bear regime
+    
+    # Align all 12h indicators to 4h
+    trix_aligned = align_htf_to_ltf(prices, df_12h, trix_smooth)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike)
+    regime_strong_aligned = align_htf_to_ltf(prices, df_12h, regime_strong.astype(float))
+    regime_weak_aligned = align_htf_to_ltf(prices, df_12h, regime_weak.astype(float))
+    
+    # === 4h: Price and volume ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume ratio (current vs 20-period average)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
-    # Wick calculations
-    body_size = np.abs(close - open_)
-    lower_wick = np.minimum(open_, close) - low
-    upper_wick = high - np.maximum(open_, close)
-    total_range = high - low
-    
-    # Avoid division by zero
-    lower_wick_ratio = np.where(total_range > 0, lower_wick / total_range, 0)
-    upper_wick_ratio = np.where(total_range > 0, upper_wick / total_range, 0)
+    # Volume confirmation (4h)
+    vol_ma20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_4h = volume / np.where(vol_ma20_4h > 0, vol_ma20_4h, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(350, n):
         # Get values
         close_val = close[i]
-        open_val = open_[i]
         high_val = high[i]
         low_val = low[i]
-        ema_val = ema50_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        lower_wick_ratio_val = lower_wick_ratio[i]
-        upper_wick_ratio_val = upper_wick_ratio[i]
+        trix_val = trix_aligned[i]
+        vol_spike_val = vol_spike_aligned[i]
+        regime_strong_val = regime_strong_aligned[i]
+        regime_weak_val = regime_weak_aligned[i]
+        vol_ratio_val = vol_ratio_4h[i]
         
         # Skip if any value is NaN
-        if np.isnan(ema_val) or np.isnan(vol_ratio_val):
+        if (np.isnan(trix_val) or np.isnan(vol_spike_val) or 
+            np.isnan(regime_strong_val) or np.isnan(regime_weak_val) or
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation threshold
+        vol_confirm = vol_ratio_val > 1.5
+        
         if position == 0:
-            # Long: bullish wick (long lower shadow) in uptrend + volume spike
-            if (lower_wick_ratio_val > 0.6 and                  # Strong lower wick
-                upper_wick_ratio_val < 0.3 and                  # Small upper wick
-                close_val > ema_val and                         # Price above EMA50 (uptrend)
-                vol_ratio_val > 1.5):                           # Volume confirmation
+            # Long: TRIX turning up in strong regime with volume spike
+            if (trix_val > trix_aligned[i-1] and  # TRIX rising
+                regime_strong_val > 0.5 and       # Bull regime
+                vol_spike_val > 2.0 and           # Volume spike
+                vol_confirm):                     # 4h volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish wick (long upper shadow) in downtrend + volume spike
-            elif (upper_wick_ratio_val > 0.6 and                # Strong upper wick
-                  lower_wick_ratio_val < 0.3 and                # Small lower wick
-                  close_val < ema_val and                       # Price below EMA50 (downtrend)
-                  vol_ratio_val > 1.5):                         # Volume confirmation
+            # Short: TRIX turning down in weak regime with volume spike
+            elif (trix_val < trix_aligned[i-1] and  # TRIX falling
+                  regime_weak_val > 0.5 and         # Bear regime
+                  vol_spike_val > 2.0 and           # Volume spike
+                  vol_confirm):                     # 4h volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or wick failure
-            if (close_val < ema_val or                    # Price below EMA50 (trend change)
-                upper_wick_ratio_val > 0.5):              # Bearish wick forming
+            # Long exit: TRIX turning down or regime change
+            if (trix_val < trix_aligned[i-1] or   # TRIX falling
+                regime_strong_val < 0.5):         # Lost bull regime
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or wick failure
-            if (close_val > ema_val or                    # Price above EMA50 (trend change)
-                lower_wick_ratio_val > 0.5):              # Bullish wick forming
+            # Short exit: TRIX turning up or regime change
+            if (trix_val > trix_aligned[i-1] or   # TRIX rising
+                regime_weak_val < 0.5):           # Lost bear regime
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-# Fix: open_ should be defined
-open_ = prices['open'].values if 'open' in prices.columns else np.zeros(n)
