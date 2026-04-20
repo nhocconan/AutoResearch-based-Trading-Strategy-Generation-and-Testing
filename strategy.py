@@ -3,96 +3,108 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and volume confirmation.
-# Uses 4h EMA50 for trend direction and 1h RSI + volume spike for entries.
-# Designed to work in both bull and bear markets by following 4h trend.
-# Target: 15-37 trades/year (60-150 over 4 years) with strict entry conditions.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 4h data once for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load weekly data once for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    # 4h EMA50 for trend
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Weekly trend: EMA34 of close
+    close_weekly = df_weekly['close'].values
+    ema34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
     
-    # 1h data
+    # Daily data for ATR and volume
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
+        return np.zeros(n)
+    
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
+    volume_daily = df_daily['volume'].values
+    
+    # Daily ATR (14)
+    tr1 = np.abs(high_daily - low_daily)
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    tr1[0] = high_daily[0] - low_daily[0]
+    tr2[0] = np.abs(high_daily[0] - close_daily[0])
+    tr3[0] = np.abs(low_daily[0] - close_daily[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
+    
+    # Daily volume average (20)
+    vol_ma_daily = pd.Series(volume_daily).rolling(window=20, min_periods=20).mean().values
+    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
+    
+    # Main timeframe data (4h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 1h volume average (20)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(ema34_weekly_aligned[i]) or np.isnan(atr_daily_aligned[i]) or 
+            np.isnan(vol_ma_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema50_4h_val = ema50_4h_aligned[i]
-        rsi_val = rsi[i]
+        ema34_weekly = ema34_weekly_aligned[i]
+        atr_daily = atr_daily_aligned[i]
+        vol_ma_daily = vol_ma_daily_aligned[i]
         vol_current = volume[i]
-        vol_ma_val = vol_ma[i]
         
-        # Trend filter: 4h EMA50
-        uptrend = price > ema50_4h_val
-        downtrend = price < ema50_4h_val
+        # Trend filter: only long in weekly uptrend, only short in weekly downtrend
+        weekly_uptrend = price > ema34_weekly
+        weekly_downtrend = price < ema34_weekly
         
-        # Volume filter: current volume > 1.8x 20-period average
-        vol_spike = vol_current > 1.8 * vol_ma_val
+        # Volatility filter: avoid low volatility periods
+        vol_filter_ok = atr_daily > 0
+        
+        # Volume filter: current volume > 1.5x daily average
+        vol_ok = vol_current > 1.5 * vol_ma_daily
         
         if position == 0:
-            # Long: uptrend + RSI < 30 (oversold) + volume spike
-            if uptrend and rsi_val < 30 and vol_spike:
-                signals[i] = 0.20
+            # Long: price above weekly EMA34 with volume and volatility
+            if weekly_uptrend and vol_ok and vol_filter_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + RSI > 70 (overbought) + volume spike
-            elif downtrend and rsi_val > 70 and vol_spike:
-                signals[i] = -0.20
+            # Short: price below weekly EMA34 with volume and volatility
+            elif weekly_downtrend and vol_ok and vol_filter_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI > 50 (momentum fade) or trend change
-            if rsi_val > 50 or not uptrend:
+            # Long exit: price crosses below weekly EMA34 OR volatility drops
+            if not weekly_uptrend or not vol_filter_ok:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI < 50 (momentum fade) or trend change
-            if rsi_val < 50 or not downtrend:
+            # Short exit: price crosses above weekly EMA34 OR volatility drops
+            if not weekly_downtrend or not vol_filter_ok:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA50_RSI_VolumeSpike_v1"
-timeframe = "1h"
+name = "4h_1d_weekly_EMA34_Trend_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
