@@ -1,105 +1,93 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_AdaptiveVolatilityBreakout_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # === Daily ATR-based volatility filter ===
+    # === Daily: Camarilla pivot levels ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range components
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate pivot and Camarilla levels for previous day
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.0833 / 2)
+    s1 = pivot - (range_1d * 1.0833 / 2)
     
-    # ATR(14) with proper initialization
-    atr_series = pd.Series(tr)
-    atr_14 = atr_series.rolling(window=14, min_periods=14).mean().values
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volatility regime: low vol = contraction, high vol = expansion
-    atr_ma30 = pd.Series(atr_14).rolling(window=30, min_periods=30).mean().values
-    vol_ratio = atr_14 / np.where(atr_ma30 > 0, atr_ma30, np.nan)
-    
-    # Align to 6h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
-    
-    # === 6h: Price and volume ===
+    # === 12h: Price, volume, trend ===
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume ratio with proper initialization
+    # EMA34 for trend filter
+    close_series = pd.Series(close)
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume ratio
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio_current = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
-    # Bollinger Bands (20, 2) on 6h for breakout detection
-    close_series = pd.Series(close)
-    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
-    std20 = close_series.rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Get values
         close_val = close[i]
-        vol_ratio_val = vol_ratio_aligned[i]
-        vol_ratio_current_val = vol_ratio_current[i]
-        upper_bb_val = upper_bb[i]
-        lower_bb_val = lower_bb[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema34_val = ema34[i]
+        vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(vol_ratio_current_val) or 
-            np.isnan(upper_bb_val) or np.isnan(lower_bb_val)):
+        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema34_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bollinger breakout with low volatility regime and volume confirmation
-            if (close_val > upper_bb_val and 
-                vol_ratio_val < 0.8 and  # Low volatility contraction
-                vol_ratio_current_val > 1.8):  # Volume expansion
+            # Long: Price breaks above R1 with volume and trend confirmation
+            if (close_val > r1_val and 
+                vol_ratio_val > 1.5 and 
+                close_val > ema34_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bollinger breakdown with low volatility regime and volume confirmation
-            elif (close_val < lower_bb_val and 
-                  vol_ratio_val < 0.8 and  # Low volatility contraction
-                  vol_ratio_current_val > 1.8):  # Volume expansion
+            # Short: Price breaks below S1 with volume and trend confirmation
+            elif (close_val < s1_val and 
+                  vol_ratio_val > 1.5 and 
+                  close_val < ema34_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to middle band or volatility expands too much
-            if close_val < sma20[i] or vol_ratio_val > 1.5:
+            # Long exit: Price returns below S1 or trend turns bearish
+            if close_val < s1_val or close_val < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to middle band or volatility expands too much
-            if close_val > sma20[i] or vol_ratio_val > 1.5:
+            # Short exit: Price returns above R1 or trend turns bullish
+            if close_val > r1_val or close_val > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
