@@ -97,11 +97,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
             if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
             elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -110,7 +110,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Short exit: price breaks above Donchian high or ADX < 20 (trend weakening)
@@ -118,17 +118,17 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# 12h_ADX_Donchian_Breakout_Volume_Session_v1
+# 4h_ADX_Donchian_Breakout_Volume_Session_v1
 # Uses daily ADX for trend strength filter (ADX > 25)
 # Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 12h timeframe with ~15-30 trades/year
-name = "12h_ADX_Donchian_Breakout_Volume_Session_v1"
-timeframe = "12h"
+# Designed for 4h timeframe with ~20-40 trades/year
+name = "4h_ADX_Donchian_Breakout_Volume_Session_v1"
+timeframe = "4h"
 leverage = 1.0
