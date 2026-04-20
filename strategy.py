@@ -3,83 +3,117 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI(2) mean reversion with 200-day moving average filter
-# In bull markets: buy RSI(2) < 10 when price > 200-day MA
-# In bear markets: sell RSI(2) > 90 when price < 200-day MA
-# Uses 1-day timeframe for MA filter to avoid look-ahead
-# Target: 100-200 total trades over 4 years (25-50/year)
+# Hypothesis: 6h 14-day Donchian breakout with 1-week high/low filter and volume confirmation
+# In bull markets: buy breakouts above 14-day high when above 1-week low (uptrend filter)
+# In bear markets: sell breakdowns below 14-day low when below 1-week high (downtrend filter)
+# Volume filter ensures breakouts have participation
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE for 200-day MA filter
+    # Load weekly data ONCE for 1w trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 14-week high/low (trend filter)
+    highest_14w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lowest_14w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    
+    # Align weekly trend filters to 6h timeframe
+    highest_14w_aligned = align_htf_to_ltf(prices, df_1w, highest_14w)
+    lowest_14w_aligned = align_htf_to_ltf(prices, df_1w, lowest_14w)
+    
+    # Load daily data ONCE for 14-day Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 200-day MA
-    ma_200 = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
+    # Calculate 14-day Donchian channels (breakout levels)
+    highest_14d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_14d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Align daily MA to 4h timeframe
-    ma_200_aligned = align_htf_to_ltf(prices, df_1d, ma_200)
+    # Align daily breakout levels to 6h timeframe
+    highest_14d_aligned = align_htf_to_ltf(prices, df_1d, highest_14d)
+    lowest_14d_aligned = align_htf_to_ltf(prices, df_1d, lowest_14d)
     
-    # Calculate 4h RSI(2)
+    # Calculate 6h ATR for volatility filter and stop sizing
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing
-    alpha = 1.0 / 2
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(1, len(gain)):
-        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    # Precompute hour of day for session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume filter: 6h volume > 20-period average
+    volume = prices['volume'].values
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(200, n):
-        # Skip if MA not ready
-        if np.isnan(ma_200_aligned[i]) or np.isnan(rsi[i]):
+    for i in range(50, n):
+        # Skip if NaN in indicators
+        if np.isnan(highest_14d_aligned[i]) or np.isnan(lowest_14d_aligned[i]) or \
+           np.isnan(highest_14w_aligned[i]) or np.isnan(lowest_14w_aligned[i]) or np.isnan(atr_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume filter
+        vol_filter = volume[i] > volume_ma_20[i]
+        
+        # Price levels
+        resistance = highest_14d_aligned[i]
+        support = lowest_14d_aligned[i]
+        weekly_high = highest_14w_aligned[i]
+        weekly_low = lowest_14w_aligned[i]
         price = close[i]
-        ma = ma_200_aligned[i]
-        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: RSI(2) < 10 and price > 200-day MA
-            if rsi_val < 10 and price > ma:
+            # Long: price breaks above 14-day resistance, above weekly low (uptrend), with volume
+            if price > resistance and price > weekly_low and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) > 90 and price < 200-day MA
-            elif rsi_val > 90 and price < ma:
+                entry_price = price
+            # Short: price breaks below 14-day support, below weekly high (downtrend), with volume
+            elif price < support and price < weekly_high and vol_filter:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: RSI(2) > 50 or price < 200-day MA
-            if rsi_val > 50 or price < ma:
+            # Long exit: stop loss (2x ATR below entry) or price breaks below 14-day support
+            if price <= entry_price - 2.0 * atr_6h[i] or price < support:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI(2) < 50 or price > 200-day MA
-            if rsi_val < 50 or price > ma:
+            # Short exit: stop loss (2x ATR above entry) or price breaks above 14-day resistance
+            if price >= entry_price + 2.0 * atr_6h[i] or price > resistance:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI2_MA200_MeanReversion"
-timeframe = "4h"
+name = "6h_14D_Donchian_14W_Trend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
