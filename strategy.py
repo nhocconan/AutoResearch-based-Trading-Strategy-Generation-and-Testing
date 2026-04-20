@@ -1,12 +1,3 @@
-# 6h_20D_Donchian_EMA50_Trend_VolumeFilter_ATRStop_VolRegime
-# Hypothesis: This strategy uses 20-day Donchian breakouts aligned with 50-day EMA trend filter,
-# volume confirmation, and volatility filtering to capture medium-term trends.
-# The 6h timeframe balances responsiveness with noise reduction, and the multi-timeframe
-# approach (daily for trend/levels, 6h for execution) reduces false breakouts.
-# Volatility regime filter (current 6h ATR < 1.5 * 14d ATR) avoids extreme volatility periods.
-# Designed to work in both bull and bear markets by requiring trend alignment and
-# only taking breakouts in the direction of the 50-day EMA.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -23,13 +14,6 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-day ATR for volatility filter
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     # Calculate 20-day Donchian channels (breakout levels)
     highest_20d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lowest_20d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
@@ -38,7 +22,6 @@ def generate_signals(prices):
     ema_50d_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align all 1d indicators to 6h timeframe
-    atr_14d_aligned = align_htf_to_ltf(prices, df_1d, atr_14d)
     highest_20d_aligned = align_htf_to_ltf(prices, df_1d, highest_20d)
     lowest_20d_aligned = align_htf_to_ltf(prices, df_1d, lowest_20d)
     ema_50d_aligned = align_htf_to_ltf(prices, df_1d, ema_50d_1d)
@@ -67,7 +50,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(atr_14d_aligned[i]) or np.isnan(highest_20d_aligned[i]) or np.isnan(lowest_20d_aligned[i]) or np.isnan(ema_50d_aligned[i]) or np.isnan(atr_6h[i]):
+        if np.isnan(highest_20d_aligned[i]) or np.isnan(lowest_20d_aligned[i]) or np.isnan(ema_50d_aligned[i]) or np.isnan(atr_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,17 +74,14 @@ def generate_signals(prices):
         trend_filter = ema_50d_aligned[i]
         price = close[i]
         
-        # Volatility filter: current 6h ATR < 1.5 * 14d ATR (avoid extreme volatility)
-        vol_filter_2 = atr_6h[i] < 1.5 * atr_14d_aligned[i]
-        
         if position == 0:
-            # Long: price breaks above 20-day resistance, above 50-day EMA, with volume and volatility filter
-            if price > resistance and price > trend_filter and vol_filter and vol_filter_2:
+            # Long: price breaks above 20-day resistance, above 50-day EMA, with volume
+            if price > resistance and price > trend_filter and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below 20-day support, below 50-day EMA, with volume and volatility filter
-            elif price < support and price < trend_filter and vol_filter and vol_filter_2:
+            # Short: price breaks below 20-day support, below 50-day EMA, with volume
+            elif price < support and price < trend_filter and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -124,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_20D_Donchian_EMA50_Trend_VolumeFilter_ATRStop_VolRegime"
+name = "6h_20D_Donchian_EMA50_Trend_VolumeFilter"
 timeframe = "6h"
 leverage = 1.0
