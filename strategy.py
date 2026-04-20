@@ -8,103 +8,90 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for HTF analysis
+    # Load 1d data for HTF analysis (Williams %R, volume, volatility)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d KAMA for trend direction (ER=10)
-    close_s = pd.Series(close_1d)
-    change = abs(close_s.diff(10))
-    volatility = close_s.diff().abs().rolling(10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = [close_1d[0]]
-    for i in range(1, len(close_1d)):
-        kama.append(kama[-1] + sc.iloc[i] * (close_1d[i] - kama[-1]))
-    kama = np.array(kama)
-    kama_slope = np.diff(kama, prepend=kama[0])
+    # 1d Williams %R (14-period) - mean reversion signal
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    williams_r[highest_high == lowest_low] = -50  # Avoid division by zero
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # 1d RSI(14) for momentum
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d ATR(14) for volatility filter and position sizing
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # 1d Chopiness Index for regime detection (14-period)
-    atr1 = np.abs(high_1d - low_1d)
-    atr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    atr2[0] = atr1[0]
-    atr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    atr3[0] = atr1[0]
-    tr = np.maximum(atr1, np.maximum(atr2, atr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)
+    # 1d Volume ratio (current volume / 20-period average)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_1d / np.where(vol_ma_20 == 0, 1, vol_ma_20)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
-    # Align HTF indicators to 12h timeframe
-    kama_slope_aligned = align_htf_to_ltf(prices, df_1d, kama_slope)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # 12h price data
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # Load 6h data for entry timing and price action
+    # Note: prices dataframe is already at 6h timeframe
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(kama_slope_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Range filter: avoid extreme chop values
-        if chop_aligned[i] > 61.8:  # High chop = range market
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        price = close[i]
+        vol = volume[i]
         
-        # Entry conditions
-        kama_up = kama_slope_aligned[i] > 0
-        rsi_not_extreme = 40 < rsi_aligned[i] < 60
+        # Williams %R thresholds: oversold < -80, overbought > -20
+        wr = williams_r_aligned[i]
+        
+        # Volatility filter: only trade when volatility is moderate (not too high, not too low)
+        atr = atr_14_aligned[i]
+        atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
+        vol_filter = (atr > 0.5 * atr_ma_20) and (atr < 2.0 * atr_ma_20)
+        
+        # Volume filter: require above-average volume for confirmation
+        vol_filter = vol_filter and (vol_ratio_aligned[i] > 1.2)
         
         if position == 0:
-            # Long when KAMA trending up and RSI in neutral zone
-            if kama_up and rsi_not_extreme:
+            # Long when Williams %R indicates oversold conditions with volume confirmation
+            if (wr < -80) and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short when KAMA trending down and RSI in neutral zone
-            elif not kama_up and rsi_not_extreme:
+            # Short when Williams %R indicates overbought conditions with volume confirmation
+            elif (wr > -20) and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA turns down or RSI becomes overbought
-            if (not kama_up) or (rsi_aligned[i] >= 70):
+            # Long exit: Williams %R returns to neutral territory or volatility spikes
+            if (wr > -50) or (atr > 3.0 * atr_ma_20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA turns up or RSI becomes oversold
-            if kama_up or (rsi_aligned[i] <= 30):
+            # Short exit: Williams %R returns to neutral territory or volatility spikes
+            if (wr < -50) or (atr > 3.0 * atr_ma_20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_KAMA_RSI_ChopFilter_v1"
-timeframe = "12h"
+name = "6h_WilliamsR_MeanReversion_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
