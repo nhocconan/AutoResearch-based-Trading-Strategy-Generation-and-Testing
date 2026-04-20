@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1S1_Breakout_Volume
-- Breakout at R1/S1 with volume confirmation
-- Uses 1-day Camarilla for 6h timeframe
-- Works in both bull/bear: breakout continuation in trend
+12h_1d_Pivot_R1S1_Breakout_Volume
+- Pivot point bounce (R1/S1) with volume confirmation for mean reversion
+- Breakout at R2/S2 with volume surge for trend continuation
+- Works in both bull/bear: mean reversion in range, breakout in trend
+- Uses 1d Pivot for 12h timeframe
 - Target: 50-150 trades over 4 years (12-37/year)
 - Size: 0.25
 """
@@ -12,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R1S1_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,39 +24,39 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1d Previous Day's High/Low/Close for Camarilla ===
+    # === 1d Pivot Points (previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values (shift by 1)
+    # Previous day's values for pivot calculation
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
     
-    # Set first values to avoid look-ahead (use current day's values)
+    # Set first values to avoid look-ahead
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
     prev_close[0] = close_1d[0]
     
-    # Classic pivot point (same for Camarilla)
+    # Classic pivot point calculation
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Camarilla levels: R1, S1, R4, S4
-    r1 = pivot + (range_val * 1.1 / 12)  # ~9.16% of range
-    s1 = pivot - (range_val * 1.1 / 12)
-    r4 = pivot + (range_val * 1.1 / 2)   # Breakout level
-    s4 = pivot - (range_val * 1.1 / 2)
+    # Pivot levels (R1, S1, R2, S2)
+    r1 = pivot + (range_val * 1.0 / 2)  # First resistance
+    s1 = pivot - (range_val * 1.0 / 2)  # First support
+    r2 = pivot + range_val              # Second resistance
+    s2 = pivot - range_val              # Second support
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # === Volume Confirmation ===
@@ -73,38 +74,38 @@ def generate_signals(prices):
         vol_ratio_val = vol_ratio[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
         pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
         if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(r4_val) or 
-            np.isnan(s4_val) or np.isnan(pivot_val)):
+            np.isnan(s1_val) or np.isnan(r2_val) or 
+            np.isnan(s2_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Breakout at R1/S1 with volume confirmation
-            if close_val > r1_val and vol_ratio_val > 1.8:
-                # Break above R1
-                signals[i] = 0.25
-                position = 1
-            elif close_val < s1_val and vol_ratio_val > 1.8:
-                # Break below S1
+            # Mean reversion at R1/S1
+            if close_val < r1_val and close_val > r1_val * 0.998 and vol_ratio_val > 1.5:
+                # Near R1, short with volume
                 signals[i] = -0.25
                 position = -1
-            # Optional: Fade at extremes (R4/S4) in ranging markets
-            elif close_val > r4_val and vol_ratio_val < 0.8:
-                # Fade at R4 in low volume
-                signals[i] = -0.25
-                position = -1
-            elif close_val < s4_val and vol_ratio_val < 0.8:
-                # Fade at S4 in low volume
+            elif close_val > s1_val and close_val < s1_val * 1.002 and vol_ratio_val > 1.5:
+                # Near S1, long with volume
                 signals[i] = 0.25
                 position = 1
+            # Breakout at R2/S2
+            elif close_val > r2_val and vol_ratio_val > 2.0:
+                # Strong break above R2
+                signals[i] = 0.25
+                position = 1
+            elif close_val < s2_val and vol_ratio_val > 2.0:
+                # Strong break below S2
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
             # Long exit: return to pivot or stop at S1
