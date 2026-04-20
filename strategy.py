@@ -3,52 +3,45 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Donchian20_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1_S1_Breakout_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need sufficient data
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need at least 20 days
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # === 1d: Calculate 20-day trend and Donchian channels (using previous day's data) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h: Calculate Camarilla pivot levels (R1, S1) using previous day's OHLC ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    open_12h = df_12h['open'].values
     
-    # Use previous day's OHLC for today's levels
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
+    # Use previous 12h bar's OHLC for current levels (Camarilla uses previous close, high, low)
+    prev_close = np.roll(close_12h, 1)
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
     
-    # Set first day's values to NaN
+    # Set first bar's values to NaN
     prev_close[0] = np.nan
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     
-    # 20-day EMA for trend filter
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # 20-day Donchian channels (highest high, lowest low over 20 days)
-    donchian_high = np.full_like(high_1d, np.nan)
-    donchian_low = np.full_like(low_1d, np.nan)
+    # Align 12h Camarilla levels to 4h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_S1)
     
-    for i in range(20, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
-    
-    # Align 1d indicators to 12h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # === 12h: Volume ratio (current vs 20-period average) ===
+    # === 4h: Volume ratio (current vs 20-period average) ===
     close = prices['close'].values
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,44 +53,38 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Get values
         close_val = close[i]
-        ema_val = ema_20_aligned[i]
-        upper_donchian = donchian_high_aligned[i]
-        lower_donchian = donchian_low_aligned[i]
+        r1_level = camarilla_R1_aligned[i]
+        s1_level = camarilla_S1_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(upper_donchian) or 
-            np.isnan(lower_donchian) or np.isnan(vol_ratio_val)):
+        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above 20-day EMA (uptrend), breaks above 20-day Donchian high, volume confirmation
-            if (close_val > ema_val and  # Uptrend filter
-                close_val > upper_donchian and   # Break above Donchian high
-                vol_ratio_val > 1.8):    # Increased volume confirmation threshold
+            # Long: Price breaks above Camarilla R1 with volume confirmation
+            if close_val > r1_level and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below 20-day EMA (downtrend), breaks below 20-day Donchian low, volume confirmation
-            elif (close_val < ema_val and  # Downtrend filter
-                  close_val < lower_donchian and   # Break below Donchian low
-                  vol_ratio_val > 1.8):    # Increased volume confirmation threshold
+            # Short: Price breaks below Camarilla S1 with volume confirmation
+            elif close_val < s1_level and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price drops below 20-day EMA or breaks below 20-day Donchian low (reversal)
-            if close_val < ema_val or close_val < lower_donchian:
+            # Long exit: Price drops back below Camarilla R1 (failed breakout)
+            if close_val < r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises above 20-day EMA or breaks above 20-day Donchian high (reversal)
-            if close_val > ema_val or close_val > upper_donchian:
+            # Short exit: Price rises back above Camarilla S1 (failed breakdown)
+            if close_val > s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
