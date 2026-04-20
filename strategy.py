@@ -1,126 +1,130 @@
 #!/usr/bin/env python3
 """
-4h_ChaikinMoneyFlow_TopBottom_Reversal_v1
-Concept: Use Chaikin Money Flow (CMF) to detect institutional accumulation/distribution.
-- Long: CMF(20) > 0.25 AND price > EMA(50) AND price crosses above Bollinger lower band
-- Short: CMF(20) < -0.25 AND price < EMA(50) AND price crosses below Bollinger upper band
-- Exit: Price crosses EMA(50) in opposite direction
+12h_KAMA_1dRSI_1wTrend_Filter
+Concept: 12h KAMA trend direction with 1d RSI overbought/oversold and 1w trend filter.
+- Long: KAMA rising AND RSI < 30 AND 1w EMA(50) > EMA(200)
+- Short: KAMA falling AND RSI > 70 AND 1w EMA(50) < EMA(200)
+- Exit: Opposite KAMA direction change
 - Position sizing: 0.25
-- Uses 12h trend filter and 1d volume confirmation to reduce false signals
-- Designed for low trade frequency (~20-40/year) to minimize fee drag
+- Target: 50-150 total trades over 4 years
+- Works in bull/bear: KAMA adapts to volatility, RSI captures mean reversion in ranges, weekly trend filters counter-trend moves
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ChaikinMoneyFlow_TopBottom_Reversal_v1"
-timeframe = "4h"
+name = "12h_KAMA_1dRSI_1wTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Get 12h data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 12h: EMA Trend Filter (50) ===
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # === 12h: KAMA Calculation ===
     close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_12h, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close_12h, n=1)), axis=0)  # 10-period sum of absolute changes
+    # Pad the beginning with NaN for alignment
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.full_like(close_12h, np.nan)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
     
-    # === 1d: Volume Spike Filter ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    vol_1d_values = df_1d['volume'].values
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_values)
+    # KAMA direction: 1 if rising, -1 if falling
+    kama_diff = np.diff(kama, prepend=kama[0])
+    kama_dir = np.where(kama_diff > 0, 1, np.where(kama_diff < 0, -1, 0))
     
-    # === 4h: Price and Volume for CMF ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # Align KAMA direction to 12h
+    kama_dir_aligned = align_htf_to_ltf(prices, df_12h, kama_dir.astype(float))
     
-    # === 4h: Bollinger Bands (20, 2) ===
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_lower = sma_20 - 2 * std_20
-    bb_upper = sma_20 + 2 * std_20
+    # === 1d: RSI(14) ===
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Align RSI to 12h
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # === 4h: Chaikin Money Flow (20) ===
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = high - low
-    mf_multiplier = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0)
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    mf_volume = mf_multiplier * volume
-    # CMF = 20-period sum of MFV / 20-period sum of Volume
-    mf_volume_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
-    volume_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = np.where(volume_sum != 0, mf_volume_sum / volume_sum, 0)
-    
-    # === 4h: EMA(50) for exit ===
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === 1w: EMA Trend Filter (50 and 200) ===
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Align 1w EMAs to 12h
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 200  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Get values
-        cmf_val = cmf[i]
-        bb_low = bb_lower[i]
-        bb_up = bb_upper[i]
-        ema50_price = ema_50[i]
-        ema50_12h = ema_50_12h_aligned[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        vol_1d = vol_1d_aligned[i]
+        kama_dir = kama_dir_aligned[i]
+        rsi_val = rsi_aligned[i]
+        ema50 = ema_50_1w_aligned[i]
+        ema200 = ema_200_1w_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(cmf_val) or np.isnan(bb_low) or np.isnan(bb_up) or 
-            np.isnan(ema50_price) or np.isnan(ema50_12h) or np.isnan(vol_ma) or np.isnan(vol_1d)):
+        if (np.isnan(kama_dir) or np.isnan(rsi_val) or 
+            np.isnan(ema50) or np.isnan(ema200)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current 1d volume > 1.3x 20-period average
-        vol_condition = vol_1d > 1.3 * vol_ma
-        
         if position == 0:
-            # Long: CMF > 0.25 (accumulation), price above EMA(50), and price crosses above BB lower
-            if cmf_val > 0.25 and close[i] > ema50_price and close[i] > bb_low and close[i-1] <= bb_low:
-                if vol_condition and ema50_12h > ema_50_12h_aligned[i-1]:  # 12h EMA rising
-                    signals[i] = 0.25
-                    position = 1
-            # Short: CMF < -0.25 (distribution), price below EMA(50), and price crosses below BB upper
-            elif cmf_val < -0.25 and close[i] < ema50_price and close[i] < bb_up and close[i-1] >= bb_up:
-                if vol_condition and ema50_12h < ema_50_12h_aligned[i-1]:  # 12h EMA falling
-                    signals[i] = -0.25
-                    position = -1
+            # Long: KAMA rising AND RSI oversold AND weekly uptrend
+            if kama_dir == 1 and rsi_val < 30 and ema50 > ema200:
+                signals[i] = 0.25
+                position = 1
+            # Short: KAMA falling AND RSI overbought AND weekly downtrend
+            elif kama_dir == -1 and rsi_val > 70 and ema50 < ema200:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price crosses below EMA(50)
-            if close[i] < ema50_price:
+            # Long exit: KAMA turns down
+            if kama_dir == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA(50)
-            if close[i] > ema50_price:
+            # Short exit: KAMA turns up
+            if kama_dir == 1:
                 signals[i] = 0.0
                 position = 0
             else:
