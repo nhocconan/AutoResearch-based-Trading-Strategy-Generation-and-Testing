@@ -3,50 +3,40 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_R3S3_Breakout_Volume_Trend_v1"
-timeframe = "12h"
+name = "4h_1d_21ema_Trend_Breakout_With_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
     
-    # Get 1w and 1d data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 2 or len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1w: Calculate weekly trend (EMA50) ===
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # === 1d: Calculate Camarilla pivot points ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d: Calculate 21 EMA for trend filter ===
     close_1d = df_1d['close'].values
+    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    r3_1d = close_1d + range_1d * 1.1 / 2.0
-    s3_1d = close_1d - range_1d * 1.1 / 2.0
-    
-    # Align Camarilla levels
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # === 12h: Indicators ===
+    # === 4h: Indicators ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR(14) for stop loss
+    # 21 EMA for trend filter
+    close_s = pd.Series(close)
+    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # 100-period high/low for breakout (Donchian-like)
+    high_max = pd.Series(high).rolling(window=100, min_periods=100).max().values
+    low_min = pd.Series(low).rolling(window=100, min_periods=100).min().values
+    
+    # ATR(14) for volatility-based stop
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -54,59 +44,65 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Volume spike detector (current volume > 2x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 60  # Need enough data for indicators
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Get aligned values
-        weekly_trend = ema50_1w_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        current_atr = atr[i]
+        # Get values
+        ema21_1d_val = ema21_1d_aligned[i]
+        ema21_val = ema21[i]
+        high_max_val = high_max[i]
+        low_min_val = low_min[i]
+        atr_val = atr[i]
+        vol_spike_val = vol_spike[i]
         current_close = close[i]
-        current_volume = volume[i]
+        current_high = high[i]
+        current_low = low[i]
         
         # Skip if any value is NaN
-        if (np.isnan(weekly_trend) or np.isnan(r3) or np.isnan(s3) or np.isnan(current_atr)):
+        if (np.isnan(ema21_1d_val) or np.isnan(ema21_val) or 
+            np.isnan(high_max_val) or np.isnan(low_min_val) or 
+            np.isnan(atr_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.5x 20-period 12h average volume ===
-        if i >= 20:
-            vol_ma = np.mean(volume[i-20:i])
-            vol_condition = current_volume > 1.5 * vol_ma
-        else:
-            vol_condition = False
-        
         if position == 0:
-            # Long conditions: break above R3 with volume AND above weekly EMA50 (uptrend)
-            if current_close > r3 and vol_condition and current_close > weekly_trend:
+            # Long: break above 100-period high with volume spike AND 1d EMA21 uptrend
+            if (current_high > high_max_val and vol_spike_val and 
+                ema21_1d_val > ema21_1d[max(0, i-1)] if i > 0 else ema21_1d_val > ema21_1d_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short conditions: break below S3 with volume AND below weekly EMA50 (downtrend)
-            elif current_close < s3 and vol_condition and current_close < weekly_trend:
+            # Short: break below 100-period low with volume spike AND 1d EMA21 downtrend
+            elif (current_low < low_min_val and vol_spike_val and 
+                  ema21_1d_val < ema21_1d[max(0, i-1)] if i > 0 else ema21_1d_val < ema21_1d_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price fails to hold above R3 OR stop loss
-            if current_close <= r3 or current_close < entry_price - 2.5 * current_atr:
+            # Long exit: break below 100-period low OR stop loss
+            if (current_low < low_min_val or 
+                current_close < entry_price - 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price fails to hold below S3 OR stop loss
-            if current_close >= s3 or current_close > entry_price + 2.5 * current_atr:
+            # Short exit: break above 100-period high OR stop loss
+            if (current_high > high_max_val or 
+                current_close > entry_price + 2.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
             else:
