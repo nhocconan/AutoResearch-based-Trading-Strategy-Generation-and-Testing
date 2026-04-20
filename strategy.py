@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1
-Concept: Camarilla pivot breakout using daily pivots, with volume confirmation and EMA trend filter.
-- Long when price breaks above R1 with volume > 2x average and above daily EMA34
-- Short when price breaks below S1 with volume > 2x average and below daily EMA34
-- Exit when price returns to previous day's close
-- Conservative sizing (0.25) to manage drawdown in choppy markets
-- Designed for both bull (breakouts work) and bear (mean reversion to daily close works)
+1d_1w_RSI_Momentum_With_TrendFilter_v1
+Concept: Use weekly RSI momentum on daily timeframe with trend filter.
+- Long when daily RSI(14) > 50 and weekly RSI(14) > 50 and price above weekly EMA(50)
+- Short when daily RSI(14) < 50 and weekly RSI(14) < 50 and price below weekly EMA(50)
+- Exit when RSI crosses back below/above 50
+- Sizing 0.25 to manage drawdown
+- Works in bull (momentum continuation) and bear (mean reversion via RSI extremes)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1"
-timeframe = "12h"
+name = "1d_1w_RSI_Momentum_With_TrendFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,87 +22,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data ONCE before loop for trend and momentum
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === Calculate daily Camarilla pivots ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Weekly: RSI(14) and EMA(50) for trend filter ===
+    close_1w = df_1w['close'].values
     
-    # Pivot point and range
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate weekly RSI(14)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    # Previous day's close for exit
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = np.nan
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss != 0, avg_loss, 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
+    # Weekly EMA(50) for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # === 12h: EMA34 trend filter from daily ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align weekly indicators to daily
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # === 12h: Volume ratio (current vs 20-period average) ===
-    volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    # === Daily: RSI(14) for entry signal ===
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss != 0, avg_loss, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure enough data for EMA34
+    start_idx = 50  # Ensure enough data for weekly EMA50
     
     for i in range(start_idx, n):
         # Get values
-        ema34_val = ema34_aligned[i]
-        close_val = prices['close'].iloc[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        close_barrier_val = prev_close_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        rsi_val = rsi[i]
+        rsi_1w_val = rsi_1w_aligned[i]
+        ema50_1w_val = ema50_1w_aligned[i]
+        close_val = close[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema34_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
-            np.isnan(close_barrier_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(rsi_val) or np.isnan(rsi_1w_val) or np.isnan(ema50_1w_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and above EMA34
-            breakout_long = close_val > r1_val
-            vol_confirm = vol_ratio_val > 2.0
-            
-            if breakout_long and vol_confirm and close_val > ema34_val:
+            # Long: Daily RSI > 50, Weekly RSI > 50, and price above weekly EMA50
+            if rsi_val > 50 and rsi_1w_val > 50 and close_val > ema50_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and below EMA34
-            elif close_val < s1_val and vol_confirm and close_val < ema34_val:
+            # Short: Daily RSI < 50, Weekly RSI < 50, and price below weekly EMA50
+            elif rsi_val < 50 and rsi_1w_val < 50 and close_val < ema50_1w_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below previous day's close
-            if close_val <= close_barrier_val:
+            # Long exit: Daily RSI crosses back below 50
+            if rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above previous day's close
-            if close_val >= close_barrier_val:
+            # Short exit: Daily RSI crosses back above 50
+            if rsi_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
