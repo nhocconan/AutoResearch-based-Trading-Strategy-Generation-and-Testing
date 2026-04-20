@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_RSI_Divergence_Momentum
-Concept: 6s RSI divergence with weekly trend and daily momentum confirmation.
-- Long: Weekly EMA(20) > EMA(50) AND daily RSI(14) < 30 (oversold) AND 6h RSI(14) > previous 6h RSI(14) (bullish divergence)
-- Short: Weekly EMA(20) < EMA(50) AND daily RSI(14) > 70 (overbought) AND 6h RSI(14) < previous 6h RSI(14) (bearish divergence)
-- Exit: RSI crosses back to neutral (40-60 range) or weekly trend flips
+4h_Camarilla_R1S1_Breakout_Volume_Regime
+Concept: 4h Camarilla R1/S1 breakout with daily volume spike and choppiness regime filter.
+- Long: Price > R1 (daily) AND daily volume > 1.5x 20-period avg AND Choppiness(14) < 40 (trending)
+- Short: Price < S1 (daily) AND daily volume > 1.5x 20-period avg AND Choppiness(14) < 40 (trending)
+- Exit: Price crosses back through Camarilla pivot point (PP)
 - Position sizing: 0.25
-- Target: 50-150 total trades over 4 years
-- Works in bull/bear: Weekly trend filter adapts, RSI divergence captures exhaustion points
+- Target: 80-150 total trades over 4 years
+- Works in bull/bear: Choppiness filter avoids ranging markets, volume confirms breakout strength
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_RSI_Divergence_Momentum"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,47 +23,74 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Weekly: EMA Trend Filter (20 and 50) ===
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align weekly EMAs to 6h
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # === Daily: RSI (14) ===
+    # === Daily: Camarilla Levels (Pivot Point, R1, S1) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_values = rsi_1d.fillna(50).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # === 6h: RSI (14) for divergence detection ===
+    # Calculate pivot point and support/resistance levels
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    r1 = pp + (high_1d - low_1d) * 1.1 / 12
+    s1 = pp - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align daily Camarilla levels to 4h
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === Daily: Volume Spike Filter ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    vol_1d_vals = df_1d['volume'].values
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_vals)
+    
+    # === 4h: Choppiness Index (14-period) for regime filter ===
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_6h = 100 - (100 / (1 + rs))
-    rsi_6h_values = rsi_6h.fillna(50).values
+    
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Choppiness Index: 100 * log10(sum(ATR)/ (max(high)-min(low)) ) / log10(14)
+    # We calculate over 14-period window
+    def calculate_chop(high, low, close, window=14):
+        n = len(high)
+        chop = np.full(n, np.nan)
+        for i in range(window-1, n):
+            # True Range sum over window
+            tr_sum = 0
+            for j in range(i-window+1, i+1):
+                tr1 = high[j] - low[j]
+                tr2 = abs(high[j] - close[j-1]) if j > 0 else abs(high[j] - close[j])
+                tr3 = abs(low[j] - close[j-1]) if j > 0 else abs(low[j] - close[j])
+                tr_sum += max(tr1, tr2, tr3)
+            
+            # Max high - min low over window
+            max_high = np.max(high[i-window+1:i+1])
+            min_low = np.min(low[i-window+1:i+1])
+            range_hl = max_high - min_low
+            
+            if range_hl > 0 and tr_sum > 0:
+                chop[i] = 100 * np.log10(tr_sum) / np.log10(window) / np.log10(range_hl) * np.log10(range_hl)
+            else:
+                chop[i] = 50  # neutral when invalid
+        return chop
+    
+    chop = calculate_chop(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,41 +99,48 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Get values
-        ema20 = ema_20_1w_aligned[i]
-        ema50 = ema_50_1w_aligned[i]
-        rsi_daily = rsi_1d_aligned[i]
-        rsi_current = rsi_6h_values[i]
-        rsi_previous = rsi_6h_values[i-1]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        vol_ma = vol_ma_20_1d_aligned[i]
+        current_vol = vol_1d_aligned[i]
+        chop_val = chop[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema20) or np.isnan(ema50) or np.isnan(rsi_daily) or 
-            np.isnan(rsi_current) or np.isnan(rsi_previous)):
+        if (np.isnan(pp_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
+            np.isnan(vol_ma) or np.isnan(current_vol) or np.isnan(chop_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume condition: current daily volume > 1.5x 20-period average
+        vol_condition = current_vol > 1.5 * vol_ma
+        
+        # Regime condition: Choppiness < 40 indicates trending market (not ranging)
+        regime_condition = chop_val < 40
+        
         if position == 0:
-            # Long: weekly uptrend + daily oversold + bullish RSI divergence
-            if ema20 > ema50 and rsi_daily < 30 and rsi_current > rsi_previous:
+            # Long: price breaks above R1 with volume spike and trending regime
+            if close[i] > r1_val and vol_condition and regime_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + daily overbought + bearish RSI divergence
-            elif ema20 < ema50 and rsi_daily > 70 and rsi_current < rsi_previous:
+            # Short: price breaks below S1 with volume spike and trending regime
+            elif close[i] < s1_val and vol_condition and regime_condition:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI returns to neutral or weekly trend flips
-            if rsi_current > 40 or ema20 < ema50:
+            # Long exit: price crosses below pivot point (PP)
+            if close[i] < pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI returns to neutral or weekly trend flips
-            if rsi_current < 60 or ema20 > ema50:
+            # Short exit: price crosses above pivot point (PP)
+            if close[i] > pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
