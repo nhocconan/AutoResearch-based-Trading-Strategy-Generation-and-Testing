@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter
-# Hypothesis: Use daily pivot levels (R1/S1) with 12h breakout, volume confirmation, and 12h EMA34 trend filter.
-# Only trade breakouts aligned with daily trend. Targets 12-37 trades/year by using 12h timeframe and tight entry conditions.
-# Works in both bull and bear markets by following trend and requiring volume confirmation.
+# 4h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v4
+# Hypothesis: Use 1d Camarilla pivot levels (R1/S1) with 4h breakout, volume confirmation, and 1d EMA34 trend filter.
+# Only trade breakouts aligned with trend. Targets 20-50 trades/year by using 4h timeframe and tight entry conditions.
+# Designed to work in both bull and bear markets by following trend and requiring volume confirmation.
 
-name = "12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d pivot levels (R1/S1)
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -35,7 +35,7 @@ def generate_signals(prices):
     # Typical price for pivot calculation
     typical_price_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Pivot point and range
+    # Pivot point and ranges
     pivot_1d = typical_price_1d
     range_1d = high_1d - low_1d
     
@@ -43,7 +43,7 @@ def generate_signals(prices):
     r1_1d = close_1d + (range_1d * 1.1 / 12)
     s1_1d = close_1d - (range_1d * 1.1 / 12)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -52,7 +52,7 @@ def generate_signals(prices):
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume average for spike detection (20-period)
+    # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
