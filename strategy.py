@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-6h_TurtleSoup_With_Volume_Filter
-Hypothesis: Trade reversals at 4-bar lows (long) and highs (short) with volume confirmation, 
-inspired by Linda Raschke's Turtle Soup setup. Works in bull/bear by fading short-term exhaustion 
-on volume spikes, avoiding trend-following whipsaw. Uses 12h EMA20 filter to avoid counter-trend trades.
-Target: 60-120 total trades over 4 years (15-30/year) with position size 0.25.
+4h_CCI_14_Trend_Volume_Filter
+Hypothesis: Use 4-hour CCI(14) for mean-reversion entries in overbought/oversold zones, 
+filtered by daily trend direction and volume confirmation. Enter long when CCI crosses above -100 
+with daily uptrend and volume spike; enter short when CCI crosses below +100 with daily downtrend 
+and volume spike. Exit when CCI crosses zero or trend reversals occur.
+Designed to work in both bull and bear markets by aligning with higher timeframe trend while 
+exploiting short-term mean reversion. Volume filter ensures trades occur during active participation.
+Target: 20-40 trades/year with position size 0.25 to minimize fee drag.
 """
 
-name = "6h_TurtleSoup_With_Volume_Filter"
-timeframe = "6h"
+name = "4h_CCI_14_Trend_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +20,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,78 +28,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA20 for trend filter
-    close_12h = df_12h['close'].values
-    ema20_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 20:
-        multiplier = 2.0 / (20 + 1)
-        ema20_12h[19] = np.mean(close_12h[:20])
-        for i in range(20, len(close_12h)):
-            ema20_12h[i] = multiplier * close_12h[i] + (1 - multiplier) * ema20_12h[i-1]
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    # Calculate daily EMA50 for trend filter
+    close_daily = df_daily['close'].values
+    ema50_daily = np.full_like(close_daily, np.nan)
+    if len(close_daily) >= 50:
+        multiplier = 2.0 / (50 + 1)
+        ema50_daily[49] = np.mean(close_daily[:50])
+        for i in range(50, len(close_daily)):
+            ema50_daily[i] = multiplier * close_daily[i] + (1 - multiplier) * ema50_daily[i-1]
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
     
-    # Volume spike detector (20-period average)
-    vol_avg = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            vol_avg[i] = np.mean(volume[max(0, i-19):i+1]) if (i+1) > 0 else 0
-        else:
-            vol_avg[i] = np.mean(volume[i-19:i+1])
+    # Calculate CCI(14)
+    tp = (high + low + close) / 3.0  # Typical Price
+    sma_tp = np.full(n, np.nan)
+    if len(tp) >= 14:
+        sma_tp[13] = np.mean(tp[:14])
+        for i in range(14, n):
+            sma_tp[i] = sma_tp[i-1] + (tp[i] - tp[i-14]) / 14.0
+    
+    # Mean deviation
+    md = np.full(n, np.nan)
+    if len(tp) >= 14:
+        for i in range(14, n):
+            md[i] = np.mean(np.abs(tp[i-14:i] - sma_tp[i-1]))
+    
+    cci = np.full(n, np.nan)
+    valid = ~np.isnan(sma_tp) & ~np.isnan(md) & (md != 0)
+    cci[valid] = (tp[valid] - sma_tp[valid]) / (0.015 * md[valid])
+    
+    # Volume spike detector: volume > 1.5 * 20-period average
+    vol_ma = np.full(n, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[:20])
+        for i in range(20, n):
+            vol_ma[i] = vol_ma[i-1] + (volume[i] - volume[i-20]) / 20.0
+    vol_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure indicators are ready
+    start_idx = max(20, 14)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(cci[i]) or np.isnan(ema50_daily_aligned[i]) or 
+            np.isnan(close[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition (current volume > 1.5x average)
-        vol_spike = volume[i] > 1.5 * vol_avg[i]
-        
         if position == 0:
-            # Turtle Soup Long: 4-bar low with volume spike, above 12h EMA (avoid counter-trend)
-            if i >= 3:
-                four_bar_low = np.min(low[i-3:i+1])
-                if low[i] <= four_bar_low and vol_spike and close[i] > ema20_12h_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Turtle Soup Short: 4-bar high with volume spike, below 12h EMA (avoid counter-trend)
-            if i >= 3:
-                four_bar_high = np.max(high[i-3:i+1])
-                if high[i] >= four_bar_high and vol_spike and close[i] < ema20_12h_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: CCI crosses above -100 (from below) + daily uptrend + volume spike
+            if (cci[i] > -100 and cci[i-1] <= -100 and 
+                close[i] > ema50_daily_aligned[i] and vol_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: CCI crosses below +100 (from above) + daily downtrend + volume spike
+            elif (cci[i] < 100 and cci[i-1] >= 100 and 
+                  close[i] < ema50_daily_aligned[i] and vol_spike[i]):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price closes below 4-bar low OR trend turns down
-            if i >= 3:
-                four_bar_low = np.min(low[i-3:i+1])
-                if close[i] < four_bar_low or close[i] < ema20_12h_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: CCI crosses below zero OR daily trend turns down
+            if (cci[i] < 0 and cci[i-1] >= 0) or close[i] < ema50_daily_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above 4-bar high OR trend turns up
-            if i >= 3:
-                four_bar_high = np.max(high[i-3:i+1])
-                if close[i] > four_bar_high or close[i] > ema20_12h_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: CCI crosses above zero OR daily trend turns up
+            if (cci[i] > 0 and cci[i-1] <= 0) or close[i] > ema50_daily_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
