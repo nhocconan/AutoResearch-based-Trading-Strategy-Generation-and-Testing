@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_Trend_Scalper
-# Hypothesis: Weekly pivot levels act as strong support/resistance. Price tends to trend away from
-# weekly pivot (PP) with momentum. In bull markets, price stays above PP; in bear markets, below PP.
-# We go long when price crosses above weekly PP with bullish momentum (close > open) and short
-# when price crosses below weekly PP with bearish momentum (close < open). Uses 6h timeframe to
-# reduce noise and frequency. Volatility filter ensures trades only in sufficient volatility.
+# 12h_1w_1d_Pivot_R1_S1_Breakout_VolumeFilter
+# Hypothesis: Weekly and daily pivot levels (R1/S1) act as strong support/resistance in BTC/ETH.
+# Breakouts with volume confirmation capture sustained moves in both bull and bear markets.
+# Using 12h timeframe reduces trade frequency; weekly trend filter avoids counter-trend trades.
 
-name = "6h_WeeklyPivot_Trend_Scalper"
-timeframe = "6h"
+name = "12h_1w_1d_Pivot_R1_S1_Breakout_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,71 +20,74 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
+    # Get weekly and daily data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1w) < 1 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week)
-    wh = df_1w['high'].values
-    wl = df_1w['low'].values
-    wc = df_1w['close'].values
+    # Weekly trend filter: price above/below weekly VWAP
+    # VWAP = sum(price * volume) / sum(volume)
+    vwap_num = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3 * df_1w['volume']
+    vwap_den = df_1w['volume']
+    weekly_vwap = (vwap_num.cumsum() / vwap_den.cumsum()).values
+    weekly_vwap_aligned = align_htf_to_ltf(prices, df_1w, weekly_vwap)
     
-    # Weekly pivot: PP = (H + L + C) / 3
-    pp = (wh + wl + wc) / 3
+    # Daily pivot and Camarilla levels (R1/S1)
+    ph = df_1d['high'].values
+    pl = df_1d['low'].values
+    pc = df_1d['close'].values
     
-    # Align weekly PP to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    # Pivot point
+    p = (ph + pl + pc) / 3
+    # Camarilla R1 and S1
+    r1 = p + (ph - pl) * 1.1 / 12
+    s1 = p - (ph - pl) * 1.1 / 12
     
-    # Momentum filter: bullish/bearish candle
-    bullish = close > open_price
-    bearish = close < open_price
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volatility filter: ATR > 0.5 * ATR(50)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr > (atr_ma50 * 0.5)
+    # Volume filter: volume > 1.3x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma20 * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)  # Ensure ATR and momentum are ready
+    start_idx = max(30, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(volatility_filter[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(weekly_vwap_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price crosses above weekly PP with bullish candle + volatility
-            if close[i] > pp_aligned[i] and close[i-1] <= pp_aligned[i-1] and bullish[i] and volatility_filter[i]:
+            # Long: price above weekly VWAP (uptrend) + breaks above R1 + volume
+            if close[i] > weekly_vwap_aligned[i] and close[i] > r1_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below weekly PP with bearish candle + volatility
-            elif close[i] < pp_aligned[i] and close[i-1] >= pp_aligned[i-1] and bearish[i] and volatility_filter[i]:
+            # Short: price below weekly VWAP (downtrend) + breaks below S1 + volume
+            elif close[i] < weekly_vwap_aligned[i] and close[i] < s1_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses back below weekly PP
-            if close[i] < pp_aligned[i] and close[i-1] >= pp_aligned[i-1]:
+            # Long: exit if price breaks below S1 (reversal) or falls below weekly VWAP
+            if close[i] < s1_aligned[i] or close[i] < weekly_vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses back above weekly PP
-            if close[i] > pp_aligned[i] and close[i-1] <= pp_aligned[i-1]:
+            # Short: exit if price breaks above R1 (reversal) or rises above weekly VWAP
+            if close[i] > r1_aligned[i] or close[i] > weekly_vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
