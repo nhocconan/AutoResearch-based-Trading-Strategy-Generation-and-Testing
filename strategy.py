@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_R3S3_Reversal_Volume_Confirmation_v1"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R3S3_Breakout_Volume_TrendFilter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
@@ -17,7 +17,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d: Calculate Daily Pivot Points (Standard) ===
+    # === 1d: Calculate Camarilla pivot points ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -26,32 +26,23 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     # Range = H - L
     range_1d = high_1d - low_1d
-    # R3 = P + 2*(H - L), S3 = P - 2*(H - L) [Standard formula]
-    r3_1d = pivot_1d + 2 * range_1d
-    s3_1d = pivot_1d - 2 * range_1d
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    r3_1d = close_1d + range_1d * 1.1 / 2.0
+    s3_1d = close_1d - range_1d * 1.1 / 2.0
     
-    # Align Pivot levels
+    # Align Camarilla levels
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # === 6h: Indicators ===
+    # === 4h: Indicators ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI(14) for overbought/oversold
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain = np.concatenate([[0], gain])
-    loss = np.concatenate([[0], loss])
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # EMA34 for trend filter
+    close_s = pd.Series(close)
+    ema34 = close_s.ewm(span=34, min_periods=34, adjust=False).mean().values
     
     # ATR(14) for stop loss
     tr1 = np.abs(high[1:] - low[1:])
@@ -65,55 +56,55 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 30  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Get aligned values
         r3 = r3_1d_aligned[i]
         s3 = s3_1d_aligned[i]
-        current_rsi = rsi[i]
+        current_ema34 = ema34[i]
         current_atr = atr[i]
         current_close = close[i]
         current_volume = volume[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r3) or np.isnan(s3) or np.isnan(current_rsi) or np.isnan(current_atr)):
+        if (np.isnan(r3) or np.isnan(s3) or np.isnan(current_ema34) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.3x 20-period 6h average volume
+        # === Volume condition: current volume > 1.5x 20-period 4h average volume ===
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            vol_condition = current_volume > 1.3 * vol_ma
+            vol_condition = current_volume > 1.5 * vol_ma
         else:
             vol_condition = False
         
         if position == 0:
-            # Long reversal: price touches/bounces off S3 with RSI oversold + volume
-            if current_close <= s3 and current_rsi < 30 and vol_condition:
+            # Long conditions: break above R3 with volume AND above EMA34 (uptrend)
+            if current_close > r3 and vol_condition and current_close > current_ema34:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short reversal: price touches/rejects at R3 with RSI overbought + volume
-            elif current_close >= r3 and current_rsi > 70 and vol_condition:
+            # Short conditions: break below S3 with volume AND below EMA34 (downtrend)
+            elif current_close < s3 and vol_condition and current_close < current_ema34:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price reaches R3 OR stop loss OR RSI overbought
-            if current_close >= r3 or current_close < entry_price - 2.0 * current_atr or current_rsi > 70:
+            # Long exit: price fails to hold above R3 OR stop loss
+            if current_close <= r3 or current_close < entry_price - 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches S3 OR stop loss OR RSI oversold
-            if current_close <= s3 or current_close > entry_price + 2.0 * current_atr or current_rsi < 30:
+            # Short exit: price fails to hold below S3 OR stop loss
+            if current_close >= s3 or current_close > entry_price + 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
