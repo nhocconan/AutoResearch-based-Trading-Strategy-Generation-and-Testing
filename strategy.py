@@ -3,48 +3,47 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h Williams %R mean reversion with daily volume confirmation and trend filter.
+# Williams %R < -80 = oversold (long), > -20 = overbought (short).
+# Uses 1d EMA50 as trend filter to avoid counter-trend trades.
+# Volume > 1.5x 20-period average confirms momentum.
+# Designed for fewer trades (<40/year) to avoid fee drag, works in bull/bear via trend filter.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (1w timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA for trend (21-period EMA)
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Load daily data for price action and volume
+    # Load daily data for Williams %R, volume, and trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR for volatility filter
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    high_low[0] = high_1d[0] - low_1d[0]
-    high_close[0] = np.abs(high_1d[0] - close_1d[0])
-    low_close[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Williams %R (14-period)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Daily volume average for confirmation
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,30 +53,30 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above weekly EMA with volume confirmation and sufficient volatility
-            if (price > ema_21_1w_aligned[i] and 
-                vol > 1.5 * vol_ma_1d_aligned[i] and 
-                atr_1d_aligned[i] > 0):
+            # Long: oversold + above EMA50 + volume confirmation
+            if (williams_r_aligned[i] < -80 and 
+                price > ema_50_1d_aligned[i] and 
+                vol > 1.5 * vol_ma_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly EMA with volume confirmation and sufficient volatility
-            elif (price < ema_21_1w_aligned[i] and 
-                  vol > 1.5 * vol_ma_1d_aligned[i] and 
-                  atr_1d_aligned[i] > 0):
+            # Short: overbought + below EMA50 + volume confirmation
+            elif (williams_r_aligned[i] > -20 and 
+                  price < ema_50_1d_aligned[i] and 
+                  vol > 1.5 * vol_ma_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly EMA or volume drops significantly
-            if price < ema_21_1w_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
+            # Long exit: Williams %R crosses above -50 or trend changes
+            if williams_r_aligned[i] > -50 or price < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly EMA or volume drops significantly
-            if price > ema_21_1w_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
+            # Short exit: Williams %R crosses below -50 or trend changes
+            if williams_r_aligned[i] < -50 or price > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyEMA_VolumeSurge"
-timeframe = "6h"
+name = "12h_WilliamsR_MeanReversion_TrendFilter_V1"
+timeframe = "12h"
 leverage = 1.0
