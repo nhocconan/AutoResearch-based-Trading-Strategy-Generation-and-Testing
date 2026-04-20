@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_VolumeTrend_Filter
-# Hypothesis: Donchian channel breakouts with volume confirmation and trend filter capture strong momentum moves.
-# Works in bull markets by catching breakouts to new highs and in bear markets by catching breakdowns to new lows.
-# Volume confirmation ensures institutional participation, while 4h EMA20 filter avoids counter-trend trades.
-# Designed for 4h timeframe to balance trade frequency and signal quality, targeting 20-40 trades/year.
+# 1d_Touchstone_Signal
+# Hypothesis: Combines 1-week Donchian breakout with 1-day Bollinger mean-reversion within the weekly range.
+# Uses price touching weekly Bollinger bands as reversal signals when price is near weekly extremes.
+# Works in both bull/bear markets by fading extremes in ranging markets and catching breakouts in trending markets.
+# Low trade frequency (<25/year) minimizes fee drag while capturing high-probability moves.
 
-name = "4h_Donchian_Breakout_VolumeTrend_Filter"
-timeframe = "4h"
+name = "1d_Touchstone_Signal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,56 +23,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA20 for trend filter
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Weekly Donchian channels (20-period)
+    wh = df_1w['high'].values
+    wl = df_1w['low'].values
+    wc = df_1w['close'].values
     
-    # Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly Donchian high/low
+    wh_max = pd.Series(wh).rolling(window=20, min_periods=20).max().values
+    wl_min = pd.Series(wl).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Align weekly Donchian levels to daily timeframe
+    wh_max_aligned = align_htf_to_ltf(prices, df_1w, wh_max)
+    wl_min_aligned = align_htf_to_ltf(prices, df_1w, wl_min)
+    
+    # Daily Bollinger Bands (20-period, 2 std)
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma20 + (2 * std20)
+    lower_bb = ma20 - (2 * std20)
+    
+    # Volume filter: volume > 1.3x 20-day average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma20 * 1.5)
+    volume_filter = volume > (vol_ma20 * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for Donchian channel to be ready
+    start_idx = max(50, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema_20_1d_aligned[i])):
+        if (np.isnan(wh_max_aligned[i]) or np.isnan(wl_min_aligned[i]) or
+            np.isnan(ma20[i]) or np.isnan(std20[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume + uptrend (price > 1d EMA20)
-            if close[i] > high_20[i] and volume_filter[i] and close[i] > ema_20_1d_aligned[i]:
+            # Long: price touches lower Bollinger Band AND above weekly low (support)
+            if close[i] <= lower_bb[i] and close[i] > wl_min_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + volume + downtrend (price < 1d EMA20)
-            elif close[i] < low_20[i] and volume_filter[i] and close[i] < ema_20_1d_aligned[i]:
+            # Short: price touches upper Bollinger Band AND below weekly high (resistance)
+            elif close[i] >= upper_bb[i] and close[i] < wh_max_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below Donchian low (reversal)
-            if close[i] < low_20[i]:
+            # Long: exit if price touches upper Bollinger Band OR breaks below weekly low
+            if close[i] >= upper_bb[i] or close[i] <= wl_min_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above Donchian high (reversal)
-            if close[i] > high_20[i]:
+            # Short: exit if price touches lower Bollinger Band OR breaks above weekly high
+            if close[i] <= lower_bb[i] or close[i] >= wh_max_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
