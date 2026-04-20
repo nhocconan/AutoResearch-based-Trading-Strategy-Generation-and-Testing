@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 12h_1d_Pivot_R2S2_MomentumBreakout
-# Hypothesis: Trade breakouts from 1d Camarilla R2/S2 levels on 12h timeframe with volume confirmation.
-# R2/S2 levels represent stronger intraday support/resistance than R1/S1, reducing false breakouts.
-# Uses volume surge (>2x 20-period average) to confirm institutional participation.
-# Works in bull markets (breakouts continue) and bear markets (mean reversion from extreme levels).
+# 6h_1d_WeeklyPivot_TrendFollowing
+# Hypothesis: Use 1d weekly pivot points (calculated from prior week's OHLC) to identify trend direction on 6h timeframe.
+# In bull markets: price above weekly pivot = long bias, buy pullbacks to support.
+# In bear markets: price below weekly pivot = short bias, sell rallies to resistance.
+# Uses volume confirmation to filter breakouts and avoid false signals.
+# Weekly pivots are more significant than daily pivots as they reflect multi-day structure.
 # Target: 50-150 total trades over 4 years (12-37/year) with discrete position sizing to minimize fee drag.
 
-name = "12h_1d_Pivot_R2S2_MomentumBreakout"
-timeframe = "12h"
+name = "6h_1d_WeeklyPivot_TrendFollowing"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,25 +27,38 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 1d pivot and Camarilla R2/S2 levels
+    # Calculate weekly pivot points from 1d data
+    # Group by week (Monday to Friday) and calculate pivot from weekly OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Create DataFrame for weekly grouping
+    df_weekly = pd.DataFrame({
+        'high': high_1d,
+        'low': low_1d,
+        'close': close_1d
+    }, index=pd.to_datetime(df_1d.index))
     
-    # Camarilla R2 and S2 levels (stronger intraday support/resistance)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
+    # Resample to weekly (Monday start)
+    weekly = df_weekly.resample('W-MON').agg({
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    })
     
-    # Align 1d levels to 12h timeframe
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    # Calculate weekly pivot: (H + L + C) / 3
+    weekly_pivot = (weekly['high'] + weekly['low'] + weekly['close']) / 3
+    
+    # Forward fill weekly pivot to daily frequency
+    weekly_pivot_daily = weekly_pivot.reindex(df_1d.index, method='ffill')
+    weekly_pivot_values = weekly_pivot_daily.values
+    
+    # Align weekly pivot to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot_values)
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,34 +70,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(close[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(volume_ma[i]) or 
+            np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above R2 with volume surge
-            if (close[i] > r2_aligned[i] * 1.003 and 
-                volume[i] > 2.0 * volume_ma[i]):
+            # Long: price above weekly pivot with volume surge
+            if (close[i] > pivot_aligned[i] * 1.002 and 
+                volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below S2 with volume surge
-            elif (close[i] < s2_aligned[i] * 0.997 and 
-                  volume[i] > 2.0 * volume_ma[i]):
+            # Short: price below weekly pivot with volume surge
+            elif (close[i] < pivot_aligned[i] * 0.998 and 
+                  volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below S2
-            if close[i] < s2_aligned[i] * 0.997:
+            # Long exit: price crosses below weekly pivot
+            if close[i] < pivot_aligned[i] * 0.998:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above R2
-            if close[i] > r2_aligned[i] * 1.003:
+            # Short exit: price crosses above weekly pivot
+            if close[i] > pivot_aligned[i] * 1.002:
                 signals[i] = 0.0
                 position = 0
             else:
