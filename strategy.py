@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_Pivot_Breakout_Volume_Trend
-# Hypothesis: Daily Camarilla pivot levels (R1/S1) act as key support/resistance on 12h timeframe.
-# Breakouts above R1 or below S1 with volume confirmation and daily trend filter capture momentum.
-# Daily trend uses 1d EMA34 to filter trades: only long when price > daily EMA34, short when price < daily EMA34.
-# This reduces false breakouts and works in both bull and bear markets by aligning with higher timeframe trend.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+# 4h_Donchian_RSI_Strategy
+# Hypothesis: Donchian channel breakouts with RSI momentum filter capture trends while avoiding false breakouts.
+# RSI > 60 for long entries, RSI < 40 for short entries ensures momentum alignment.
+# Works in both bull and bear markets by capturing momentum shifts. Low trade frequency minimizes fee drag.
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_Donchian_RSI_Strategy"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,67 +22,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Get 4h data for calculations
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels (20-period) on 4h data
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
+    donchian_high = np.full_like(high_4h, np.nan)
+    donchian_low = np.full_like(high_4h, np.nan)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    for i in range(len(high_4h)):
+        if i >= 19:  # 20-period lookback
+            donchian_high[i] = np.max(high_4h[i-19:i+1])
+            donchian_low[i] = np.min(low_4h[i-19:i+1])
     
-    # Align 1d indicators to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align Donchian levels to LTF
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Volume confirmation: volume > 1.5x 20-period average on 12h
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma20 * 1.5)
+    # Calculate RSI (14-period) on close prices
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    
+    for i in range(len(close)):
+        if i >= 13:  # 14-period average
+            avg_gain[i] = np.mean(gain[i-13:i+1])
+            avg_loss[i] = np.mean(loss[i-13:i+1])
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure EMA34 and volume MA are calculated
+    start_idx = max(20, 14)  # Ensure Donchian and RSI are calculated
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + price > daily EMA34 + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema_34_aligned[i] and volume_filter[i]:
+            # Long: price breaks above Donchian high + RSI > 60 (bullish momentum)
+            if close[i] > donchian_high_aligned[i] and rsi[i] > 60:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + price < daily EMA34 + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_aligned[i] and volume_filter[i]:
+            # Short: price breaks below Donchian low + RSI < 40 (bearish momentum)
+            elif close[i] < donchian_low_aligned[i] and rsi[i] < 40:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 or price < daily EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
+            # Long: exit if price breaks below Donchian low or RSI < 50 (momentum fade)
+            if close[i] < donchian_low_aligned[i] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 or price > daily EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
+            # Short: exit if price breaks above Donchian high or RSI > 50 (momentum fade)
+            if close[i] > donchian_high_aligned[i] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
