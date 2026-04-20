@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_Volume_Trend_Filter
-Hypothesis: Trade 12h Donchian breakouts with volume confirmation and daily trend filter.
-Long when price breaks above 20-period upper band + volume surge + daily uptrend.
-Short when price breaks below 20-period lower band + volume surge + daily downtrend.
-Exit when price returns to midpoint of the Donchian channel.
-This captures strong trends while filtering weak breakouts with volume and trend alignment.
-Works in bull/bear: daily trend filter prevents counter-trend trades, volume confirms breakout strength.
-Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+4h_1d_VWAP_Trend_Signal
+Hypothesis: Trade VWAP deviation from 1-day VWAP with 4h VWAP trend filter. 
+Long when price > 1d VWAP and 4h VWAP rising; short when price < 1d VWAP and 4h VWAP falling.
+VWAP acts as a dynamic mean and trend filter, working in both bull (buy dips) and bear (sell rallies).
+Target: 80-150 total trades over 4 years with position size 0.25.
+Uses VWAP for institutional alignment and mean reversion with trend filter to avoid chop.
 """
 
-name = "12h_Donchian_Breakout_Volume_Trend_Filter"
-timeframe = "12h"
+name = "4h_1d_VWAP_Trend_Signal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,9 +21,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Get daily data ONCE before loop
@@ -33,68 +31,75 @@ def generate_signals(prices):
     if len(df_daily) < 10:
         return np.zeros(n)
     
-    # Calculate daily EMA20 for trend filter
-    close_daily = df_daily['close'].values
-    ema20_daily = np.full_like(close_daily, np.nan)
-    if len(close_daily) >= 20:
-        multiplier = 2.0 / (20 + 1)
-        ema20_daily[19] = np.mean(close_daily[:20])
-        for i in range(20, len(close_daily)):
-            ema20_daily[i] = multiplier * close_daily[i] + (1 - multiplier) * ema20_daily[i-1]
-    ema20_daily_aligned = align_htf_to_ltf(prices, df_daily, ema20_daily)
+    # Calculate daily VWAP (Volume Weighted Average Price)
+    typical_price_daily = (df_daily['high'].values + df_daily['low'].values + df_daily['close'].values) / 3.0
+    vol_daily = df_daily['volume'].values
     
-    # Calculate 12-period Donchian channels
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
-    middle_band = np.full(n, np.nan)
+    # Cumulative VWAP for daily
+    cum_vol_price_daily = np.cumsum(typical_price_daily * vol_daily)
+    cum_vol_daily = np.cumsum(vol_daily)
+    vwap_daily = np.divide(cum_vol_price_daily, cum_vol_daily, out=np.full_like(cum_vol_price_daily, np.nan), where=cum_vol_daily!=0)
+    vwap_daily_aligned = align_htf_to_ltf(prices, df_daily, vwap_daily)
     
-    for i in range(19, n):
-        upper_band[i] = np.max(high[i-19:i+1])
-        lower_band[i] = np.min(low[i-19:i+1])
-        middle_band[i] = (upper_band[i] + lower_band[i]) / 2.0
+    # Calculate 4h VWAP for trend filter
+    typical_price = (high + low + close) / 3.0
+    vol_price = typical_price * volume
     
-    # Calculate 20-period volume average for volume spike detection
-    vol_ma = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
+    # Rolling 20-period VWAP for 4h trend (enough lookback for trend)
+    window = 20
+    cum_vol_price = np.zeros(n)
+    cum_vol = np.zeros(n)
+    vwap_4h = np.full(n, np.nan)
+    
+    for i in range(n):
+        if i == 0:
+            cum_vol_price[i] = vol_price[i]
+            cum_vol[i] = volume[i]
+        else:
+            cum_vol_price[i] = cum_vol_price[i-1] + vol_price[i]
+            cum_vol[i] = cum_vol[i-1] + volume[i]
+        
+        # Maintain rolling window
+        if i >= window:
+            cum_vol_price[i] -= vol_price[i-window]
+            cum_vol[i] -= volume[i-window]
+        
+        if cum_vol[i] > 0:
+            vwap_4h[i] = cum_vol_price[i] / cum_vol[i]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure indicators are ready
+    start_idx = max(20, 30)  # Ensure VWAP calculations are stable
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(middle_band[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema20_daily_aligned[i]) or np.isnan(close[i]) or 
-            np.isnan(volume[i])):
+        if (np.isnan(vwap_4h[i]) or np.isnan(vwap_daily_aligned[i]) or 
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        volume_surge = volume[i] > 1.5 * vol_ma[i]  # Volume 50% above average
-        
         if position == 0:
-            # Long: break above upper band + volume surge + daily uptrend
-            if close[i] > upper_band[i] and volume_surge and close[i] > ema20_daily_aligned[i]:
+            # Long: price above daily VWAP AND 4h VWAP rising
+            if close[i] > vwap_daily_aligned[i] and vwap_4h[i] > vwap_4h[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band + volume surge + daily downtrend
-            elif close[i] < lower_band[i] and volume_surge and close[i] < ema20_daily_aligned[i]:
+            # Short: price below daily VWAP AND 4h VWAP falling
+            elif close[i] < vwap_daily_aligned[i] and vwap_4h[i] < vwap_4h[i-1]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle band
-            if close[i] < middle_band[i]:
+            # Long exit: price below daily VWAP OR 4h VWAP falls
+            if close[i] < vwap_daily_aligned[i] or vwap_4h[i] < vwap_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle band
-            if close[i] > middle_band[i]:
+            # Short exit: price above daily VWAP OR 4h VWAP rises
+            if close[i] > vwap_daily_aligned[i] or vwap_4h[i] > vwap_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
