@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d HTF data once
+    # Load 1d HTF data once for pivot levels and volatility
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate daily pivot levels
+    # Calculate daily pivot levels (standard formula)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -44,9 +44,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.8x 30-period average (tightened)
+    # Volume filter: current volume > 1.5x 30-period average
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume / np.where(vol_ma_30 == 0, 1, vol_ma_30) > 1.8
+    vol_filter = volume / np.where(vol_ma_30 == 0, 1, vol_ma_30) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -100,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_PivotMeanReversion_VolumeFilter_v2"
+name = "12h_1d_PivotMeanReversion_VolumeFilter_v1"
 timeframe = "12h"
 leverage = 1.0
