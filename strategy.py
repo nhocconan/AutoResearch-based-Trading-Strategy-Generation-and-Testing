@@ -3,83 +3,80 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian Breakout with 12h Volume Confirmation and 1d Trend Filter
-# - Long when price breaks above 6h Donchian Upper (20-period) + 12h volume > 12h VWAP-volume ratio + 1d close > 1d EMA50
-# - Short when price breaks below 6h Donchian Lower (20-period) + 12h volume > 12h VWAP-volume ratio + 1d close < 1d EMA50
-# - Uses actual breakouts with volume confirmation to filter false signals
-# - Trend filter from 1d EMA50 ensures alignment with higher timeframe trend
-# - Designed for 6h timeframe with selective entries to avoid overtrading
-# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
+# Hypothesis: 4h Williams %R + 1d VWAP Trend Filter
+# - Williams %R (14) on 4h for overbought/oversold signals
+# - Long when Williams %R < -80 (oversold) and price > 1d VWAP (uptrend bias)
+# - Short when Williams %R > -20 (overbought) and price < 1d VWAP (downtrend bias)
+# - Williams %R captures short-term reversals; daily VWAP filters for institutional trend
+# - Designed for 4h timeframe with selective entries to avoid overtrading
+# - Target: 20-50 trades per year per symbol (80-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h and 1d data for volume and trend filters
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 12h VWAP and volume ratio
-    typical_price_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    vwap_12h = (typical_price_12h * df_12h['volume']).cumsum() / df_12h['volume'].cumsum()
-    vwap_12h_array = vwap_12h.values
-    volume_ratio_12h = df_12h['volume'] / vwap_12h_array
-    volume_ratio_12h_array = volume_ratio_12h.values
-    
-    # Calculate 1d EMA50
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    volume_1d = df_1d['volume'].values
     
-    # Align 12h volume ratio and 1d EMA50 to 6h timeframe
-    volume_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ratio_12h_array)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate VWAP on 1d timeframe (typical price * volume cumulative)
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    vwap_numerator = np.cumsum(typical_price * volume_1d)
+    vwap_denominator = np.cumsum(volume_1d)
+    vwap_1d = vwap_numerator / vwap_denominator
     
-    # Calculate 6h Donchian channels (20-period)
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Align 1d VWAP to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    donchian_upper = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R (14) on 4h timeframe
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    
+    highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_4h) / (highest_high_14 - lowest_low_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after Donchian and EMA warmup
+    for i in range(30, n):  # Start after Williams %R warmup
         # Skip if NaN in indicators
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
-           np.isnan(volume_ratio_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(williams_r[i]) or np.isnan(vwap_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
-        vol_ratio = volume_ratio_12h_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        price = close_4h[i]
+        wr = williams_r[i]
+        vwap = vwap_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above Donchian upper + volume confirmation + uptrend
-            if price > donchian_upper[i] and vol_ratio > 1.5 and close_6h[i] > ema_trend:
+            # Long entry: Williams %R oversold (< -80) + price > VWAP (uptrend)
+            if wr < -80 and price > vwap:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian lower + volume confirmation + downtrend
-            elif price < donchian_lower[i] and vol_ratio > 1.5 and close_6h[i] < ema_trend:
+            # Short entry: Williams %R overbought (> -20) + price < VWAP (downtrend)
+            elif wr > -20 and price < vwap:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian lower or trend turns bearish
-            if price < donchian_lower[i] or close_6h[i] < ema_trend:
+            # Long exit: Williams %R rises above -50 or price falls below VWAP
+            if wr > -50 or price < vwap:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian upper or trend turns bullish
-            if price > donchian_upper[i] or close_6h[i] > ema_trend:
+            # Short exit: Williams %R falls below -50 or price rises above VWAP
+            if wr < -50 or price > vwap:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_Breakout_Volume_TrendFilter"
-timeframe = "6h"
+name = "4h_WilliamsR_1dVWAP_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
