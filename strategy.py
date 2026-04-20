@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_VolumeTrend_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R3S3_Breakout_Volume_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,17 +22,19 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels (based on previous day)
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    r3_1d = close_1d + range_1d * 1.1 / 2.0
+    s3_1d = close_1d - range_1d * 1.1 / 2.0
     
-    # Align levels
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align Camarilla levels
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # === 12h: Indicators ===
+    # === 4h: Indicators ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -58,51 +60,51 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Get aligned values
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
+        r3 = r3_1d_aligned[i]
+        s3 = s3_1d_aligned[i]
         current_ema34 = ema34[i]
         current_atr = atr[i]
         current_close = close[i]
         current_volume = volume[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1) or np.isnan(s1) or np.isnan(current_ema34) or np.isnan(current_atr)):
+        if (np.isnan(r3) or np.isnan(s3) or np.isnan(current_ema34) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.5x 24-period 12h average volume ===
-        if i >= 24:
-            vol_ma = np.mean(volume[i-24:i])
+        # === Volume condition: current volume > 1.5x 20-period 4h average volume ===
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
             vol_condition = current_volume > 1.5 * vol_ma
         else:
             vol_condition = False
         
         if position == 0:
-            # Long conditions: break above R1 with volume AND above EMA34 (uptrend)
-            if current_close > r1 and vol_condition and current_close > current_ema34:
+            # Long conditions: break above R3 with volume AND above EMA34 (uptrend)
+            if current_close > r3 and vol_condition and current_close > current_ema34:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short conditions: break below S1 with volume AND below EMA34 (downtrend)
-            elif current_close < s1 and vol_condition and current_close < current_ema34:
+            # Short conditions: break below S3 with volume AND below EMA34 (downtrend)
+            elif current_close < s3 and vol_condition and current_close < current_ema34:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price fails to hold above R1 OR stop loss
-            if current_close <= r1 or current_close < entry_price - 2.5 * current_atr:
+            # Long exit: price fails to hold above R3 OR stop loss
+            if current_close <= r3 or current_close < entry_price - 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price fails to hold below S1 OR stop loss
-            if current_close >= s1 or current_close > entry_price + 2.5 * current_atr:
+            # Short exit: price fails to hold below S3 OR stop loss
+            if current_close >= s3 or current_close > entry_price + 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
