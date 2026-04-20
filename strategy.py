@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_Volume_Weighted_CCI_Momentum
-Hypothesis: Use 4-hour CCI with volume weighting to detect momentum extremes, filtered by daily trend.
-Long when volume-weighted CCI crosses above -100 and daily trend is up; short when crosses below +100 and daily trend is down.
-Volume weighting reduces false signals in low-liquidity periods. CCI captures cyclical extremes. Daily trend filter ensures alignment with higher timeframe momentum.
+12h_Donchian_Breakout_Volume_Trend_Filter
+Hypothesis: Trade 12h Donchian breakouts with volume confirmation and daily trend filter.
+Long when price breaks above 20-period upper band + volume surge + daily uptrend.
+Short when price breaks below 20-period lower band + volume surge + daily downtrend.
+Exit when price returns to midpoint of the Donchian channel.
+This captures strong trends while filtering weak breakouts with volume and trend alignment.
+Works in bull/bear: daily trend filter prevents counter-trend trades, volume confirms breakout strength.
 Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
-Works in bull/bear: daily filter avoids counter-trend trades, volume-weighted CCI reduces noise.
 """
 
-name = "4h_Volume_Weighted_CCI_Momentum"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_Volume_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,58 +20,43 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
     # Get daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 10:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA20 for trend filter
     close_daily = df_daily['close'].values
-    ema50_daily = np.full_like(close_daily, np.nan)
-    if len(close_daily) >= 50:
-        multiplier = 2.0 / (50 + 1)
-        ema50_daily[49] = np.mean(close_daily[:50])
-        for i in range(50, len(close_daily)):
-            ema50_daily[i] = multiplier * close_daily[i] + (1 - multiplier) * ema50_daily[i-1]
-    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    ema20_daily = np.full_like(close_daily, np.nan)
+    if len(close_daily) >= 20:
+        multiplier = 2.0 / (20 + 1)
+        ema20_daily[19] = np.mean(close_daily[:20])
+        for i in range(20, len(close_daily)):
+            ema20_daily[i] = multiplier * close_daily[i] + (1 - multiplier) * ema20_daily[i-1]
+    ema20_daily_aligned = align_htf_to_ltf(prices, df_daily, ema20_daily)
     
-    # Calculate Volume-Weighted CCI (20-period)
-    typical_price = (high + low + close) / 3.0
-    vw_tp = typical_price * volume
+    # Calculate 12-period Donchian channels
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    middle_band = np.full(n, np.nan)
     
-    # Sum of volume-weighted typical price and volume for VWAP
-    sum_vw_tp = np.zeros(n)
-    sum_volume = np.zeros(n)
+    for i in range(19, n):
+        upper_band[i] = np.max(high[i-19:i+1])
+        lower_band[i] = np.min(low[i-19:i+1])
+        middle_band[i] = (upper_band[i] + lower_band[i]) / 2.0
     
-    for i in range(n):
-        start_idx = max(0, i - 19)  # 20-period window
-        sum_vw_tp[i] = np.sum(vw_tp[start_idx:i+1])
-        sum_volume[i] = np.sum(volume[start_idx:i+1])
-    
-    vwap = np.divide(sum_vw_tp, sum_volume, out=np.full_like(sum_vw_tp, np.nan), where=sum_volume!=0)
-    
-    # Mean deviation
-    mean_dev = np.zeros(n)
-    for i in range(n):
-        start_idx = max(0, i - 19)
-        if sum_volume[i] > 0:
-            vwap_val = vwap[i]
-            deviations = np.abs(typical_price[start_idx:i+1] - vwap_val)
-            weighted_dev = deviations * volume[start_idx:i+1]
-            mean_dev[i] = np.sum(weighted_dev) / sum_volume[i]
-        else:
-            mean_dev[i] = 0
-    
-    # CCI calculation
-    cci = np.divide((typical_price - vwap), (0.015 * mean_dev), out=np.full_like(typical_price, np.nan), where=(mean_dev!=0))
+    # Calculate 20-period volume average for volume spike detection
+    vol_ma = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,32 +65,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(cci[i]) or np.isnan(ema50_daily_aligned[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(middle_band[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema20_daily_aligned[i]) or np.isnan(close[i]) or 
+            np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
+        volume_surge = volume[i] > 1.5 * vol_ma[i]  # Volume 50% above average
+        
         if position == 0:
-            # Long: CCI crosses above -100 + daily uptrend
-            if cci[i] > -100 and cci[i-1] <= -100 and close[i] > ema50_daily_aligned[i]:
+            # Long: break above upper band + volume surge + daily uptrend
+            if close[i] > upper_band[i] and volume_surge and close[i] > ema20_daily_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: CCI crosses below +100 + daily downtrend
-            elif cci[i] < 100 and cci[i-1] >= 100 and close[i] < ema50_daily_aligned[i]:
+            # Short: break below lower band + volume surge + daily downtrend
+            elif close[i] < lower_band[i] and volume_surge and close[i] < ema20_daily_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: CCI crosses below +100 OR daily trend turns down
-            if cci[i] < 100 and cci[i-1] >= 100 or close[i] < ema50_daily_aligned[i]:
+            # Long exit: price returns to middle band
+            if close[i] < middle_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: CCI crosses above -100 OR daily trend turns up
-            if cci[i] > -100 and cci[i-1] <= -100 or close[i] > ema50_daily_aligned[i]:
+            # Short exit: price returns to middle band
+            if close[i] > middle_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
