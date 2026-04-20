@@ -8,41 +8,39 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Load daily data
+    # Load daily data for trend and volume context
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily ATR for volatility filter
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    high_low[0] = high_1d[0] - low_1d[0]
-    high_close[0] = np.abs(high_1d[0] - close_1d[0])
-    low_close[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 4-hour Donchian channel (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Daily volume for confirmation
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high_1d[i-lookback:i])
+        lowest_low[i] = np.min(low_1d[i-lookback:i])
+    
+    # Daily ATR for volatility filter and position sizing
+    tr = np.maximum(high_1d - low_1d,
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Daily volume moving average for confirmation
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(lookback, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,37 +50,35 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above weekly EMA50 with volume confirmation and sufficient volatility
-            if (price > ema_50_1w_aligned[i] and 
-                vol > 1.5 * vol_ma_1d_aligned[i] and 
-                atr_1d_aligned[i] > 0):
-                signals[i] = 0.30
+            # Long breakout: price above 20-period high with volume confirmation
+            if (price > highest_high[i] and 
+                vol > 1.5 * vol_ma[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price below weekly EMA50 with volume confirmation and sufficient volatility
-            elif (price < ema_50_1w_aligned[i] and 
-                  vol > 1.5 * vol_ma_1d_aligned[i] and 
-                  atr_1d_aligned[i] > 0):
-                signals[i] = -0.30
+            # Short breakdown: price below 20-period low with volume confirmation
+            elif (price < lowest_low[i] and 
+                  vol > 1.5 * vol_ma[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly EMA50 or volatility drops significantly
-            if price < ema_50_1w_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
+            # Long exit: price crosses below 20-period low or volatility drops
+            if price < lowest_low[i] or vol < 0.5 * vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly EMA50 or volatility drops significantly
-            if price > ema_50_1w_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
+            # Short exit: price crosses above 20-period high or volatility drops
+            if price > highest_high[i] or vol < 0.5 * vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_WeeklyEMA50_VolumeFilter_V2"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
