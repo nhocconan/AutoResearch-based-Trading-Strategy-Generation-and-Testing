@@ -3,139 +3,111 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WilliamsAlligator_Trend_Confirm_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R3S3_Breakout_Volume_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d: Williams Alligator (SMMA) ===
+    # === 1d: Calculate Camarilla pivot points ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    median_price_1d = (high_1d + low_1d) / 2.0  # Williams uses median price
     
-    # SMMA (Smoothed Moving Average) calculation
-    # Jaw (13-period, 8-shift)
-    jaw_1d = _smma(median_price_1d, 13, 8)
-    # Teeth (8-period, 5-shift)
-    teeth_1d = _smma(median_price_1d, 8, 5)
-    # Lips (5-period, 3-shift)
-    lips_1d = _smma(median_price_1d, 5, 3)
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    r3_1d = close_1d + range_1d * 1.1 / 2.0
+    s3_1d = close_1d - range_1d * 1.1 / 2.0
     
-    # Align Alligator lines
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    # Align Camarilla levels
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # === 6h: Indicators ===
+    # === 12h: Indicators ===
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: current volume > 1.3x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    # EMA34 for trend filter
+    close_s = pd.Series(close)
+    ema34 = close_s.ewm(span=34, min_periods=34, adjust=False).mean().values
+    
+    # ATR(14) for stop loss
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 60  # Need enough data for all indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Get aligned values
-        jaw = jaw_1d_aligned[i]
-        teeth = teeth_1d_aligned[i]
-        lips = lips_1d_aligned[i]
+        r3 = r3_1d_aligned[i]
+        s3 = s3_1d_aligned[i]
+        current_ema34 = ema34[i]
+        current_atr = atr[i]
         current_close = close[i]
         current_volume = volume[i]
-        current_vol_ma = vol_ma20[i]
         
         # Skip if any value is NaN
-        if (np.isnan(jaw) or np.isnan(teeth) or np.isnan(lips) or 
-            np.isnan(current_vol_ma)):
+        if (np.isnan(r3) or np.isnan(s3) or np.isnan(current_ema34) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition
-        vol_condition = current_volume > 1.3 * current_vol_ma
+        # === Volume condition: current volume > 1.5x 20-period 12h average volume ===
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            vol_condition = current_volume > 1.5 * vol_ma
+        else:
+            vol_condition = False
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) + volume
-            if lips > teeth and teeth > jaw and vol_condition:
+            # Long conditions: break above R3 with volume AND above EMA34 (uptrend)
+            if current_close > r3 and vol_condition and current_close > current_ema34:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short: Lips < Teeth < Jaw (bearish alignment) + volume
-            elif lips < teeth and teeth < jaw and vol_condition:
+            # Short conditions: break below S3 with volume AND below EMA34 (downtrend)
+            elif current_close < s3 and vol_condition and current_close < current_ema34:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: Alligator lines cross (lips < teeth) OR stop loss
-            if lips < teeth or current_close < entry_price - 2.0 * _calculate_atr(prices, i):
+            # Long exit: price fails to hold above R3 OR stop loss
+            if current_close <= r3 or current_close < entry_price - 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Alligator lines cross (lips > teeth) OR stop loss
-            if lips > teeth or current_close > entry_price + 2.0 * _calculate_atr(prices, i):
+            # Short exit: price fails to hold below S3 OR stop loss
+            if current_close >= s3 or current_close > entry_price + 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-def _smma(data, period, shift):
-    """Smoothed Moving Average (SMMA) as used in Williams Alligator"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
-    
-    # First value is simple SMA
-    sma = np.mean(data[:period])
-    result = np.full_like(data, np.nan, dtype=float)
-    result[period-1] = sma
-    
-    # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CLOSE) / period
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    
-    # Apply shift (Williams Alligator shifts the lines forward)
-    shifted_result = np.full_like(data, np.nan, dtype=float)
-    if shift < len(data):
-        shifted_result[shift:] = result[:-shift]
-    
-    return shifted_result
-
-def _calculate_atr(prices, idx):
-    """Calculate ATR(14) up to given index"""
-    if idx < 14:
-        return 0.0
-    
-    high = prices['high'].values[:idx+1]
-    low = prices['low'].values[:idx+1]
-    close = prices['close'].values[:idx+1]
-    
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    return atr[-1] if not np.isnan(atr[-1]) else 0.0
