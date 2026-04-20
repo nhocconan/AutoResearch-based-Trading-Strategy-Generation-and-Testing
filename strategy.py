@@ -93,20 +93,20 @@ def generate_signals(prices):
         
         if position == 0:
             # Breakout at R1/S1 with volume confirmation and ADX > 25 (trending)
-            if close_val > r1_val and vol_ratio_val > 2.0 and adx_val > 25:
+            if close_val > r1_val and vol_ratio_val > 2.5 and adx_val > 25:
                 # Break above R1
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            elif close_val < s1_val and vol_ratio_val > 2.0 and adx_val > 25:
+            elif close_val < s1_val and vol_ratio_val > 2.5 and adx_val > 25:
                 # Break below S1
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         
         elif position == 1:
             # Long exit: stop loss or return to S1
-            if close_val <= entry_price - 2.0 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Tighter stop
+            if close_val <= entry_price - 1.5 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Tighter stop
                 # Stop loss hit
                 signals[i] = 0.0
                 position = 0
@@ -115,11 +115,11 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Short exit: stop loss or return to S1
-            if close_val >= entry_price + 2.0 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Tighter stop
+            if close_val >= entry_price + 1.5 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Tighter stop
                 # Stop loss hit
                 signals[i] = 0.0
                 position = 0
@@ -128,6 +128,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
