@@ -3,102 +3,108 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Chandelier_Exit_With_Volume_Spike"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R3S3_Breakout_Volume_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === Weekly: Chandelier Exit components ===
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # === 1d: Calculate Camarilla pivot points ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ATR(22) for weekly (approx 5 months)
-    tr1_w = np.abs(high_w[1:] - low_w[1:])
-    tr2_w = np.abs(high_w[1:] - close_w[:-1])
-    tr3_w = np.abs(low_w[1:] - close_w[:-1])
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    tr_w = np.concatenate([[np.nan], tr_w])
-    atr_w = pd.Series(tr_w).rolling(window=22, min_periods=22).mean().values
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    r3_1d = close_1d + range_1d * 1.1 / 2.0
+    s3_1d = close_1d - range_1d * 1.1 / 2.0
     
-    # 22-period high and low for Chandelier Exit
-    high_max_w = pd.Series(high_w).rolling(window=22, min_periods=22).max().values
-    low_min_w = pd.Series(low_w).rolling(window=22, min_periods=22).min().values
+    # Align Camarilla levels
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Chandelier Exit: Long exit = 22-period high - 3*ATR, Short exit = 22-period low + 3*ATR
-    chandelier_long_exit = high_max_w - 3.0 * atr_w
-    chandelier_short_exit = low_min_w + 3.0 * atr_w
-    
-    # Align Chandelier levels to daily
-    chandelier_long_exit_aligned = align_htf_to_ltf(prices, df_weekly, chandelier_long_exit)
-    chandelier_short_exit_aligned = align_htf_to_ltf(prices, df_weekly, chandelier_short_exit)
-    
-    # === Daily: Price and volume ===
-    close = prices['close'].values
+    # === 12h: Indicators ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume condition: current volume > 2.0x 20-day average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # EMA34 for trend filter
+    close_s = pd.Series(close)
+    ema34 = close_s.ewm(span=34, min_periods=34, adjust=False).mean().values
+    
+    # ATR(14) for stop loss
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 30  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Get aligned values
-        long_exit = chandelier_long_exit_aligned[i]
-        short_exit = chandelier_short_exit_aligned[i]
+        r3 = r3_1d_aligned[i]
+        s3 = s3_1d_aligned[i]
+        current_ema34 = ema34[i]
+        current_atr = atr[i]
         current_close = close[i]
         current_volume = volume[i]
-        current_vol_ma = vol_ma_20[i]
         
         # Skip if any value is NaN
-        if (np.isnan(long_exit) or np.isnan(short_exit) or np.isnan(current_vol_ma)):
+        if (np.isnan(r3) or np.isnan(s3) or np.isnan(current_ema34) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 2.0x 20-day average
-        vol_condition = current_volume > 2.0 * current_vol_ma
+        # === Volume condition: current volume > 1.5x 20-period 12h average volume ===
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            vol_condition = current_volume > 1.5 * vol_ma
+        else:
+            vol_condition = False
         
         if position == 0:
-            # Long: price breaks above Chandelier long exit with volume confirmation
-            if current_close > long_exit and vol_condition:
+            # Long conditions: break above R3 with volume AND above EMA34 (uptrend)
+            if current_close > r3 and vol_condition and current_close > current_ema34:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short: price breaks below Chandelier short exit with volume confirmation
-            elif current_close < short_exit and vol_condition:
+            # Short conditions: break below S3 with volume AND below EMA34 (downtrend)
+            elif current_close < s3 and vol_condition and current_close < current_ema34:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price closes below Chandelier long exit
-            if current_close < long_exit:
+            # Long exit: price fails to hold above R3 OR stop loss
+            if current_close <= r3 or current_close < entry_price - 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above Chandelier short exit
-            if current_close > short_exit:
+            # Short exit: price fails to hold below S3 OR stop loss
+            if current_close >= s3 or current_close > entry_price + 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
