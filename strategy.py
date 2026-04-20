@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1D_Donchian_Breakout_VolumeTrend_Regime
-# Hypothesis: On 4h timeframe, trade Donchian(20) breakouts with volume confirmation and trend filter using 1d ADX.
-# In trending markets (1d ADX > 25), breakouts are more likely to continue; in ranging markets (ADX < 20), avoid breakouts.
-# Uses volume spike (>1.5x 20-period average) to confirm breakout strength.
-# Targets 20-50 trades/year by requiring confluence of breakout, volume, and trend filter.
-# Works in both bull and bear markets by filtering for strong trends only.
+# 12h_1D_Donchian_Breakout_VolumeTrend_Regime
+# Hypothesis: On 12h timeframe, trade Donchian(20) breakouts with volume confirmation and trend regime filter.
+# Uses 1d ADX to confirm trend (ADX > 20) and 1d volume spike for breakout validation.
+# Targets 15-30 trades/year by requiring confluence of price breakout, volume surge, and trend strength.
+# Works in both bull (breakouts continue) and bear (breakouts fail quickly, stopped by ATR) markets.
 
-name = "4h_1D_Donchian_Breakout_VolumeTrend_Regime"
-timeframe = "4h"
+name = "12h_1D_Donchian_Breakout_VolumeTrend_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -66,15 +65,22 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = smooth_wilder(dx, 14)
     
-    # Align ADX to 4h timeframe
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 4h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Donchian channels (20-period) on 12h data
+    def donchian_channels(high, low, period):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(len(high)):
+            if i >= period - 1:
+                upper[i] = np.max(high[i - period + 1:i + 1])
+                lower[i] = np.min(low[i - period + 1:i + 1])
+        return upper, lower
     
-    # Volume average for spike detection
+    donchian_upper, donchian_lower = donchian_channels(high, low, 20)
+    
+    # Calculate volume moving average (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -84,36 +90,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Only trade in trending markets (ADX > 25)
-            if adx_aligned[i] > 25:
-                # Long breakout above Donchian high with volume confirmation
-                if (close[i] > highest_high[i] and 
-                    volume[i] > 1.5 * volume_ma[i]):
+            # Look for breakouts with volume confirmation and trend filter
+            if adx_aligned[i] > 20:  # Trending market
+                # Long breakout above upper band with volume spike
+                if (close[i] > donchian_upper[i] and 
+                    volume[i] > 2.0 * volume_ma[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short breakdown below Donchian low with volume confirmation
-                elif (close[i] < lowest_low[i] and 
-                      volume[i] > 1.5 * volume_ma[i]):
+                # Short breakdown below lower band with volume spike
+                elif (close[i] < donchian_lower[i] and 
+                      volume[i] > 2.0 * volume_ma[i]):
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: reverse when price returns to Donchian low or trend weakens
-            if close[i] < lowest_low[i] or adx_aligned[i] < 20:
+            # Long exit: price crosses below lower Donchian band
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: reverse when price returns to Donchian high or trend weakens
-            if close[i] > highest_high[i] or adx_aligned[i] < 20:
+            # Short exit: price crosses above upper Donchian band
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
