@@ -1,3 +1,9 @@
+# [EXPERIMENT #69031] - 6h_Camarilla_Pivot_R1S1_Breakout_VolumeFilter_v1
+# Hypothesis: Camarilla pivot levels from 1d provide robust support/resistance zones.
+# Breakouts above R1 (bullish) or below S1 (bearish) with volume confirmation capture
+# institutional flow. Works in bull/bear by filtering with 1d EMA50 trend and
+# avoiding chop with BB width ratio > 0.8. Targets 15-35 trades/year.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -8,7 +14,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend and volatility regime
+    # Load 1d data ONCE for Camarilla pivots, trend, volatility, and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -46,7 +52,16 @@ def generate_signals(prices):
     bb_width_ratio = bb_width / np.where(bb_width_ma == 0, 1, bb_width_ma)
     bb_width_ratio_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ratio)
     
-    # Close prices
+    # Camarilla pivot levels from previous 1d OHLC
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), R2 = C + ((H-L) * 1.1/6), R1 = C + ((H-L) * 1.1/12)
+    # S1 = C - ((H-L) * 1.1/12), S2 = C - ((H-L) * 1.1/6), S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+    camarilla_HL = high_1d - low_1d
+    camarilla_R1 = close_1d + camarilla_HL * 1.1 / 12
+    camarilla_S1 = close_1d - camarilla_HL * 1.1 / 12
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    
+    # 6h price data
     close = prices['close'].values
     
     signals = np.zeros(n)
@@ -55,7 +70,8 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if NaN in critical values
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(bb_width_ratio_aligned[i])):
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(bb_width_ratio_aligned[i]) or
+            np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,6 +82,8 @@ def generate_signals(prices):
         atr = atr_14_1d_aligned[i]
         vol_ratio = vol_ratio_1d_aligned[i]
         bb_width_ratio = bb_width_ratio_aligned[i]
+        r1 = camarilla_R1_aligned[i]
+        s1 = camarilla_S1_aligned[i]
         
         # Trend filter: price relative to daily EMA
         trend_up = price > ema_trend
@@ -82,26 +100,26 @@ def generate_signals(prices):
         vol_filter = vol_filter and (vol_ratio > 1.3)
         
         if position == 0:
-            # Enter long in uptrend with volume and regime filter
-            if trend_up and vol_filter and regime_filter:
+            # Enter long when price breaks above R1 with trend, volume, and regime
+            if price > r1 and trend_up and vol_filter and regime_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short in downtrend with volume and regime filter
-            elif trend_down and vol_filter and regime_filter:
+            # Enter short when price breaks below S1 with trend, volume, and regime
+            elif price < s1 and trend_down and vol_filter and regime_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal, volatility spike, or regime breakdown
-            if not trend_up or (atr > 3.5 * atr_ma_20) or (bb_width_ratio < 0.6):
+            # Exit long: trend reversal, volatility spike, or price returns below R1
+            if not trend_up or price < r1 or (atr > 3.5 * atr_ma_20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend reversal, volatility spike, or regime breakdown
-            if not trend_down or (atr > 3.5 * atr_ma_20) or (bb_width_ratio < 0.6):
+            # Exit short: trend reversal, volatility spike, or price returns above S1
+            if not trend_down or price > s1 or (atr > 3.5 * atr_ma_20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_VolumeRegime_Filter_v1"
-timeframe = "1d"
+name = "6h_Camarilla_Pivot_R1S1_Breakout_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
