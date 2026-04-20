@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 6h_1d_WeeklyPivot_TrendFollowing
-# Hypothesis: Use 1d weekly pivot points (calculated from prior week's OHLC) to identify trend direction on 6h timeframe.
-# In bull markets: price above weekly pivot = long bias, buy pullbacks to support.
-# In bear markets: price below weekly pivot = short bias, sell rallies to resistance.
-# Uses volume confirmation to filter breakouts and avoid false signals.
-# Weekly pivots are more significant than daily pivots as they reflect multi-day structure.
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete position sizing to minimize fee drag.
+# 1d_1w_WeeklyPivot_TrendFollowing
+# Hypothesis: Follow the weekly trend using 1w EMA21 as trend filter, and enter on pullbacks to 1d 20-period EMA.
+# In bull markets, price stays above weekly EMA21; in bear markets, stays below. Pullbacks to daily EMA offer high-probability entries.
+# Uses volume confirmation (>1.5x 20-day average) to filter weak moves.
+# Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing to minimize fee drag.
 
-name = "6h_1d_WeeklyPivot_TrendFollowing"
-timeframe = "6h"
+name = "1d_1w_WeeklyPivot_TrendFollowing"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,42 +23,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from 1d data
-    # Group by week (Monday to Friday) and calculate pivot from weekly OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA21 for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Create DataFrame for weekly grouping
-    df_weekly = pd.DataFrame({
-        'high': high_1d,
-        'low': low_1d,
-        'close': close_1d
-    }, index=pd.to_datetime(df_1d.index))
+    # Calculate daily EMA20 for entry trigger
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Resample to weekly (Monday start)
-    weekly = df_weekly.resample('W-MON').agg({
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    })
-    
-    # Calculate weekly pivot: (H + L + C) / 3
-    weekly_pivot = (weekly['high'] + weekly['low'] + weekly['close']) / 3
-    
-    # Forward fill weekly pivot to daily frequency
-    weekly_pivot_daily = weekly_pivot.reindex(df_1d.index, method='ffill')
-    weekly_pivot_values = weekly_pivot_daily.values
-    
-    # Align weekly pivot to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot_values)
-    
-    # Volume average for spike detection (20-period)
+    # Volume average for spike detection (20-day)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -70,34 +46,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(volume_ma[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(ema_20[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above weekly pivot with volume surge
-            if (close[i] > pivot_aligned[i] * 1.002 and 
+            # Long: price above weekly EMA21 and pulling back to daily EMA20 with volume
+            if (close[i] > ema_21_1w_aligned[i] and 
+                close[i] <= ema_20[i] * 1.01 and  # within 1% above EMA20
                 volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly pivot with volume surge
-            elif (close[i] < pivot_aligned[i] * 0.998 and 
+            # Short: price below weekly EMA21 and pulling back to daily EMA20 with volume
+            elif (close[i] < ema_21_1w_aligned[i] and 
+                  close[i] >= ema_20[i] * 0.99 and  # within 1% below EMA20
                   volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly pivot
-            if close[i] < pivot_aligned[i] * 0.998:
+            # Long exit: price crosses below weekly EMA21
+            if close[i] < ema_21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly pivot
-            if close[i] > pivot_aligned[i] * 1.002:
+            # Short exit: price crosses above weekly EMA21
+            if close[i] > ema_21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
