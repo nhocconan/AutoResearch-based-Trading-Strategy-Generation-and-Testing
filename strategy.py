@@ -3,54 +3,61 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and 1d ATR stop
-# - Uses 12h Camarilla pivot levels from 1d high/low/close
-# - Entry: price breaks above R1 or below S1 + volume > 1.8x 20-period average
-# - Stop: 1d ATR(14) * 2 from entry price
-# - Trend filter: price above/below 1d EMA50 for long/short bias
-# - Target: 15-25 trades per year per symbol (60-100 total over 4 years)
-# - Works in bull/bear: breakouts capture momentum, volume filter avoids false signals, ATR stop manages risk
+# Hypothesis: 4h price action relative to 12h VWAP with volume confirmation and ATR stop
+# - Uses 12h VWAP as dynamic equilibrium: price > VWAP suggests bullish bias, < VWAP bearish
+# - Entry: price crosses 12h VWAP with volume > 2x 20-period average (strong conviction)
+# - Exit: price reverts back across 12h VWAP or ATR stop hit (1.5x ATR for tight risk)
+# - VWAP provides mean-reversion edge in ranging markets while capturing trends
+# - High volume filter ensures only significant breaks trigger entries
+# - Target: 25-40 trades per year per symbol (100-160 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla calculation (pivots need daily OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Load 12h data for VWAP calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate typical price and VWAP components
+    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
+    pv_12h = typical_price_12h * volume_12h
     
-    # Calculate Camarilla R1 and S1 (most important levels for breakouts)
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate cumulative VWAP (session-based, reset daily)
+    # Since we don't have session boundaries, use rolling window as approximation
+    # Use 28 periods (2 * 14) to approximate daily VWAP on 12h timeframe
+    cum_pv = np.nancumsum(pv_12h)
+    cum_vol = np.nancumsum(volume_12h)
+    vwap_12h = np.where(cum_vol != 0, cum_pv / cum_vol, typical_price_12h)
     
-    # Align Camarilla levels to 12h timeframe (wait for daily close)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    # Alternative: rolling VWAP approximation for stability
+    # Use 28-period rolling window (~1 day on 12h chart)
+    window = 28
+    pv_sum = pd.Series(pv_12h).rolling(window=window, min_periods=window).sum().values
+    vol_sum = pd.Series(volume_12h).rolling(window=window, min_periods=window).sum().values
+    vwap_12h_roll = np.where(vol_sum != 0, pv_sum / vol_sum, typical_price_12h)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Use rolling VWAP as primary (more stable)
+    vwap_12h = vwap_12h_roll
     
-    # Calculate 1d ATR for stop loss
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Align VWAP to 4h timeframe
+    vwap_12h_4h = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    
+    # Calculate ATR for stop loss (using 12h data)
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h_4h = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # 12h price and volume data
+    # 4h price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -65,9 +72,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(atr_12h[i]) or 
-            np.isnan(vol_ma[i])):
+        if np.isnan(vwap_12h_4h[i]) or np.isnan(atr_12h_4h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,32 +80,31 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
+        vwap = vwap_12h_4h[i]
         
         if position == 0:
-            # Long entry: price breaks above R1 + volume surge + above 1d EMA50
-            if (price > r1_12h[i] and price > r1_12h[i-1] and 
-                vol > 1.8 * vol_ma[i] and price > ema_50_12h[i]):
+            # Long entry: price crosses above VWAP with volume surge
+            if price > vwap and price <= vwap * 1.001 and vol > 2.0 * vol_ma[i]:  # crossed above
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: price breaks below S1 + volume surge + below 1d EMA50
-            elif (price < s1_12h[i] and price < s1_12h[i-1] and 
-                  vol > 1.8 * vol_ma[i] and price < ema_50_12h[i]):
+            # Short entry: price crosses below VWAP with volume surge
+            elif price < vwap and price >= vwap * 0.999 and vol > 2.0 * vol_ma[i]:  # crossed below
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price breaks below S1 OR ATR stop hit (2*ATR)
-            if price < s1_12h[i] or price < entry_price - 2.0 * atr_12h[i]:
+            # Long exit: price crosses back below VWAP OR ATR stop hit (1.5*ATR)
+            if price < vwap or price < entry_price - 1.5 * atr_12h_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 OR ATR stop hit (2*ATR)
-            if price > r1_12h[i] or price > entry_price + 2.0 * atr_12h[i]:
+            # Short exit: price crosses back above VWAP OR ATR stop hit (1.5*ATR)
+            if price > vwap or price > entry_price + 1.5 * atr_12h_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume_ATRStop"
-timeframe = "12h"
+name = "4h_VWAP_Cross_Volume_ATRStop"
+timeframe = "4h"
 leverage = 1.0
