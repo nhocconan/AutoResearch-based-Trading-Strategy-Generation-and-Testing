@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_VolumeFilter
-Hypothesis: Trade daily Camarilla pivot R1/S1 breakouts on 12h timeframe with daily volume confirmation.
-Long when 12h price breaks above daily R1 with volume spike; short when breaks below daily S1 with volume spike.
-Daily Camarilla levels provide strong daily support/resistance. Volume filter ensures institutional participation.
-Works in bull/bear: breaks indicate momentum continuation, volume confirms validity.
-Target: 60-120 total trades over 4 years (15-30/year) with position size 0.25.
+4h_1d_Donchian20_Breakout_VolumeTrend_v1
+Hypothesis: Trade Donchian(20) breakouts on 4h with 1d trend filter and volume confirmation.
+Long when price breaks above 20-period 4h high with volume spike and 1d EMA50 > EMA200.
+Short when price breaks below 20-period 4h low with volume spike and 1d EMA50 < EMA200.
+Uses 1d EMA for trend filter (bull/bear adaptability) and volume spike for institutional confirmation.
+Designed for low trade frequency (~25-50/year) to minimize fee drag. Works in bull/bear via trend filter.
 """
 
-name = "12h_1d_Camarilla_R1S1_Breakout_VolumeFilter"
-timeframe = "12h"
+name = "4h_1d_Donchian20_Breakout_VolumeTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,81 +21,83 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for Camarilla levels and volume confirmation
+    # Get daily data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily volume average for spike detection (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = np.full(len(vol_1d), np.nan)
-    for i in range(len(vol_1d)):
-        if i >= 19:  # 20-period average
-            vol_avg_1d[i] = np.mean(vol_1d[i-19:i+1])
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Calculate 1d EMA50 and EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate daily Camarilla levels for each daily bar
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Align daily EMAs to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Arrays to store daily R1 and S1 levels
-    daily_r1 = np.full_like(daily_close, np.nan)
-    daily_s1 = np.full_like(daily_close, np.nan)
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
     
-    # Calculate for each daily bar (starting from index 1 to avoid look-ahead)
-    for j in range(1, len(daily_close)):
-        range_val = daily_high[j-1] - daily_low[j-1]
-        if range_val > 0:
-            daily_r1[j] = daily_close[j-1] + (range_val * 1.1 / 12)
-            daily_s1[j] = daily_close[j-1] - (range_val * 1.1 / 12)
+    # Vectorized rolling max/min
+    high_max = np.full(n, np.nan)
+    low_min = np.full(n, np.nan)
+    for i in range(20, n):  # min_periods=20
+        high_max[i] = np.max(high_4h[i-19:i+1])
+        low_min[i] = np.min(low_4h[i-19:i+1])
     
-    # Align the daily R1/S1 to 12h timeframe
-    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
+    # Calculate 4h volume average (20-period) for spike detection
+    volume_4h = prices['volume'].values
+    vol_avg_4h = np.full(n, np.nan)
+    for i in range(20, n):  # min_periods=20
+        vol_avg_4h[i] = np.mean(volume_4h[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 10  # Need enough data for daily alignment
-    
-    for i in range(start_idx, n):
+    for i in range(20, n):
+        # Skip if EMA data not available yet
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]):
+            continue
+            
         current_close = prices['close'].iloc[i]
+        current_high = prices['high'].iloc[i]
+        current_low = prices['low'].iloc[i]
         current_volume = prices['volume'].iloc[i]
         
-        # Volume spike: current volume > 1.5x daily average volume
-        vol_spike = (not np.isnan(vol_avg_1d_aligned[i]) and 
-                     current_volume > 1.5 * vol_avg_1d_aligned[i])
+        # Volume spike: current volume > 1.8x 20-period average
+        vol_spike = (not np.isnan(vol_avg_4h[i]) and 
+                     current_volume > 1.8 * vol_avg_4h[i])
         
         if position == 0:
-            # Long: price breaks above daily R1 with volume spike
-            if (not np.isnan(daily_r1_aligned[i]) and 
-                current_close > daily_r1_aligned[i] and vol_spike):
+            # Long: price breaks above 4h Donchian high with volume spike and 1d uptrend
+            if (not np.isnan(high_max[i]) and 
+                current_high > high_max[i] and vol_spike and
+                ema50_1d_aligned[i] > ema200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily S1 with volume spike
-            elif (not np.isnan(daily_s1_aligned[i]) and 
-                  current_close < daily_s1_aligned[i] and vol_spike):
+            # Short: price breaks below 4h Donchian low with volume spike and 1d downtrend
+            elif (not np.isnan(low_min[i]) and 
+                  current_low < low_min[i] and vol_spike and
+                  ema50_1d_aligned[i] < ema200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below daily S1 or volume dries up
-            if ((not np.isnan(daily_s1_aligned[i]) and 
-                 current_close < daily_s1_aligned[i]) or
-                (not np.isnan(vol_avg_1d_aligned[i]) and 
-                 current_volume < 0.5 * vol_avg_1d_aligned[i])):
+            # Long exit: price breaks below 4h Donchian low or trend reverses
+            if ((not np.isnan(low_min[i]) and 
+                 current_low < low_min[i]) or
+                ema50_1d_aligned[i] < ema200_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above daily R1 or volume dries up
-            if ((not np.isnan(daily_r1_aligned[i]) and 
-                 current_close > daily_r1_aligned[i]) or
-                (not np.isnan(vol_avg_1d_aligned[i]) and 
-                 current_volume < 0.5 * vol_avg_1d_aligned[i])):
+            # Short exit: price breaks above 4h Donchian high or trend reverses
+            if ((not np.isnan(high_max[i]) and 
+                 current_high > high_max[i]) or
+                ema50_1d_aligned[i] > ema200_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
