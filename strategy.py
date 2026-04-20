@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6h_1d_Pivot_R3S3_Fade_Reverse_v1
-# Hypothesis: On 6h timeframe, trade reversals at 1d Camarilla R3/S3 levels with volume confirmation.
-# In ranging markets, price tends to reverse at R3/S3; in trending markets, breaks through R4/S4.
-# Uses 1d ADX to filter ranging (ADX < 25) for reversals and trending (ADX > 25) for breakouts.
-# Targets 15-35 trades/year by requiring confluence of level, volume, and regime filter.
+# 12h_1d_TRIX_SignalLine_Crossover_VolumeConfirm_V1
+# Hypothesis: On 12h timeframe, TRIX (12-period) crossing above/below its signal line (9-period EMA of TRIX)
+# indicates momentum shifts. Combined with 1d ADX > 25 for trending markets and volume > 1.5x 20-period MA,
+# this captures sustained moves. In ranging markets (ADX < 25), we fade at 1d Bollinger Bands (20,2) with volume.
+# Targets 15-35 trades/year by requiring TRIX crossover + volume + regime filter.
 
-name = "6h_1d_Pivot_R3S3_Fade_Reverse_v1"
-timeframe = "6h"
+name = "12h_1d_TRIX_SignalLine_Crossover_VolumeConfirm_V1"
+timezone = "UTC"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,34 +26,34 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d TRIX (12-period) and signal line (9-period EMA of TRIX)
     close_1d = df_1d['close'].values
     
-    # Typical price for pivot calculation
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    # Triple EMA for TRIX
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    # Pivot point and ranges
-    pivot_1d = typical_price_1d
-    range_1d = high_1d - low_1d
+    # TRIX = 100 * (EMA3 - previous EMA3) / previous EMA3
+    trix = np.full_like(close_1d, np.nan)
+    trix[13:] = 100 * (ema3[13:] - ema3[12:-1]) / ema3[12:-1]
     
-    # Camarilla levels: R3, S3, R4, S4
-    r3_1d = close_1d + (range_1d * 1.1 / 6)
-    s3_1d = close_1d - (range_1d * 1.1 / 6)
-    r4_1d = close_1d + (range_1d * 1.1 / 4)
-    s4_1d = close_1d - (range_1d * 1.1 / 4)
+    # Signal line = 9-period EMA of TRIX
+    signal_line = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Align 1d levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Calculate 1d Bollinger Bands (20,2) for ranging markets
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
     
-    # Calculate 1d ADX for trend/ranging filter (14-period)
+    # Calculate 1d ADX (14-period) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
     # True Range
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
@@ -67,7 +68,7 @@ def generate_signals(prices):
     plus_dm = np.concatenate([[np.nan], plus_dm])
     minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Smoothed TR and DM
+    # Smoothed TR and DM using Wilder smoothing
     def smooth_wilder(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
@@ -85,69 +86,77 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = smooth_wilder(dx, 14)
     
-    # Align ADX to 6h timeframe
+    # Align 1d indicators to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    signal_line_aligned = align_htf_to_ltf(prices, df_1d, signal_line)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume average for spike detection
+    # Volume average for spike detection (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 60  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+        if (np.isnan(trix_aligned[i]) or np.isnan(signal_line_aligned[i]) or
+            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Ranging market (ADX < 25): fade at R3/S3
-            if adx_aligned[i] < 25:
-                # Long near S3 with volume confirmation
-                if (close[i] <= s3_aligned[i] * 1.005 and 
-                    close[i] >= s3_aligned[i] * 0.995 and
+            # Trending market (ADX > 25): TRIX crossover with volume confirmation
+            if adx_aligned[i] > 25:
+                # Bullish crossover: TRIX crosses above signal line
+                if (trix_aligned[i] > signal_line_aligned[i] and 
+                    trix_aligned[i-1] <= signal_line_aligned[i-1] and
                     volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
-                # Short near R3 with volume confirmation
-                elif (close[i] >= r3_aligned[i] * 0.995 and 
-                      close[i] <= r3_aligned[i] * 1.005 and
+                # Bearish crossover: TRIX crosses below signal line
+                elif (trix_aligned[i] < signal_line_aligned[i] and 
+                      trix_aligned[i-1] >= signal_line_aligned[i-1] and
                       volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
-            # Trending market (ADX > 25): breakout at R4/S4
-            elif adx_aligned[i] > 25:
-                # Long breakout above R4 with volume
-                if (close[i] > r4_aligned[i] * 1.005 and 
-                    volume[i] > 2.0 * volume_ma[i]):
-                    signals[i] = 0.25
+            # Ranging market (ADX < 25): fade at Bollinger Bands with volume
+            elif adx_aligned[i] < 25:
+                # Long at lower band with volume
+                if (close[i] <= lower_bb_aligned[i] * 1.01 and 
+                    close[i] >= lower_bb_aligned[i] * 0.99 and
+                    volume[i] > 1.5 * volume_ma[i]):
+                    signals[i] = 0.30
                     position = 1
-                # Short breakdown below S4 with volume
-                elif (close[i] < s4_aligned[i] * 0.995 and 
-                      volume[i] > 2.0 * volume_ma[i]):
-                    signals[i] = -0.25
+                # Short at upper band with volume
+                elif (close[i] >= upper_bb_aligned[i] * 0.99 and 
+                      close[i] <= upper_bb_aligned[i] * 1.01 and
+                      volume[i] > 1.5 * volume_ma[i]):
+                    signals[i] = -0.30
                     position = -1
         
         elif position == 1:
-            # Long exit: reverse at opposite level or ADX shifts to ranging
-            if (adx_aligned[i] < 25 and close[i] >= r3_aligned[i] * 0.995) or \
-               (adx_aligned[i] > 25 and close[i] < s4_aligned[i]):
+            # Long exit: TRIX crosses below signal line or ADX drops to ranging
+            if (trix_aligned[i] < signal_line_aligned[i] and 
+                trix_aligned[i-1] >= signal_line_aligned[i-1]) or \
+               (adx_aligned[i] < 25):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: reverse at opposite level or ADX shifts to ranging
-            if (adx_aligned[i] < 25 and close[i] <= s3_aligned[i] * 1.005) or \
-               (adx_aligned[i] > 25 and close[i] > r4_aligned[i]):
+            # Short exit: TRIX crosses above signal line or ADX drops to ranging
+            if (trix_aligned[i] > signal_line_aligned[i] and 
+                trix_aligned[i-1] <= signal_line_aligned[i-1]) or \
+               (adx_aligned[i] < 25):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
