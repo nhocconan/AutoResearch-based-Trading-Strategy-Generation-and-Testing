@@ -3,9 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Regime"
-timezone = "UTC"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +27,7 @@ def generate_signals(prices):
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
     
-    # Handle first day
+    # Set first values to avoid look-ahead
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
     prev_close[0] = close_1d[0]
@@ -41,12 +40,12 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # === 12h Volume Confirmation ===
+    # === 4h Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -82,13 +81,13 @@ def generate_signals(prices):
         else:
             chop[i] = 50  # neutral
     
-    # Align chop to 12h timeframe
+    # Align chop to 4h timeframe
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(80, n):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
