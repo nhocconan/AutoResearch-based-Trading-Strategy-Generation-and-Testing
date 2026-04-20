@@ -1,3 +1,9 @@
+# 1h_ADX_Donchian_Breakout_Volume_Session_v1
+# Hypothesis: Strong trends (ADX > 25) with volume confirmation provide reliable breakout opportunities.
+# Uses daily ADX for trend strength, daily Donchian channels for breakout levels, and volume filter.
+# Session filter (8-20 UTC) reduces noise. Designed for 1h timeframe targeting 15-30 trades/year.
+# Works in both bull (trend continuation) and bear (strong downtrends) markets by trading breakouts in direction of trend.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -97,11 +103,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
             if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
             elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -110,7 +116,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Short exit: price breaks above Donchian high or ADX < 20 (trend weakening)
@@ -118,17 +124,17 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# 12h_ADX_Donchian_Breakout_Volume_Session_v1
+# 1h_ADX_Donchian_Breakout_Volume_Session_v1
 # Uses daily ADX for trend strength filter (ADX > 25)
 # Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 12h timeframe with ~15-30 trades/year
-name = "12h_ADX_Donchian_Breakout_Volume_Session_v1"
-timeframe = "12h"
+# Designed for 1h timeframe with ~15-30 trades/year
+name = "1h_ADX_Donchian_Breakout_Volume_Session_v1"
+timeframe = "1h"
 leverage = 1.0
