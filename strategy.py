@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_R1S1_Breakout_Volume_TrendFilter
-# Hypothesis: Breakout above 1D R1 or below S1 pivot levels with volume confirmation and 1D EMA trend filter on 4h timeframe.
-# Uses 1D pivot levels for key support/resistance, EMA34 to filter trend direction, and volume spike for confirmation.
-# Works in bull/bear via EMA34 filter - only trade breakouts in direction of 1D trend.
+# 4h_1d_RSI_Stoch_Confluence_LongOnly
+# Hypothesis: Long-only strategy using RSI(14) oversold and Stochastic(14,3,3) oversold confluence on 4h,
+# filtered by 1D EMA50 trend (price > EMA50 = bullish regime). Exits when RSI > 60 or price < EMA50.
+# Works in bull via trend filter; in bear, avoids longs during downtrends, reducing whipsaw.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_TrendFilter"
+name = "4h_1d_RSI_Stoch_Confluence_LongOnly"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,86 +17,67 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for pivot levels and EMA
+    # Get 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === Calculate 1d pivot levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Calculate EMA50 on 1d close for trend filter ===
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pivot point and range
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # === 4h: RSI(14) ===
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss > 0, avg_loss, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    
-    # === Calculate EMA34 on 1d close for trend filter ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # === 4h: Volume ratio (current vs 20-period average) ===
-    volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
-    # Align all 1d data to 4h
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 4h: Stochastic(14,3,3) ===
+    high = prices['high'].values
+    low = prices['low'].values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low) / np.where(highest_high - lowest_low > 0, highest_high - lowest_low, 1e-10)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    d_percent_smooth = pd.Series(d_percent).rolling(window=3, min_periods=3).mean().values  # Slow %D
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
-    for i in range(34, n):  # Start after EMA warmup
+    for i in range(50, n):  # Start after warmup
         # Get values
-        close_val = prices['close'].iloc[i]
-        r1_1d_val = r1_1d_aligned[i]
-        s1_1d_val = s1_1d_aligned[i]
-        ema_34_val = ema_34_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        close_val = close[i]
+        rsi_val = rsi[i]
+        stoch_val = d_percent_smooth[i]
+        ema_50_val = ema_50_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1_1d_val) or np.isnan(s1_1d_val) or 
-            np.isnan(ema_34_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(rsi_val) or np.isnan(stoch_val) or np.isnan(ema_50_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Breakout above R1 with volume confirmation and uptrend (price > EMA34)
-            if (close_val > r1_1d_val and  # Price broke above R1
-                ema_34_val > 0 and  # Valid EMA
-                close_val > ema_34_val and  # Uptrend filter: price above EMA34
-                vol_ratio_val > 2.0):  # Volume confirmation
+            # Long: RSI < 30 AND Stoch < 30 AND price > EMA50 (bullish regime)
+            if (rsi_val < 30 and 
+                stoch_val < 30 and 
+                close_val > ema_50_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below S1 with volume confirmation and downtrend (price < EMA34)
-            elif (close_val < s1_1d_val and  # Price broke below S1
-                  ema_34_val > 0 and  # Valid EMA
-                  close_val < ema_34_val and  # Downtrend filter: price below EMA34
-                  vol_ratio_val > 2.0):  # Volume confirmation
-                signals[i] = -0.25
-                position = -1
         
         elif position == 1:
-            # Long exit: Price returns below EMA34 or breaks below S1 (invalidates uptrend)
-            if close_val < ema_34_val or close_val < s1_1d_val:
+            # Long exit: RSI > 60 OR price < EMA50 (trend change or overbought)
+            if (rsi_val > 60 or 
+                close_val < ema_50_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: Price returns above EMA34 or breaks above R1 (invalidates downtrend)
-            if close_val > ema_34_val or close_val > r1_1d_val:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
