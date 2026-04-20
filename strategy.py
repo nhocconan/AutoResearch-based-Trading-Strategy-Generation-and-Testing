@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_FundingRate_MeanReversion_with_VolumeFilter
-# Hypothesis: Funding rate mean reversion on 12h timeframe with weekly and daily trend filters.
-# Extreme funding rates (positive for shorts, negative for longs) indicate overextended sentiment.
-# In bull markets (price > weekly EMA50): short when funding > 0.03%, long when funding < -0.03%.
-# In bear markets (price < weekly EMA50): reverse logic for counter-trend mean reversion.
-# Volume confirmation ensures institutional participation. Max 0.30 position size.
-# Target: 15-35 trades/year to minimize fee drag in ranging 2025+ markets.
+# 6h_WeeklyPivot_Breakout_Volume_TrendFilter
+# Hypothesis: On 6h chart, break above weekly pivot R1 with volume spike and trend alignment = long.
+# Break below weekly pivot S1 with volume spike and trend alignment = short.
+# Uses weekly pivot levels from 1w data, volume confirmation > 1.5x 20-period average, and 6h EMA50 trend filter.
+# Designed to work in both bull and bear markets by following the trend via EMA50.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "12h_FundingRate_MeanReversion_with_VolumeFilter"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Breakout_Volume_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,86 +19,80 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and funding rate data
+    # Get 1w data for weekly pivot levels
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 50 or len(df_1d) < 50:
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Daily average volume for volume filter (20-period)
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_volume_20_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_20)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # Funding rate data (using open price as proxy - actual funding would come from separate data)
-    # For this implementation, we'll use price deviation from weekly VWAP as funding proxy
-    typical_price = (high + low + close) / 3
-    vwap_1w = (typical_price * volume).cumsum() / volume.cumsum()
-    # Resample to weekly and align (simplified funding proxy)
-    funding_proxy = (close - vwap_1w) / vwap_1w  # Normalized deviation
+    # Align weekly pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # 6h EMA50 for trend filter
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 50  # Need enough data for EMA50 and volume average
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(avg_volume_20_aligned[i]) or 
-            np.isnan(funding_proxy[i]) or np.isnan(volume[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(ema50[i]) or 
+            np.isnan(vol_avg[i]) or vol_avg[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume must be above average
-        volume_ok = volume[i] > avg_volume_20_aligned[i]
+        # Volume spike condition: current volume > 1.5x 20-period average
+        volume_spike = volume[i] > 1.5 * vol_avg[i]
         
         if position == 0:
-            # Determine trend from weekly EMA50
-            uptrend = close[i] > ema50_1w_aligned[i]
-            downtrend = close[i] < ema50_1w_aligned[i]
-            
-            # Extreme funding signals for mean reversion
-            funding_extreme_long = funding_proxy[i] < -0.0003  # -0.03% threshold
-            funding_extreme_short = funding_proxy[i] > 0.0003   # +0.03% threshold
-            
-            # In uptrend: look for extreme negative funding (oversold) to go long
-            # In downtrend: look for extreme positive funding (overbought) to go short
-            if uptrend and funding_extreme_long and volume_ok:
-                signals[i] = 0.30
+            # Long: price breaks above R1, volume spike, and uptrend (price > EMA50)
+            if (close[i] > r1_1w_aligned[i] and 
+                volume_spike and 
+                close[i] > ema50[i]):
+                signals[i] = 0.25
                 position = 1
-            elif downtrend and funding_extreme_short and volume_ok:
-                signals[i] = -0.30
+            # Short: price breaks below S1, volume spike, and downtrend (price < EMA50)
+            elif (close[i] < s1_1w_aligned[i] and 
+                  volume_spike and 
+                  close[i] < ema50[i]):
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit when funding normalizes or trend breaks
-            if (funding_proxy[i] > -0.0001 or  # Funding back to neutral
-                close[i] < ema50_1w_aligned[i] or  # Trend break
-                volume[i] < avg_volume_20_aligned[i] * 0.5):  # Volume collapse
+            # Long: exit if price breaks below pivot or trend reverses
+            if close[i] < pivot_1w_aligned[i] or close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit when funding normalizes or trend breaks
-            if (funding_proxy[i] < 0.0001 or  # Funding back to neutral
-                close[i] > ema50_1w_aligned[i] or  # Trend break
-                volume[i] < avg_volume_20_aligned[i] * 0.5):  # Volume collapse
+            # Short: exit if price breaks above pivot or trend reverses
+            if close[i] > pivot_1w_aligned[i] or close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
