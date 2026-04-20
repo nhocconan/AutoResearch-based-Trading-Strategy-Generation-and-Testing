@@ -3,81 +3,88 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R + 1w Trend Filter
-# - Williams %R(14) on 1d for overbought/oversold signals
-# - Long when %R < -80 (oversold) and 1w EMA21 > 1w EMA50 (uptrend)
-# - Short when %R > -20 (overbought) and 1w EMA21 < 1w EMA50 (downtrend)
-# - Williams %R captures mean reversion; weekly EMA crossover filters for trend direction
-# - Designed for 1d timeframe with selective entries to avoid overtrading
-# - Target: 7-25 trades per year per symbol (30-100 total over 4 years)
+# Hypothesis: 6h ATR-based Volatility Contraction Breakout with 12h Trend Filter
+# - Identify low volatility periods using ATR contraction (ATR(7) < 0.5 * ATR(30))
+# - Breakout triggers when price moves beyond Donchian(20) channels
+# - 12h EMA50 filter ensures breakouts align with medium-term trend
+# - Designed to capture explosive moves after consolidation in both bull and bear markets
+# - Target: 15-35 trades per year per symbol (60-140 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1d data for Williams %R calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Williams %R(14) on 1d timeframe
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Calculate EMA(50) on 12h timeframe
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align 1d Williams %R to 1d timeframe (no alignment needed, same timeframe)
-    williams_r_1d = williams_r
+    # Calculate ATR components on 6h timeframe
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Load 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Calculate EMA21 and EMA50 on 1w timeframe
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # ATR(7) and ATR(30)
+    atr_7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
+    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
     
-    # Align 1w EMA to 1d timeframe
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Donchian channels (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(40, n):  # Start after ATR(30) and Donchian warmup
         # Skip if NaN in indicators
-        if np.isnan(williams_r_1d[i]) or np.isnan(ema21_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]):
+        if (np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or 
+            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
+            np.isnan(ema_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        williams_r_val = williams_r_1d[i]
-        ema21 = ema21_1w_aligned[i]
-        ema50 = ema50_1w_aligned[i]
+        # Volatility contraction condition: ATR(7) < 0.5 * ATR(30)
+        vol_contract = atr_7[i] < 0.5 * atr_30[i]
+        
+        price = close[i]
+        upper_channel = highest_high_20[i]
+        lower_channel = lowest_low_20[i]
+        ema_trend = ema_12h_aligned[i]
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) + 1w EMA21 > EMA50 (uptrend)
-            if williams_r_val < -80 and ema21 > ema50:
+            # Long entry: volatility contraction + breakout above upper channel + uptrend
+            if vol_contract and price > upper_channel and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R overbought (> -20) + 1w EMA21 < EMA50 (downtrend)
-            elif williams_r_val > -20 and ema21 < ema50:
+            # Short entry: volatility contraction + breakdown below lower channel + downtrend
+            elif vol_contract and price < lower_channel and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R rises above -50 or trend turns bearish
-            if williams_r_val > -50 or ema21 < ema50:
+            # Long exit: price crosses below EMA or volatility expands significantly
+            if price < ema_trend or atr_7[i] > 1.5 * atr_30[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R falls below -50 or trend turns bullish
-            if williams_r_val < -50 or ema21 > ema50:
+            # Short exit: price crosses above EMA or volatility expands significantly
+            if price > ema_trend or atr_7[i] > 1.5 * atr_30[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_1wEMA_TrendFilter"
-timeframe = "1d"
+name = "6h_VolContraction_Breakout_12hEMAFilter"
+timeframe = "6h"
 leverage = 1.0
