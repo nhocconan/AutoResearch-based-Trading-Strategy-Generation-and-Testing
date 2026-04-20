@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WeeklyPivot_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1w_Camarilla_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -14,35 +14,40 @@ def generate_signals(prices):
     
     # Get weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # === Weekly Pivot Points (previous week) ===
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # === Weekly High/Low for Range Calculation ===
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
-    # Previous week's values for pivot calculation
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
+    # === Daily Close for Pivot Calculation ===
+    close_1d = df_1d['close'].values
     
-    # Set first values to avoid look-ahead
-    prev_high[0] = high_1w[0]
-    prev_low[0] = low_1w[0]
-    prev_close[0] = close_1w[0]
+    # Calculate weekly range
+    weekly_high = np.max(high_1w)
+    weekly_low = np.min(low_1w)
+    weekly_range = weekly_high - weekly_low
     
-    # Classic pivot (same for weekly)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    # Calculate daily pivot (previous day's close)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = close_1d[0]  # avoid look-ahead
     
-    # Weekly pivot R3 and S3 levels (strong rejection levels)
-    r3 = pivot + (range_val * 1.1)
-    s3 = pivot - (range_val * 1.1)
+    # Classic pivot point
+    pivot = (weekly_high + weekly_low + prev_close_1d) / 3
     
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Camarilla R1 and S1 levels (more sensitive breakout levels)
+    r1 = pivot + (weekly_range * 1.1 / 12)
+    s1 = pivot - (weekly_range * 1.1 / 12)
+    
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
     # === Volume Confirmation ===
@@ -58,30 +63,30 @@ def generate_signals(prices):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r3_val) or 
-            np.isnan(s3_val) or np.isnan(pivot_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R3 with volume confirmation (strong bullish breakout)
-            if close_val > r3_val and vol_ratio_val > 2.0:
+            # Long: Break above R1 with volume confirmation
+            if close_val > r1_val and vol_ratio_val > 1.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with volume confirmation (strong bearish breakdown)
-            elif close_val < s3_val and vol_ratio_val > 2.0:
+            # Short: Break below S1 with volume confirmation
+            elif close_val < s1_val and vol_ratio_val > 1.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below weekly pivot (mean reversion)
+            # Long exit: Price returns below pivot
             if close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
@@ -89,7 +94,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above weekly pivot (mean reversion)
+            # Short exit: Price returns above pivot
             if close_val > pivot_val:
                 signals[i] = 0.0
                 position = 0
