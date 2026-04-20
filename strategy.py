@@ -3,100 +3,101 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d Volume Spike + ADX Trend Filter
-# - Williams %R (14) on 6h for overbought/oversold signals
-# - Long when %R < -80 (oversold) and 1d volume > 1.5x 20-period average (institutional interest)
-# - Short when %R > -20 (overbought) and 1d volume > 1.5x 20-period average
-# - ADX(14) on 1d > 25 confirms trend strength to avoid chop
-# - Volume spike indicates institutional participation; Williams %R captures short-term reversals
-# - Designed for 6h timeframe with selective entries to avoid overtrading
-# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
+# Hypothesis: 4h Donchian breakout with 12h volume confirmation and 12h Choppiness regime filter
+# - Long when price breaks above Donchian(20) high AND 12h volume > 1.5x 20-period average AND 12h Choppiness > 61.8 (ranging market)
+# - Short when price breaks below Donchian(20) low AND 12h volume > 1.5x 20-period average AND 12h Choppiness > 61.8
+# - Exit when price returns to Donchian midpoint or volatility regime shifts
+# - Designed for 4h timeframe with volume and regime filters to reduce false breakouts
+# - Target: 20-50 trades per year per symbol (80-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1d data for volume and ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Load 12h data for volume and Choppiness filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate ADX(14) on 1d timeframe
-    plus_dm = np.zeros(len(high_1d))
-    minus_dm = np.zeros(len(high_1d))
-    tr = np.zeros(len(high_1d))
+    # Calculate 12h volume average (20-period)
+    vol_12h = df_12h['volume'].values
+    vol_avg_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(1, len(high_1d)):
-        high_diff = high_1d[i] - high_1d[i-1]
-        low_diff = low_1d[i-1] - low_1d[i]
-        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
-        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
-        tr[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    # Calculate 12h Choppiness Index (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Smooth with Wilder's smoothing (alpha = 1/14)
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with close_12h
     
-    # Calculate volume average and spike condition
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * vol_ma_20)
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d indicators to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    # Sum of ATR over 14 periods
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate Williams %R (14) on 6h timeframe
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
     
-    highest_high_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_6h) / (highest_high_14 - lowest_low_14)
+    # Choppiness Index
+    chop = 100 * np.log10(sum_atr_14 / (hh_14 - ll_14)) / np.log10(14)
+    chop = np.where((hh_14 - ll_14) == 0, 50, chop)  # avoid division by zero
+    
+    # Align 12h indicators to 4h timeframe
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20)
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    
+    # Calculate Donchian channels on 4h (20-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after Williams %R warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if NaN in indicators
-        if np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(volume_spike_aligned[i]):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_avg_20_aligned[i]) or np.isnan(chop_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
-        wr = williams_r[i]
-        adx = adx_1d_aligned[i]
-        vol_spike = volume_spike_aligned[i] > 0.5  # Convert back to boolean
+        price = close_4h[i]
+        vol_avg = vol_avg_20_aligned[i]
+        chop_val = chop_aligned[i]
+        vol_12h_current = df_12h['volume'].values[len(df_12h) - len(prices) + i // 3] if i // 3 < len(df_12h) else vol_avg
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) + volume spike + ADX > 25
-            if wr < -80 and vol_spike and adx > 25:
+            # Long entry: price breaks above Donchian high + volume confirmation + ranging market (chop > 61.8)
+            if price > donch_high[i] and vol_12h_current > 1.5 * vol_avg and chop_val > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R overbought (> -20) + volume spike + ADX > 25
-            elif wr > -20 and vol_spike and adx > 25:
+            # Short entry: price breaks below Donchian low + volume confirmation + ranging market (chop > 61.8)
+            elif price < donch_low[i] and vol_12h_current > 1.5 * vol_avg and chop_val > 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R rises above -50 or ADX weakens
-            if wr > -50 or adx < 20:
+            # Long exit: price returns to Donchian midpoint OR chop drops below 38.2 (trending market)
+            if price < donch_mid[i] or chop_val < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R falls below -50 or ADX weakens
-            if wr < -50 or adx < 20:
+            # Short exit: price returns to Donchian midpoint OR chop drops below 38.2 (trending market)
+            if price > donch_mid[i] or chop_val < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_VolumeSpike_ADXFilter"
-timeframe = "6h"
+name = "4h_Donchian_Volume_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
