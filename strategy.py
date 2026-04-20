@@ -1,4 +1,4 @@
-#12h_Camarilla_Pivot_Breakout_Volume
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -8,75 +8,85 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for Camarilla pivot calculation
+    # Get 1d data ONCE before loop for Donchian and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate Donchian channels (20-day) on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    range_prev = high_prev - low_prev
+    # Upper band: highest high of last 20 days
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 days
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels
-    R1 = pivot + (range_prev * 1.1 / 12)
-    R2 = pivot + (range_prev * 1.1 / 6)
-    R3 = pivot + (range_prev * 1.1 / 4)
-    S1 = pivot - (range_prev * 1.1 / 12)
-    S2 = pivot - (range_prev * 1.1 / 6)
-    S3 = pivot - (range_prev * 1.1 / 4)
+    # Align Donchian bands to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Align pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    # Calculate ATR (14-day) on 1d data for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Get 12h volume data for confirmation
-    volume = prices['volume'].values
-    avg_volume = pd.Series(volume).rolling(window=24, min_periods=10).mean().values  # 24 periods = 12 days
+    # Calculate ATR (14) on 4h data for stoploss
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    tr1_4h = high_4h - low_4h
+    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = tr1_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
-        # Skip if any pivot value is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(R2_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(S2_aligned[i]) or np.isnan(avg_volume[i])):
+    for i in range(20, n):
+        # Get values
+        close_val = prices['close'].iloc[i]
+        upper_val = donchian_upper_aligned[i]
+        lower_val = donchian_lower_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
+        atr_4h_val = atr_4h[i]
+        
+        # Skip if any value is NaN
+        if (np.isnan(upper_val) or np.isnan(lower_val) or 
+            np.isnan(atr_1d_val) or np.isnan(atr_4h_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        close_val = prices['close'].iloc[i]
-        vol_ratio = volume[i] / avg_volume[i] if avg_volume[i] > 0 else 0
-        
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation
-            if close_val > R1_aligned[i] and vol_ratio > 1.5:
+            # Long: price breaks above upper Donchian band with volatility filter
+            if close_val > upper_val and atr_1d_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation
-            elif close_val < S1_aligned[i] and vol_ratio > 1.5:
+            # Short: price breaks below lower Donchian band with volatility filter
+            elif close_val < lower_val and atr_1d_val > 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below pivot or R2
-            if close_val < pivot_aligned[i] or close_val > R2_aligned[i]:
+            # Long exit: price closes below lower Donchian band or ATR-based stop
+            if close_val < lower_val or close_val < prices['high'].iloc[i] - 2.0 * atr_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above pivot or S2
-            if close_val > pivot_aligned[i] or close_val < S2_aligned[i]:
+            # Short exit: price closes above upper Donchian band or ATR-based stop
+            if close_val > upper_val or close_val > prices['low'].iloc[i] + 2.0 * atr_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,13 +94,13 @@ def generate_signals(prices):
     
     return signals
 
-# 12h Camarilla Pivot Breakout with Volume Confirmation
-# Uses daily Camarilla pivot levels (R1, S1) as breakout levels
-# Enters long when price breaks above R1 with volume > 1.5x average
-# Enters short when price breaks below S1 with volume > 1.5x average
-# Exits when price returns to pivot level or reaches R2/S2
-# Volume confirmation reduces false breakouts
-# Target: 20-40 trades/year on 12h timeframe
-name = "12h_Camarilla_Pivot_Breakout_Volume"
-timeframe = "12h"
+# 4h_DonchianBreakout_1dATRFilter_V1
+# Uses 1-day Donchian channels (20) as breakout signals
+# Enters long when 4h price breaks above 1d upper band
+# Enters short when 4h price breaks below 1d lower band
+# Uses 1d ATR as volatility filter to avoid choppy markets
+# Exits on opposite band touch or 2*ATR stoploss
+# Designed for 4h timeframe with ~20-50 trades/year
+name = "4h_DonchianBreakout_1dATRFilter_V1"
+timeframe = "4h"
 leverage = 1.0
