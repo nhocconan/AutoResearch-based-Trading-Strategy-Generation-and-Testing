@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_R1S1_Breakout_VolumeFilter
-Hypothesis: Trade Camarilla pivot R1/S1 breakouts on 4h with 12h volume confirmation. 
+6h_12h_Camarilla_R1S1_Breakout_VolumeFilter
+Hypothesis: Trade Camarilla pivot R1/S1 breakouts on 6h with 12h volume confirmation.
 Long when price breaks above R1 with volume spike; short when breaks below S1 with volume spike.
 Camarilla levels provide intraday support/resistance. Volume filter ensures institutional participation.
 Works in bull/bear: breaks indicate momentum continuation, volume confirms validity.
-Target: 80-150 total trades over 4 years (20-38/year) with position size 0.25.
+Target: 60-120 total trades over 4 years (15-30/year) with position size 0.25.
 """
 
-name = "4h_12h_Camarilla_R1S1_Breakout_VolumeFilter"
-timeframe = "4h"
+name = "6h_12h_Camarilla_R1S1_Breakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -37,18 +37,18 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for calculations
+    start_idx = 40  # Need enough data for calculations (40*6h=10 days)
     
     for i in range(start_idx, n):
-        # Need at least 1 day of prior data for Camarilla calculation
-        if i < 96:  # 96 * 4h = 16 days worth of 4h bars to have 1 day prior
+        # Need at least 1 day of prior data for Camarilla calculation (4 bars of 6h)
+        if i < 4:
             continue
             
         # Calculate Camarilla levels using prior day's OHLC
-        # Look back 24 bars (6 hours * 4 = 24) to get prior day's data
-        prior_day_high = np.max(prices['high'].iloc[i-24:i])
-        prior_day_low = np.min(prices['low'].iloc[i-24:i])
-        prior_day_close = prices['close'].iloc[i-1]  # Previous 4h bar close
+        # Look back 4 bars (4*6h = 24h) to get prior day's data
+        prior_day_high = np.max(prices['high'].iloc[i-4:i])
+        prior_day_low = np.min(prices['low'].iloc[i-4:i])
+        prior_day_close = prices['close'].iloc[i-1]  # Previous 6h bar close
         
         # Calculate Camarilla levels
         range_val = prior_day_high - prior_day_low
