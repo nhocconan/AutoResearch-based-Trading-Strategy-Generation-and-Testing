@@ -3,122 +3,140 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h trend following with 4h Supertrend filter and volume confirmation.
-# Long when 4h Supertrend is bullish, price > 1h EMA20, and volume > 1.5x average.
-# Short when 4h Supertrend is bearish, price < 1h EMA20, and volume > 1.5x average.
-# Uses 4h Supertrend for trend direction (works in both bull/bear markets) and 1h for entry timing.
-# Target: 15-30 trades/year per symbol to avoid fee drag.
+# Hypothesis: 6h chart with 1w Williams Fractal filter and 1d pivot point breakout.
+# Long when price breaks above R1 pivot with bullish weekly fractal confirmation.
+# Short when price breaks below S1 pivot with bearish weekly fractal confirmation.
+# Williams Fractals require 2-bar confirmation (center bar + 2 bars after) to avoid look-ahead.
+# Uses weekly fractals to filter trend direction and avoid counter-trend trades.
+# Target: 20-40 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 4h data for Supertrend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Load 1d data for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR for Supertrend
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[0]), np.abs(low_4h[0] - close_4h[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Previous day's pivot points (to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Supertrend calculation
-    hl2 = (high_4h + low_4h) / 2
-    upperband = hl2 + (3.0 * atr)
-    lowerband = hl2 - (3.0 * atr)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
     
-    supertrend = np.zeros_like(close_4h)
-    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
+    # Align pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    supertrend[0] = upperband[0]
-    direction[0] = 1
+    # Load 1w data for Williams Fractals
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
     
-    for i in range(1, len(close_4h)):
-        if close_4h[i] > upperband[i-1]:
-            direction[i] = 1
-        elif close_4h[i] < lowerband[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            if direction[i] == -1 and upperband[i] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Williams Fractals: need 5 points (n-2, n-1, n, n+1, n+2)
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] < high[n+1] > high[n+2]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] > low[n+1] < low[n+2]
+    n_w = len(high_1w)
+    bearish_fractal = np.zeros(n_w, dtype=bool)
+    bullish_fractal = np.zeros(n_w, dtype=bool)
+    
+    for i in range(2, n_w - 2):
+        # Bearish fractal pattern
+        if (high_1w[i-2] < high_1w[i-1] and 
+            high_1w[i-1] > high_1w[i] and 
+            high_1w[i] < high_1w[i+1] and 
+            high_1w[i+1] > high_1w[i+2]):
+            bearish_fractal[i] = True
         
-        if direction[i] == 1:
-            supertrend[i] = lowerband[i]
-        else:
-            supertrend[i] = upperband[i]
+        # Bullish fractal pattern
+        if (low_1w[i-2] > low_1w[i-1] and 
+            low_1w[i-1] < low_1w[i] and 
+            low_1w[i] > low_1w[i+1] and 
+            low_1w[i+1] < low_1w[i+2]):
+            bullish_fractal[i] = True
     
-    # Align Supertrend direction to 1h timeframe
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, direction)
+    # Convert to float arrays (1.0 where fractal exists, 0.0 otherwise)
+    bearish_fractal_float = bearish_fractal.astype(float)
+    bullish_fractal_float = bullish_fractal.astype(float)
     
-    # 1h data
+    # Align fractals to 6h timeframe with 2-bar confirmation delay
+    # Williams fractals need 2 additional bars after the center bar for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal_float, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal_float, additional_delay_bars=2)
+    
+    # 6h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA20 on 1h
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
-    
     # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20, adjust=False).mean().values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(ema20[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        st_dir = supertrend_dir_aligned[i]
-        ema20_val = ema20[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        bearish_fractal_val = bearish_fractal_aligned[i] > 0.5  # True if fractal present
+        bullish_fractal_val = bullish_fractal_aligned[i] > 0.5   # True if fractal present
         vol_ok = vol_filter[i]
         
         if position == 0:
-            # Long: 4h Supertrend bullish, price > EMA20, volume confirmation
-            if st_dir == 1 and price > ema20_val and vol_ok:
-                signals[i] = 0.20
+            # Long: price breaks above R1, bullish weekly fractal, volume
+            if price > r1_val and bullish_fractal_val and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h Supertrend bearish, price < EMA20, volume confirmation
-            elif st_dir == -1 and price < ema20_val and vol_ok:
-                signals[i] = -0.20
+            # Short: price breaks below S1, bearish weekly fractal, volume
+            elif price < s1_val and bearish_fractal_val and vol_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: 4h Supertrend turns bearish or price < EMA20
-            if st_dir == -1 or price < ema20_val:
+            # Long exit: price breaks below S1 or bearish fractal appears
+            if price < s1_val or bearish_fractal_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: 4h Supertrend turns bullish or price > EMA20
-            if st_dir == 1 or price > ema20_val:
+            # Short exit: price breaks above R1 or bullish fractal appears
+            if price > r1_val or bullish_fractal_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_Supertrend_EMA20_VolumeFilter_v1"
-timeframe = "1h"
+name = "6h_1w_WilliamsFractal_1d_Pivot_Breakout_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
