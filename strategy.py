@@ -3,21 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h momentum strategy using RSI and volume divergence to catch trend reversals.
-# Uses RSI(14) for momentum, volume confirmation for institutional participation, 
-# and 1d EMA200 for higher-timeframe trend filter to avoid counter-trend trades.
-# Strategy goes long when RSI crosses above 50 (bullish momentum) with volume > 1.5x average
-# and price above 1d EMA200. Short when RSI crosses below 50 with volume confirmation and price below 1d EMA200.
-# This captures momentum shifts while filtering for trend alignment and institutional interest.
-# Target: 20-40 trades per year to minimize fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+# Donchian channels identify breakouts above/below recent 20-period highs/lows, capturing momentum.
+# 1d EMA200 ensures we only trade in direction of higher timeframe trend (avoid counter-trend).
+# Volume confirmation (volume > 1.5x 20-period average) filters weak breakouts.
+# Target: 15-25 trades per year to minimize fee drift and work in both bull and bear markets.
 
-name = "4h_RSI_Momentum_1dEMA200_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA200_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop for EMA200 trend
@@ -30,19 +28,17 @@ def generate_signals(prices):
     ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # === RSI(14) for momentum ===
+    # === 12h Donchian(20) breakout ===
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Use Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Donchian high: max of last 20 highs (excluding current bar)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    # Donchian low: min of last 20 lows (excluding current bar)
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === Volume confirmation ===
+    # === 12h Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
@@ -51,49 +47,45 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(14, n):  # Start after RSI warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Get values
         close_val = prices['close'].iloc[i]
         ema_val = ema_200_aligned[i]
-        rsi_val = rsi[i]
-        rsi_prev = rsi[i-1]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(rsi_val) or np.isnan(rsi_prev) or 
-            np.isnan(vol_ratio_val)):
+        if (np.isnan(ema_val) or np.isnan(donch_high_val) or 
+            np.isnan(donch_low_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: RSI crosses above 50 (bullish momentum) with volume confirmation
-            # and price above 1d EMA200 (trend alignment)
-            if rsi_prev <= 50 and rsi_val > 50 and close_val > ema_val and vol_ratio_val > 1.5:
+            # Long breakout: price breaks above Donchian high + uptrend + volume
+            if close_val > donch_high_val and close_val > ema_val and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short entry: RSI crosses below 50 (bearish momentum) with volume confirmation
-            # and price below 1d EMA200 (trend alignment)
-            elif rsi_prev >= 50 and rsi_val < 50 and close_val < ema_val and vol_ratio_val > 1.5:
+            # Short breakout: price breaks below Donchian low + downtrend + volume
+            elif close_val < donch_low_val and close_val < ema_val and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         
         elif position == 1:
-            # Long exit: RSI crosses below 50 (loss of bullish momentum) 
-            # or price closes below 1d EMA200 (trend reversal)
-            if rsi_val < 50 or close_val < ema_val:
+            # Long exit: price breaks below Donchian low or trend reversal
+            if close_val < donch_low_val or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI crosses above 50 (loss of bearish momentum)
-            # or price closes above 1d EMA200 (trend reversal)
-            if rsi_val > 50 or close_val > ema_val:
+            # Short exit: price breaks above Donchian high or trend reversal
+            if close_val > donch_high_val or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
