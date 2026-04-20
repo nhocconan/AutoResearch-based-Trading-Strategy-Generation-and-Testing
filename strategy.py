@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_Vortex_TrendFollowing_VolumeConfirmation
-# Hypothesis: Use daily Vortex indicator (VI+ and VI-) to capture trend direction on 4h timeframe.
-# Vortex identifies trend strength by comparing current high-low ranges with prior periods.
-# Long when VI+ > VI- (uptrend) with volume confirmation; short when VI- > VI+ (downtrend) with volume confirmation.
-# Uses volume spike (>1.5x 24-period average) to filter false signals and reduce whipsaw.
-# Target: 20-40 trades/year per symbol for balance between signal quality and frequency.
+# 1d_1w_Camarilla_R1S1_Breakout_Volume_Spike
+# Hypothesis: Weekly Camarilla R1/S1 breakouts on daily timeframe with volume spike confirmation.
+# Uses weekly pivot levels for structural support/resistance and volume spikes to confirm breakout strength.
+# Designed to work in both bull and bear markets by capturing institutional breakout attempts.
+# Target: 15-25 trades/year per symbol (~60-100 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_Vortex_TrendFollowing_VolumeConfirmation"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,91 +23,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 14-period Vortex Indicator on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range components
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First element NaN
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = pivot_1w + (high_1w - low_1w) * 1.1 / 12
+    s1_1w = pivot_1w - (high_1w - low_1w) * 1.1 / 12
     
-    # Vortex Indicator components
-    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])  # |High - Prior Low|
-    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])  # |Low - Prior High|
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    # Calculate volume average for spike detection (20-day average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Sum over 14 periods
-    tr14 = np.convolve(tr, np.ones(14), 'valid') if len(tr) >= 14 else np.full_like(tr, np.nan)
-    vm_plus14 = np.convolve(vm_plus, np.ones(14), 'valid') if len(vm_plus) >= 14 else np.full_like(vm_plus, np.nan)
-    vm_minus14 = np.convolve(vm_minus, np.ones(14), 'valid') if len(vm_minus) >= 14 else np.full_like(vm_minus, np.nan)
-    
-    # Align arrays to original length
-    tr14_full = np.full_like(tr, np.nan)
-    vm_plus14_full = np.full_like(vm_plus, np.nan)
-    vm_minus14_full = np.full_like(vm_minus, np.nan)
-    if len(tr14) > 0:
-        tr14_full[13:13+len(tr14)] = tr14
-        vm_plus14_full[13:13+len(vm_plus14)] = vm_plus14
-        vm_minus14_full[13:13+len(vm_minus14)] = vm_minus14
-    
-    # VI+ and VI- (avoid division by zero)
-    vi_plus = np.where(tr14_full != 0, vm_plus14_full / tr14_full, 0)
-    vi_minus = np.where(tr14_full != 0, vm_minus14_full / tr14_full, 0)
-    
-    # Calculate volume average for spike detection
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 24*4h = 4 days
-    
-    # Align 1d indicators to 4h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    # Align weekly indicators to daily timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are ready
+    start_idx = 40  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5 * 1d average volume
-        volume_spike = volume[i] > 1.5 * vol_ma_aligned[i]
+        # Volume spike condition: current volume > 2.0 * 20-day average volume
+        volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: VI+ > VI- (uptrend) with volume confirmation
-            if vi_plus_aligned[i] > vi_minus_aligned[i] and volume_spike:
+            # Long: price breaks above weekly R1 with volume spike
+            if close[i] > r1_1w_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- > VI+ (downtrend) with volume confirmation
-            elif vi_minus_aligned[i] > vi_plus_aligned[i] and volume_spike:
+            # Short: price breaks below weekly S1 with volume spike
+            elif close[i] < s1_1w_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if trend reverses (VI- > VI+)
-            if vi_minus_aligned[i] > vi_plus_aligned[i]:
+            # Long: exit if price breaks below weekly S1 (reversal)
+            if close[i] < s1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if trend reverses (VI+ > VI-)
-            if vi_plus_aligned[i] > vi_minus_aligned[i]:
+            # Short: exit if price breaks above weekly R1 (reversal)
+            if close[i] > r1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
