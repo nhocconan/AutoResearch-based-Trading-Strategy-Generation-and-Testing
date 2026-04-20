@@ -1,158 +1,120 @@
-# 1d_KAMA_RSI_ChopFilter  
-# Hypothesis: Daily trend following using Kaufman Adaptive Moving Average (KAMA) for direction,  
-# RSI for momentum confirmation, and Choppiness Index (CHOP) to avoid ranging markets.  
-# Long when KAMA slope > 0, RSI > 50, and CHOP > 61.8 (trending regime).  
-# Short when KAMA slope < 0, RSI < 50, and CHOP > 61.8.  
-# Uses discrete position sizing (0.30) to limit drawdown and reduce trade frequency.  
-# Designed for low trade frequency (<25/year) to minimize fee impact in bear markets.  
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation
+# In bull markets: buy breakouts above 20-period high when above 12h EMA (uptrend)
+# In bear markets: sell breakdowns below 20-period low when below 12h EMA (downtrend)
+# Volume filter ensures breakouts have participation
+# Uses discrete position sizing (0.25) to minimize fee churn
+# Target: 100-200 total trades over 4 years (25-50/year)
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE for higher timeframe context
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 12h data ONCE for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly EMA200 as long-term trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Load daily data ONCE for KAMA and RSI
+    # Load daily data ONCE for Donchian channels (using 20-day period)
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate KAMA ( Kaufman Adaptive Moving Average )
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # placeholder, will fix below
-    # Correct calculation of volatility (sum of absolute changes over 10 periods)
-    volatility = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i < 10:
-            volatility[i] = np.nan
-        else:
-            volatility[i] = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Align KAMA to daily (already daily, but for consistency)
-    kama_aligned = kama  # already on daily timeframe
-    
-    # Calculate RSI(14) on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index (CHOP) on daily
-    # True Range
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Max and min over 14 periods
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    # CHOP formula
-    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
     
-    # Align indicators to daily (already aligned)
-    rsi_aligned = rsi
-    chop_aligned = chop
-    ema200_1w_daily = ema200_1w_aligned  # weekly EMA200 aligned to daily
+    # Calculate 20-day Donchian channels
+    highest_20d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_20d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Prepare price and volume arrays
-    close = prices['close'].values
+    # Align daily Donchian levels to 4h timeframe
+    highest_20d_aligned = align_htf_to_ltf(prices, df_1d, highest_20d)
+    lowest_20d_aligned = align_htf_to_ltf(prices, df_1d, lowest_20d)
+    
+    # Calculate 4h ATR for volatility filter and stop sizing
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    
+    # Precompute hour of day for session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    # Volume filter: 4h volume > 20-period average
     volume = prices['volume'].values
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Signals array
     signals = np.zeros(n)
-    
-    # State tracking
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Main loop
-    for i in range(100, n):  # Start after warmup period
-        # Skip if any key indicator is NaN
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or \
-           np.isnan(chop_aligned[i]) or np.isnan(ema200_1w_daily[i]):
+    for i in range(50, n):
+        # Skip if NaN in indicators
+        if np.isnan(highest_20d_aligned[i]) or np.isnan(lowest_20d_aligned[i]) or \
+           np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get current values
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume filter
+        vol_filter = volume[i] > volume_ma_20[i]
+        
+        # Price levels
+        resistance = highest_20d_aligned[i]
+        support = lowest_20d_aligned[i]
+        ema_trend = ema_34_12h_aligned[i]
         price = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = chop_aligned[i]
-        ema200_val = ema200_1w_daily[i]
         
-        # Determine KAMA slope (using 1-period change)
-        if i > 0:
-            kama_slope = kama_val - kama_aligned[i-1]
-        else:
-            kama_slope = 0
-        
-        # Entry conditions
         if position == 0:
-            # Long: KAMA rising, RSI > 50, CHOP > 61.8 (trending), price above weekly EMA200
-            if kama_slope > 0 and rsi_val > 50 and chop_val > 61.8 and price > ema200_val:
-                signals[i] = 0.30
+            # Long: price breaks above 20-day resistance, above 12h EMA (uptrend), with volume
+            if price > resistance and price > ema_trend and vol_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: KAMA falling, RSI < 50, CHOP > 61.8 (trending), price below weekly EMA200
-            elif kama_slope < 0 and rsi_val < 50 and chop_val > 61.8 and price < ema200_val:
-                signals[i] = -0.30
+            # Short: price breaks below 20-day support, below 12h EMA (downtrend), with volume
+            elif price < support and price < ema_trend and vol_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
-        # Exit conditions
         elif position == 1:
-            # Exit long: KAMA slope turns negative OR RSI < 45
-            if kama_slope < 0 or rsi_val < 45:
+            # Long exit: stop loss (2x ATR below entry) or price breaks below 20-day support
+            if price <= entry_price - 2.0 * atr_4h[i] or price < support:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA slope turns positive OR RSI > 55
-            if kama_slope > 0 or rsi_val > 55:
+            # Short exit: stop loss (2x ATR above entry) or price breaks above 20-day resistance
+            if price >= entry_price + 2.0 * atr_4h[i] or price > resistance:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "4h_20D_Donchian_12hEMA34_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
