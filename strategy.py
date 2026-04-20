@@ -3,108 +3,105 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R3S3_Breakout_Volume_TrendFilter_v1"
-timeframe = "12h"
+name = "4h_12h_KAMA_RSI_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    # === 1d: Calculate Camarilla pivot points ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h: KAMA for trend direction ===
+    close_12h = df_12h['close'].values
+    close_12h_s = pd.Series(close_12h)
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    r3_1d = close_1d + range_1d * 1.1 / 2.0
-    s3_1d = close_1d - range_1d * 1.1 / 2.0
+    # Efficiency Ratio
+    change = np.abs(close_12h_s.diff(10))
+    volatility = close_12h_s.diff().abs().rolling(window=10).sum()
+    er = change / volatility.replace(0, np.nan)
     
-    # Align Camarilla levels
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    sc = sc.fillna(0)
     
-    # === 12h: Indicators ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # KAMA calculation
+    kama = np.zeros_like(close_12h)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close_12h[i] - kama[i-1])
+    
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    
+    # === 4h: RSI for momentum ===
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # EMA34 for trend filter
     close_s = pd.Series(close)
-    ema34 = close_s.ewm(span=34, min_periods=34, adjust=False).mean().values
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # ATR(14) for stop loss
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # === 4h: Volume confirmation ===
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 60  # Need enough data for indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Get aligned values
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        current_ema34 = ema34[i]
-        current_atr = atr[i]
+        kama_val = kama_12h_aligned[i]
+        rsi_val = rsi[i]
         current_close = close[i]
         current_volume = volume[i]
         
-        # Skip if any value is NaN
-        if (np.isnan(r3) or np.isnan(s3) or np.isnan(current_ema34) or np.isnan(current_atr)):
+        if np.isnan(kama_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.5x 20-period 12h average volume ===
+        # Volume condition: current volume > 1.3x 20-period average
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            vol_condition = current_volume > 1.5 * vol_ma
+            vol_condition = current_volume > 1.3 * vol_ma
         else:
             vol_condition = False
         
         if position == 0:
-            # Long conditions: break above R3 with volume AND above EMA34 (uptrend)
-            if current_close > r3 and vol_condition and current_close > current_ema34:
+            # Long: price above KAMA (uptrend) + RSI > 55 (bullish momentum) + volume
+            if current_close > kama_val and rsi_val > 55 and vol_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short conditions: break below S3 with volume AND below EMA34 (downtrend)
-            elif current_close < s3 and vol_condition and current_close < current_ema34:
+            # Short: price below KAMA (downtrend) + RSI < 45 (bearish momentum) + volume
+            elif current_close < kama_val and rsi_val < 45 and vol_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price fails to hold above R3 OR stop loss
-            if current_close <= r3 or current_close < entry_price - 2.5 * current_atr:
+            # Exit long: price below KAMA OR RSI < 40
+            if current_close <= kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price fails to hold below S3 OR stop loss
-            if current_close >= s3 or current_close > entry_price + 2.5 * current_atr:
+            # Exit short: price above KAMA OR RSI > 60
+            if current_close >= kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
