@@ -3,54 +3,50 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1-day mean reversion at weekly Bollinger Bands with volume confirmation.
+# In both bull and bear markets, price tends to revert to the mean after reaching extreme bands.
+# Weekly Bollinger Bands provide dynamic support/resistance; volume confirms institutional interest.
+# Weekly trend filter avoids counter-trend trades in strong moves.
+# Target: 10-25 trades/year per symbol with disciplined exits.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for trend and volatility
+    # Load weekly data for Bollinger Bands and trend
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Weekly Bollinger Bands (20, 2.0)
+    bb_period = 20
+    bb_std = 2.0
+    sma_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_20 + bb_std * std_20
+    lower_bb = sma_20 - bb_std * std_20
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
+    
+    # Load daily data
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily EMA(50) for trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate daily ATR(14) for volatility and position sizing
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    high_low[0] = high_1d[0] - low_1d[0]
-    high_close[0] = np.abs(high_1d[0] - close_1d[0])
-    low_close[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 4-period RSI for momentum (daily)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_4 = 100 - (100 / (1 + rs))
-    rsi_4_aligned = align_htf_to_ltf(prices, df_1d, rsi_4)
-    
-    # Calculate 20-day volume average for confirmation
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Daily volume average for confirmation
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(rsi_4_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(sma_20_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
             np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -61,30 +57,28 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above EMA50, RSI < 30 (oversold), volume above average
-            if (price > ema_50_1d_aligned[i] and 
-                rsi_4_aligned[i] < 30 and 
-                vol > 1.1 * vol_ma_20_aligned[i]):
+            # Long: price touches or crosses below lower Bollinger Band with volume confirmation
+            if (price <= lower_bb_aligned[i] and 
+                vol > 1.5 * vol_ma_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA50, RSI > 70 (overbought), volume above average
-            elif (price < ema_50_1d_aligned[i] and 
-                  rsi_4_aligned[i] > 70 and 
-                  vol > 1.1 * vol_ma_20_aligned[i]):
+            # Short: price touches or crosses above upper Bollinger Band with volume confirmation
+            elif (price >= upper_bb_aligned[i] and 
+                  vol > 1.5 * vol_ma_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below EMA50 or RSI > 70
-            if price < ema_50_1d_aligned[i] or rsi_4_aligned[i] > 70:
+            # Long exit: price returns to weekly SMA (mean reversion complete) or volume drops
+            if price >= sma_20_aligned[i] or vol < 0.8 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA50 or RSI < 30
-            if price > ema_50_1d_aligned[i] or rsi_4_aligned[i] < 30:
+            # Short exit: price returns to weekly SMA or volume drops
+            if price <= sma_20_aligned[i] or vol < 0.8 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_RSI4_VolumeFilter"
+name = "1d_WeeklyBollingerMeanReversion_Volume"
 timeframe = "1d"
 leverage = 1.0
