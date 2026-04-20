@@ -3,85 +3,99 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian20_VolumeSpike_Trend_v2"
-timeframe = "4h"
+name = "6h_1d_WilliamsFractal_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # === Daily Donchian Channels (20-day) ===
+    # === Williams Fractals on daily chart ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Upper band: highest high of last 20 days (including current)
-    upper_band = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 days (including current)
-    lower_band = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n] > high[n+2]
+    bearish = np.zeros(len(high_1d), dtype=bool)
+    bullish = np.zeros(len(low_1d), dtype=bool)
     
-    # Align to 4h timeframe (shifted to avoid look-ahead)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] > high_1d[i-1] and 
+            high_1d[i] > high_1d[i+1] and 
+            high_1d[i] > high_1d[i+2]):
+            bearish[i] = True
+            
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] < low_1d[i-1] and 
+            low_1d[i] < low_1d[i+1] and 
+            low_1d[i] < low_1d[i+2]):
+            bullish[i] = True
     
-    # === 4h Volume Confirmation ===
+    # Convert to levels: bearish fractal = resistance level, bullish = support
+    fractal_resist = np.where(bearish, high_1d, np.nan)
+    fractal_support = np.where(bullish, low_1d, np.nan)
+    
+    # Forward fill to get the most recent fractal level
+    resist_series = pd.Series(fractal_resist)
+    resist_ffill = resist_series.ffill().values
+    support_series = pd.Series(fractal_support)
+    support_ffill = support_series.ffill().values
+    
+    # Align to 6h timeframe with 2-bar delay for confirmation
+    resist_aligned = align_htf_to_ltf(prices, df_1d, resist_ffill, additional_delay_bars=2)
+    support_aligned = align_htf_to_ltf(prices, df_1d, support_ffill, additional_delay_bars=2)
+    
+    # === 6h Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
-    # === 4h Trend Filter: EMA21 vs EMA50 ===
-    close = prices['close'].values
-    ema21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    vol_ratio = np.where(vol_ma20 > 0, volume / vol_ma20, 0.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after warmup period
-        # Get values
+    for i in range(50, n):
         close_val = prices['close'].iloc[i]
-        upper_val = upper_band_aligned[i]
-        lower_val = lower_band_aligned[i]
+        resist_val = resist_aligned[i]
+        support_val = support_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        ema21_val = ema21[i]
-        ema50_val = ema50[i]
         
         # Skip if any value is NaN
-        if (np.isnan(upper_val) or np.isnan(lower_val) or 
-            np.isnan(vol_ratio_val) or np.isnan(ema21_val) or np.isnan(ema50_val)):
+        if (np.isnan(resist_val) or np.isnan(support_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above upper Donchian band with volume confirmation and uptrend
-            if close_val > upper_val and vol_ratio_val > 2.0 and ema21_val > ema50_val:
+            # Long: Break above recent bearish fractal (resistance) with volume
+            if close_val > resist_val and vol_ratio_val > 2.0:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower Donchian band with volume confirmation and downtrend
-            elif close_val < lower_val and vol_ratio_val > 2.0 and ema21_val < ema50_val:
+            # Short: Break below recent bullish fractal (support) with volume
+            elif close_val < support_val and vol_ratio_val > 2.0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below lower Donchian band OR trend reverses
-            if close_val < lower_val or ema21_val < ema50_val:
+            # Long exit: Price returns below support fractal OR volume dries up
+            if close_val < support_val or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above upper Donchian band OR trend reverses
-            if close_val > upper_val or ema21_val > ema50_val:
+            # Short exit: Price returns above resistance fractal OR volume dries up
+            if close_val > resist_val or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
