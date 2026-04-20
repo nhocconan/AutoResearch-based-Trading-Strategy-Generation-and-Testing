@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -122,13 +122,13 @@ def generate_signals(prices):
     
     return signals
 
-# 12h_ADX_Donchian_Breakout_Volume_Session_v2
+# 12h_ADX_Donchian_Breakout_Volume_Session_v3
 # Uses daily ADX for trend strength filter (ADX > 25)
 # Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
 # Designed for 12h timeframe with ~15-25 trades/year
-name = "12h_ADX_Donchian_Breakout_Volume_Session_v2"
+name = "12h_ADX_Donchian_Breakout_Volume_Session_v3"
 timeframe = "12h"
 leverage = 1.0
