@@ -3,24 +3,37 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v2"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Volume_Control_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 1d: Calculate Camarilla pivot levels (using previous day's data) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Weekly: Calculate SMA200 for trend filter ===
+    weekly_close = df_1w['close'].values
+    weekly_sma200 = pd.Series(weekly_close).rolling(window=200, min_periods=200).mean().values
+    weekly_sma200_aligned = align_htf_to_ltf(prices, df_1w, weekly_sma200)
+    
+    # === Daily: Calculate daily close and volume ===
+    daily_close = prices['close'].values
+    daily_volume = prices['volume'].values
+    
+    # Daily volume ratio (current vs 20-period average)
+    vol_ma20 = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = daily_volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    
+    # === Daily: Calculate Camarilla pivot levels (using previous day's data) ===
+    high_1d = prices['high'].values
+    low_1d = prices['low'].values
+    close_1d = prices['close'].values
     
     # Use previous day's OHLC for today's levels
     prev_close = np.roll(close_1d, 1)
@@ -36,56 +49,36 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # === 4h: Volume ratio (current vs 20-period average) ===
-    close = prices['close'].values
-    volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
-    # === 4h: RSI filter to avoid false breakouts ===
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(200, n):  # Start after SMA200 warmup
         # Get values
-        close_val = close[i]
-        r1_level = camarilla_r1_aligned[i]
-        s1_level = camarilla_s1_aligned[i]
+        close_val = daily_close[i]
+        r1_level = camarilla_r1[i]
+        s1_level = camarilla_s1[i]
         vol_ratio_val = vol_ratio[i]
-        rsi_val = rsi_values[i]
+        weekly_trend = weekly_sma200_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val) or np.isnan(rsi_val)):
+        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val) or 
+            np.isnan(weekly_trend)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and RSI not overbought
+            # Long: Price breaks above R1 with volume confirmation and weekly uptrend
             if (close_val > r1_level and   # Break above R1
                 vol_ratio_val > 2.0 and    # Strong volume confirmation
-                rsi_val < 70):             # Not overbought
+                close_val > weekly_trend): # Weekly uptrend filter
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and RSI not oversold
+            # Short: Price breaks below S1 with volume confirmation and weekly downtrend
             elif (close_val < s1_level and   # Break below S1
                   vol_ratio_val > 2.0 and    # Strong volume confirmation
-                  rsi_val > 30):             # Not oversold
+                  close_val < weekly_trend): # Weekly downtrend filter
                 signals[i] = -0.25
                 position = -1
         
