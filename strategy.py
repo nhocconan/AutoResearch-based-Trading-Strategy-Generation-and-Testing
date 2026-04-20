@@ -5,24 +5,24 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load daily data ONCE for HTF regime
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate 20-day Donchian channels on daily data
     highest_20d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lowest_20d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align daily Donchian levels to 4h timeframe
+    # Align daily Donchian levels to 12h timeframe
     highest_20d_aligned = align_htf_to_ltf(prices, df_1d, highest_20d)
     lowest_20d_aligned = align_htf_to_ltf(prices, df_1d, lowest_20d)
     
-    # Calculate 4h ATR for volatility filter
+    # Calculate 12h ATR for volatility filter
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -31,21 +31,21 @@ def generate_signals(prices):
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Precompute hour of day for session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Volume filter: 4h volume > 20-period average
+    # Volume filter: 12h volume > 20-period average
     volume = prices['volume'].values
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if NaN in HTF indicators
-        if np.isnan(highest_20d_aligned[i]) or np.isnan(lowest_20d_aligned[i]) or np.isnan(atr_4h[i]):
+        if np.isnan(highest_20d_aligned[i]) or np.isnan(lowest_20d_aligned[i]) or np.isnan(atr_12h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -96,9 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 20-day Donchian breakout on daily timeframe with volume confirmation and session filter.
-# Works in bull markets by catching breakouts, in bear markets by catching breakdowns.
-# Daily timeframe reduces noise, volume confirms institutional interest, session filter avoids low-liquidity hours.
-name = "4h_Donchian20_Breakout_VolumeFilter_Session"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_VolumeFilter_Session"
+timeframe = "12h"
 leverage = 1.0
