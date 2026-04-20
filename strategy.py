@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 1d_1w_Camarilla_R1_S1_Breakout_VolumeATRFilter
-# Hypothesis: Daily chart with weekly trend filter - trade breakouts of weekly-derived Camarilla R1/S1 levels on daily timeframe.
-# Uses weekly trend direction (price above/below weekly EMA20) to determine bias, then trades breakouts of daily R1/S1 with volume confirmation.
-# Works in bull markets by buying R1 breaks in uptrend; in bear markets by selling S1 breaks in downtrend.
-# Volume filter ensures institutional participation, ATR filter avoids low-volatility false breakouts.
-# Target: 15-30 trades/year to minimize fee drag on daily timeframe.
+# 4h_1d_Supertrend_TrendFollowing_With_1d_Supertrend_Filter
+# Hypothesis: Combines 4h Supertrend for entry timing with 1d Supertrend as a regime filter to avoid counter-trend trades.
+# Uses ATR-based trend following with a higher-timeframe trend filter to improve win rate in both bull and bear markets.
+# Designed to generate 20-40 trades per year with controlled risk via ATR-based trailing stops.
 
-name = "1d_1w_Camarilla_R1_S1_Breakout_VolumeATRFilter"
-timeframe = "1d"
+name = "4h_1d_Supertrend_TrendFollowing_With_1d_Supertrend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,103 +14,159 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly trend filter: EMA20
-    weekly_close = df_1w['close'].values
-    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_trend_up = weekly_close > weekly_ema20  # True when in weekly uptrend
-    
-    # Align weekly trend to daily timeframe
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
-    
-    # Get daily data for Camarilla calculation
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily pivot points from previous day
+    # Calculate 1d Supertrend for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Use previous day's OHLC for today's pivot (avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # First period uses current values
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # ATR for 1d Supertrend
+    tr1_1d = np.abs(high_1d - low_1d)
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d[0] = tr1_1d[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
+    # Supertrend parameters
+    atr_mult = 3.0
     
-    # Align daily Camarilla levels to daily timeframe (already aligned but using for consistency)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate upper and lower bands for 1d
+    hl2_1d = (high_1d + low_1d) / 2
+    upper_band_1d = hl2_1d + (atr_mult * atr_1d)
+    lower_band_1d = hl2_1d - (atr_mult * atr_1d)
     
-    # Volume filter: volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > (vol_ema20 * 1.5)
+    # Initialize Supertrend arrays
+    supertrend_1d = np.full_like(close_1d, np.nan)
+    uptrend_1d = np.full_like(close_1d, True)
     
-    # ATR filter: avoid low-volatility breakouts
+    # Calculate Supertrend for 1d
+    for i in range(1, len(close_1d)):
+        if np.isnan(upper_band_1d[i]) or np.isnan(lower_band_1d[i]) or np.isnan(atr_1d[i]):
+            continue
+            
+        # Update bands
+        if close_1d[i-1] > upper_band_1d[i-1]:
+            upper_band_1d[i] = max(upper_band_1d[i], upper_band_1d[i-1])
+        else:
+            upper_band_1d[i] = upper_band_1d[i]
+            
+        if close_1d[i-1] < lower_band_1d[i-1]:
+            lower_band_1d[i] = min(lower_band_1d[i], lower_band_1d[i-1])
+        else:
+            lower_band_1d[i] = lower_band_1d[i]
+        
+        # Determine trend
+        if close_1d[i] > upper_band_1d[i-1]:
+            uptrend_1d[i] = True
+        elif close_1d[i] < lower_band_1d[i-1]:
+            uptrend_1d[i] = False
+        else:
+            uptrend_1d[i] = uptrend_1d[i-1]
+            if uptrend_1d[i] and lower_band_1d[i] < lower_band_1d[i-1]:
+                lower_band_1d[i] = lower_band_1d[i-1]
+            if not uptrend_1d[i] and upper_band_1d[i] > upper_band_1d[i-1]:
+                upper_band_1d[i] = upper_band_1d[i-1]
+        
+        supertrend_1d[i] = lower_band_1d[i] if uptrend_1d[i] else upper_band_1d[i]
+    
+    # Align 1d Supertrend and trend direction to 4h timeframe
+    supertrend_1d_aligned = align_htf_to_ltf(prices, df_1d, supertrend_1d)
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))  # Convert bool to float for alignment
+    
+    # Calculate 4h Supertrend for entry signals
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_filter = atr > (atr_ma * 0.7)  # Only trade when volatility is above 70% of its 50-period average
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (atr_mult * atr)
+    lower_band = hl2 - (atr_mult * atr)
+    
+    # Initialize 4h Supertrend
+    supertrend = np.full(n, np.nan)
+    uptrend = np.full(n, True)
+    
+    # Calculate Supertrend for 4h
+    for i in range(1, n):
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(atr[i]):
+            continue
+            
+        # Update bands
+        if close[i-1] > upper_band[i-1]:
+            upper_band[i] = max(upper_band[i], upper_band[i-1])
+        else:
+            upper_band[i] = upper_band[i]
+            
+        if close[i-1] < lower_band[i-1]:
+            lower_band[i] = min(lower_band[i], lower_band[i-1])
+        else:
+            lower_band[i] = lower_band[i]
+        
+        # Determine trend
+        if close[i] > upper_band[i-1]:
+            uptrend[i] = True
+        elif close[i] < lower_band[i-1]:
+            uptrend[i] = False
+        else:
+            uptrend[i] = uptrend[i-1]
+            if uptrend[i] and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if not uptrend[i] and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        supertrend[i] = lower_band[i] if uptrend[i] else upper_band[i]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are ready
+    start_idx = 20  # Ensure sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(weekly_trend_up_aligned[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(atr_filter[i])):
+        # Skip if required data is not available
+        if (np.isnan(supertrend_1d_aligned[i]) or np.isnan(uptrend_1d_aligned[i]) or
+            np.isnan(supertrend[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
+        # Only take trades in direction of 1d Supertrend trend
+        trend_filter = uptrend_1d_aligned[i] > 0.5  # True if 1d uptrend
+        
         if position == 0:
-            # Long: price breaks above R1 + weekly uptrend + volume + volatility confirmation
-            if (close[i] > r1_aligned[i] and weekly_trend_up_aligned[i] > 0.5 and 
-                volume_filter[i] and atr_filter[i]):
+            # Long: price above 4h Supertrend AND 1d uptrend
+            if close[i] > supertrend[i] and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + weekly downtrend + volume + volatility confirmation
-            elif (close[i] < s1_aligned[i] and weekly_trend_up_aligned[i] < 0.5 and 
-                  volume_filter[i] and atr_filter[i]):
+            # Short: price below 4h Supertrend AND 1d downtrend
+            elif close[i] < supertrend[i] and not trend_filter:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 (reversal) or weekly trend turns down
-            if close[i] < s1_aligned[i] or weekly_trend_up_aligned[i] < 0.5:
+            # Long: exit if price closes below 4h Supertrend
+            if close[i] < supertrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 (reversal) or weekly trend turns up
-            if close[i] > r1_aligned[i] or weekly_trend_up_aligned[i] > 0.5:
+            # Short: exit if price closes above 4h Supertrend
+            if close[i] > supertrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
