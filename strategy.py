@@ -5,31 +5,31 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h < 50):
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 14-period ADX for trend strength on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 14-period ADX for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
     # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -42,26 +42,26 @@ def generate_signals(prices):
             result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
         return result
     
-    atr_12h = wilder_smooth(tr, 14)
-    di_plus_12h = wilder_smooth(dm_plus, 14)
-    di_minus_12h = wilder_smooth(dm_minus, 14)
+    atr_1d = wilder_smooth(tr, 14)
+    di_plus_1d = wilder_smooth(dm_plus, 14)
+    di_minus_1d = wilder_smooth(dm_minus, 14)
     
     # Avoid division by zero
-    di_sum = di_plus_12h + di_minus_12h
-    dx = np.where(di_sum != 0, 100 * np.abs(di_plus_12h - di_minus_12h) / di_sum, 0)
-    adx_12h = wilder_smooth(dx, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    di_sum = di_plus_1d + di_minus_1d
+    dx = np.where(di_sum != 0, 100 * np.abs(di_plus_1d - di_minus_1d) / di_sum, 0)
+    adx_1d = wilder_smooth(dx, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 20-period Donchian channels on 12h
-    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
-    donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    # Calculate 20-period Donchian channels
+    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Calculate 20-period average volume on 12h
-    volume_12h = df_12h['volume'].values
-    vol_avg_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20)
+    # Calculate 20-period average volume
+    volume_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     # Session filter: 8-20 UTC
     hours = prices.index.hour  # Pre-compute before loop
@@ -69,7 +69,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Session filter: only trade 8-20 UTC
         hour = hours[i]
         if hour < 8 or hour > 20:
@@ -80,9 +80,9 @@ def generate_signals(prices):
         
         # Get values
         close_val = prices['close'].iloc[i]
-        adx_val = adx_12h_aligned[i]
-        donch_high_val = donch_high_12h_aligned[i]
-        donch_low_val = donch_low_12h_aligned[i]
+        adx_val = adx_1d_aligned[i]
+        donch_high_val = donch_high_1d_aligned[i]
+        donch_low_val = donch_low_1d_aligned[i]
         vol_val = prices['volume'].iloc[i]
         vol_avg_val = vol_avg_20_aligned[i]
         
@@ -122,13 +122,13 @@ def generate_signals(prices):
     
     return signals
 
-# 4h_ADX_Donchian_Breakout_Volume_Session_12h
-# Uses 12h ADX for trend strength filter (ADX > 25)
-# Uses 12h Donchian(20) breakouts for entry
+# 4h_ADX_Donchian_Breakout_Volume_Session
+# Uses daily ADX for trend strength filter (ADX > 25)
+# Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 4h timeframe with ~20-40 trades/year
-name = "4h_ADX_Donchian_Breakout_Volume_Session_12h"
+# Designed for 4h timeframe with ~25-40 trades/year
+name = "4h_ADX_Donchian_Breakout_Volume_Session"
 timeframe = "4h"
 leverage = 1.0
