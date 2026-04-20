@@ -5,92 +5,107 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Load 1D data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-week period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    upper_band = np.full(len(high_1w), np.nan)
-    lower_band = np.full(len(low_1w), np.nan)
-    for i in range(19, len(high_1w)):
-        upper_band[i] = np.max(high_1w[i-19:i+1])
-        lower_band[i] = np.min(low_1w[i-19:i+1])
+    # Calculate daily close EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align to daily timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
-    
-    # Calculate daily ATR for volatility filter
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = np.nan
-    tr3[0] = np.nan
+    # Calculate daily ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    atr = np.zeros_like(tr)
-    for i in range(14, len(tr)):
-        atr[i] = np.mean(tr[i-14:i+1])
-    atr[:14] = np.nan
+    # Calculate 6H RSI(14)
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate daily volume average
+    # Wilder's smoothing
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14]) if n > 13 else 0
+    avg_loss[13] = np.mean(loss[1:14]) if n > 13 else 0
+    
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:13] = np.nan
+    
+    # Calculate 6H volume average (20 periods)
     volume = prices['volume'].values
     vol_ma = np.zeros_like(volume)
-    for i in range(20, len(volume)):
+    for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     vol_ma[:20] = np.nan
     
-    # Generate signals
+    # Signals
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        atr_val = atr[i]
+        rsi_val = rsi[i]
+        vol_val = volume[i]
         vol_ma_val = vol_ma[i]
-        upper = upper_band_aligned[i]
-        lower = lower_band_aligned[i]
+        ema_1d = ema_34_1d_aligned[i]
+        atr_1d = atr_14_1d_aligned[i]
+        close_price = close[i]
+        
+        # Volatility filter: only trade when ATR > 50% of its 100-period average
+        if i >= 100:
+            atr_ma_100 = np.mean(atr_14_1d_aligned[i-100:i])
+            vol_filter = atr_1d > 0.5 * atr_ma_100
+        else:
+            vol_filter = True  # Not enough data for MA, allow trading
         
         if position == 0:
-            # Long: price breaks above upper band + volume spike + volatility filter
-            if price > upper and vol > 1.5 * vol_ma_val and atr_val > 0.5 * np.mean(atr[max(0, i-50):i]):
+            # Long: RSI > 55, price above daily EMA34, volume spike, volatility filter
+            if rsi_val > 55 and close_price > ema_1d and vol_val > 1.5 * vol_ma_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band + volume spike + volatility filter
-            elif price < lower and vol > 1.5 * vol_ma_val and atr_val > 0.5 * np.mean(atr[max(0, i-50):i]):
+            # Short: RSI < 45, price below daily EMA34, volume spike, volatility filter
+            elif rsi_val < 45 and close_price < ema_1d and vol_val > 1.5 * vol_ma_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price drops below lower band or ATR drops
-            if price < lower or atr_val < 0.3 * np.mean(atr[max(0, i-50):i]):
+            # Long exit: RSI drops below 50 or price crosses below daily EMA34
+            if rsi_val < 50 or close_price < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above upper band or ATR drops
-            if price > upper or atr_val < 0.3 * np.mean(atr[max(0, i-50):i]):
+            # Short exit: RSI rises above 50 or price crosses above daily EMA34
+            if rsi_val > 50 or close_price > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_Volume_ATRFilter_v1"
-timeframe = "1d"
+name = "6h_RSI_EMA_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
