@@ -23,7 +23,7 @@ def generate_signals(prices):
     # Lower band: lowest low of last 20 days
     donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian bands to 4h timeframe
+    # Align Donchian bands to daily timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
@@ -36,16 +36,8 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate ATR (14) on 4h data for stoploss
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    tr1_4h = high_4h - low_4h
-    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    tr_4h[0] = tr1_4h[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    # Calculate ATR (14) on 1d data for stoploss
+    atr_1d_sl = atr_1d_aligned  # Reuse ATR for stoploss
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,11 +48,10 @@ def generate_signals(prices):
         upper_val = donchian_upper_aligned[i]
         lower_val = donchian_lower_aligned[i]
         atr_1d_val = atr_1d_aligned[i]
-        atr_4h_val = atr_4h[i]
         
         # Skip if any value is NaN
         if (np.isnan(upper_val) or np.isnan(lower_val) or 
-            np.isnan(atr_1d_val) or np.isnan(atr_4h_val)):
+            np.isnan(atr_1d_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,7 +69,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Long exit: price closes below lower Donchian band or ATR-based stop
-            if close_val < lower_val or close_val < prices['high'].iloc[i] - 2.0 * atr_4h_val:
+            if close_val < lower_val or close_val < prices['high'].iloc[i] - 2.0 * atr_1d_sl[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,7 +77,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price closes above upper Donchian band or ATR-based stop
-            if close_val > upper_val or close_val > prices['low'].iloc[i] + 2.0 * atr_4h_val:
+            if close_val > upper_val or close_val > prices['low'].iloc[i] + 2.0 * atr_1d_sl[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,13 +85,13 @@ def generate_signals(prices):
     
     return signals
 
-# 4h_DonchianBreakout_1dATRFilter_V1
-# Uses 1-day Donchian channels (20) as breakout signals
-# Enters long when 4h price breaks above 1d upper band
-# Enters short when 4h price breaks below 1d lower band
-# Uses 1d ATR as volatility filter to avoid choppy markets
+# 1d_DonchianBreakout_1dATRFilter_V1
+# Uses daily Donchian channels (20) as breakout signals
+# Enters long when price breaks above daily upper band
+# Enters short when price breaks below daily lower band
+# Uses daily ATR as volatility filter to avoid choppy markets
 # Exits on opposite band touch or 2*ATR stoploss
-# Designed for 4h timeframe with ~20-50 trades/year
-name = "4h_DonchianBreakout_1dATRFilter_V1"
-timeframe = "4h"
+# Designed for 1d timeframe with ~7-25 trades/year
+name = "1d_DonchianBreakout_1dATRFilter_V1"
+timeframe = "1d"
 leverage = 1.0
