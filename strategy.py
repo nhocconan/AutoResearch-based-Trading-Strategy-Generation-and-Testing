@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_Control_v1"
-timeframe = "4h"
+name = "1d_1w_Pivot_R1S1_TrendBreakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,20 +12,20 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === Daily Pivot Points (previous day) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Weekly Pivot Points (previous week) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Previous week's values for pivot calculation
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
     
     # Pivot point
     pivot = (prev_high + prev_low + prev_close) / 3
@@ -35,12 +35,12 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
-    # === 4h Momentum and Volume ===
+    # === Daily Momentum and Trend ===
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -60,7 +60,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(60, n):
         # Get values
         close_val = close[i]
         roc_val = roc5[i]
@@ -79,16 +79,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R1 with positive momentum and volume
+            # Long: Break above R1 with positive momentum and volume, above weekly trend
             if (close_val > r1_val and 
-                roc_val > 0.5 and 
+                roc_val > 0.3 and 
                 vol_ratio_val > 1.5 and
                 close_val > ema20_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with negative momentum and volume
+            # Short: Break below S1 with negative momentum and volume, below weekly trend
             elif (close_val < s1_val and 
-                  roc_val < -0.5 and 
+                  roc_val < -0.3 and 
                   vol_ratio_val > 1.5 and
                   close_val < ema20_val):
                 signals[i] = -0.25
@@ -96,7 +96,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Long exit: Price returns below pivot or momentum turns negative
-            if close_val < pivot_val or roc_val < -0.3:
+            if close_val < pivot_val or roc_val < -0.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,7 +104,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: Price returns above pivot or momentum turns positive
-            if close_val > pivot_val or roc_val > 0.3:
+            if close_val > pivot_val or roc_val > 0.2:
                 signals[i] = 0.0
                 position = 0
             else:
