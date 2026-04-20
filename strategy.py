@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter_v4"
-timeframe = "4h"
+name = "1h_4d1d_Camarilla_R1S1_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,17 +17,15 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Points (previous day) ===
+    # === 1d Previous Day's OHLC for Pivot Calculation ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for pivot calculation
+    # Previous day's values (avoid look-ahead)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
-    
-    # Set first values to avoid look-ahead
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
     prev_close[0] = close_1d[0]
@@ -40,7 +38,7 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 4h timeframe
+    # Align to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -50,7 +48,7 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === ATR Stop Loss (4h) ===
+    # === ATR for Stop Loss (1h) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -58,15 +56,25 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     atr_series = pd.Series(tr)
     atr = atr_series.rolling(window=14, min_periods=14).mean().values
+    
+    # === Session Filter: 08-20 UTC ===
+    hours = prices.index.hour  # Already datetime64[ms], .hour works
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(100, n):
+        # Skip outside session
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
@@ -86,12 +94,12 @@ def generate_signals(prices):
             # Breakout at R1/S1 with volume confirmation
             if close_val > r1_val and vol_ratio_val > 2.0:
                 # Break above R1
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close_val
             elif close_val < s1_val and vol_ratio_val > 2.0:
                 # Break below S1
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close_val
         
@@ -106,7 +114,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Short exit: stop loss or return to S1
@@ -119,6 +127,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
