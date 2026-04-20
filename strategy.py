@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for calculations
+    # Load 1d data for regime and trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -46,13 +46,7 @@ def generate_signals(prices):
     bb_width_ratio = bb_width / np.where(bb_width_ma == 0, 1, bb_width_ma)
     bb_width_ratio_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ratio)
     
-    # Weekly EMA(34) for higher timeframe trend
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # 1d price data (primary timeframe)
+    # 12h price data (primary timeframe)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -63,8 +57,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if NaN in critical values
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(bb_width_ratio_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i])):
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(bb_width_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,11 +68,10 @@ def generate_signals(prices):
         atr = atr_14_1d_aligned[i]
         vol_ratio = vol_ratio_1d_aligned[i]
         bb_width_ratio = bb_width_ratio_aligned[i]
-        ema_1w_trend = ema_34_1w_aligned[i]
         
-        # Trend filter: price relative to daily EMA and weekly EMA
-        trend_up = price > ema_trend and ema_trend > ema_1w_trend
-        trend_down = price < ema_trend and ema_trend < ema_1w_trend
+        # Trend filter: price relative to daily EMA
+        trend_up = price > ema_trend
+        trend_down = price < ema_trend
         
         # Regime filter: avoid extreme chop (BB width too narrow)
         regime_filter = bb_width_ratio > 0.8  # Not in extreme squeeze
@@ -119,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_WeeklyEMA34_VolumeRegime_Filter_v1"
-timeframe = "1d"
+name = "12h_1d_EMA50_VolumeRegime_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
