@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-12h_1w_Donchian20_1dVolumeBreakout_Regime_v1
-Concept: 12h price breaks weekly Donchian(20) with daily volume spike and weekly chop filter.
-- Long: Close > weekly Donchian Upper(20) AND daily volume > 2.0x 20-period avg AND WEEKLY CHOP(14) > 61.8 (range regime)
-- Short: Close < weekly Donchian Lower(20) AND daily volume > 2.0x 20-period avg AND WEEKLY CHOP(14) > 61.8 (range regime)
+1d_1w_Donchian20_WeeklyTrend_DailyVolume_Breakout_v1
+Concept: Daily price breaks weekly Donchian(20) with daily volume spike and weekly trend filter.
+- Long: Close > weekly Donchian Upper(20) AND daily volume > 2.0x 20-period avg AND weekly close > weekly SMA(50)
+- Short: Close < weekly Donchian Lower(20) AND daily volume > 2.0x 20-period avg AND weekly close < weekly SMA(50)
 - Exit: Close crosses back through weekly midline
 - Position sizing: 0.25
-- Target: 50-150 total trades over 4 years (12-37/year)
-- Works in bull/bear: weekly structure adapts, volume confirms institutional interest, chop filter avoids trends
+- Target: 30-100 total trades over 4 years (7-25/year)
+- Works in bull/bear: weekly trend filter adapts, volume confirms institutional interest
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Donchian20_1dVolumeBreakout_Regime_v1"
-timeframe = "12h"
+name = "1d_1w_Donchian20_WeeklyTrend_DailyVolume_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     
     # Get weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -47,46 +47,34 @@ def generate_signals(prices):
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
     donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
     
+    # === Weekly: SMA(50) for trend filter ===
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    
     # === Daily: Volume MA (20-period) ===
     volume_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # === Weekly: Chopiness Index (14) ===
-    atr_period = 14
-    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1]))
-    tr2 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, tr2)
-    tr = np.concatenate([[np.nan], tr])  # align with original index
-    
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # Sum of absolute returns
-    returns = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    sum_returns = pd.Series(returns).rolling(window=atr_period, min_periods=atr_period).sum().values
-    
-    chop = 100 * np.log10(sum_returns / (atr * atr_period)) / np.log10(atr_period)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
-    # === 12h: Price ===
+    # === 1d: Price ===
     close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for weekly SMA(50)
     
     for i in range(start_idx, n):
         # Get values
         upper_val = donchian_upper_aligned[i]
         lower_val = donchian_lower_aligned[i]
         mid_val = donchian_mid_aligned[i]
+        sma_50_val = sma_50_1w_aligned[i]
         vol_ma_20 = vol_ma_20_1d_aligned[i]
-        chop_val = chop_aligned[i]
         
         # Skip if any value is NaN
         if (np.isnan(upper_val) or np.isnan(lower_val) or np.isnan(mid_val) or 
-            np.isnan(vol_ma_20) or np.isnan(chop_val)):
+            np.isnan(sma_50_val) or np.isnan(vol_ma_20)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,16 +86,21 @@ def generate_signals(prices):
         current_vol = vol_1d_aligned[i]
         vol_condition = current_vol > 2.0 * vol_ma_20
         
-        # Chop condition: range-bound market
-        chop_condition = chop_val > 61.8
+        # Trend filter: weekly close above/below weekly SMA(50)
+        weekly_close = close_1w[-1] if len(close_1w) > 0 else np.nan
+        # Get aligned weekly close for current day
+        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+        weekly_close_val = weekly_close_aligned[i]
+        weekly_uptrend = weekly_close_val > sma_50_val
+        weekly_downtrend = weekly_close_val < sma_50_val
         
         if position == 0:
-            # Long: price breaks above weekly Donchian upper with volume spike and range regime
-            if close[i] > upper_val and vol_condition and chop_condition:
+            # Long: price breaks above weekly Donchian upper with volume spike and weekly uptrend
+            if close[i] > upper_val and vol_condition and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian lower with volume spike and range regime
-            elif close[i] < lower_val and vol_condition and chop_condition:
+            # Short: price breaks below weekly Donchian lower with volume spike and weekly downtrend
+            elif close[i] < lower_val and vol_condition and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         
