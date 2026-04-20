@@ -3,83 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 12h Trend Filter
-# - Elder Ray (Bull/Bear Power) on 6h: Bull = High - EMA13, Bear = EMA13 - Low
-# - Long when Bull Power > 0 and Bear Power < 0 AND 12h EMA34 > 12h EMA89 (uptrend)
-# - Short when Bear Power > 0 and Bull Power < 0 AND 12h EMA34 < 12h EMA89 (downtrend)
-# - Exit when Elder Ray signals weaken or 12h trend flips
-# - Combines momentum (Elder Ray) with trend filter (12h EMA cross) for robust signals
-# - Designed for 6h timeframe with selective entries to avoid overtrading
-# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
+# Hypothesis: 4h Donchian Channel Breakout with Volume Confirmation and ADX Trend Filter
+# - Long when price breaks above Donchian(20) high + volume > 1.5x average + ADX > 25
+# - Short when price breaks below Donchian(20) low + volume > 1.5x average + ADX > 25
+# - Exit when price crosses back through Donchian midpoint
+# - Designed for 4h timeframe with selective entries to avoid overtrading
+# - Uses volume and ADX to filter false breakouts
+# - Target: 20-50 trades per year per symbol (80-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 1d data for ADX calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA8 and EMA34 on 12h timeframe
-    ema8_12h = pd.Series(close_12h).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate ADX(14) on 1d timeframe
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align 12h EMAs to 6h timeframe
-    ema8_12h_aligned = align_htf_to_ltf(prices, df_12h, ema8_12h)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Calculate Elder Ray on 6h timeframe
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # EMA13 for Elder Ray calculation
-    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Bull Power = High - EMA13
-    bull_power = high_6h - ema13_6h
-    # Bear Power = EMA13 - Low
-    bear_power = ema13_6h - low_6h
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Donchian Channel on 4h timeframe
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
+    
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if NaN in indicators
-        if (np.isnan(ema8_12h_aligned[i]) or np.isnan(ema34_12h_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) or np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema8 = ema8_12h_aligned[i]
-        ema34 = ema34_12h_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        price = close_4h[i]
+        volume = volume_4h[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        mid = donchian_mid[i]
+        vol_avg = vol_ma[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Long entry: Bull Power > 0, Bear Power < 0, and 12h EMA8 > EMA34 (uptrend)
-            if bull > 0 and bear < 0 and ema8 > ema34:
+            # Long entry: break above upper band + volume spike + strong trend
+            if price > upper and volume > 1.5 * vol_avg and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Bear Power > 0, Bull Power < 0, and 12h EMA8 < EMA34 (downtrend)
-            elif bear > 0 and bull < 0 and ema8 < ema34:
+            # Short entry: break below lower band + volume spike + strong trend
+            elif price < lower and volume > 1.5 * vol_avg and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Elder Ray weakens or 12h trend turns down
-            if bull <= 0 or bear >= 0 or ema8 <= ema34:
+            # Long exit: price crosses below midpoint
+            if price < mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Elder Ray weakens or 12h trend turns up
-            if bear <= 0 or bull >= 0 or ema8 >= ema34:
+            # Short exit: price crosses above midpoint
+            if price > mid:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_12hEMATrendFilter"
-timeframe = "6h"
+name = "4h_Donchian20_Volume_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
