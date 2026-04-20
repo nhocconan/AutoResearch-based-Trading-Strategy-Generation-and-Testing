@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R1S1_Breakout_Volume_Trend_Filter
-Hypothesis: Trade 12h price breakouts above/below 1-day Camarilla R1/S1 levels with volume confirmation and 1-week trend filter.
-Long when price breaks above 1d R1 with volume spike and 1w uptrend; short when breaks below 1d S1 with volume spike and 1w downtrend.
-Uses daily Camarilla pivot levels (calculated from prior day's high, low, close) and volume > 1.5x 20-period average for confirmation.
-1-week trend filter avoids counter-trend trades. Designed for 12h timeframe to capture multi-day moves with reduced noise.
-Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
-Works in bull/bear: 1w trend filter avoids counter-trend trades, volume filter reduces false breakouts.
+4h_Camarilla_Pivot_R1S1_Breakout_Volume_Trend_Filter
+Hypothesis: Trade 4h price breakouts above/below daily pivot resistance/support levels with volume confirmation and 1d trend filter.
+Long when price breaks above daily R1 with volume spike and 1d uptrend; short when breaks below daily S1 with volume spike and 1d downtrend.
+Uses daily pivot levels (calculated from prior daily bar) and volume > 1.5x 20-period average for confirmation.
+Designed for 4h timeframe to capture medium-term moves while reducing noise.
+Target: 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+Works in bull/bear: 1d trend filter avoids counter-trend trades, volume filter reduces false breakouts.
 """
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_Volume_Trend_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R1S1_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,45 +27,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla levels
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate daily pivot points (using prior daily bar's high, low, close)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels (using prior day's high, low, close)
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    rang = high_1d - low_1d
-    r1_1d = close_1d + rang * 1.1 / 12.0
-    s1_1d = close_1d - rang * 1.1 / 12.0
+    # Pivot point calculation: PP = (H + L + C) / 3
+    # R1 = 2*PP - L, S1 = 2*PP - H
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pp_1d - low_1d
+    s1_1d = 2 * pp_1d - high_1d
     
-    # Align 1d Camarilla levels to 12h timeframe (already delayed by one bar via align_htf_to_ltf)
+    # Align daily pivot levels to 4h timeframe (already delayed by one bar via align_htf_to_ltf)
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA20 for trend filter
-    def ema(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            multiplier = 2.0 / (period + 1)
-            result[period-1] = np.mean(values[:period])
-            for i in range(period, len(values)):
-                result[i] = multiplier * values[i] + (1 - multiplier) * result[i-1]
-        return result
-    
-    ema20_1w = ema(close_1w, 20)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Calculate volume filter (volume > 1.5x 20-period average)
     vol_ma20 = np.full_like(volume, np.nan)
@@ -76,36 +57,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure indicators are ready (20 for EMA + buffer)
+    start_idx = 20  # Ensure volume MA is ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above 1d R1 with volume filter AND 1w uptrend (close > EMA20)
-            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema20_1w_aligned[i]:
+            # Long: price breaks above daily R1 with volume filter AND 1d uptrend (close > PP)
+            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > pp_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d S1 with volume filter AND 1w downtrend (close < EMA20)
-            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema20_1w_aligned[i]:
+            # Short: price breaks below daily S1 with volume filter AND 1d downtrend (close < PP)
+            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < pp_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below 1d S1 OR 1w trend turns down
-            if close[i] < s1_1d_aligned[i] or close[i] < ema20_1w_aligned[i]:
+            # Long exit: price breaks below daily pivot point OR below S1
+            if close[i] < pp_1d_aligned[i] or close[i] < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 1d R1 OR 1w trend turns up
-            if close[i] > r1_1d_aligned[i] or close[i] > ema20_1w_aligned[i]:
+            # Short exit: price breaks above daily pivot point OR above R1
+            if close[i] > pp_1d_aligned[i] or close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
