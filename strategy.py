@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Direction_RSI20_80_VolumeFilter_V1
-# Hypothesis: KAMA adapts to market noise, providing a smooth trend direction signal.
-# RSI extremes (<20 for oversold, >80 for overbought) with volume confirmation capture
-# high-probability reversals in both bull and bear markets. Designed for 12h to minimize
-# trade frequency and avoid fee drag, with volume filter ensuring institutional participation.
+# 4h_1d_Camarilla_R1_S1_Breakout_VolumeATRFilter
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily pivot act as institutional support/resistance.
+# Breakouts with volume confirmation and ATR-based volatility filter capture sustained moves.
+# Designed for 4h timeframe with daily pivot levels to balance trade frequency and signal quality.
+# Works in both bull/bear markets by capturing breakouts from key levels with institutional volume validation.
 
-name = "12h_KAMA_Direction_RSI20_80_VolumeFilter_V1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1_S1_Breakout_VolumeATRFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -28,28 +28,33 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) - 2 periods for fast adaptation
-    close_series = pd.Series(close)
-    change = abs(close_series.diff(1))
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, 1e-10)  # Efficiency Ratio
-    sc = (er * (0.66 - 0.06) + 0.06) ** 2  # Smoothing Constant
-    kama = [close[0]]  # Initialize with first price
-    for i in range(1, len(close)):
-        kama.append(kama[-1] + sc[i] * (close[i] - kama[-1]))
-    kama = np.array(kama)
+    # Calculate Camarilla levels from previous day
+    # Using (H+L+C)/3 as pivot
+    ph = df_1d['high'].values
+    pl = df_1d['low'].values
+    pc = df_1d['close'].values
     
-    # Calculate RSI (14-period)
-    delta = pd.Series(close).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate pivot and Camarilla levels
+    p = (ph + pl + pc) / 3
+    r1 = p + (ph - pl) * 1.1 / 12
+    s1 = p - (ph - pl) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma20 * 1.5)
+    
+    # ATR filter: only trade when volatility is sufficient
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr > (atr_ma50 * 0.5)  # Only trade when ATR > 50% of its MA
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,31 +63,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(volatility_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above KAMA, RSI oversold (<20), volume confirmation
-            if close[i] > kama[i] and rsi[i] < 20 and volume_filter[i]:
+            # Long: price breaks above R1 + volume confirmation + sufficient volatility
+            if close[i] > r1_aligned[i] and volume_filter[i] and volatility_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI overbought (>80), volume confirmation
-            elif close[i] < kama[i] and rsi[i] > 80 and volume_filter[i]:
+            # Short: price breaks below S1 + volume confirmation + sufficient volatility
+            elif close[i] < s1_aligned[i] and volume_filter[i] and volatility_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses below KAMA or RSI overbought (>70)
-            if close[i] < kama[i] or rsi[i] > 70:
+            # Long: exit if price breaks below S1 (reversal signal)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses above KAMA or RSI oversold (<30)
-            if close[i] > kama[i] or rsi[i] < 30:
+            # Short: exit if price breaks above R1 (reversal signal)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
