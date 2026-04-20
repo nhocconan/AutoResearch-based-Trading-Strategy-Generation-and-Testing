@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d Trend Filter and Volume Spike
-# Enters long when Williams %R(14) crosses above -20 (oversold recovery) with 1d uptrend (close > EMA50) and volume > 2x average.
-# Enters short when Williams %R(14) crosses below -80 (overbought breakdown) with 1d downtrend (close < EMA50) and volume > 2x average.
-# Exits when Williams %R returns to -50 (mean reversion center) or trend fails.
-# Williams %R identifies momentum extremes; 1d EMA50 filters counter-trend trades; volume spike confirms institutional interest.
-# Designed for low-frequency, high-conviction trades targeting 50-150 total over 4 years (12-37/year).
+# Hypothesis: 1d Williams Alligator with Weekly Trend Filter and Volume Confirmation
+# Uses Alligator lines (Jaw=13, Teeth=8, Lips=5 SMAs) to identify trend direction and alignment.
+# Enters long when Lips > Teeth > Jaw (bullish alignment) with price above Lips and volume > 1.5x average.
+# Enters short when Lips < Teeth < Jaw (bearish alignment) with price below Lips and volume > 1.5x average.
+# Exits when alignment breaks or price crosses back through Teeth.
+# Weekly trend filter ensures alignment with higher timeframe trend.
+# Target: 30-100 total trades over 4 years (7-25/year).
 
-name = "12h_WilliamsR_1dEMA50_VolumeSpike"
-timeframe = "12h"
+name = "1d_Alligator_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,78 +20,83 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === Williams %R (14-period) on 12h data ===
+    # === Williams Alligator (13,8,5) ===
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Jaw (13-period SMMA of median price)
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    # Teeth (8-period SMMA of median price)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    # Lips (5-period SMMA of median price)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Range: -100 to 0, where -20 is overbought, -80 is oversold
-    denominator = highest_high - lowest_low
-    williams_r = np.where(denominator != 0, ((highest_high - close) / denominator) * -100, -50)
+    # === Weekly EMA20 for trend filter ===
+    weekly_close = df_1w['close'].values
+    ema_20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
-    # Previous Williams %R for crossover detection
-    williams_r_prev = np.roll(williams_r, 1)
-    williams_r_prev[0] = np.nan
-    
-    # === Daily EMA50 for trend filter ===
-    daily_close = df_1d['close'].values
-    ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # === Volume confirmation (volume spike) ===
+    # === Volume confirmation ===
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values  # 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values  # 20-day average
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(14, n):  # Start after warmup
+    for i in range(13, n):  # Start after warmup for Jaw
         # Get values
-        wr = williams_r[i]
-        wr_prev = williams_r_prev[i]
-        ema_val = ema_50_aligned[i]
+        close_val = close[i]
+        lips_val = lips[i]
+        teeth_val = teeth[i]
+        jaw_val = jaw[i]
+        ema_val = ema_20_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(wr) or np.isnan(wr_prev) or np.isnan(ema_val) or 
-            np.isnan(vol_ratio_val)):
+        if (np.isnan(lips_val) or np.isnan(teeth_val) or np.isnan(jaw_val) or 
+            np.isnan(ema_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: Williams %R crosses above -20 (oversold recovery) with uptrend and volume spike
-            if wr > -20 and wr_prev <= -20 and close[i] > ema_val and vol_ratio_val > 2.0:
+            # Bullish alignment: Lips > Teeth > Jaw
+            bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
+            # Bearish alignment: Lips < Teeth < Jaw
+            bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
+            
+            # Long entry: bullish alignment, price above Lips, weekly uptrend, volume confirmation
+            if bullish_alignment and close_val > lips_val and close_val > ema_val and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R crosses below -80 (overbought breakdown) with downtrend and volume spike
-            elif wr < -80 and wr_prev >= -80 and close[i] < ema_val and vol_ratio_val > 2.0:
+                entry_price = close_val
+            # Short entry: bearish alignment, price below Lips, weekly downtrend, volume confirmation
+            elif bearish_alignment and close_val < lips_val and close_val < ema_val and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         
         elif position == 1:
-            # Long exit: Williams %R returns to -50 (mean reversion) or trend breaks
-            if wr >= -50 or close[i] <= ema_val:
+            # Long exit: alignment breaks or price crosses below Teeth
+            if not (lips_val > teeth_val and teeth_val > jaw_val) or close_val < teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R returns to -50 (mean reversion) or trend breaks
-            if wr <= -50 or close[i] >= ema_val:
+            # Short exit: alignment breaks or price crosses above Teeth
+            if not (lips_val < teeth_val and teeth_val < jaw_val) or close_val > teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
