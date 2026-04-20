@@ -3,97 +3,85 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Donchian20_VolumeSpike_ATRFilter_v1"
-timeframe = "6h"
+name = "4h_12h_Donchian20_VolumeSpike_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # === Daily Donchian Channel (20) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 12h Donchian Channel (20-period) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Rolling max/min of last 20 daily highs/lows
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
+    # Calculate rolling max/min with proper alignment
+    high_series = pd.Series(high_12h)
+    low_series = pd.Series(low_12h)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align to 4h timeframe (waits for 12h bar close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    # === 6h ATR (14) for volatility filter ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # === 6h Volume Spike Filter ===
+    # === Volume Spike Filter (4h) ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20>0)
+    
+    # === 4h EMA Trend Filter ===
+    close_series = pd.Series(prices['close'].values)
+    ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
-        # Get values
-        close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        vol_ratio_val = vol_ratio[i]
-        dch_high = donchian_high_aligned[i]
-        dch_low = donchian_low_aligned[i]
-        atr_val = atr[i]
-        
-        # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(dch_high) or 
-            np.isnan(dch_low) or np.isnan(atr_val)):
+    for i in range(100, n):
+        # Skip if any value is invalid
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema50[i]) or np.isnan(ema200[i]) or vol_ma20[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
+            
+        close_val = prices['close'].iloc[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        vol_ratio_val = vol_ratio[i]
+        ema50_val = ema50[i]
+        ema200_val = ema200[i]
         
         if position == 0:
-            # Long: Break above Donchian high with volume spike and volatility filter
-            if high_val > dch_high and vol_ratio_val > 2.5 and atr_val > 0:
+            # Long: Break above Donchian high with volume spike and uptrend
+            if close_val > donchian_high_val and vol_ratio_val > 2.0 and ema50_val > ema200_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low with volume spike and volatility filter
-            elif low_val < dch_low and vol_ratio_val > 2.5 and atr_val > 0:
+            # Short: Break below Donchian low with volume spike and downtrend
+            elif close_val < donchian_low_val and vol_ratio_val > 2.0 and ema50_val < ema200_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price closes below Donchian low OR volatility drops
-            if close_val < dch_low or atr_val < atr[i-1] * 0.5:  # ATR contraction
+            # Long exit: Price returns below Donchian low OR trend breaks down
+            if close_val < donchian_low_val or ema50_val < ema200_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price closes above Donchian high OR volatility drops
-            if close_val > dch_high or atr_val < atr[i-1] * 0.5:  # ATR contraction
+            # Short exit: Price returns above Donchian high OR trend breaks up
+            if close_val > donchian_high_val or ema50_val > ema200_val:
                 signals[i] = 0.0
                 position = 0
             else:
