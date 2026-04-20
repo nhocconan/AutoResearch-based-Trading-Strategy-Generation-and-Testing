@@ -1,12 +1,12 @@
-# [EXPERIMENT #65468] 12h_KAMA_Direction_With_Volume_and_Chop_Filter
-# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise—slow in ranging, fast in trending.
-# Direction: price > KAMA = bullish, price < KAMA = bearish. Entry when price crosses KAMA with volume confirmation.
-# Chop filter: Choppiness Index > 61.8 = ranging (avoid trend trades), < 38.2 = trending (allow trades).
-# Works in bull/bear via directional entries; volatility-adjusted via Chop regime.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+#!/usr/bin/env python3
+# 4h_1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation
+# Hypothesis: 4h breakouts above 1d Camarilla R1 or below S1 with volume confirmation capture institutional interest.
+# Works in both bull and bear markets: R1 breakouts for bull continuation, S1 breaks for bear continuation.
+# Volume filter reduces false breakouts. Uses 4h timeframe with 1d HTF pivot levels.
+# Target: 20-50 trades/year to stay under fee drag limits.
 
-name = "12h_KAMA_Direction_With_Volume_and_Chop_Filter"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,93 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === KAMA (Kaufman Adaptive Moving Average) ===
-    # ER = |net change| / sum(|abs change|) over 10 periods
-    # SCR = [ER * (fastest - slowest) + slowest]^2
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    abs_change = change
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    net_change = np.abs(np.subtract(close, np.roll(close, 10)))
-    sum_abs = np.sum(np.abs(np.diff(close, prepend=close[0])).reshape(-1, 10), axis=1)
-    # Handle edge cases for sum_abs calculation
-    sum_abs = np.convolve(abs_change, np.ones(10), mode='full')[:n] * 0  # placeholder, will compute properly
+    # Calculate Camarilla levels from previous day's OHLC
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Proper ER calculation
-    er = np.zeros(n)
-    for i in range(10, n):
-        net = np.abs(close[i] - close[i-10])
-        total = np.sum(np.abs(np.diff(close[i-9:i+1])))
-        er[i] = net / total if total != 0 else 0
+    # Shift by 1 to use previous day's data (avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
     
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate Camarilla R1 and S1
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # === Choppiness Index (14-period) ===
-    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align to 4h timeframe (waits for 1d bar to close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr / (max_high - min_low + 1e-10)) / np.log10(14)
-    
-    # Chop regimes: >61.8 = ranging, <38.2 = trending
-    chop_trending = chop < 38.2  # Only trade in trending markets
-    
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.3)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20, 14)
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(chop[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in trending markets (Chop < 38.2)
-        if not chop_trending[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: price crosses above KAMA with volume confirmation
-            if close[i] > kama[i] and close[i-1] <= kama[i-1] and volume_confirm[i]:
+            # Long: break above R1 with volume confirmation
+            if (close[i] > camarilla_r1_aligned[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below KAMA with volume confirmation
-            elif close[i] < kama[i] and close[i-1] >= kama[i-1] and volume_confirm[i]:
+            # Short: break below S1 with volume confirmation
+            elif (close[i] < camarilla_s1_aligned[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses below KAMA
-            if close[i] < kama[i] and close[i-1] >= kama[i-1]:
+            # Long: exit if price breaks below S1 (reversal)
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses above KAMA
-            if close[i] > kama[i] and close[i-1] <= kama[i-1]:
+            # Short: exit if price breaks above R1 (reversal)
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
