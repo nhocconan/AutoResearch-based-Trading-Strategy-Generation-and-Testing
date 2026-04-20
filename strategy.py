@@ -3,73 +3,70 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d ADX trend filter
-# Long when price breaks above 20-period Donchian high with 12h volume spike and ADX > 25 (trending)
-# Short when price breaks below 20-period Donchian low with 12h volume spike and ADX > 25 (trending)
-# Avoids false breakouts in ranging markets via ADX filter. Volume confirms institutional participation.
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Hypothesis: 1-day KAMA trend + RSI(2) mean reversion with 1-week trend filter
+# In bull markets: go long when KAMA rising, RSI(2) < 10 (oversold), and weekly trend up
+# In bear markets: go short when KAMA falling, RSI(2) > 90 (overbought), and weekly trend down
+# Uses contrarian entries within the trend for high-probability mean reversion
+# Target: 30-100 trades over 4 years (7-25/year) with disciplined entries
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    vol_12h = df_12h['volume'].values
-    
-    # Load 1d data ONCE for ADX trend filter
+    # Load daily data ONCE for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) on 4h
+    # Calculate KAMA ( Kaufman Adaptive Moving Average )
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
+    # Recalculate volatility properly
+    volatility = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        volatility[i] = volatility[i-1] + np.abs(close_1d[i] - close_1d[i-1])
+    # Avoid division by zero
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Calculate RSI(2) on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=2, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).rolling(window=2, min_periods=2).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align KAMA and RSI to daily timeframe (no alignment needed as same TF)
+    # But we still use the helper for consistency in interface
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Weekly EMA(34) for trend
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Daily ATR for stop sizing
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 12h volume spike (> 2.0 x 20-period average)
-    vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_12h_spike = vol_12h > (vol_ma_20 * 2.0)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_12h_spike)
-    
-    # Calculate 1d ADX (14-period) for trend strength
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # DI and DX
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 4h ATR for stop sizing
-    tr1_4h = high[1:] - low[1:]
-    tr2_4h = np.abs(high[1:] - close[:-1])
-    tr3_4h = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
-    atr_4h = pd.Series(tr_4h).rolling(window=20, min_periods=20).mean().values
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,44 +74,42 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(vol_spike_aligned[i]) or np.isnan(adx_aligned[i]) or \
-           np.isnan(atr_4h[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or \
+           np.isnan(ema_1w_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Price levels
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        vol_spike = vol_spike_aligned[i]
-        adx_val = adx_aligned[i]
+        # Price and indicators
         price = close[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
+        ema_1w_val = ema_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high, volume spike, trending (ADX > 25)
-            if price > upper and vol_spike and adx_val > 25:
+            # Long: KAMA rising (trend up), RSI(2) oversold, weekly trend up
+            if kama_val > kama_aligned[i-1] and rsi_val < 10 and price > ema_1w_val:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below Donchian low, volume spike, trending (ADX > 25)
-            elif price < lower and vol_spike and adx_val > 25:
+            # Short: KAMA falling (trend down), RSI(2) overbought, weekly trend down
+            elif kama_val < kama_aligned[i-1] and rsi_val > 90 and price < ema_1w_val:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: stop loss (2x ATR below entry) or price breaks below Donchian low
-            if price <= entry_price - 2.0 * atr_4h[i] or price < lower:
+            # Long exit: stop loss (1.5x ATR below entry) or RSI(2) overbought
+            if price <= entry_price - 1.5 * atr[i] or rsi_val > 80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: stop loss (2x ATR above entry) or price breaks above Donchian high
-            if price >= entry_price + 2.0 * atr_4h[i] or price > upper:
+            # Short exit: stop loss (1.5x ATR above entry) or RSI(2) oversold
+            if price >= entry_price + 1.5 * atr[i] or rsi_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hVolSpike_1dADXFilter"
-timeframe = "4h"
+name = "1d_KAMA_RSI2_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
