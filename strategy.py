@@ -1,15 +1,14 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_12h_Camarilla_Pivot_R4S4_Breakout_Volume
-Hypothesis: Use 12h Camarilla pivot levels (R4/S4) as breakout levels with volume confirmation.
-In trending markets: breakout above R4 or below S4 signals strong momentum.
-In ranging markets: fewer false breakouts due to wider bands and volume filter.
-Targets 20-50 trades/year with position size 0.25 to balance opportunity and drawdown.
-Works in both bull/bear via breakout logic (direction agnostic).
+4h_Keltner_RSI_Trend_V1
+Hypothesis: 4h Keltner Channel breakout in direction of 1d EMA50 trend with RSI momentum filter. 
+Keltner breakouts capture volatility expansion moves. Trend filter ensures alignment with higher timeframe direction. 
+RSI avoids overextended entries. Designed for fewer trades (<50/year) with position size 0.25 to manage drawdown in both bull and bear markets.
 """
 
-name = "6h_12h_Camarilla_Pivot_R4S4_Breakout_Volume"
-timeframe = "6h"
+name = "4h_Keltner_RSI_Trend_V1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,75 +17,119 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Get 4h data ONCE before loop for indicators
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h Camarilla pivots (based on previous day)
-    # Typical price = (H + L + C) / 3
-    typical_price = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
+    # Get 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Camarilla levels: R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
-    r4 = typical_price + range_12h * 1.1 / 2
-    s4 = typical_price - range_12h * 1.1 / 2
+    close_1d = df_1d['close'].values
     
-    # Align to 6h timeframe (wait for 12h bar to close)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    # === 4h Indicators: Keltner Channel (20, 10, 2.0) ===
+    # EMA20
+    ema20 = np.full_like(close_4h, np.nan)
+    if len(close_4h) >= 20:
+        ema20[19] = np.mean(close_4h[:20])
+        for i in range(20, len(close_4h)):
+            ema20[i] = 0.1 * close_4h[i] + 0.9 * ema20[i-1]
     
-    # Volume average (20-period) for confirmation
-    vol_avg = np.zeros_like(volume)
-    vol_avg[:] = np.nan
-    for i in range(20, len(volume)):
-        vol_avg[i] = np.mean(volume[i-20:i])
+    # ATR10
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr10 = np.full_like(close_4h, np.nan)
+    if len(tr) >= 10:
+        atr10[9] = np.mean(tr[:10])
+        for i in range(10, len(tr)):
+            atr10[i] = 0.1 * tr[i] + 0.9 * atr10[i-1]
+    
+    # Keltner Bands
+    upper_keltner = ema20 + 2.0 * atr10
+    lower_keltner = ema20 - 2.0 * atr10
+    
+    # === 1d Indicator: EMA50 Trend ===
+    ema50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = 0.02 * close_1d[i] + 0.98 * ema50_1d[i-1]
+    
+    # === 4h Indicator: RSI(14) ===
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing for RSI
+    avg_gain = np.full_like(close_4h, np.nan)
+    avg_loss = np.full_like(close_4h, np.nan)
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(gain)):
+            avg_gain[i] = (13 * avg_gain[i-1] + gain[i]) / 14
+            avg_loss[i] = (13 * avg_loss[i-1] + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align indicators to 4h timeframe
+    ema20_aligned = align_htf_to_ltf(prices, df_4h, ema20)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_4h, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_4h, lower_keltner)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Need 12h data + vol avg
+    start_idx = 60  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(ema20_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or 
+            np.isnan(lower_keltner_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long breakout: price crosses above R4 with volume > 1.5x average
-            if close[i] > r4_aligned[i] and volume[i] > vol_avg[i] * 1.5:
+            # Long: Close above upper Keltner + price > 1d EMA50 + RSI < 70 (not overbought)
+            if close[i] > upper_keltner_aligned[i] and close[i] > ema50_1d_aligned[i] and rsi_aligned[i] < 70:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price crosses below S4 with volume > 1.5x average
-            elif close[i] < s4_aligned[i] and volume[i] > vol_avg[i] * 1.5:
+            # Short: Close below lower Keltner + price < 1d EMA50 + RSI > 30 (not oversold)
+            elif close[i] < lower_keltner_aligned[i] and close[i] < ema50_1d_aligned[i] and rsi_aligned[i] > 30:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below R4 (failed breakout) or reverse below S4
-            if close[i] < r4_aligned[i]:
+            # Long exit: Close below EMA20 OR RSI > 80 (overbought)
+            if close[i] < ema20_aligned[i] or rsi_aligned[i] > 80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above S4 (failed breakdown) or reverse above R4
-            if close[i] > s4_aligned[i]:
+            # Short exit: Close above EMA20 OR RSI < 20 (oversold)
+            if close[i] > ema20_aligned[i] or rsi_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
