@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_TF_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_TF_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 36:  # Need at least 3 days of 12h data
+    if n < 50:  # Need at least ~8 days of 4h data
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need at least 20 days for calculations
+    if len(df_1d) < 10:  # Need at least 10 days for calculations
         return np.zeros(n)
     
     # === 1d: Calculate Camarilla pivot levels (using previous day's data) ===
@@ -38,20 +38,20 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 12h: Volume ratio (current vs 10-period average) ===
+    # === 4h: Volume ratio (current vs 20-period average) ===
     close = prices['close'].values
     volume = prices['volume'].values
-    vol_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    vol_ratio = volume / np.where(vol_ma10 > 0, vol_ma10, np.nan)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(36, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Get values
         close_val = close[i]
         r1_level = camarilla_r1_aligned[i]
