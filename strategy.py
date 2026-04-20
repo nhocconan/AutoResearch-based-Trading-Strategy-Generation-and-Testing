@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v4"
-timeframe = "4h"
+name = "6h_1d_Pivot_R1S1_Breakout_Confluence"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -14,10 +14,10 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d: Calculate Camarilla pivot levels (using previous day's data) ===
+    # === 1d: Calculate pivot points (previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -32,23 +32,30 @@ def generate_signals(prices):
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     
-    # Calculate Camarilla levels: R1, S1
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Calculate pivot point and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align 1d indicators to 6h timeframe
+    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    r2_1d = align_htf_to_ltf(prices, df_1d, r2)
+    s2_1d = align_htf_to_ltf(prices, df_1d, s2)
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # === 6h: Price and volume ===
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    
+    # Volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === 4h: ATR for volatility filter ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -56,7 +63,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === 4h: Trend filter using EMA 34 ===
+    # === 6h: Trend filter (EMA 34) ===
     close_series = pd.Series(close)
     ema_34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
@@ -66,8 +73,10 @@ def generate_signals(prices):
     for i in range(50, n):
         # Get values
         close_val = close[i]
-        r1_level = camarilla_r1_aligned[i]
-        s1_level = camarilla_s1_aligned[i]
+        r1_level = r1_1d[i]
+        s1_level = s1_1d[i]
+        r2_level = r2_1d[i]
+        s2_level = s2_1d[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr[i]
         ema_val = ema_34[i]
