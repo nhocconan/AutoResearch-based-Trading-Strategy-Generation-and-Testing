@@ -3,79 +3,118 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian breakout with weekly trend filter
-# - Enter long when price breaks above 20-day high, short when below 20-day low
-# - Filter trades using 1-week EMA trend: only long when price > weekly EMA, short when price < weekly EMA
-# - Use volume confirmation: require volume > 1.5x 20-day average volume
-# - Exit when price crosses back through 10-day moving average
-# - Designed for 1d timeframe with selective entries to avoid overtrading
-# - Target: 7-25 trades per year per symbol (30-100 total over 4 years)
+# Hypothesis: 6h ADX + Williams Alligator with Daily Trend Filter
+# - ADX(14) > 25 to filter trending conditions
+# - Williams Alligator (Jaw=13, Teeth=8, Lips=5) for trend direction and entry timing
+# - Daily EMA(50) as higher timeframe trend filter (price above/below)
+# - Only take long when price > daily EMA50 and Alligator aligned bullish
+# - Only take short when price < daily EMA50 and Alligator aligned bearish
+# - Designed for 6h timeframe with selective entries to avoid overtrading
+# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for daily EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate EMA50 on 1d timeframe
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Daily price and volume data
+    # Calculate Williams Alligator on 6h timeframe
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
+    median_price = (high + low) / 2
     
-    # Calculate 20-day Donchian channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Jaw (13-period smoothed with 8-period offset)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.rolling(window=8, min_periods=8).mean().values
     
-    # Calculate 20-day average volume for volume filter
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Teeth (8-period smoothed with 5-period offset)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.rolling(window=5, min_periods=5).mean().values
     
-    # Calculate 10-day EMA for exit signal
-    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Lips (5-period smoothed with 3-period offset)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
+    lips = lips.rolling(window=3, min_periods=3).mean().values
+    
+    # Calculate ADX(14) on 6h timeframe
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if any required data is NaN
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_avg_20[i]) or \
-           np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_10[i]):
+    for i in range(100, n):
+        # Skip if NaN in indicators
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
+           np.isnan(adx[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        volume_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Determine Alligator alignment
+        alligator_bullish = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
+        alligator_bearish = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
+        
+        # Determine price position relative to daily EMA50
+        price_above_ema = close[i] > ema50_1d_aligned[i]
+        price_below_ema = close[i] < ema50_1d_aligned[i]
+        
+        # Strong trend filter
+        strong_trend = adx[i] > 25
         
         if position == 0:
-            # Long entry: price breaks above 20-day high + above weekly EMA + volume confirmation
-            if close[i] > high_20[i] and close[i] > ema_20_1w_aligned[i] and volume_confirm:
+            # Long entry: ADX > 25 + Alligator bullish + price above daily EMA50
+            if strong_trend and alligator_bullish and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below 20-day low + below weekly EMA + volume confirmation
-            elif close[i] < low_20[i] and close[i] < ema_20_1w_aligned[i] and volume_confirm:
+            # Short entry: ADX > 25 + Alligator bearish + price below daily EMA50
+            elif strong_trend and alligator_bearish and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 10-day EMA
-            if close[i] < ema_10[i]:
+            # Long exit: Loss of bullish alignment or price crosses below EMA50
+            if not alligator_bullish or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 10-day EMA
-            if close[i] > ema_10[i]:
+            # Short exit: Loss of bearish alignment or price crosses above EMA50
+            if not alligator_bearish or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMAFilter_Volume"
-timeframe = "1d"
+name = "6h_ADX_Alligator_DailyEMAFilter"
+timeframe = "6h"
 leverage = 1.0
