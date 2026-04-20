@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Regime_v1"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1S1_Breakout_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,25 +12,25 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Points (previous day) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Daily data for 12h candles (using 12h data) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Previous day's values for pivot calculation (using 12h candles)
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close = np.roll(close_12h, 1)
     
     # Set first values to avoid look-ahead
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    prev_high[0] = high_12h[0]
+    prev_low[0] = low_12h[0]
+    prev_close[0] = close_12h[0]
     
     # Camarilla pivot (same as classic)
     pivot = (prev_high + prev_low + prev_close) / 3
@@ -40,32 +40,32 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
     
-    # === 12h Volume Confirmation ===
+    # === 4h Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Chopiness Index (1d) for regime filter ===
-    # Calculate daily chopiness index: higher = ranging, lower = trending
-    high_low = df_1d['high'].values - df_1d['low'].values
+    # === Chopiness Index (12h) for regime filter ===
+    # Calculate 12h chopiness index: higher = ranging, lower = trending
+    high_low = df_12h['high'].values - df_12h['low'].values
     atr1 = np.zeros_like(high_low)
     atr1[0] = high_low[0]
     for i in range(1, len(high_low)):
         tr = max(
             high_low[i],
-            abs(df_1d['high'].values[i] - df_1d['close'].values[i-1]),
-            abs(df_1d['low'].values[i] - df_1d['close'].values[i-1])
+            abs(df_12h['high'].values[i] - df_12h['close'].values[i-1]),
+            abs(df_12h['low'].values[i] - df_12h['close'].values[i-1])
         )
         atr1[i] = 0.9 * atr1[i-1] + 0.1 * tr
     
-    # Sum of absolute returns over 14 days
-    abs_returns = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    # Sum of absolute returns over 14 periods
+    abs_returns = np.abs(np.diff(close_12h, prepend=close_12h[0]))
     sum_abs_ret = np.zeros_like(abs_returns)
     for i in range(len(abs_returns)):
         if i < 14:
@@ -74,15 +74,15 @@ def generate_signals(prices):
             sum_abs_ret[i] = np.sum(abs_returns[i-13:i+1])
     
     # Chopiness index formula
-    chop = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
+    chop = np.zeros_like(close_12h)
+    for i in range(len(close_12h)):
         if sum_abs_ret[i] > 0 and atr1[i] > 0:
             chop[i] = 100 * np.log10(sum_abs_ret[i] / (atr1[i] * 14)) / np.log10(14)
         else:
             chop[i] = 50  # neutral
     
-    # Align chop to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align chop to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
