@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1d_1w_Donchian_Breakout_Volume_Trend
-# Hypothesis: On 1d timeframe, trade Donchian(20) breakouts with volume confirmation and 1w EMA trend filter.
-# In trending markets (price > 1w EMA), take long breakouts above 20-day high; in ranging markets (price < 1w EMA),
-# take short breakdowns below 20-day low. Uses volume > 1.5x 20-day average for confirmation.
-# Targets 10-25 trades/year by requiring confluence of breakout, volume, and trend filter.
+# 12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
+# Hypothesis: On 12h timeframe, trade breakouts at 1d Camarilla R1/S1 levels with volume and ATR volatility filter.
+# In ranging markets, price breaks through R1/S1 with volume; in trending markets, continues momentum.
+# Uses 1d ADX to filter ranging (ADX < 25) for breakouts and trending (ADX > 25) for continuation.
+# Targets 20-40 trades/year by requiring confluence of level, volume, and volatility filter.
 
-name = "1d_1w_Donchian_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,61 +23,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) on 1d
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Typical price for pivot calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    
+    # Pivot point and ranges
+    pivot_1d = typical_price_1d
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: R1, S1
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    
+    # Align 1d levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Calculate 1d ATR for volatility filter (14-period)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Wilder smoothing for ATR
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period])
+        # Subsequent values: Wilder smoothing
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    atr = smooth_wilder(tr, 14)
+    
+    # Align ATR to 12h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # ATR average for volatility filter
+    atr_ma = pd.Series(atr_aligned).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(atr_ma[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Trend filter: price > 1w EMA = uptrend, price < 1w EMA = downtrend
-            if close[i] > ema_21_1w_aligned[i]:
-                # Uptrend: look for long breakout above 20-day high
-                if (close[i] > high_max[i] and 
-                    volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = 0.25
-                    position = 1
-            else:
-                # Downtrend: look for short breakdown below 20-day low
-                if (close[i] < low_min[i] and 
-                    volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = -0.25
-                    position = -1
+            # Breakout above R1 with volume and volatility expansion
+            if (close[i] > r1_aligned[i] * 1.002 and 
+                volume[i] > 1.5 * volume_ma[i] and
+                atr_aligned[i] > 1.2 * atr_ma[i]):
+                signals[i] = 0.25
+                position = 1
+            # Breakdown below S1 with volume and volatility expansion
+            elif (close[i] < s1_aligned[i] * 0.998 and 
+                  volume[i] > 1.5 * volume_ma[i] and
+                  atr_aligned[i] > 1.2 * atr_ma[i]):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price falls below 20-day low or trend reverses
-            if close[i] < low_min[i] or close[i] < ema_21_1w_aligned[i]:
+            # Long exit: breakdown below S1 or volatility contraction
+            if (close[i] < s1_aligned[i] * 0.998) or \
+               (atr_aligned[i] < 0.8 * atr_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above 20-day high or trend reverses
-            if close[i] > high_max[i] or close[i] > ema_21_1w_aligned[i]:
+            # Short exit: breakout above R1 or volatility contraction
+            if (close[i] > r1_aligned[i] * 1.002) or \
+               (atr_aligned[i] < 0.8 * atr_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
