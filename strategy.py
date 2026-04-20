@@ -8,38 +8,61 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d and 1w data ONCE before loop
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d RSI(14) for overbought/oversold
+    # Calculate 1d Williams %R (14) for oversold/overbought signals
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate 1d RSI (14) for momentum confirmation
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Calculate 1w close for trend filter
-    close_1w = df_1w['close'].values
-    sma_10_1w = pd.Series(close_1w).rolling(window=10, min_periods=10).mean().values
-    sma_10_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_10_1w)
-    
-    # Calculate 6-hour ATR(14) for volatility filter and stoploss
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    # Calculate 1d ADX (14) for trend strength filter
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth TR, DM+ and DM-
+    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    dm_plus14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
+    dm_minus14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Calculate DI+ and DI-
+    di_plus = 100 * dm_plus14 / np.where(tr14 == 0, 1e-10, tr14)
+    di_minus = 100 * dm_minus14 / np.where(tr14 == 0, 1e-10, tr14)
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1e-10, (di_plus + di_minus))
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,39 +70,39 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        rsi_val = rsi_1d_aligned[i]
-        sma_10w_val = sma_10_1w_aligned[i]
-        atr_val = atr_6h[i]
+        williams_val = williams_r_aligned[i]
+        rsi_val = rsi_aligned[i]
+        adx_val = adx_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(rsi_val) or np.isnan(sma_10w_val) or 
-            np.isnan(atr_val)):
+        if (np.isnan(williams_val) or np.isnan(rsi_val) or 
+            np.isnan(adx_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold (<30) with weekly uptrend (price > 10w SMA)
-            if rsi_val < 30 and close_val > sma_10w_val and atr_val > 0:
+            # Long: Williams %R oversold (< -80) + RSI > 50 + ADX > 25 (trending)
+            if williams_val < -80 and rsi_val > 50 and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) with weekly downtrend (price < 10w SMA)
-            elif rsi_val > 70 and close_val < sma_10w_val and atr_val > 0:
+            # Short: Williams %R overbought (> -20) + RSI < 50 + ADX > 25 (trending)
+            elif williams_val > -20 and rsi_val < 50 and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI overbought (>70) or ATR-based stop
-            if rsi_val > 70 or close_val < prices['high'].iloc[i] - 2.0 * atr_val:
+            # Long exit: Williams %R overbought (> -20) or RSI < 40
+            if williams_val > -20 or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI oversold (<30) or ATR-based stop
-            if rsi_val < 30 or close_val > prices['low'].iloc[i] + 2.0 * atr_val:
+            # Short exit: Williams %R oversold (< -80) or RSI > 60
+            if williams_val < -80 or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,13 +110,13 @@ def generate_signals(prices):
     
     return signals
 
-# 6h_1dRSI_1wTrend_ATRFilter_V1
-# Uses 1-day RSI(14) for overbought/oversold signals
-# Filters by 1-week trend (price vs 10-period SMA)
-# Enters long when RSI < 30 and weekly uptrend (price > 10w SMA)
-# Enters short when RSI > 70 and weekly downtrend (price < 10w SMA)
-# Uses 6h ATR(14) for volatility filter and 2*ATR stoploss
-# Designed for 6h timeframe with ~12-37 trades/year
-name = "6h_1dRSI_1wTrend_ATRFilter_V1"
-timeframe = "6h"
+# 12h_WilliamsRSI_ADXFilter_V1
+# Uses 1-day Williams %R for overbought/oversold signals
+# Enters long when Williams %R < -80 (oversold) + RSI > 50 + ADX > 25
+# Enters short when Williams %R > -20 (overbought) + RSI < 50 + ADX > 25
+# Uses ADX > 25 to ensure trending market (avoid chop)
+# Exits on opposite Williams %R level or RSI extreme
+# Designed for 12h timeframe with ~12-37 trades/year
+name = "12h_WilliamsRSI_ADXFilter_V1"
+timeframe = "12h"
 leverage = 1.0
