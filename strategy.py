@@ -3,108 +3,135 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h/1d regime filter
-# - Uses 4h EMA(34) for trend direction, 1d RSI(14) for overbought/oversold
-# - 1h RSI(14) for entry timing in mean reversion zones
-# - Session filter (08-20 UTC) to avoid low-liquidity hours
-# - Targets 15-35 trades/year by requiring multi-timeframe alignment
-# - Works in bull/bear via mean reversion in ranging markets and trend filters
+# Hypothesis: 6h chart with 1d pivot levels (R1/S1) for mean reversion, confirmed by 1w trend.
+# In ranging markets, price reverts to pivot; in trending markets, breaks through R1/S1 with volume.
+# Works in bull/bear by adapting to regime via 1w trend filter.
+# Target: 15-25 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Load 1d data for regime filter (RSI)
+    # Load 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # 1h data
+    # Calculate daily pivot points (standard formula)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Pivot = (H + L + C)/3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Weekly EMA(20) for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # 6h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1h RSI(14) for entry timing
-    delta_1h = np.diff(close, prepend=close[0])
-    gain_1h = np.where(delta_1h > 0, delta_1h, 0)
-    loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
-    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1h = avg_gain_1h / np.where(avg_loss_1h == 0, 1e-10, avg_loss_1h)
-    rsi_14_1h = 100 - (100 / (1 + rs_1h))
+    # 6h ATR(14) for volatility and stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # 6h volume ratio (current / 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(rsi_14_1h[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema_trend = ema_34_4h_aligned[i]
-        rsi_daily = rsi_14_1d_aligned[i]
-        rsi_hourly = rsi_14_1h[i]
-        hour = hours[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_20_1w_aligned[i]
+        atr = atr_14[i]
+        vol_ratio_6h = vol_ratio[i]
         
-        # Regime filters
-        uptrend_regime = price > ema_trend
-        downtrend_regime = price < ema_trend
-        oversold = rsi_daily < 30
-        overbought = rsi_daily > 70
+        # Determine market regime from weekly trend
+        uptrend = price > ema_trend
+        downtrend = price < ema_trend
         
-        # Entry conditions with session filter
-        in_session = 8 <= hour <= 20
+        # Volatility filter: avoid extreme volatility
+        atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values[i]
+        vol_filter = (atr < 3.0 * atr_ma_20)
         
-        if position == 0 and in_session:
-            # Long: uptrend regime + daily oversold + hourly RSI < 30
-            if uptrend_regime and oversold and rsi_hourly < 30:
-                signals[i] = 0.20
-                position = 1
-            # Short: downtrend regime + daily overbought + hourly RSI > 70
-            elif downtrend_regime and overbought and rsi_hourly > 70:
-                signals[i] = -0.20
-                position = -1
+        # Volume filter: require above-average volume
+        vol_filter = vol_filter and (vol_ratio_6h > 1.2)
+        
+        if position == 0:
+            # In uptrend: look for long near S1 (support)
+            if uptrend and vol_filter:
+                if price <= s1_val * 1.002:  # Near S1 with small buffer
+                    signals[i] = 0.25
+                    position = 1
+            # In downtrend: look for short near R1 (resistance)
+            elif downtrend and vol_filter:
+                if price >= r1_val * 0.998:  # Near R1 with small buffer
+                    signals[i] = -0.25
+                    position = -1
+            # In ranging (no clear trend): fade extremes
+            else:
+                if price <= s1_val * 1.002 and vol_filter:  # Near S1
+                    signals[i] = 0.25
+                    position = 1
+                elif price >= r1_val * 0.998 and vol_filter:  # Near R1
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: RSI > 50 or trend breakdown
-            if rsi_hourly > 50 or price < ema_trend:
+            # Long exit: price reaches pivot or stops reversed
+            if price >= pivot_val or (not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 or trend breakdown
-            if rsi_hourly < 50 or price > ema_trend:
+            # Short exit: price reaches pivot or stops reversed
+            if price <= pivot_val or (not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_1d_RSI_MeanReversion_Regime_v1"
-timeframe = "1h"
+name = "6h_1d_Pivot_R1S1_MeanReversion_TrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
