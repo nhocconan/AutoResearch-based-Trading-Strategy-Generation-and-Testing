@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_R1S1_Breakout_VolumeSpike_TrendFilter_v1
-# Hypothesis: Use 1d Camarilla pivot levels (R1/S1) with 12h breakout, volume confirmation, and 1d EMA34 trend filter.
-# Only trade breakouts aligned with trend. Focus on fewer, higher-quality trades to avoid fee drag.
-# Target: 15-35 trades/year per symbol for low attrition and robustness in bull/bear markets.
+# 4h_1d_Pivot_R1S1_Breakout_VolumeSpike_TrendFilter_v3
+# Hypothesis: Use 1d Camarilla pivot levels (R1/S1) with 4h breakout, volume confirmation, and 4h EMA34 trend filter.
+# Only trade breakouts aligned with trend. Tighten volume threshold to 2.5x average and increase breakout filter to 0.5% above/below pivot to reduce trades and improve quality.
+# Target: 15-30 trades/year per symbol for low fee attrition and strong edge in both bull and bear markets.
 
-name = "12h_1d_Camarilla_R1S1_Breakout_VolumeSpike_TrendFilter_v1"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_VolumeSpike_TrendFilter_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -43,16 +43,15 @@ def generate_signals(prices):
     r1_1d = close_1d + (range_1d * 1.1 / 12)
     s1_1d = close_1d - (range_1d * 1.1 / 12)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 4h EMA34 for trend filter
+    close_series = pd.Series(close)
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume average for spike detection (20-period)
+    # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -63,27 +62,27 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(volume_ma[i])):
+            np.isnan(ema34[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
             # Long breakout: price breaks above R1 with volume spike and uptrend
-            if (close[i] > r1_aligned[i] and 
-                volume[i] > 2.0 * volume_ma[i] and 
-                close[i] > ema34_aligned[i]):
+            if (close[i] > r1_aligned[i] * 1.005 and 
+                volume[i] > 2.5 * volume_ma[i] and 
+                close[i] > ema34[i]):
                 signals[i] = 0.25
                 position = 1
             # Short breakdown: price breaks below S1 with volume spike and downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  volume[i] > 2.0 * volume_ma[i] and 
-                  close[i] < ema34_aligned[i]):
+            elif (close[i] < s1_aligned[i] * 0.995 and 
+                  volume[i] > 2.5 * volume_ma[i] and 
+                  close[i] < ema34[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long exit: price breaks below S1 or trend reverses
-            if close[i] < s1_aligned[i] or close[i] < ema34_aligned[i]:
+            if close[i] < s1_aligned[i] or close[i] < ema34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,7 +90,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price breaks above R1 or trend reverses
-            if close[i] > r1_aligned[i] or close[i] > ema34_aligned[i]:
+            if close[i] > r1_aligned[i] or close[i] > ema34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
