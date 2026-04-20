@@ -3,63 +3,62 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1w trend filter + volume confirmation
+# - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# - Long when Bull Power > 0, Bear Power < 0, and price > weekly EMA34 (uptrend)
+# - Short when Bear Power < 0, Bull Power > 0, and price < weekly EMA34 (downtrend)
+# - Volume must be > 1.5x 20-period average for confirmation
+# - Exit when Elder Power signals reverse or price crosses weekly EMA34
+# - Uses 1h for Elder Ray calculation (more responsive) and 1w for trend filter
+# - Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # Get higher timeframe data
-    df_1d = get_htf_data(prices, '1d')
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1h data for Elder Ray calculation (more responsive than 6h)
+    df_1h = get_htf_data(prices, '1h')
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
     
-    # Calculate 1d EMA200 for trend
-    close_1d = pd.Series(df_1d['close'])
-    ema_200_1d = close_1d.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate EMA13 for Elder Ray (using 1h data)
+    ema13_1h = pd.Series(close_1h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 4h MACD (12,26,9)
-    close_4h = pd.Series(df_4h['close'])
-    ema_12 = close_4h.ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_26 = close_4h.ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema_12 - ema_26
-    macd_signal = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_line_aligned = align_htf_to_ltf(prices, df_4h, macd_line)
-    macd_signal_aligned = align_htf_to_ltf(prices, df_4h, macd_signal)
+    # Calculate Elder Ray components
+    bull_power_1h = high_1h - ema13_1h  # Bull Power = High - EMA13
+    bear_power_1h = low_1h - ema13_1h   # Bear Power = Low - EMA13
     
-    # Calculate 1h ATR (14) for stop loss
-    high = pd.Series(prices['high'])
-    low = pd.Series(prices['low'])
-    close = pd.Series(prices['close'])
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1h = tr.rolling(window=14, min_periods=14).mean().values
+    # Align Elder Ray to 6h timeframe
+    bull_power_6h = align_htf_to_ltf(prices, df_1h, bull_power_1h)
+    bear_power_6h = align_htf_to_ltf(prices, df_1h, bear_power_1h)
+    
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # 6h price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
     # Volume confirmation: 20-period average
-    volume = pd.Series(prices['volume'])
-    vol_ma = volume.rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08:00 to 20:00 UTC
-    hours = prices.index.hour
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(macd_line_aligned[i]) or 
-            np.isnan(macd_signal_aligned[i]) or np.isnan(atr_1h[i]) or 
-            np.isnan(vol_ma[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or np.isnan(ema34_1w_aligned[i]) or \
+           np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,43 +68,39 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long entry: price > EMA200, MACD bullish, volume spike
-            if (price > ema_200_1d_aligned[i] and 
-                macd_line_aligned[i] > macd_signal_aligned[i] and 
-                vol > 1.5 * vol_ma[i]):
-                signals[i] = 0.20
+            # Long entry: Bull Power > 0, Bear Power < 0, price > weekly EMA34, volume surge
+            if (bull_power_6h[i] > 0 and bear_power_6h[i] < 0 and 
+                price > ema34_1w_aligned[i] and vol > 1.5 * vol_ma[i]):
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: price < EMA200, MACD bearish, volume spike
-            elif (price < ema_200_1d_aligned[i] and 
-                  macd_line_aligned[i] < macd_signal_aligned[i] and 
-                  vol > 1.5 * vol_ma[i]):
-                signals[i] = -0.20
+            # Short entry: Bear Power < 0, Bull Power > 0, price < weekly EMA34, volume surge
+            elif (bear_power_6h[i] < 0 and bull_power_6h[i] > 0 and 
+                  price < ema34_1w_aligned[i] and vol > 1.5 * vol_ma[i]):
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: stop loss (2*ATR) or trend/MACD reversal
-            if (price <= entry_price - 2.0 * atr_1h[i] or
-                price < ema_200_1d_aligned[i] or
-                macd_line_aligned[i] < macd_signal_aligned[i]):
+            # Long exit: Elder Power signals reverse OR price crosses below weekly EMA34
+            if (bull_power_6h[i] <= 0 or bear_power_6h[i] >= 0 or 
+                price < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: stop loss (2*ATR) or trend/MACD reversal
-            if (price >= entry_price + 2.0 * atr_1h[i] or
-                price > ema_200_1d_aligned[i] or
-                macd_line_aligned[i] > macd_signal_aligned[i]):
+            # Short exit: Elder Power signals reverse OR price crosses above weekly EMA34
+            if (bear_power_6h[i] >= 0 or bull_power_6h[i] <= 0 or 
+                price > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA200_MACD_Volume_Session"
-timeframe = "1h"
+name = "6h_ElderRay_Power_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
