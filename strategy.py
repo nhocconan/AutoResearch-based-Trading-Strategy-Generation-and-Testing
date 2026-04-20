@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with Weekly Trend Filter and Volume Confirmation
-# Uses Alligator lines (Jaw=13, Teeth=8, Lips=5 SMAs) to identify trend direction and alignment.
-# Enters long when Lips > Teeth > Jaw (bullish alignment) with price above Lips and volume > 1.5x average.
-# Enters short when Lips < Teeth < Jaw (bearish alignment) with price below Lips and volume > 1.5x average.
-# Exits when alignment breaks or price crosses back through Teeth.
-# Weekly trend filter ensures alignment with higher timeframe trend.
-# Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h Ichimoku Cloud with 1d Trend Filter and Volume Confirmation
+# Uses Ichimoku cloud (Tenkan/Kijun) on 6h for entry signals, with 1d EMA50 trend filter.
+# Long when Tenkan crosses above Kijun, price above cloud, and 1d EMA50 uptrend.
+# Short when Tenkan crosses below Kijun, price below cloud, and 1d EMA50 downtrend.
+# Volume confirmation requires current volume > 1.5x 20-period average.
+# Targets 60-120 total trades over 4 years (15-30/year) with clear entry/exit rules.
+# Ichimoku provides dynamic support/resistance; higher timeframe filter avoids counter-trend trades.
 
-name = "1d_Alligator_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Ichimoku_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,49 +20,68 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === Williams Alligator (13,8,5) ===
-    close = prices['close'].values
+    # === Ichimoku Components (9, 26, 52 periods) on 6h data ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # Jaw (13-period SMMA of median price)
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    # Teeth (8-period SMMA of median price)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    # Lips (5-period SMMA of median price)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # === Weekly EMA20 for trend filter ===
-    weekly_close = df_1w['close'].values
-    ema_20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
+    
+    # Kumo (Cloud) top and bottom (Senkou Span shifted 26 periods ahead)
+    # For simplicity, we use current Senkou spans as cloud boundaries
+    # In practice, cloud is plotted 26 periods ahead, but for filtering we check if price is above/both spans
+    kumo_top = np.maximum(senkou_a, senkou_b)
+    kumo_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # === 1d EMA50 for trend filter ===
+    daily_close = df_1d['close'].values
+    ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # === Volume confirmation ===
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values  # 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(13, n):  # Start after warmup for Jaw
+    for i in range(52, n):  # Start after warmup for Ichimoku
         # Get values
         close_val = close[i]
-        lips_val = lips[i]
-        teeth_val = teeth[i]
-        jaw_val = jaw[i]
-        ema_val = ema_20_aligned[i]
+        tenkan_val = tenkan[i]
+        kijun_val = kijun[i]
+        tenkan_prev = tenkan[i-1]
+        kijun_prev = kijun[i-1]
+        kumo_top_val = kumo_top[i]
+        kumo_bottom_val = kumo_bottom[i]
+        ema_val = ema_50_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(lips_val) or np.isnan(teeth_val) or np.isnan(jaw_val) or 
+        if (np.isnan(tenkan_val) or np.isnan(kijun_val) or np.isnan(tenkan_prev) or 
+            np.isnan(kijun_prev) or np.isnan(kumo_top_val) or np.isnan(kumo_bottom_val) or 
             np.isnan(ema_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -70,33 +89,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Bullish alignment: Lips > Teeth > Jaw
-            bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
-            # Bearish alignment: Lips < Teeth < Jaw
-            bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
-            
-            # Long entry: bullish alignment, price above Lips, weekly uptrend, volume confirmation
-            if bullish_alignment and close_val > lips_val and close_val > ema_val and vol_ratio_val > 1.5:
+            # Long entry: Tenkan crosses above Kijun, price above cloud, 1d uptrend, volume confirmation
+            if (tenkan_prev <= kijun_prev and tenkan_val > kijun_val and 
+                close_val > kumo_top_val and close_val > ema_val and vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-            # Short entry: bearish alignment, price below Lips, weekly downtrend, volume confirmation
-            elif bearish_alignment and close_val < lips_val and close_val < ema_val and vol_ratio_val > 1.5:
+            # Short entry: Tenkan crosses below Kijun, price below cloud, 1d downtrend, volume confirmation
+            elif (tenkan_prev >= kijun_prev and tenkan_val < kijun_val and 
+                  close_val < kumo_bottom_val and close_val < ema_val and vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
         
         elif position == 1:
-            # Long exit: alignment breaks or price crosses below Teeth
-            if not (lips_val > teeth_val and teeth_val > jaw_val) or close_val < teeth_val:
+            # Long exit: Tenkan crosses below Kijun or price falls below cloud
+            if tenkan_val < kijun_val or close_val < kumo_top_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: alignment breaks or price crosses above Teeth
-            if not (lips_val < teeth_val and teeth_val < jaw_val) or close_val > teeth_val:
+            # Short exit: Tenkan crosses above Kijun or price rises above cloud
+            if tenkan_val > kijun_val or close_val > kumo_bottom_val:
                 signals[i] = 0.0
                 position = 0
             else:
