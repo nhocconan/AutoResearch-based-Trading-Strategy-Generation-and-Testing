@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_PriceAction_Scalp_v1
-Concept: 6h price action around weekly pivot points with volume confirmation.
-- Weekly pivot points calculated from prior week's OHLC
-- Long: Price above weekly pivot + breaking above weekly R1 with volume surge
-- Short: Price below weekly pivot + breaking below weekly S1 with volume surge
-- Exit: Price returns to weekly pivot level
+12h_Pivot_R1S1_Breakout_Volume_Confirm
+Concept: 12h Camarilla pivot R1/S1 breakout with volume confirmation and 1d trend filter.
+- Long: Close > R1 AND volume > 1.5x avg volume AND 1d close > 1d open (bullish bias)
+- Short: Close < S1 AND volume > 1.5x avg volume AND 1d close < 1d open (bearish bias)
+- Exit: Price crosses back below R1 (long) or above S1 (short)
 - Position sizing: 0.25
-- Works in bull/bear: Uses weekly structure as dynamic support/resistance
-- Target: 20-40 trades/year (80-160 total over 4 years)
+- Target: 15-35 trades/year (60-140 total over 4 years)
+- Works in bull/bear: Pivot levels define support/resistance, volume confirms breakout strength, 1d trend filters counter-trend noise
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_PriceAction_Scalp_v1"
-timeframe = "6h"
+name = "12h_Pivot_R1S1_Breakout_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,87 +23,79 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
+    # Get daily data ONCE before loop for pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # === Calculate Camarilla pivot levels from previous day ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot = (high_w + low_w + close_w) / 3.0
-    r1 = 2 * pivot - low_w
-    s1 = 2 * pivot - high_w
+    # Pivot point and support/resistance levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    R1 = pivot + (range_1d * 1.0 / 12.0)  # R1 level
+    S1 = pivot - (range_1d * 1.0 / 12.0)  # S1 level
     
-    # Align weekly levels to 6h timeframe (no delay needed as levels are static for the week)
-    pivot_64 = align_ltf_to_htf(prices, df_weekly, pivot)
-    r1_64 = align_ltf_to_htf(prices, df_weekly, r1)
-    s1_64 = align_ltf_to_htf(prices, df_weekly, s1)
+    # Align pivot levels to 12h timeframe (use previous day's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume surge detection: current volume > 1.5 * 20-period average
+    # === 12h: Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)  # Avoid division by zero
+    
+    # === 1d: Trend filter (bullish if close > open) ===
+    trend_bullish = close_1d > df_1d['open'].values
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need volume MA
+    start_idx = 20  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
-        # Skip if any data is unavailable
-        if (np.isnan(pivot_64[i]) or np.isnan(r1_64[i]) or np.isnan(s1_64[i]) or 
-            np.isnan(vol_ma[i])):
+        # Get values
+        close_price = prices['close'].iloc[i]
+        r1_level = R1_aligned[i]
+        s1_level = S1_aligned[i]
+        vol_ratio_val = vol_ratio[i]
+        trend_val = trend_bullish_aligned[i]
+        
+        # Skip if any value is NaN
+        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val) or 
+            np.isnan(trend_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_surge = volume[i] > 1.5 * vol_ma[i]
-        
         if position == 0:
-            # Long: Price above pivot, breaking above R1 with volume surge
-            if (prices['close'][i] > pivot_64[i] and 
-                prices['close'][i] > r1_64[i] and 
-                prices['close'][i-1] <= r1_64[i-1] and 
-                vol_surge):
+            # Long: Close above R1 AND volume confirmation AND bullish 1d trend
+            if close_price > r1_level and vol_ratio_val > 1.5 and trend_val > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below pivot, breaking below S1 with volume surge
-            elif (prices['close'][i] < pivot_64[i] and 
-                  prices['close'][i] < s1_64[i] and 
-                  prices['close'][i-1] >= s1_64[i-1] and 
-                  vol_surge):
+            # Short: Close below S1 AND volume confirmation AND bearish 1d trend
+            elif close_price < s1_level and vol_ratio_val > 1.5 and trend_val < 0.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below pivot
-            if prices['close'][i] <= pivot_64[i]:
+            # Long position: hold until price crosses back below R1
+            signals[i] = 0.25
+            if close_price < r1_level:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above pivot
-            if prices['close'][i] >= pivot_64[i]:
+            # Short position: hold until price crosses back above S1
+            signals[i] = -0.25
+            if close_price > s1_level:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
-
-def align_ltf_to_htf(ltf_prices, htf_df, htf_values):
-    """
-    Helper function to align HTF values to LTF without look-ahead.
-    Since weekly pivot levels are constant throughout the week,
-    we simply forward-fill the values.
-    """
-    # Create a series with HTF values indexed by HTF timestamps
-    htf_series = pd.Series(htf_values, index=htf_df.index)
-    # Reindex to LTF timestamps, forward-filling to hold value until next weekly update
-    aligned_series = htf_series.reindex(ltf_prices.index, method='ffill')
-    return aligned_series.values
