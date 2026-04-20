@@ -11,66 +11,51 @@ def generate_signals(prices):
     # Get 1w and 1d data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 30 or len(df_1d) < 30:
+    if len(df_1w) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1w RSI (14) for long-term momentum
+    # Calculate 1w linear regression slope (5-period) for long-term trend
     close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = np.where(avg_loss == 0, 100, rsi_1w)
-    rsi_1w = np.where(avg_gain == 0, 0, rsi_1w)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    x = np.arange(5)
+    slope_1w = np.zeros_like(close_1w, dtype=float)
+    for i in range(4, len(close_1w)):
+        y = close_1w[i-4:i+1]
+        if np.any(np.isnan(y)):
+            slope_1w[i] = np.nan
+        else:
+            slope = np.polyfit(x, y, 1)[0]
+            slope_1w[i] = slope
+    slope_1w_aligned = align_htf_to_ltf(prices, df_1w, slope_1w)
     
-    # Calculate 1d RSI (14) for short-term momentum
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = np.where(avg_loss == 0, 100, rsi_1d)
-    rsi_1d = np.where(avg_gain == 0, 0, rsi_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Calculate 1d ADX (14) for trend strength
+    # Calculate 1d Donchian channels (20) for breakout signals
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    
+    # Calculate 1d ATR (14) for volatility filter and stoploss
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    down_move = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    up14 = pd.Series(up_move).rolling(window=14, min_periods=14).mean().values
-    down14 = pd.Series(down_move).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * np.divide(up14, tr14, out=np.zeros_like(up14), where=tr14!=0)
-    minus_di = 100 * np.divide(down14, tr14, out=np.zeros_like(down14), where=tr14!=0)
-    
-    # DX and ADX
-    dx = np.divide(np.abs(plus_di - minus_di), (plus_di + minus_di), out=np.zeros_like(plus_di), where=(plus_di + minus_di)!=0) * 100
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 4h ATR (14) for stoploss (matching timeframe)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    tr1_4h = high_4h - low_4h
+    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = tr1_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,38 +63,42 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        rsi_1w_val = rsi_1w_aligned[i]
-        rsi_1d_val = rsi_1d_aligned[i]
-        adx_val = adx_aligned[i]
+        upper_val = donchian_upper_aligned[i]
+        lower_val = donchian_lower_aligned[i]
+        slope_val = slope_1w_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
+        atr_4h_val = atr_4h[i]
         
         # Skip if any value is NaN
-        if (np.isnan(rsi_1w_val) or np.isnan(rsi_1d_val) or np.isnan(adx_val)):
+        if (np.isnan(upper_val) or np.isnan(lower_val) or 
+            np.isnan(slope_val) or np.isnan(atr_1d_val) or 
+            np.isnan(atr_4h_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI weekly > 50 (bullish momentum) and RSI daily < 30 (oversold) and ADX > 25 (trending)
-            if rsi_1w_val > 50 and rsi_1d_val < 30 and adx_val > 25:
+            # Long: price breaks above upper Donchian band with upward weekly trend
+            if close_val > upper_val and slope_val > 0 and atr_1d_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI weekly < 50 (bearish momentum) and RSI daily > 70 (overbought) and ADX > 25 (trending)
-            elif rsi_1w_val < 50 and rsi_1d_val > 70 and adx_val > 25:
+            # Short: price breaks below lower Donchian band with downward weekly trend
+            elif close_val < lower_val and slope_val < 0 and atr_1d_val > 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI daily > 70 (overbought) or ADX < 20 (weak trend)
-            if rsi_1d_val > 70 or adx_val < 20:
+            # Long exit: price closes below lower Donchian band or ATR-based stop
+            if close_val < lower_val or close_val < prices['high'].iloc[i] - 2.0 * atr_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI daily < 30 (oversold) or ADX < 20 (weak trend)
-            if rsi_1d_val < 30 or adx_val < 20:
+            # Short exit: price closes above upper Donchian band or ATR-based stop
+            if close_val > upper_val or close_val > prices['low'].iloc[i] + 2.0 * atr_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,12 +106,13 @@ def generate_signals(prices):
     
     return signals
 
-# 12h_1wRSI_1dRSI_ADXFilter_V1
-# Uses 1-week RSI for long-term momentum direction and 1-day RSI for overbought/oversold signals
-# Enters long when weekly RSI > 50 (bullish momentum) AND daily RSI < 30 (oversold) AND ADX > 25 (strong trend)
-# Enters short when weekly RSI < 50 (bearish momentum) AND daily RSI > 70 (overbought) AND ADX > 25 (strong trend)
-# Exits when daily RSI reaches opposite extreme or ADX weakens (<20)
-# Designed for 12h timeframe with ~12-37 trades/year
-name = "12h_1wRSI_1dRSI_ADXFilter_V1"
-timeframe = "12h"
+# 4h_1wTrend_1dDonchian_ATRFilter_V1
+# Uses 1-week linear regression slope for long-term trend direction
+# Enters long when 4h price breaks above 1d upper Donchian band with upward weekly trend
+# Enters short when 4h price breaks below 1d lower Donchian band with downward weekly trend
+# Uses 1d ATR as volatility filter to avoid choppy markets
+# Exits on opposite band touch or 2*ATR stoploss (using 4h ATR)
+# Designed for 4h timeframe with ~20-50 trades/year
+name = "4h_1wTrend_1dDonchian_ATRFilter_V1"
+timeframe = "4h"
 leverage = 1.0
