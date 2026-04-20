@@ -13,24 +13,15 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA(34) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Williams %R on 1d data (14-period)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * ((highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14))
+    williams_r[highest_high_14 == lowest_low_14] = -50  # avoid division by zero
     
-    # Calculate 1d ATR(14) for volatility filter
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    high_low[0] = high_1d[0] - low_1d[0]
-    high_close[0] = np.abs(high_1d[0] - close_1d[0])
-    low_close[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Align to 4h timeframe with proper delay
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # 4h data for entry timing and volume
     df_4h = get_htf_data(prices, '4h')
@@ -43,25 +34,25 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     
-    # 4h ATR(14) for stoploss
-    high_low_4h = high_4h - low_4h
-    high_close_4h = np.abs(high_4h - np.roll(close_4h, 1))
-    low_close_4h = np.abs(low_4h - np.roll(close_4h, 1))
-    high_low_4h[0] = high_4h[0] - low_4h[0]
-    high_close_4h[0] = np.abs(high_4h[0] - close_4h[0])
-    low_close_4h[0] = np.abs(low_4h[0] - close_4h[0])
-    tr_4h = np.maximum(high_low_4h, np.maximum(high_close_4h, low_close_4h))
-    tr_4h[0] = high_low_4h[0]
-    atr_14_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
+    # ATR for volatility filter (14-period on 4h)
+    high_low = high_4h - low_4h
+    high_close = np.abs(high_4h - np.roll(close_4h, 1))
+    low_close = np.abs(low_4h - np.roll(close_4h, 1))
+    high_low[0] = high_4h[0] - low_4h[0]
+    high_close[0] = np.abs(high_4h[0] - close_4h[0])
+    low_close[0] = np.abs(low_4h[0] - close_4h[0])
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_14_4h_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
+            np.isnan(atr_14_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,30 +62,30 @@ def generate_signals(prices):
         vol = volume_4h[i]
         
         if position == 0:
-            # Long: price above EMA34 (bullish trend) with volume spike
-            if (price > ema_34_1d_aligned[i] and 
-                vol > 2.5 * vol_ma_20_aligned[i]):
+            # Long: Williams %R oversold (< -80) with volume confirmation
+            if (williams_r_aligned[i] < -80 and 
+                vol > 2.0 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA34 (bearish trend) with volume spike
-            elif (price < ema_34_1d_aligned[i] and 
-                  vol > 2.5 * vol_ma_20_aligned[i]):
+            # Short: Williams %R overbought (> -20) with volume confirmation
+            elif (williams_r_aligned[i] > -20 and 
+                  vol > 2.0 * vol_ma_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below EMA34 or ATR-based stop
-            if (price < ema_34_1d_aligned[i] or 
-                price < low_4h[i] - 2.0 * atr_14_4h_aligned[i]):
+            # Long exit: Williams %R returns to neutral (> -50) or ATR-based stop
+            if (williams_r_aligned[i] > -50 or 
+                price < low_4h[i] - 1.5 * atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above EMA34 or ATR-based stop
-            if (price > ema_34_1d_aligned[i] or 
-                price > high_4h[i] + 2.0 * atr_14_4h_aligned[i]):
+            # Short exit: Williams %R returns to neutral (< -50) or ATR-based stop
+            if (williams_r_aligned[i] < -50 or 
+                price > high_4h[i] + 1.5 * atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_EMA34_VolumeSpike"
+name = "4h_1d_WilliamsR_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
