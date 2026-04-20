@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_12h_PriceAction_With_Volume_Momentum
-Hypothesis: Trade price action breakouts with volume momentum on 4h using 12h volume confirmation. 
-Long when price breaks above recent high with volume surge; short when breaks below recent low with volume surge.
-Volume surge confirms institutional participation. Works in bull/bear: breakouts with volume indicate momentum.
+4h_12h_Camarilla_R1S1_Breakout_VolumeFilter
+Hypothesis: Trade Camarilla pivot R1/S1 breakouts on 4h with 12h volume confirmation. 
+Long when price breaks above R1 with volume spike; short when breaks below S1 with volume spike.
+Camarilla levels provide intraday support/resistance. Volume filter ensures institutional participation.
+Works in bull/bear: breaks indicate momentum continuation, volume confirms validity.
 Target: 80-150 total trades over 4 years (20-38/year) with position size 0.25.
 """
 
-name = "4h_12h_PriceAction_With_Volume_Momentum"
+name = "4h_12h_Camarilla_R1S1_Breakout_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,13 +40,24 @@ def generate_signals(prices):
     start_idx = 20  # Need enough data for calculations
     
     for i in range(start_idx, n):
-        # Need at least 1 day of prior data for high/low calculation
-        if i < 6:  # 6 * 4h = 24h worth of 4h bars to have 1 day prior
+        # Need at least 1 day of prior data for Camarilla calculation
+        if i < 96:  # 96 * 4h = 16 days worth of 4h bars to have 1 day prior
             continue
             
-        # Calculate recent high and low (prior 6 periods = 24 hours)
-        recent_high = np.max(prices['high'].iloc[i-6:i])
-        recent_low = np.min(prices['low'].iloc[i-6:i])
+        # Calculate Camarilla levels using prior day's OHLC
+        # Look back 24 bars (6 hours * 4 = 24) to get prior day's data
+        prior_day_high = np.max(prices['high'].iloc[i-24:i])
+        prior_day_low = np.min(prices['low'].iloc[i-24:i])
+        prior_day_close = prices['close'].iloc[i-1]  # Previous 4h bar close
+        
+        # Calculate Camarilla levels
+        range_val = prior_day_high - prior_day_low
+        if range_val <= 0:
+            continue
+            
+        # Camarilla R1 and S1 levels
+        r1 = prior_day_close + (range_val * 1.1 / 12)
+        s1 = prior_day_close - (range_val * 1.1 / 12)
         
         current_close = prices['close'].iloc[i]
         current_volume = prices['volume'].iloc[i]
@@ -55,28 +67,28 @@ def generate_signals(prices):
                      current_volume > 1.5 * vol_avg_12h_aligned[i])
         
         if position == 0:
-            # Long: price breaks above recent high with volume spike
-            if current_close > recent_high and vol_spike:
+            # Long: price breaks above R1 with volume spike
+            if current_close > r1 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below recent low with volume spike
-            elif current_close < recent_low and vol_spike:
+            # Short: price breaks below S1 with volume spike
+            elif current_close < s1 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below recent low or volume dries up
-            if current_close < recent_low or (not np.isnan(vol_avg_12h_aligned[i]) and 
-                                            current_volume < 0.5 * vol_avg_12h_aligned[i]):
+            # Long exit: price breaks below S1 or volume dries up
+            if current_close < s1 or (not np.isnan(vol_avg_12h_aligned[i]) and 
+                                    current_volume < 0.5 * vol_avg_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above recent high or volume dries up
-            if current_close > recent_high or (not np.isnan(vol_avg_12h_aligned[i]) and 
-                                             current_volume < 0.5 * vol_avg_12h_aligned[i]):
+            # Short exit: price breaks above R1 or volume dries up
+            if current_close > r1 or (not np.isnan(vol_avg_12h_aligned[i]) and 
+                                    current_volume < 0.5 * vol_avg_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
