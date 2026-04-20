@@ -3,46 +3,51 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Trend Following with Daily Pullback Entries
-# Uses weekly trend filter (price above/below weekly 50 EMA) to establish direction
-# On daily timeframe, enters on pullbacks to daily 20 EMA in direction of weekly trend
-# Volume confirmation filters out false breakouts (volume > 1.5x 20-day average)
-# ATR-based risk management with 2x ATR stop loss
-# Designed for low frequency (10-25 trades/year) to minimize fee drag
-# Works in both bull and bear markets by following the dominant weekly trend
+# Hypothesis: 12h Camarilla pivot (R1/S1) breakout with 1d trend filter and volume confirmation
+# Camarilla levels provide high-probability reversal/breakout levels from prior day's range
+# 1d EMA50 filters for daily trend alignment to avoid counter-trend trades
+# Volume > 1.5x 20-period average confirms institutional participation
+# Designed for 12h timeframe with selective entries to avoid overtrading
+# Target: 12-37 trades per year per symbol (50-150 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    close_weekly = df_weekly['close'].values
+    # Load 1d data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 50-period EMA on weekly timeframe for trend filter
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    # Calculate 50-period EMA on 1d timeframe for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Daily indicators
-    close = prices['close'].values
+    # Calculate Camarilla levels (R1, S1) from prior day's range
+    # R1 = close + (high - low) * 1.12
+    # S1 = close - (high - low) * 1.12
+    camarilla_high = close_1d + (high_1d - low_1d) * 1.12
+    camarilla_low = close_1d - (high_1d - low_1d) * 1.12
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    
+    # Calculate ATR for stop loss
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Daily 20 EMA for pullback entries
-    ema20_daily = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
-    
-    # ATR for stop loss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume filter: volume > 1.5x 20-period average
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,16 +55,16 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(ema50_weekly_aligned[i]) or np.isnan(ema20_daily[i]) or \
-           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(camarilla_high_aligned[i]) or \
+           np.isnan(camarilla_low_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        weekly_uptrend = close[i] > ema50_weekly_aligned[i]
-        weekly_downtrend = close[i] < ema50_weekly_aligned[i]
+        # Determine 1d trend
+        is_uptrend = close[i] > ema50_1d_aligned[i]
+        is_downtrend = close[i] < ema50_1d_aligned[i]
         
         # Volume confirmation
         has_volume = vol_filter[i]
@@ -67,11 +72,11 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long entry: weekly uptrend + price pulls back to/touches daily 20 EMA + volume
-            long_signal = weekly_uptrend and (price <= ema20_daily[i] * 1.005) and has_volume
+            # Long entry: price breaks above Camarilla R1 + uptrend + volume
+            long_signal = (price > camarilla_high_aligned[i]) and is_uptrend and has_volume
             
-            # Short entry: weekly downtrend + price pulls back to/touches daily 20 EMA + volume
-            short_signal = weekly_downtrend and (price >= ema20_daily[i] * 0.995) and has_volume
+            # Short entry: price breaks below Camarilla S1 + downtrend + volume
+            short_signal = (price < camarilla_low_aligned[i]) and is_downtrend and has_volume
             
             if long_signal:
                 signals[i] = 0.25
@@ -83,22 +88,22 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Long exit: stop loss or weekly trend reversal
+            # Long exit: stop loss or Camarilla S1 break
             stop_loss = entry_price - 2.0 * atr[i]
-            trend_reversal = close[i] < ema50_weekly_aligned[i]
+            camarilla_break = price < camarilla_low_aligned[i]
             
-            if stop_loss <= 0 or price <= stop_loss or trend_reversal:
+            if stop_loss <= 0 or price <= stop_loss or camarilla_break:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: stop loss or weekly trend reversal
+            # Short exit: stop loss or Camarilla R1 break
             stop_loss = entry_price + 2.0 * atr[i]
-            trend_reversal = close[i] > ema50_weekly_aligned[i]
+            camarilla_break = price > camarilla_high_aligned[i]
             
-            if stop_loss <= 0 or price >= stop_loss or trend_reversal:
+            if stop_loss <= 0 or price >= stop_loss or camarilla_break:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_DailyPullback_Volume_ATR"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_1dTrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
