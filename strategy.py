@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_Donchian_20_With_Weekly_Trend_Filter
-Hypothesis: Trade Donchian(20) breakouts on 1d with weekly trend filter. 
-Long when price breaks above 20-day high + weekly uptrend.
-Short when price breaks below 20-day low + weekly downtrend.
-Donchian provides clear breakout signals; weekly trend filter ensures alignment with higher timeframe momentum.
-Target: 30-100 total trades over 4 years (7-25/year) with position size 0.25.
-Works in bull/bear: weekly filter avoids counter-trend trades, Donchian captures strong moves.
+6h_12h_Camarilla_Pivot_Fade_Signal
+Hypothesis: Fade price at Camarilla R3/S3 levels on 6h timeframe when 12h timeframe is in a ranging regime (Chop > 61.8). 
+In ranging markets, price tends to revert from extreme levels. In trending markets (Chop < 38.2), we avoid trades to prevent whipsaw.
+Works in bull/bear: Choppiness index regime filter ensures we only mean-revert in ranging conditions, avoiding trend-following losses.
+Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
-name = "1d_Donchian_20_With_Weekly_Trend_Filter"
-timeframe = "1d"
+name = "6h_12h_Camarilla_Pivot_Fade_Signal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,67 +20,113 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_weekly = df_weekly['close'].values
-    ema20_weekly = np.full_like(close_weekly, np.nan)
-    if len(close_weekly) >= 20:
-        multiplier = 2.0 / (20 + 1)
-        ema20_weekly[19] = np.mean(close_weekly[:20])
-        for i in range(20, len(close_weekly)):
-            ema20_weekly[i] = multiplier * close_weekly[i] + (1 - multiplier) * ema20_weekly[i-1]
-    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
+    # Calculate 12h Choppiness Index for regime detection
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian channels (20-day high/low)
-    high_20 = np.full(n, np.nan)
-    low_20 = np.full(n, np.nan)
+    # True Range
+    tr = np.maximum(
+        high_12h[1:] - low_12h[1:],
+        np.maximum(
+            np.abs(high_12h[1:] - close_12h[:-1]),
+            np.abs(low_12h[1:] - close_12h[:-1])
+        )
+    )
+    tr = np.concatenate([[high_12h[0] - low_12h[0]], tr])
     
-    for i in range(19, n):
-        high_20[i] = np.max(high[i-19:i+1])
-        low_20[i] = np.min(low[i-19:i+1])
+    # ATR(14)
+    atr = np.full(len(tr), np.nan)
+    if len(tr) >= 14:
+        atr[13] = np.mean(tr[:14])
+        for i in range(14, len(tr)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Chop = 100 * log10(sum(ATR14)/ (max(high)-min(low)) ) / log10(14)
+    chop = np.full(len(close_12h), np.nan)
+    for i in range(13, len(close_12h)):
+        if atr[i] > 0:
+            sum_atr14 = np.sum(atr[i-13:i+1])
+            max_h = np.max(high_12h[i-13:i+1])
+            min_l = np.min(low_12h[i-13:i+1])
+            if max_h > min_l:
+                chop[i] = 100 * np.log10(sum_atr14 / (max_h - min_l)) / np.log10(14)
+            else:
+                chop[i] = 50
+        else:
+            chop[i] = 50
+    
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    
+    # Calculate Camarilla levels for 6h (using previous bar's OHLC)
+    camarilla_high = np.full(n, np.nan)
+    camarilla_low = np.full(n, np.nan)
+    camarilla_close = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        camarilla_high[i] = high[i-1]
+        camarilla_low[i] = low[i-1]
+        camarilla_close[i] = close[i-1]
+    
+    # For first bar, use same values
+    camarilla_high[0] = high[0]
+    camarilla_low[0] = low[0]
+    camarilla_close[0] = close[0]
+    
+    # Camarilla levels
+    R3 = camarilla_close + (camarilla_high - camarilla_low) * 1.1000 / 4
+    S3 = camarilla_close - (camarilla_high - camarilla_low) * 1.1000 / 4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure Donchian is ready
+    start_idx = 14  # Need Chop calculated
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema20_weekly_aligned[i]) or 
+        if (np.isnan(chop_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
             np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade in ranging market (Chop > 61.8)
+        if chop_aligned[i] <= 61.8:
+            signals[i] = 0.0
+            position = 0
+            continue
+        
         if position == 0:
-            # Long: price breaks above 20-day high + weekly uptrend
-            if close[i] > high_20[i] and close[i] > ema20_weekly_aligned[i]:
+            # Fade at S3 (support) - go long
+            if close[i] <= S3[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low + weekly downtrend
-            elif close[i] < low_20[i] and close[i] < ema20_weekly_aligned[i]:
+            # Fade at R3 (resistance) - go short
+            elif close[i] >= R3[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below 20-day low OR weekly trend turns down
-            if close[i] < low_20[i] or close[i] < ema20_weekly_aligned[i]:
+            # Exit long when price reaches midpoint or R3
+            midpoint = camarilla_close[i] + (camarilla_high[i] - camarilla_low[i]) * 1.1000 / 2
+            if close[i] >= midpoint or close[i] >= R3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 20-day high OR weekly trend turns up
-            if close[i] > high_20[i] or close[i] > ema20_weekly_aligned[i]:
+            # Exit short when price reaches midpoint or S3
+            midpoint = camarilla_close[i] - (camarilla_high[i] - camarilla_low[i]) * 1.1000 / 2
+            if close[i] <= midpoint or close[i] <= S3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
