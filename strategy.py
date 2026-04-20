@@ -3,107 +3,81 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Choppiness_Donchian_Breakout"
-timeframe = "1d"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data (already loaded, but we need it for calculations)
-    # For 1w data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1w: Choppiness Index (regime filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d: Camarilla pivot levels ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    # Calculate Camarilla levels: R1, S1
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    R1 = close_1d + (range_1d * 1.1 / 12)
+    S1 = close_1d - (range_1d * 1.1 / 12)
     
-    # ATR(14)
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Sum of ATR over 14 periods
-    sum_atr_14 = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chop = 100 * np.log10(sum_atr_14 / (hh_1w - ll_1w)) / np.log10(14)
-    chop = np.where((hh_1w - ll_1w) > 0, chop, 50)  # Avoid division by zero
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
-    # === 1d: Donchian Channel (breakout) ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 4h: Price and volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20)
-    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation
+    # Volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(50, n):  # Start after sufficient data
         # Get values
-        chop_val = chop_1w_aligned[i]
-        dc_high_val = dc_high[i]
-        dc_low_val = dc_low[i]
         close_val = close[i]
         vol_ratio_val = vol_ratio[i]
+        R1_val = R1_aligned[i]
+        S1_val = S1_aligned[i]
         
         # Skip if any value is NaN
-        if np.isnan(chop_val) or np.isnan(dc_high_val) or np.isnan(dc_low_val) or np.isnan(vol_ratio_val):
+        if np.isnan(R1_val) or np.isnan(S1_val) or np.isnan(vol_ratio_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Donchian breakout + low chop (trending) + volume
-            if (close_val > dc_high_val and  # Breakout above Donchian high
-                chop_val < 38.2 and          # Trending regime (chop < 38.2)
-                vol_ratio_val > 1.5):        # Volume confirmation
+            # Long: price breaks above R1 with volume confirmation
+            if close_val > R1_val and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown + low chop (trending) + volume
-            elif (close_val < dc_low_val and  # Breakdown below Donchian low
-                  chop_val < 38.2 and         # Trending regime
-                  vol_ratio_val > 1.5):       # Volume confirmation
+            # Short: price breaks below S1 with volume confirmation
+            elif close_val < S1_val and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Donchian breakdown OR high chop (ranging)
-            if (close_val < dc_low_val or  # Breakdown below Donchian low
-                chop_val > 61.8):          # Ranging regime (chop > 61.8)
+            # Long exit: price breaks below S1 or loss of momentum
+            if close_val < S1_val or vol_ratio_val < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Donchian breakout OR high chop (ranging)
-            if (close_val > dc_high_val or  # Breakout above Donchian high
-                chop_val > 61.8):           # Ranging regime
+            # Short exit: price breaks above R1 or loss of momentum
+            if close_val > R1_val or vol_ratio_val < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
