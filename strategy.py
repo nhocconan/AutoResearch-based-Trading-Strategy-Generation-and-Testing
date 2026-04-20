@@ -3,11 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d trend filter (price > SMA200)
-# Works in bull: breakouts capture momentum; works in bear: SMA200 filter avoids shorts in strong downtrends, longs only in residual strength
-# Target: 20-40 trades/year (80-160 total over 4 years) to avoid fee drag
-name = "4h_Donchian20_Volume_SMA200Trend_v1"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1S1_Breakout_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -15,73 +12,100 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for SMA200 filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === Daily SMA200 for trend filter ===
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # === Weekly Trend Filter: 1w EMA21 > EMA50 for uptrend, < for downtrend ===
+    close_1w = df_1w['close'].values
+    ema21_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Align weekly EMAs to daily
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # === Daily Price Data ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    sma200_1d = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
-    sma200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d)
-    
-    # === 4h Donchian channels (20-period) ===
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # Upper band: highest high of past 20 bars (excluding current)
-    high_series = pd.Series(high)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    # Lower band: lowest low of past 20 bars (excluding current)
-    low_series = pd.Series(low)
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # === Volume confirmation: volume > 1.5x 20-period average ===
     volume = prices['volume'].values
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Previous day's values for pivot calculation (to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Classic pivot (base for Camarilla)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla R1 and S1 levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
+    
+    # Align Camarilla levels to daily
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # === Volume Filter ===
+    volume_series = pd.Series(volume)
+    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(50, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        upper_val = donchian_upper[i]
-        lower_val = donchian_lower[i]
         vol_ratio_val = vol_ratio[i]
-        sma200_val = sma200_1d_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        pivot_val = pivot_aligned[i]
+        ema21_val = ema21_1w_aligned[i]
+        ema50_val = ema50_1w_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(upper_val) or np.isnan(lower_val) or 
-            np.isnan(vol_ratio_val) or np.isnan(sma200_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(pivot_val) or 
+            np.isnan(ema21_val) or np.isnan(ema50_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above upper Donchian band with volume confirmation and price > daily SMA200
-            if close_val > upper_val and vol_ratio_val > 1.5 and close_val > sma200_val:
+            # Long: Break above R1 with volume confirmation and weekly uptrend
+            if close_val > r1_val and vol_ratio_val > 2.0 and ema21_val > ema50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower Donchian band with volume confirmation and price < daily SMA200
-            elif close_val < lower_val and vol_ratio_val > 1.5 and close_val < sma200_val:
+            # Short: Break below S1 with volume confirmation and weekly downtrend
+            elif close_val < s1_val and vol_ratio_val > 2.0 and ema21_val < ema50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below lower Donchian band OR volume drops
-            if close_val < lower_val or vol_ratio_val < 1.0:
+            # Long exit: Price returns below pivot OR weekly trend breaks down
+            if close_val < pivot_val or ema21_val < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above upper Donchian band OR volume drops
-            if close_val > upper_val or vol_ratio_val < 1.0:
+            # Short exit: Price returns above pivot OR weekly trend breaks up
+            if close_val > pivot_val or ema21_val > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
