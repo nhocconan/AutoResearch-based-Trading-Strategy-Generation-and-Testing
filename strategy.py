@@ -3,115 +3,152 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d chart with 1w Bollinger Bands filter and 1d KAMA trend.
-# Long when price closes above upper Bollinger Band and KAMA is rising.
-# Short when price closes below lower Bollinger Band and KAMA is falling.
-# Uses weekly Bollinger Bands to filter for high-probability mean-reversion reversals.
-# Target: 15-30 trades/year per symbol to avoid fee drag.
+# Hypothesis: 6h ADX + SuperTrend with 1d ATR-based volatility regime filter.
+# Long when ADX > 25 (trending) and price > SuperTrend (uptrend).
+# Short when ADX > 25 and price < SuperTrend (downtrend).
+# Uses 1d ATR percentile to filter low-volatility chop (avoid false signals).
+# Target: 15-30 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for Bollinger Bands (20, 2)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data for ATR-based volatility regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bollinger Bands calculation
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Calculate 14-period ATR on daily
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Bollinger Bands to 1d timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)
+    # 50th percentile of ATR as volatility threshold (median ATR)
+    atr_median = pd.Series(atr_14).rolling(window=50, min_periods=50).median().values
+    vol_regime = atr_14 > atr_median  # High volatility regime
     
-    # 1d data
-    close = prices['close'].values
+    # Align volatility regime to 6h
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
+    
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - ER=10
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    er = np.zeros_like(change)
-    for i in range(len(change)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
+    # Calculate ADX (14-period) on 6h
+    # True Range
+    tr1_h = high - low
+    tr2_h = np.abs(high - np.roll(close, 1))
+    tr3_h = np.abs(low - np.roll(close, 1))
+    tr1_h[0] = high[0] - low[0]
+    tr2_h[0] = np.abs(high[0] - close[0])
+    tr3_h[0] = np.abs(low[0] - close[0])
+    tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
+    atr_6h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed DM
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_6h
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_6h
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # SuperTrend (ATR=10, multiplier=3.0) on 6h
+    atr_multiplier = 3.0
+    atr_period = 10
+    atr_st = pd.Series(tr_h).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    upper_band = (high + low) / 2 + (atr_multiplier * atr_st)
+    lower_band = (high + low) / 2 - (atr_multiplier * atr_st)
+    
+    supertrend = np.zeros(n)
+    trend = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, n):
+        if close[i] > upper_band[i-1]:
+            trend[i] = 1
+        elif close[i] < lower_band[i-1]:
+            trend[i] = -1
         else:
-            er[i] = 0
-    smooth_er = pd.Series(er).ewm(alpha=2/(10+1), adjust=False).mean().values
-    sc = np.square(smooth_er * (2/2 - 2/30) + 2/30)  # Fast=2, Slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+            trend[i] = trend[i-1]
+            if trend[i] == 1 and lower_band[i] > lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if trend[i] == -1 and upper_band[i] < upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        supertrend[i] = lower_band[i] if trend[i] == 1 else upper_band[i]
     
-    # KAMA direction: rising if current > previous
-    kama_rising = kama > np.roll(kama, 1)
-    kama_falling = kama < np.roll(kama, 1)
-    kama_rising[0] = False
-    kama_falling[0] = False
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20) > 1.3
-    
+    # Signals
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
-            np.isnan(kama[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(adx[i]) or np.isnan(supertrend[i]) or 
+            np.isnan(vol_regime_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        adx_val = adx[i]
+        st_val = supertrend[i]
         price = close[i]
-        upper_bb_val = upper_bb_aligned[i]
-        lower_bb_val = lower_bb_aligned[i]
-        vol_ok = vol_filter[i]
-        kama_rise = kama_rising[i]
-        kama_fall = kama_falling[i]
+        vol_ok = vol_regime_aligned[i]
         
-        if position == 0:
-            # Long: price closes above upper BB, KAMA rising, volume
-            if price > upper_bb_val and kama_rise and vol_ok:
-                signals[i] = 0.25
-                position = 1
-            # Short: price closes below lower BB, KAMA falling, volume
-            elif price < lower_bb_val and kama_fall and vol_ok:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Long exit: price closes below KAMA or volatility drops
-            if price < kama[i] or not vol_ok:
+        # Only trade in high volatility regime and strong trend (ADX > 25)
+        if vol_ok and adx_val > 25:
+            if position == 0:
+                # Long: price above SuperTrend (uptrend)
+                if price > st_val:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price below SuperTrend (downtrend)
+                elif price < st_val:
+                    signals[i] = -0.25
+                    position = -1
+            elif position == 1:
+                # Long exit: price crosses below SuperTrend
+                if price < st_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Short exit: price crosses above SuperTrend
+                if price > st_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            # Low volatility or weak trend: exit any position
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: price closes above KAMA or volatility drops
-            if price > kama[i] or not vol_ok:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "1d_1w_BollingerBands_KAMA_VolumeFilter_v1"
-timeframe = "1d"
+name = "6h_ADX_SuperTrend_VolRegime_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
