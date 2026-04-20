@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1w_Camarilla_R1S1_Breakout_Volume_ATRFilter
+4h_1w_Camarilla_R1S1_Breakout_Volume_ATRFilter_v2
 Hypothesis: Trade 4-hour chart using weekly Camarilla pivot R1/S1 breakouts with volume confirmation and ATR-based stop loss.
 Weekly Camarilla levels provide strong weekly support/resistance. Breakouts with volume indicate institutional participation.
 ATR stop loss manages risk during adverse moves. Works in bull/bear markets: breaks indicate momentum continuation.
 Target: 20-50 total trades over 4 years (5-12/year) with position size 0.30.
 """
 
-name = "4h_1w_Camarilla_R1S1_Breakout_Volume_ATRFilter"
+name = "4h_1w_Camarilla_R1S1_Breakout_Volume_ATRFilter_v2"
 timeframe = "4h"
 leverage = 1.0
 
