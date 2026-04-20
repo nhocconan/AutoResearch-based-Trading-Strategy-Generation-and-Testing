@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation.
-# The 1d EMA200 provides long-term trend direction to avoid counter-trend trades.
-# Donchian(20) breakout captures momentum, volume confirms institutional interest.
-# This combination should work in both bull and bear markets by following the higher timeframe trend.
-# Target: 20-40 trades per year to minimize fee drag.
+# Hypothesis: 4h TRIX momentum with 1d trend filter and volume confirmation.
+# TRIX (12-period) filters noise and identifies momentum shifts. Combined with 1d EMA200 trend filter
+# to avoid counter-trend trades and volume confirmation (>1.5x average) for institutional validation.
+# Exit on TRIX signal reversal or trend failure. Designed for 20-40 trades/year to minimize fee drag.
 
-name = "12h_Donchian20_1dEMA200_Volume"
-timeframe = "12h"
+name = "4h_TRIX12_1dEMA200_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,15 +27,16 @@ def generate_signals(prices):
     ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # === 12h Donchian channels (20-period) ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 4h TRIX (12-period) ===
+    close = prices['close'].values
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = (ema3 / ema3.shift(1) - 1) * 100  # Percentage change
+    trix = trix.fillna(0).values
     
-    # Calculate rolling max/min for Donchian channels
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 12h Volume confirmation ===
+    # === 4h Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
@@ -49,40 +49,39 @@ def generate_signals(prices):
         # Get values
         close_val = prices['close'].iloc[i]
         ema_val = ema_200_aligned[i]
-        upper_channel = high_max[i]
-        lower_channel = low_min[i]
+        trix_val = trix[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(upper_channel) or np.isnan(lower_channel) or np.isnan(vol_ratio_val)):
+        if (np.isnan(ema_val) or np.isnan(trix_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper + uptrend (price > EMA200) + volume spike
-            if close_val > upper_channel and close_val > ema_val and vol_ratio_val > 1.5:
+            # Long: TRIX positive + uptrend (price > EMA200) + volume spike
+            if trix_val > 0 and close_val > ema_val and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short: price breaks below Donchian lower + downtrend (price < EMA200) + volume spike
-            elif close_val < lower_channel and close_val < ema_val and vol_ratio_val > 1.5:
+            # Short: TRIX negative + downtrend (price < EMA200) + volume spike
+            elif trix_val < 0 and close_val < ema_val and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         
         elif position == 1:
-            # Long exit: price breaks below Donchian lower or trend reversal
-            if close_val < lower_channel or close_val < ema_val:
+            # Long exit: TRIX turns negative or trend reversal
+            if trix_val < 0 or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian upper or trend reversal
-            if close_val > upper_channel or close_val > ema_val:
+            # Short exit: TRIX turns positive or trend reversal
+            if trix_val > 0 or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
