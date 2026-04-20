@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_Pivot_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,45 +12,45 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 12h Pivot Points (previous day) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1d Camarilla Pivot Points (previous day) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Previous day's values for pivot calculation
-    prev_high = np.roll(high_12h, 1)
-    prev_low = np.roll(low_12h, 1)
-    prev_close = np.roll(close_12h, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
     # Set first values to avoid look-ahead
-    prev_high[0] = high_12h[0]
-    prev_low[0] = low_12h[0]
-    prev_close[0] = close_12h[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
     # Classic pivot (same for Camarilla)
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Pivot levels - Focus on R1/S1 for breakouts
+    # Camarilla levels - Focus on R1/S1 for breakouts
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === Volume Confirmation (6h) ===
+    # === Volume Confirmation (4h) ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === ATR Stop Loss (6h) ===
+    # === ATR Stop Loss (4h) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -86,12 +86,12 @@ def generate_signals(prices):
             # Breakout at R1/S1 with volume confirmation
             if close_val > r1_val and vol_ratio_val > 2.0:
                 # Break above R1
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = close_val
             elif close_val < s1_val and vol_ratio_val > 2.0:
                 # Break below S1
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = close_val
         
@@ -106,7 +106,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Short exit: stop loss or return to S1
@@ -119,6 +119,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
