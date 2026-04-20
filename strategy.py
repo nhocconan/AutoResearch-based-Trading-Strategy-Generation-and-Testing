@@ -1,10 +1,20 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+"""
+6h_1d_Pivot_Zone_Reversal_V1
+Hypothesis: Price often reverses near daily pivot zones (R1/S1) during low volatility (chop>60).
+In ranging markets (chop>60), we fade extremes; in trending markets (chop<40), we breakout.
+Timeframe: 6h (primary), HTF: 1d for pivot and chop regime.
+Target: 12-37 trades/year (50-150 over 4 years). Size: 0.25.
+Works in bull/bear via regime filter.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Regime_v2"
-timeframe = "12h"
+name = "6h_1d_Pivot_Zone_Reversal_V1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,53 +27,53 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Points (previous day) ===
+    # === Daily Pivot Points (previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for pivot calculation
+    # Previous day's values for pivot calculation (avoid look-ahead)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
-    
-    # Set first values to avoid look-ahead
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
     prev_close[0] = close_1d[0]
     
-    # Camarilla pivot (same as classic)
+    # Standard pivot calculation
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Camarilla R1 and S1 levels
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
+    # Support and Resistance levels
+    r1 = pivot + (range_val * 1.0 / 2)  # R1 = P + (H-L)/2
+    s1 = pivot - (range_val * 1.0 / 2)  # S1 = P - (H-L)/2
+    r2 = pivot + range_val              # R2 = P + (H-L)
+    s2 = pivot - range_val              # S2 = P - (H-L)
     
-    # Align to 12h timeframe
+    # Align to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # === 12h Volume Confirmation ===
-    volume = prices['volume'].values
-    vol_series = pd.Series(volume)
-    vol_ma30 = vol_series.rolling(window=30, min_periods=30).mean().values
-    vol_ratio = volume / np.where(vol_ma30 > 0, vol_ma30, np.nan)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # === Chopiness Index (1d) for regime filter ===
-    high_low = df_1d['high'].values - df_1d['low'].values
-    atr1 = np.zeros_like(high_low)
-    atr1[0] = high_low[0]
-    for i in range(1, len(high_low)):
-        tr = max(
-            high_low[i],
-            abs(df_1d['high'].values[i] - df_1d['close'].values[i-1]),
-            abs(df_1d['low'].values[i] - df_1d['close'].values[i-1])
-        )
-        atr1[i] = 0.9 * atr1[i-1] + 0.1 * tr
+    # True range
+    tr = np.zeros_like(high_1d)
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        hl = high_1d[i] - low_1d[i]
+        hc = abs(high_1d[i] - close_1d[i-1])
+        lc = abs(low_1d[i] - close_1d[i-1])
+        tr[i] = max(hl, hc, lc)
     
-    # Sum of absolute returns over 14 days
+    # ATR(14)
+    atr = np.zeros_like(tr)
+    atr[:14] = np.nan
+    for i in range(14, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Sum of absolute returns over 14 periods
     abs_returns = np.abs(np.diff(close_1d, prepend=close_1d[0]))
     sum_abs_ret = np.zeros_like(abs_returns)
     for i in range(len(abs_returns)):
@@ -73,15 +83,19 @@ def generate_signals(prices):
             sum_abs_ret[i] = np.sum(abs_returns[i-13:i+1])
     
     # Chopiness index formula
-    chop = np.zeros_like(close_1d)
+    chop = np.full_like(close_1d, 50.0)  # neutral default
     for i in range(len(close_1d)):
-        if sum_abs_ret[i] > 0 and atr1[i] > 0:
-            chop[i] = 100 * np.log10(sum_abs_ret[i] / (atr1[i] * 14)) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral
+        if sum_abs_ret[i] > 0 and not np.isnan(atr[i]) and atr[i] > 0:
+            chop[i] = 100 * np.log10(sum_abs_ret[i] / (atr[i] * 14)) / np.log10(14)
     
-    # Align chop to 12h timeframe
+    # Align chop to 6h timeframe
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # === 6h Volume Confirmation ===
+    volume = prices['volume'].values
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.divide(volume, vol_ma20, out=np.full_like(volume, 1.0), where=vol_ma20>0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -90,43 +104,64 @@ def generate_signals(prices):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        pivot_val = pivot_aligned[i]
         chop_val = chop_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(pivot_val) or np.isnan(chop_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(chop_val) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with volume confirmation in low chop (trending market)
-            if close_val > r1_val and vol_ratio_val > 2.0 and chop_val < 45:
-                signals[i] = 0.25
-                position = 1
-            # Short: Break below S1 with volume confirmation in low chop
-            elif close_val < s1_val and vol_ratio_val > 2.0 and chop_val < 45:
-                signals[i] = -0.25
-                position = -1
+            # Determine market regime
+            is_ranging = chop_val > 60
+            is_trending = chop_val < 40
+            
+            if is_ranging:
+                # In ranging markets: fade at S1/R1 with volume confirmation
+                if close_val <= s1_aligned[i] and vol_ratio_val > 1.8:
+                    # Long near S1 support
+                    signals[i] = 0.25
+                    position = 1
+                elif close_val >= r1_aligned[i] and vol_ratio_val > 1.8:
+                    # Short near R1 resistance
+                    signals[i] = -0.25
+                    position = -1
+            elif is_trending:
+                # In trending markets: breakout continuation with volume
+                if close_val > r2_aligned[i] and vol_ratio_val > 2.0:
+                    # Break above R2 -> long
+                    signals[i] = 0.25
+                    position = 1
+                elif close_val < s2_aligned[i] and vol_ratio_val > 2.0:
+                    # Break below S2 -> short
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot OR chop increases (rangy market)
-            if close_val < pivot_val or chop_val > 55:
+            # Long exit conditions
+            if chop_val > 65:  # Market became ranging
+                signals[i] = 0.0
+                position = 0
+            elif close_val < pivot_aligned[i]:  # Price returned below pivot
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Hold position
         
         elif position == -1:
-            # Short exit: Price returns above pivot OR chop increases
-            if close_val > pivot_val or chop_val > 55:
+            # Short exit conditions
+            if chop_val > 65:  # Market became ranging
+                signals[i] = 0.0
+                position = 0
+            elif close_val > pivot_aligned[i]:  # Price returned above pivot
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Hold position
     
     return signals
