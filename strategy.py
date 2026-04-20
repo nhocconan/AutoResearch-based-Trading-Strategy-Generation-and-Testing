@@ -3,59 +3,45 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R2S2_Breakout_Volume"
-timeframe = "1d"
+name = "6h_1d_Donchian20_Breakout_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # === Weekly Close for Trend Filter ===
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    weekly_trend_up = weekly_close > weekly_ema
-    
-    # Align weekly trend to daily
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
-    
-    # === Daily Data (for Pivot Calculation) ===
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    # === Daily Donchian Channels (20-day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    
+    # 20-day rolling max/min (using previous day's data to avoid look-ahead)
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Fill initial values
+    donchian_high[:20] = high_1d[:20].max()
+    donchian_low[:20] = low_1d[:20].min()
+    
+    # Align to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # === Daily Trend Filter: 50-day EMA ===
     close_1d = df_1d['close'].values
+    close_series_1d = pd.Series(close_1d)
+    ema50 = close_series_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # Previous day's values for pivot calculation (avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Classic pivot (same for Camarilla)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla R2 and S2 levels (stronger breakout levels)
-    r2 = pivot + (range_val * 1.1 / 6)
-    s2 = pivot - (range_val * 1.1 / 6)
-    
-    # Align to daily timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # === Volume Confirmation ===
+    # === 6h Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -64,44 +50,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
+        dh_val = donchian_high_aligned[i]
+        dl_val = donchian_low_aligned[i]
+        ema50_val = ema50_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        pivot_val = pivot_aligned[i]
-        weekly_trend = weekly_trend_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or 
-            np.isnan(s2_val) or np.isnan(pivot_val)):
+        if (np.isnan(dh_val) or np.isnan(dl_val) or 
+            np.isnan(ema50_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R2 with volume confirmation and weekly uptrend
-            if close_val > r2_val and vol_ratio_val > 1.8 and weekly_trend:
+            # Long: Break above Donchian High with volume and uptrend filter
+            if close_val > dh_val and vol_ratio_val > 1.5 and close_val > ema50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S2 with volume confirmation and weekly downtrend
-            elif close_val < s2_val and vol_ratio_val > 1.8 and not weekly_trend:
+            # Short: Break below Donchian Low with volume and downtrend filter
+            elif close_val < dl_val and vol_ratio_val > 1.5 and close_val < ema50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot OR weekly trend turns down
-            if close_val < pivot_val or not weekly_trend:
+            # Long exit: Price returns below Donchian Low OR trend turns bearish
+            if close_val < dl_val or close_val < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot OR weekly trend turns up
-            if close_val > pivot_val or weekly_trend:
+            # Short exit: Price returns above Donchian High OR trend turns bullish
+            if close_val > dh_val or close_val > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
