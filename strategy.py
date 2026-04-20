@@ -3,43 +3,50 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_R4S4_Breakout_VolumeFilter_v1"
-timeframe = "6h"
+# Hypothesis: 12h timeframe with 1-day pivot point breakout strategy
+# Uses S1/S2 support/resistance levels with volume confirmation and ATR-based stops
+# Designed to work in both bull and bear markets by fading extremes at key pivot levels
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+name = "12h_Pivot_S1S2_Breakout_Volume_ATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 1d data ONCE before loop for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === Weekly Pivot Points (Standard) ===
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    # === 1d: Calculate pivot points (standard) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Pivot = (H + L + C) / 3
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    # R4 = 3*P - 2*L, S4 = 3*P - 2*H
-    r4_w = 3 * pivot_w - 2 * low_w
-    s4_w = 3 * pivot_w - 2 * high_w
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # S1 = 2*P - H, R1 = 2*P - L
+    s1_1d = 2 * pivot_1d - high_1d
+    r1_1d = 2 * pivot_1d - low_1d
+    # S2 = P - (H - L), R2 = P + (H - L)
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r2_1d = pivot_1d + (high_1d - low_1d)
     
-    # Align weekly levels to 6h
-    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r4_w_aligned = align_htf_to_ltf(prices, df_1w, r4_w)
-    s4_w_aligned = align_htf_to_ltf(prices, df_1w, s4_w)
+    # Align all pivot levels
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     
-    # === 6h: Volume and ATR for filtering ===
+    # === 12h: ATR(14) for volatility and stop loss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # TR for ATR
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -47,60 +54,79 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # Enough for ATR and volume MA
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Get aligned values
-        pivot = pivot_w_aligned[i]
-        r4 = r4_w_aligned[i]
-        s4 = s4_w_aligned[i]
+        pivot = pivot_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s2 = s2_1d_aligned[i]
+        r2 = r2_1d_aligned[i]
         current_atr = atr[i]
-        current_close = close[i]
-        current_volume = volume[i]
-        current_vol_ma = vol_ma[i]
+        current_close = prices['close'].iloc[i]
+        current_volume = prices['volume'].iloc[i]
         
         # Skip if any value is NaN
-        if (np.isnan(pivot) or np.isnan(r4) or np.isnan(s4) or 
-            np.isnan(current_atr) or np.isnan(current_vol_ma)):
+        if (np.isnan(pivot) or np.isnan(s1) or np.isnan(r1) or np.isnan(s2) or np.isnan(r2) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.5x 20-period average
-        vol_condition = current_volume > 1.5 * current_vol_ma
+        # === Volume condition: current volume > 1.3x 24-period 12h average volume ===
+        if i >= 24:
+            vol_ma = np.mean(prices['volume'].iloc[i-24:i].values)
+            vol_condition = current_volume > 1.3 * vol_ma
+        else:
+            vol_condition = False
         
         if position == 0:
-            # Long: Break above weekly R4 with volume
-            if current_close > r4 and vol_condition:
+            # Long conditions:
+            # 1. Price breaks above S1 with volume (bounce from support)
+            # 2. Price is below R1 (not overextended)
+            if (current_close > s1 and
+                vol_condition and
+                current_close < r1):
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short: Break below weekly S4 with volume
-            elif current_close < s4 and vol_condition:
+            # Short conditions:
+            # 1. Price breaks below R1 with volume (rejection at resistance)
+            # 2. Price is above S1 (not overextended)
+            elif (current_close < r1 and
+                  vol_condition and
+                  current_close > s1):
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: Price falls back below weekly pivot OR ATR stop
-            if current_close < pivot or current_close < entry_price - 2.5 * current_atr:
+            # Long exit conditions:
+            # 1. Price falls below S1 (support broken - stop loss)
+            # 2. Price hits R1 (take profit at resistance)
+            # 3. ATR-based stop loss
+            if (current_close <= s1 or
+                current_close >= r1 or
+                current_close < entry_price - 2.5 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises back above weekly pivot OR ATR stop
-            if current_close > pivot or current_close > entry_price + 2.5 * current_atr:
+            # Short exit conditions:
+            # 1. Price rises above R1 (resistance broken - stop loss)
+            # 2. Price hits S1 (take profit at support)
+            # 3. ATR-based stop loss
+            if (current_close >= r1 or
+                current_close <= s1 or
+                current_close > entry_price + 2.5 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
