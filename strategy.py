@@ -1,115 +1,101 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_SuperTrend_1DTrend_v1
-Concept: 1d SuperTrend (ATR=10, mult=3) trend filter with weekly trend alignment.
-- Long: 1d close > SuperTrend AND weekly close > weekly EMA200 (bullish alignment)
-- Short: 1d close < SuperTrend AND weekly close < weekly EMA200 (bearish alignment)
-- Exit: 1d close crosses SuperTrend in opposite direction
+12h_1d_Camarilla_R1S1_Breakout_Volume_Filter_v1
+Concept: 12h Camarilla pivot levels (R1/S1) from prior 1d + volume spike + close confirmation.
+- Long: Close > R1 and volume > 1.5x avg volume
+- Short: Close < S1 and volume > 1.5x avg volume
+- Exit: Close crosses back below R1 (long) or above S1 (short)
 - Position sizing: 0.25
-- Target: 10-25 trades/year (40-100 total over 4 years)
-- Works in bull/bear: Weekly EMA200 defines long-term trend, SuperTrend captures intermediate trend
+- Target: 15-25 trades/year (60-100 total over 4 years)
+- Works in bull/bear: Camarilla levels adapt to volatility, volume confirms breakout strength
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_SuperTrend_1DTrend_v1"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 210:  # Need enough data for weekly EMA200 (~420 days) and SuperTrend
+    if n < 20:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get daily data ONCE before loop for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d: SuperTrend calculation (ATR=10, multiplier=3) ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # === Calculate Camarilla pivot levels from prior 1d OHLC ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Pivot point = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
     
-    # ATR(10)
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Camarilla levels:
+    # R1 = C + (H - L) * 1.0833
+    # S1 = C - (H - L) * 1.0833
+    r1 = close_1d + range_1d * 1.0833
+    s1 = close_1d - range_1d * 1.0833
     
-    # Basic Upper and Lower Bands
-    hl_avg = (high + low) / 2
-    upper_band = hl_avg + (3 * atr)
-    lower_band = hl_avg - (3 * atr)
+    # Align to 12h timeframe (use prior day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # SuperTrend
-    supertrend = np.zeros_like(close)
-    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = max(upper_band[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(lower_band[i], supertrend[i-1])
-            direction[i] = -1
-    
-    # === Weekly: EMA200 trend filter ===
-    weekly_close = df_1w['close'].values
-    weekly_ema200 = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    weekly_ema200_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema200)
+    # === Volume spike filter (12h) ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 10  # Need enough data for ATR calculation
+    start_idx = 20  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
         # Get values
-        supertrend_val = supertrend[i]
-        close_val = close[i]
-        weekly_ema200_val = weekly_ema200_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        vol_ma_val = vol_ma[i]
+        close_val = prices['close'].iloc[i]
+        volume_val = volume[i]
         
         # Skip if any value is NaN
-        if (np.isnan(supertrend_val) or np.isnan(close_val) or 
-            np.isnan(weekly_ema200_val)):
+        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(vol_ma_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume spike condition
+        vol_spike = volume_val > 1.5 * vol_ma_val
+        
         if position == 0:
-            # Long: Price above SuperTrend AND weekly close above weekly EMA200
-            if close_val > supertrend_val and close_val > weekly_ema200_val:
+            # Long: Close above R1 and volume spike
+            if close_val > r1_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below SuperTrend AND weekly close below weekly EMA200
-            elif close_val < supertrend_val and close_val < weekly_ema200_val:
+            # Short: Close below S1 and volume spike
+            elif close_val < s1_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses below SuperTrend
-            if close_val < supertrend_val:
+            # Long exit: Close crosses back below R1
+            if close_val < r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses above SuperTrend
-            if close_val > supertrend_val:
+            # Short exit: Close crosses back above S1
+            if close_val > s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
