@@ -3,84 +3,104 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly RSI with daily price action confirmation
-# RSI(14) on weekly timeframe to identify overbought/oversold conditions
-# Enter long when weekly RSI < 30 and daily close > daily open (bullish candle)
-# Enter short when weekly RSI > 70 and daily close < daily open (bearish candle)
-# Exit when RSI returns to neutral zone (40-60) or opposite signal appears
-# Designed to work in both bull and bear markets by capturing mean reversion
-# at extreme weekly levels while using daily price action for timing
-# Target: 20-50 trades/year to minimize fee drag
-
-name = "1d_1w_RSI_MeanReversion_v1"
-timeframe = "1d"
+name = "12h_1d_KAMA_RSI_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 150:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
+    # === Daily KAMA for Trend Direction ===
+    close_1d = df_1d['close'].values
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
+    vol = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # 10-period volatility
+    # Handle edge cases for vol calculation
+    vol_padded = np.concatenate([np.abs(np.diff(close_1d, n=1)), [0]])
+    vol_sum = np.convolve(vol_padded, np.ones(10), mode='valid')
+    er = np.where(vol_sum > 0, change / vol_sum, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan, dtype=float)
+    kama[29] = close_1d[29]  # Start after enough data
+    for i in range(30, len(close_1d)):
+        if not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Align KAMA to 12h
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # === 12h RSI for Momentum ===
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    
-    # Align weekly RSI to daily
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Daily price action
-    close = prices['close'].values
-    open_price = prices['open'].values
+    # === 12h Volume Filter ===
+    volume = prices['volume'].values
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        rsi_val = rsi_1w_aligned[i]
+    for i in range(50, n):
+        # Get values
         close_val = close[i]
-        open_val = open_price[i]
+        rsi_val = rsi[i]
+        vol_ratio_val = vol_ratio[i]
+        kama_val = kama_aligned[i]
         
-        # Skip if RSI is not ready
-        if np.isnan(rsi_val):
+        # Skip if any value is NaN
+        if (np.isnan(rsi_val) or np.isnan(vol_ratio_val) or np.isnan(kama_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Weekly oversold + daily bullish candle
-            if rsi_val < 30 and close_val > open_val:
+            # Long: Price above KAMA (uptrend) + RSI oversold bounce + volume
+            if (close_val > kama_val and 
+                rsi_val < 35 and 
+                vol_ratio_val > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly overbought + daily bearish candle
-            elif rsi_val > 70 and close_val < open_val:
+            # Short: Price below KAMA (downtrend) + RSI overbought + volume
+            elif (close_val < kama_val and 
+                  rsi_val > 65 and 
+                  vol_ratio_val > 1.3):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI returns to neutral or bearish candle
-            if rsi_val >= 40 or close_val < open_val:
+            # Long exit: Price below KAMA or RSI overbought
+            if close_val < kama_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI returns to neutral or bullish candle
-            if rsi_val <= 60 or close_val > open_val:
+            # Short exit: Price above KAMA or RSI oversold
+            if close_val > kama_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
