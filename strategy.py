@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Pivot Point R1/S1 Breakout with Volume Confirmation and ATR Stop
-Hypothesis: In trending markets, price tends to retest and break previous day's pivot resistance (R1) or support (S1).
-In ranging markets, these levels act as strong support/resistance for mean reversion.
-Combined with volume confirmation (to avoid fakeouts) and ATR-based stops (to limit losses),
-this strategy works in both bull and bear markets by using adaptive daily pivot levels.
-Target: 20-50 trades per year by requiring volume confirmation and using wider stops.
+1D Weekly EMA34 Trend with Volume Filter
+Hypothesis: In trending markets (both bull and bear), price tends to respect the weekly EMA34 as dynamic support/resistance.
+During uptrends, price pulls back to EMA34 and bounces; during downtrends, price rallies to EMA34 and rejects.
+Volume confirmation filters out weak moves. Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
+Target: 15-25 trades per year by requiring weekly EMA34 alignment and volume confirmation.
 """
 
 import numpy as np
@@ -17,36 +16,19 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for pivot points and ATR
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Load weekly data once for EMA34 trend
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 34:
         return np.zeros(n)
     
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    close_weekly = df_weekly['close'].values
+    # Calculate weekly EMA34
+    ema34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate daily True Range for ATR
-    tr1 = np.abs(high_daily - low_daily)
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr1[0] = high_daily[0] - low_daily[0]
-    tr2[0] = np.abs(high_daily[0] - close_daily[0])
-    tr3[0] = np.abs(low_daily[0] - close_daily[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly EMA34 to daily timeframe
+    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
     
-    # Calculate daily pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    pivot_daily = (high_daily + low_daily + close_daily) / 3.0
-    r1_daily = 2 * pivot_daily - low_daily
-    s1_daily = 2 * pivot_daily - high_daily
-    
-    # Align daily indicators to 4h timeframe
-    atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
-    r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
-    s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
-    
-    # Main timeframe data (4h)
+    # Daily data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -57,43 +39,41 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(atr_daily_aligned[i]) or np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i])):
+        if np.isnan(ema34_weekly_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        atr = atr_daily_aligned[i]
-        r1 = r1_daily_aligned[i]
-        s1 = s1_daily_aligned[i]
+        ema34 = ema34_weekly_aligned[i]
         vol_current = volume[i]
         
-        # Volume filter: current volume > 1.8x 30-period average (more selective)
-        vol_ma = np.mean(volume[max(0, i-30):i]) if i >= 30 else volume[i]
-        vol_ok = vol_current > 1.8 * vol_ma
+        # Volume filter: current volume > 1.5x 20-period average
+        vol_ma = np.mean(volume[max(0, i-20):i]) if i >= 20 else volume[i]
+        vol_ok = vol_current > 1.5 * vol_ma
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation
-            if price > r1 and vol_ok:
+            # Long: price above weekly EMA34 with volume confirmation
+            if price > ema34 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with volume confirmation
-            elif price < s1 and vol_ok:
+            # Short: price below weekly EMA34 with volume confirmation
+            elif price < ema34 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 (failed breakout) or ATR-based stop
-            if price < s1 or (i > 0 and close[i-1] > s1 and price < close[i-1] - 1.5 * atr):
+            # Long exit: price crosses below weekly EMA34
+            if price < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 (failed breakdown) or ATR-based stop
-            if price > r1 or (i > 0 and close[i-1] < r1 and price > close[i-1] + 1.5 * atr):
+            # Short exit: price crosses above weekly EMA34
+            if price > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PivotPoint_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "4h"
+name = "1D_WeeklyEMA34_Trend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
