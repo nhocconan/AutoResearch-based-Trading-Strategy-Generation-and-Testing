@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1S1_Breakout_Volume_Trend_Filter
-Hypothesis: Trade 4h price breakouts above/below daily pivot resistance/support levels with volume confirmation and 1d trend filter.
-Long when price breaks above daily R1 with volume spike and 1d uptrend; short when breaks below daily S1 with volume spike and 1d downtrend.
-Uses daily pivot levels (calculated from prior daily bar) and volume > 1.5x 20-period average for confirmation.
-Designed for 4h timeframe to capture medium-term moves while reducing noise.
-Target: 75-200 total trades over 4 years (19-50/year) with position size 0.25.
-Works in bull/bear: 1d trend filter avoids counter-trend trades, volume filter reduces false breakouts.
+6h_WoodyCCI_Divergence_With_Volume
+Hypothesis: Trade divergences between price and Woody CCI on 6h timeframe, confirmed by volume spikes and aligned with 1d trend.
+Long when bullish divergence (price makes lower low, CCI makes higher low) with volume spike and 1d uptrend.
+Short when bearish divergence (price makes higher high, CCI makes lower high) with volume spike and 1d downtrend.
+Uses Woody CCI (typically more responsive than standard CCI) with period 14.
+Designed for 6h to capture medium-term reversals with confirmation, reducing false signals.
+Works in bull/bear: 1d trend filter ensures trades align with higher timeframe momentum.
+Target: 60-120 total trades over 4 years (15-30/year) with position size 0.25.
 """
 
-name = "4h_Camarilla_Pivot_R1S1_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "6h_WoodyCCI_Divergence_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -27,28 +28,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data ONCE before loop
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily pivot points (using prior daily bar's high, low, close)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point calculation: PP = (H + L + C) / 3
-    # R1 = 2*PP - L, S1 = 2*PP - H
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pp_1d - low_1d
-    s1_1d = 2 * pp_1d - high_1d
+    # Calculate 1d EMA20 for trend filter
+    def ema(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) >= period:
+            multiplier = 2.0 / (period + 1)
+            result[period-1] = np.mean(values[:period])
+            for i in range(period, len(values)):
+                result[i] = multiplier * values[i] + (1 - multiplier) * result[i-1]
+        return result
     
-    # Align daily pivot levels to 4h timeframe (already delayed by one bar via align_htf_to_ltf)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema20_1d = ema(close_1d, 20)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Calculate volume filter (volume > 1.5x 20-period average)
+    # Calculate Woody CCI on 6h (Typical Price = (H+L+C)/3)
+    tp = (high + low + close) / 3.0
+    # CCI = (TP - SMA(TP,20)) / (0.015 * Mean Deviation)
+    sma_tp = np.full_like(tp, np.nan)
+    md = np.full_like(tp, np.nan)
+    cci = np.full_like(tp, np.nan)
+    
+    for i in range(19, len(tp)):
+        sma_tp[i] = np.mean(tp[i-19:i+1])
+        mean_dev = np.mean(np.abs(tp[i-19:i+1] - sma_tp[i]))
+        if mean_dev > 0:
+            cci[i] = (tp[i] - sma_tp[i]) / (0.015 * mean_dev)
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = np.full_like(volume, np.nan)
     for i in range(20, len(volume)):
         vol_ma20[i] = np.mean(volume[i-20:i])
@@ -57,36 +70,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure volume MA is ready
+    start_idx = 40  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(cci[i]) or np.isnan(cci[i-1]) or np.isnan(ema20_1d_aligned[i]) or
+            np.isnan(close[i]) or np.isnan(close[i-1]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above daily R1 with volume filter AND 1d uptrend (close > PP)
-            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > pp_1d_aligned[i]:
+            # Bullish divergence: price makes lower low, CCI makes higher low
+            bull_div = (close[i] < close[i-1]) and (low[i] < low[i-1]) and (cci[i] > cci[i-1])
+            # Bearish divergence: price makes higher high, CCI makes lower high
+            bear_div = (close[i] > close[i-1]) and (high[i] > high[i-1]) and (cci[i] < cci[i-1])
+            
+            if bull_div and volume_filter[i] and close[i] > ema20_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily S1 with volume filter AND 1d downtrend (close < PP)
-            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < pp_1d_aligned[i]:
+            elif bear_div and volume_filter[i] and close[i] < ema20_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below daily pivot point OR below S1
-            if close[i] < pp_1d_aligned[i] or close[i] < s1_1d_aligned[i]:
+            # Long exit: bearish divergence OR price breaks below EMA20
+            bear_div = (close[i] > close[i-1]) and (high[i] > high[i-1]) and (cci[i] < cci[i-1])
+            if bear_div or close[i] < ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above daily pivot point OR above R1
-            if close[i] > pp_1d_aligned[i] or close[i] > r1_1d_aligned[i]:
+            # Short exit: bullish divergence OR price breaks above EMA20
+            bull_div = (close[i] < close[i-1]) and (low[i] < low[i-1]) and (cci[i] > cci[i-1])
+            if bull_div or close[i] > ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
