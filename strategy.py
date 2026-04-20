@@ -1,52 +1,69 @@
 #!/usr/bin/env python3
 """
-4h_1d_Pivot_R1S1_Breakout_Volume_Trend_v3
-Concept: Daily pivot point breakout with volume confirmation and trend filter on 4h timeframe.
-- Uses daily pivot points (R1, S1) as key support/resistance levels
-- Long when price breaks above R1 with volume confirmation and above 4h EMA50
-- Short when price breaks below S1 with volume confirmation and below 4h EMA50
-- Exit when price returns to central pivot point (mean reversion)
+1d_1w_KAMA_PriceChannel_Trend_v1
+Concept: Daily KAMA trend combined with weekly price channel breakout and volume confirmation.
+- Uses daily KAMA (Adaptive Moving Average) to determine trend direction
+- Uses weekly Donchian channel (20-period) for breakout signals
+- Requires volume confirmation (volume > 1.5x 20-period average)
+- Long when price breaks above weekly upper channel AND daily KAMA is rising
+- Short when price breaks below weekly lower channel AND daily KAMA is falling
+- Exit when price crosses daily KAMA (trend reversal)
 - Conservative sizing (0.25) to manage drawdown
-- Works in bull/bear: Pivot points adapt to market conditions, volume confirms breakouts
+- Works in bull/bear: KAMA adapts to volatility, price channels capture breakouts
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend_v3"
-timeframe = "4h"
+name = "1d_1w_KAMA_PriceChannel_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data ONCE before loop for price channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === Calculate daily pivot points ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Weekly: Donchian channel (20-period) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # Align weekly channels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === 4h: EMA50 trend filter ===
+    # === Daily: KAMA trend indicator ===
     close = prices['close'].values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period sum of absolute changes
+    # Pad arrays to match length
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    # Avoid division by zero
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # === Daily: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
@@ -54,49 +71,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA50
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Get values
-        ema50_val = ema50[i]
+        kama_val = kama[i]
+        kama_prev = kama[i-1] if i > 0 else kama_val
         close_val = close[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        upper_channel = donchian_high_aligned[i]
+        lower_channel = donchian_low_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema50_val) or np.isnan(pivot_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(kama_val) or np.isnan(kama_prev) or np.isnan(close_val) or 
+            np.isnan(upper_channel) or np.isnan(lower_channel) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and above EMA50
-            breakout_long = close_val > r1_val
-            vol_confirm = vol_ratio_val > 1.3  # Volume above average
+            # Long: Price breaks above weekly upper channel with volume confirmation and KAMA rising
+            breakout_long = close_val > upper_channel
+            vol_confirm = vol_ratio_val > 1.5  # Volume above average
+            kama_rising = kama_val > kama_prev
             
-            if breakout_long and vol_confirm and close_val > ema50_val:
+            if breakout_long and vol_confirm and kama_rising:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and below EMA50
-            elif close_val < s1_val and vol_confirm and close_val < ema50_val:
+            # Short: Price breaks below weekly lower channel with volume confirmation and KAMA falling
+            elif close_val < lower_channel and vol_confirm and kama_val < kama_prev:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below central pivot (mean reversion)
-            if close_val <= pivot_val:
+            # Long exit: Price crosses below daily KAMA (trend reversal)
+            if close_val < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above central pivot (mean reversion)
-            if close_val >= pivot_val:
+            # Short exit: Price crosses above daily KAMA (trend reversal)
+            if close_val > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
