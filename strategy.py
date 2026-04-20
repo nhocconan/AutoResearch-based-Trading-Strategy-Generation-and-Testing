@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_Pivot_R3S3_Breakout_Volume
-# Hypothesis: On 4h timeframe, trade breakouts from daily Camarilla R3/S3 levels with volume confirmation.
-# Uses daily volume moving average to confirm breakout strength. Targets 20-30 trades per year.
-# Works in both bull and bear markets due to price action-based entries (no directional bias).
+# 12h_Daily_Close_Breakout_RSI_Filter
+# Hypothesis: Breakouts from daily close with RSI filter on 12h timeframe.
+# Uses daily close as dynamic support/resistance. RSI(14) filters for momentum strength.
+# Works in bull markets (breakouts up) and bear markets (breakdowns down).
+# Target: 20-40 trades per year to avoid fee drag.
 
-name = "4h_1d_Pivot_R3S3_Breakout_Volume"
-timeframe = "4h"
+name = "12h_Daily_Close_Breakout_RSI_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,67 +25,62 @@ def generate_signals(prices):
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily close as support/resistance
+    daily_close = df_1d['close'].values
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
     
-    # Typical price for pivot calculation
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    # RSI(14) on 12h closes
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Pivot point and ranges
-    pivot_1d = typical_price_1d
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: R3, S3
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
-    
-    # Align daily levels to 4h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    
-    # Volume average for spike detection (20-period)
+    # Volume confirmation (20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
+        if (np.isnan(daily_close_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long breakout above R3 with volume confirmation
-            if (close[i] > r3_aligned[i] * 1.005 and 
-                volume[i] > 2.0 * volume_ma[i]):
+            # Long breakout above daily close with RSI > 50 and volume
+            if (close[i] > daily_close_aligned[i] * 1.002 and 
+                rsi[i] > 50 and 
+                volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown below S3 with volume
-            elif (close[i] < s3_aligned[i] * 0.995 and 
-                  volume[i] > 2.0 * volume_ma[i]):
+            # Short breakdown below daily close with RSI < 50 and volume
+            elif (close[i] < daily_close_aligned[i] * 0.998 and 
+                  rsi[i] < 50 and 
+                  volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: breakdown below S3
-            if close[i] < s3_aligned[i] * 0.995:
+            # Long exit: breakdown below daily close
+            if close[i] < daily_close_aligned[i] * 0.998:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: breakout above R3
-            if close[i] > r3_aligned[i] * 1.005:
+            # Short exit: breakout above daily close
+            if close[i] > daily_close_aligned[i] * 1.002:
                 signals[i] = 0.0
                 position = 0
             else:
