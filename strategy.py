@@ -1,120 +1,93 @@
 #!/usr/bin/env python3
-# 6h_1d_Ichimoku_Cloud_Breakout
-# Hypothesis: Use 1d Ichimoku cloud (from daily timeframe) to determine trend and support/resistance on 6h chart.
-# Enter long when 6h price breaks above the 1d cloud with price > Senkou Span A and B (bullish cloud).
-# Enter short when 6h price breaks below the 1d cloud with price < Senkou Span A and B (bearish cloud).
-# Use 6h volume confirmation (2x average volume) to avoid false breakouts.
-# Works in bull/bear: cloud acts as dynamic support/resistance, trend filter inherent in cloud position.
+# 4h_12h_Pivot_R3S3_Volume_Confirmation
+# Hypothesis: Fade at 12h Pivot R3/S3 levels with volume confirmation on 4h timeframe.
+# Uses 12h trend filter to avoid counter-trend trades. Target: 100-180 trades over 4 years (25-45/year).
+# Works in bull/bear via 12h trend filter - only trade with the 12h trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Ichimoku_Cloud_Breakout"
-timeframe = "6h"
+name = "4h_12h_Pivot_R3S3_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE for Ichimoku components
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need 52 periods for Senkou Span B
+    # Get 12h data ONCE before loop for pivot levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Calculate 12h pivot levels (R3, S3) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max()
-    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()
-    tenkan_sen = (max_high_tenkan + min_low_tenkan) / 2
+    # Pivot point and range
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max()
-    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()
-    kijun_sen = (max_high_kijun + min_low_kijun) / 2
+    # Camarilla levels: R3 = close + (range * 1.1/4), S3 = close - (range * 1.1/4)
+    r3_12h = close_12h + (range_12h * 1.1 / 4)
+    s3_12h = close_12h - (range_12h * 1.1 / 4)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2, plotted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2, plotted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max()
-    min_low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()
-    senkou_span_b = (max_high_senkou_b + min_low_senkou_b) / 2
-    
-    # Shift Senkou Spans forward by 26 periods (for cloud plotting)
-    # But for signal generation, we use current cloud values (already shifted in calculation)
-    # Actually, we need to use the values as they would be known at time t (not forward-shifted)
-    # So we use the calculated Senkou Spans without additional shift for current cloud
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
-    
-    # 6h volume confirmation
+    # === 4h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
+    # Align all 12h levels to 4h
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after Senkou Span B calculation
+    for i in range(20, n):  # Start after volume MA warmup
         # Get values
         close_val = prices['close'].iloc[i]
-        tenkan_val = tenkan_sen_aligned[i]
-        kijun_val = kijun_sen_aligned[i]
-        span_a_val = senkou_span_a_aligned[i]
-        span_b_val = senkou_span_b_aligned[i]
+        r3_12h_val = r3_12h_aligned[i]
+        s3_12h_val = s3_12h_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(tenkan_val) or np.isnan(kijun_val) or np.isnan(span_a_val) or 
-            np.isnan(span_b_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(r3_12h_val) or np.isnan(s3_12h_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B form the cloud)
-        upper_cloud = max(span_a_val, span_b_val)
-        lower_cloud = min(span_a_val, span_b_val)
-        
         if position == 0:
-            # Long: Price breaks above cloud with volume confirmation
-            if (close_val > upper_cloud and  # Price above cloud
-                close_val > tenkan_val and   # Price above conversion line (momentum)
-                vol_ratio_val > 2.0):      # Volume confirmation
+            # Long: Price rejects S3 (bounces off support) with volume confirmation
+            if (close_val < s3_12h_val and  # Price touched or went below S3
+                prices['low'].iloc[i] <= s3_12h_val and  # Confirmed touch of S3
+                close_val > s3_12h_val and  # Now bouncing back above S3
+                vol_ratio_val > 2.0):  # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below cloud with volume confirmation
-            elif (close_val < lower_cloud and  # Price below cloud
-                  close_val < tenkan_val and   # Price below conversion line (momentum)
-                  vol_ratio_val > 2.0):      # Volume confirmation
+            # Short: Price rejects R3 (bounces off resistance) with volume confirmation
+            elif (close_val > r3_12h_val and  # Price touched or went above R3
+                  prices['high'].iloc[i] >= r3_12h_val and  # Confirmed touch of R3
+                  close_val < r3_12h_val and  # Now falling back below R3
+                  vol_ratio_val > 2.0):  # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price closes below cloud or Tenkan-Kijun cross down
-            if close_val < lower_cloud or (tenkan_val < kijun_val and close_val < kijun_val):
+            # Long exit: Price reaches R3 or shows weakness
+            if close_val >= r3_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price closes above cloud or Tenkan-Kijun cross up
-            if close_val > upper_cloud or (tenkan_val > kijun_val and close_val > kijun_val):
+            # Short exit: Price reaches S3 or shows weakness
+            if close_val <= s3_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
