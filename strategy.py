@@ -3,54 +3,66 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h chart with 1-week pivot levels (R1/S1) for mean reversion, confirmed by 1-day trend.
-# In ranging markets, price reverts to weekly pivot; in trending markets, breaks through R1/S1 with volume.
-# Works in bull/bear by adapting to regime via 1d trend filter.
-# Target: 15-25 trades/year per symbol.
+# Hypothesis: 4h chart with 1w/1d RSI divergence + volume confirmation + price action.
+# Uses weekly RSI(14) divergence with price to identify exhaustion in trends.
+# Confirms with daily RSI(14) oversold/overbought and volume spike.
+# Works in bull/bear by fading extremes with momentum divergence.
+# Target: 20-35 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend filter
+    # Load 1d data for RSI and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA(50) for trend
+    # Calculate daily RSI(14)
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1, avg_loss)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Load 1w data for pivot calculation
+    # Load 1w data for RSI divergence
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate weekly RSI(14)
     close_1w = df_1w['close'].values
+    delta_w = np.diff(close_1w, prepend=close_1w[0])
+    gain_w = np.where(delta_w > 0, delta_w, 0)
+    loss_w = np.where(delta_w < 0, -delta_w, 0)
+    avg_gain_w = pd.Series(gain_w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_w = pd.Series(loss_w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_w = avg_gain_w / np.where(avg_loss_w == 0, 1, avg_loss_w)
+    rsi_1w = 100 - (100 / (1 + rs_w))
     
-    # Pivot = (H + L + C)/3
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
+    # Align weekly RSI to 4h
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # 6h data
+    # 4h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h ATR(14) for volatility
+    # 4h RSI(14) for confirmation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1, avg_loss)
+    rsi_4h = 100 - (100 / (1 + rs))
+    
+    # 4h ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -59,72 +71,75 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h volume ratio (current / 20-period average)
+    # 4h volume ratio (current / 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(rsi_1d[i-1]) or np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi_4h[i]) or
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        rsi_1d_val = rsi_1d[i-1]  # Use previous day's RSI (already closed)
+        rsi_1w_val = rsi_1w_aligned[i]
+        rsi_4h_val = rsi_4h[i]
         atr = atr_14[i]
-        vol_ratio_6h = vol_ratio[i]
-        
-        # Determine market regime from daily trend
-        uptrend = price > ema_trend
-        downtrend = price < ema_trend
+        vol_ratio_4h = vol_ratio[i]
         
         # Volatility filter: avoid extreme volatility
         atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values[i]
         vol_filter = (atr < 3.0 * atr_ma_20)
         
         # Volume filter: require above-average volume
-        vol_filter = vol_filter and (vol_ratio_6h > 1.2)
+        vol_filter = vol_filter and (vol_ratio_4h > 1.5)
+        
+        # Price action: look for rejection at extremes
+        # Bullish rejection: lower wick > 60% of body
+        body = np.abs(close[i] - prices['open'].values[i])
+        lower_wick = prices['open'].values[i] - low[i] if close[i] >= prices['open'].values[i] else close[i] - low[i]
+        bullish_rejection = (lower_wick > 0.6 * body) if body > 0 else False
+        
+        # Bearish rejection: upper wick > 60% of body
+        upper_wick = high[i] - prices['open'].values[i] if close[i] >= prices['open'].values[i] else high[i] - close[i]
+        bearish_rejection = (upper_wick > 0.6 * body) if body > 0 else False
         
         if position == 0:
-            # In uptrend: look for long near S1 (support)
-            if uptrend and vol_filter:
-                if price <= s1_val * 1.002:  # Near S1 with small buffer
-                    signals[i] = 0.25
-                    position = 1
-            # In downtrend: look for short near R1 (resistance)
-            elif downtrend and vol_filter:
-                if price >= r1_val * 0.998:  # Near R1 with small buffer
-                    signals[i] = -0.25
-                    position = -1
-            # In ranging (no clear trend): fade extremes
-            else:
-                if price <= s1_val * 1.002 and vol_filter:  # Near S1
-                    signals[i] = 0.25
-                    position = 1
-                elif price >= r1_val * 0.998 and vol_filter:  # Near R1
-                    signals[i] = -0.25
-                    position = -1
+            # Long setup: RSI divergence + oversold + bullish rejection
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            # Simplified: RSI oversold and turning up
+            if (rsi_1d_val < 30 and rsi_1w_val < 40 and rsi_4h_val < 35 and
+                rsi_4h_val > rsi_4h[i-1] and bullish_rejection and vol_filter):
+                signals[i] = 0.25
+                position = 1
+            # Short setup: RSI divergence + overbought + bearish rejection
+            elif (rsi_1d_val > 70 and rsi_1w_val > 60 and rsi_4h_val > 65 and
+                  rsi_4h_val < rsi_4h[i-1] and bearish_rejection and vol_filter):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price reaches pivot or stops reversed
-            if price >= pivot_val or (not vol_filter):
+            # Long exit: RSI overbought or breakdown
+            if (rsi_4h_val > 70 or 
+                close[i] < low[i-1] or  # Break below previous low
+                not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches pivot or stops reversed
-            if price <= pivot_val or (not vol_filter):
+            # Short exit: RSI oversold or breakout
+            if (rsi_4h_val < 30 or 
+                close[i] > high[i-1] or  # Break above previous high
+                not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_Pivot_R1S1_MeanReversion_TrendFilter_v1"
-timeframe = "6h"
+name = "4h_1w_1d_RSI_Divergence_Volume_Rejection_v1"
+timeframe = "4h"
 leverage = 1.0
