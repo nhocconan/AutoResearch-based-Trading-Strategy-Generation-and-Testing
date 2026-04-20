@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1d_Pivot_R1S1_Breakout_Volume
-# Hypothesis: Breakouts from daily Camarilla R1/S1 levels on 4h timeframe with volume confirmation.
-# Uses daily volume moving average to confirm breakout strength. Targets 20-40 trades per year.
+# 1d_WeeklyPivot_R1S1_Breakout_Volume
+# Hypothesis: On daily timeframe, trade breakouts from weekly Camarilla R1/S1 levels with volume confirmation.
+# Uses weekly volume moving average to confirm breakout strength. Targets 10-20 trades per year.
 # Works in both bull and bear markets due to price action-based entries (no directional bias).
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1S1_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,30 +22,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Typical price for pivot calculation
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3
     
     # Pivot point and ranges
-    pivot_1d = typical_price_1d
-    range_1d = high_1d - low_1d
+    pivot_1w = typical_price_1w
+    range_1w = high_1w - low_1w
     
     # Camarilla levels: R1, S1
-    s1_1d = close_1d - (range_1d * 1.1 / 6)
-    r1_1d = close_1d + (range_1d * 1.1 / 6)
+    s1_1w = close_1w - (range_1w * 1.1 / 12)
+    r1_1w = close_1w + (range_1w * 1.1 / 12)
     
-    # Align daily levels to 4h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    # Align weekly levels to daily timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,7 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are ready
+    start_idx = 40  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
