@@ -3,116 +3,119 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_Keltner_Breakout_Volume_Regime"
-timeframe = "4h"
+name = "1d_1w_KAMA_Trend_RSI_volatility_filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 12h and 1d data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_12h) < 2 or len(df_1d) < 2:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 12h Keltner Channel ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === KAMA Calculation (Daily) ===
+    close = prices['close'].values
+    direction = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period sum of absolute changes
+    volatility = np.concatenate([np.full(9, np.nan), volatility])  # align length
+    er = np.where(volatility > 0, direction / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # 20-period EMA of typical price
-    tp_12h = (high_12h + low_12h + close_12h) / 3
-    ema_tp = pd.Series(tp_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # === RSI(14) ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.where(loss_ma > 0, gain_ma / loss_ma, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # ATR(20)
-    tr1_12h = np.abs(high_12h[1:] - low_12h[1:])
-    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
-    atr_12h = pd.Series(tr_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # === Weekly ATR for Volatility Filter ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = high_1w[0] - low_1w[0]
+    tr2[0] = np.abs(high_1w[0] - close_1w[0])
+    tr3[0] = np.abs(low_1w[0] - close_1w[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Keltner Bands
-    keltner_upper = ema_tp + 2.0 * atr_12h
-    keltner_lower = ema_tp - 2.0 * atr_12h
-    
-    # Align to 4h
-    keltner_upper_4h = align_htf_to_ltf(prices, df_12h, keltner_upper)
-    keltner_lower_4h = align_htf_to_ltf(prices, df_12h, keltner_lower)
-    ema_tp_4h = align_htf_to_ltf(prices, df_12h, ema_tp)
-    
-    # === 1d Volatility Regime (Keltner Width Percentile) ===
-    tp_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    ema_tp_1d = pd.Series(tp_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
-    
-    tr1_1d = np.abs(df_1d['high'][1:] - df_1d['low'][1:])
-    tr2_1d = np.abs(df_1d['high'][1:] - df_1d['close'][:-1])
-    tr3_1d = np.abs(df_1d['low'][1:] - df_1d['close'][:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_1d = pd.Series(tr_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
-    
-    keltner_width_1d = (ema_tp_1d + 2.0 * atr_1d) - (ema_tp_1d - 2.0 * atr_1d)  # = 4 * atr_1d
-    # Use 50-period percentile of width
-    width_series = pd.Series(keltner_width_1d)
-    width_rank = width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
-    # Normal regime: width between 30th and 70th percentile
-    keltner_width_1d_aligned = align_htf_to_ltf(prices, df_1d, keltner_width_1d)
-    width_rank_aligned = align_htf_to_ltf(prices, df_1d, width_rank)
-    
-    # === Volume Confirmation ===
-    volume = prices['volume'].values
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma20 > 0, volume / vol_ma20, 0)
+    # === Weekly KAMA for Trend Filter ===
+    direction_1w = np.abs(np.diff(close_1w, n=10))
+    volatility_1w = np.sum(np.abs(np.diff(close_1w, n=1)), axis=0)
+    volatility_1w = np.concatenate([np.full(9, np.nan), volatility_1w])
+    er_1w = np.where(volatility_1w > 0, direction_1w / volatility_1w, 0)
+    sc_1w = (er_1w * (2/2 - 2/30) + 2/30) ** 2
+    kama_1w = np.full_like(close_1w, np.nan)
+    kama_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        if np.isnan(sc_1w[i]):
+            kama_1w[i] = kama_1w[i-1]
+        else:
+            kama_1w[i] = kama_1w[i-1] + sc_1w[i] * (close_1w[i] - kama_1w[i-1])
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        close_val = prices['close'].iloc[i]
-        up_val = keltner_upper_4h[i]
-        low_val = keltner_lower_4h[i]
-        ema_val = ema_tp_4h[i]
-        vol_ratio_val = vol_ratio[i]
-        width_rank_val = width_rank_aligned[i]
-        
+    for i in range(30, n):
         # Skip if any value is NaN
-        if (np.isnan(close_val) or np.isnan(up_val) or np.isnan(low_val) or 
-            np.isnan(ema_val) or np.isnan(vol_ratio_val) or np.isnan(width_rank_val)):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(kama_1w_aligned[i]) or np.isnan(atr_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade in normal volatility (avoid extreme volatility)
-        in_normal_vol = (width_rank_val > 0.3) and (width_rank_val < 0.7)
+        close_val = close[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        weekly_kama = kama_1w_aligned[i]
+        weekly_atr = atr_1w_aligned[i]
         
-        if position == 0 and in_normal_vol:
-            # Long breakout above upper Keltner with volume
-            if close_val > up_val and vol_ratio_val > 1.5:
+        # Volatility filter: avoid extremely low volatility regimes
+        if weekly_atr < np.nanpercentile(atr_1w_aligned[:i+1], 20) if i >= 20 else False:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if position == 0:
+            # Long: price above daily KAMA, RSI not overbought, weekly trend up
+            if close_val > kama_val and rsi_val < 70 and close_val > weekly_kama:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown below lower Keltner with volume
-            elif close_val < low_val and vol_ratio_val > 1.5:
+            # Short: price below daily KAMA, RSI not oversold, weekly trend down
+            elif close_val < kama_val and rsi_val > 30 and close_val < weekly_kama:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to middle or breaks below lower band
-            if close_val < ema_val or close_val < low_val:
+            # Exit long: price below daily KAMA or RSI overbought
+            if close_val < kama_val or rsi_val > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to middle or breaks above upper band
-            if close_val > ema_val or close_val > up_val:
+            # Exit short: price above daily KAMA or RSI oversold
+            if close_val > kama_val or rsi_val < 25:
                 signals[i] = 0.0
                 position = 0
             else:
