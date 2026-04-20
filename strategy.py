@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 12h_1d_Alligator_Trend_With_Volume
-# Hypothesis: Use Williams Alligator on 1d to determine trend (Green line > Red = uptrend, Red > Green = downtrend).
-# On 12h, trade in direction of 1d trend: long when price > Jaw (blue) in uptrend, short when price < Jaw in downtrend.
-# Requires volume confirmation (volume > 1.5x 20-period average) to avoid false breakouts.
-# Exit when price crosses the Jaw in opposite direction or volume drops.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
-# Works in bull/bear via 1d trend filter - only trade with the higher timeframe trend.
+# 4h_12h_Pivot_R3S3_SwingRejection_Volume
+# Hypothesis: Fade at 12h Pivot R3/S3 levels with swing rejection and volume confirmation on 4h.
+# Uses 12h trend filter to only trade with the 12h trend (long in uptrend, short in downtrend).
+# Entry: Price rejects S3/R3 with volume > 2x average, closes back inside the pivot range.
+# Exit: Price reaches opposite pivot level (R3 for long, S3 for short) or shows weakness.
+# Designed for fewer trades (~20-40/year) with high win rate in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Alligator_Trend_With_Volume"
-timeframe = "12h"
+name = "4h_12h_Pivot_R3S3_SwingRejection_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,110 +19,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for Alligator
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # === Calculate Williams Alligator on 1d ===
-    # Jaw (Blue): 13-period SMMA, shifted 8 bars forward
-    # Teeth (Red): 8-period SMMA, shifted 5 bars forward  
-    # Lips (Green): 5-period SMMA, shifted 3 bars forward
-    close_1d = df_1d['close'].values
+    # === Calculate 12h pivot levels (R3, S3) and pivot point ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    def smma(data, period):
-        """Smoothed Moving Average"""
-        if len(data) < period:
-            return np.full_like(data, np.nan, dtype=float)
-        result = np.full_like(data, np.nan, dtype=float)
-        # First value is simple SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (PREV * (period-1) + CURRENT) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Pivot point and range
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
     
-    jaw_1d = smma(close_1d, 13)  # Blue line
-    teeth_1d = smma(close_1d, 8)  # Red line
-    lips_1d = smma(close_1d, 5)   # Green line
+    # Camarilla levels: R3 = close + (range * 1.1/4), S3 = close - (range * 1.1/4)
+    r3_12h = close_12h + (range_12h * 1.1 / 4)
+    s3_12h = close_12h - (range_12h * 1.1 / 4)
     
-    # Shift as per Alligator specification
-    jaw_1d = np.roll(jaw_1d, 8)
-    teeth_1d = np.roll(teeth_1d, 5)
-    lips_1d = np.roll(lips_1d, 3)
+    # === 12h trend filter: EMA(34) on close ===
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Trend determination: Green > Red = uptrend, Red > Green = downtrend
-    # We'll use lips > teeth for uptrend, teeth > lips for downtrend
-    trend_up_1d = lips_1d > teeth_1d
-    trend_down_1d = teeth_1d > lips_1d
-    
-    # Align all 1d indicators to 12h
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d.astype(float))
-    trend_down_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d.astype(float))
-    
-    # === 12h: Jaw (blue line) for entry/exit ===
-    close_12h = prices['close'].values
-    jaw_12h = smma(close_12h, 13)
-    jaw_12h = np.roll(jaw_12h, 8)
-    
-    # === Volume confirmation ===
+    # === 4h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
+    # Align all 12h levels to 4h
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(34, n):  # Start after EMA warmup
         # Get values
         close_val = prices['close'].iloc[i]
-        jaw_12h_val = jaw_12h[i]
-        jaw_1d_val = jaw_1d_aligned[i]
-        teeth_1d_val = teeth_1d_aligned[i]
-        lips_1d_val = lips_1d_aligned[i]
-        trend_up_1d_val = trend_up_1d_aligned[i]
-        trend_down_1d_val = trend_down_1d_aligned[i]
+        pivot_val = pivot_12h_aligned[i]
+        r3_12h_val = r3_12h_aligned[i]
+        s3_12h_val = s3_12h_aligned[i]
+        ema_34_val = ema_34_12h_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(jaw_12h_val) or np.isnan(jaw_1d_val) or np.isnan(teeth_1d_val) or 
-            np.isnan(lips_1d_val) or np.isnan(trend_up_1d_val) or np.isnan(trend_down_1d_val) or 
-            np.isnan(vol_ratio_val)):
+        if (np.isnan(pivot_val) or np.isnan(r3_12h_val) or np.isnan(s3_12h_val) or 
+            np.isnan(ema_34_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 1d uptrend (Green > Red) AND price > 12h Jaw with volume confirmation
-            if (trend_up_1d_val and  # 1d uptrend: Lips > Teeth
-                close_val > jaw_12h_val and  # Price above 12h Jaw
-                vol_ratio_val > 1.5):  # Volume confirmation
+            # Long: Price rejects S3 (bounces off support) with volume confirmation
+            # Only in 12h uptrend (price > EMA34)
+            if (close_val > pivot_val and  # Price is above pivot (bullish bias)
+                s3_12h_val < close_val <= s3_12h_val * 1.005 and  # Price near S3 (within 0.5%)
+                ema_34_val < close_val and  # 12h uptrend filter
+                vol_ratio_val > 2.0):  # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: 1d downtrend (Red > Green) AND price < 12h Jaw with volume confirmation
-            elif (trend_down_1d_val and  # 1d downtrend: Teeth > Lips
-                  close_val < jaw_12h_val and  # Price below 12h Jaw
-                  vol_ratio_val > 1.5):  # Volume confirmation
+            # Short: Price rejects R3 (bounces off resistance) with volume confirmation
+            # Only in 12h downtrend (price < EMA34)
+            elif (close_val < pivot_val and  # Price is below pivot (bearish bias)
+                  r3_12h_val * 0.995 <= close_val < r3_12h_val and  # Price near R3 (within 0.5%)
+                  ema_34_val > close_val and  # 12h downtrend filter
+                  vol_ratio_val > 2.0):  # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: 1d trend turns down OR price crosses below 12h Jaw
-            if (not trend_up_1d_val or  # 1d trend turned down
-                close_val < jaw_12h_val):  # Price crossed below 12h Jaw
+            # Long exit: Price reaches R3 or shows weakness (breaks below pivot)
+            if close_val >= r3_12h_val or close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: 1d trend turns up OR price crosses above 12h Jaw
-            if (not trend_down_1d_val or  # 1d trend turned up
-                close_val > jaw_12h_val):  # Price crossed above 12h Jaw
+            # Short exit: Price reaches S3 or shows weakness (breaks above pivot)
+            if close_val <= s3_12h_val or close_val > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
