@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 12h_WeeklyPivot_R2_S2_Breakout_VolumeATRFilter
-# Hypothesis: Weekly pivot levels (R2/S2) act as strong institutional support/resistance.
-# Breakouts from these levels with volume confirmation and ATR volatility filter capture
-# sustained moves with fewer trades. Works in bull/bear markets by capturing breakouts
-# from key weekly levels with institutional volume validation. Target: 50-150 total trades over 4 years.
+# 4h_TRIX_VolumeSpike_ChopRegime
+# Hypothesis: TRIX (triple smoothed EMA) captures momentum with reduced noise. Combined with volume spikes and Choppiness Index regime filter (CHOP > 61.8 = ranging, < 38.2 = trending), it avoids whipsaws in both bull and bear markets. Long when TRIX rising + volume spike + trending regime; short when TRIX falling + volume spike + trending regime. Uses 4h timeframe to limit trades and reduce fee drag.
 
-name = "12h_WeeklyPivot_R2_S2_Breakout_VolumeATRFilter"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopRegime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,71 +20,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot and R2/S2 levels from previous week
-    ph = df_1w['high'].values
-    pl = df_1w['low'].values
-    pc = df_1w['close'].values
+    # TRIX: 15-period triple EMA of percent change
+    # Step 1: EMA1 of close
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # Step 2: EMA2 of EMA1
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # Step 3: EMA3 of EMA2
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # TRIX = 100 * (EMA3_today - EMA3_yesterday) / EMA3_yesterday
+    trix_raw = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
+    trix = np.concatenate([[np.nan], trix_raw])
+    # Smooth TRIX with 9-period EMA for signal line
+    trix_smooth = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Weekly pivot and R2/S2
-    p = (ph + pl + pc) / 3
-    r2 = p + 2 * (ph - pl)
-    s2 = p - 2 * (ph - pl)
+    # Choppiness Index (14-period) from daily data
+    # CHOP = 100 * log10(sum(TR over n) / (max(HH) - min(LL))) / log10(n)
+    # Using daily high/low/close
+    dh = df_1d['high'].values
+    dl = df_1d['low'].values
+    dc = df_1d['close'].values
+    # True Range
+    tr1 = dh[1:] - dl[1:]
+    tr2 = np.abs(dh[1:] - dc[:-1])
+    tr3 = np.abs(dl[1:] - dc[:-1])
+    tr_daily = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Sum of TR over 14 days
+    tr_sum = pd.Series(tr_daily).rolling(window=14, min_periods=14).sum().values
+    # Max high and min low over 14 days
+    max_hh = pd.Series(dh).rolling(window=14, min_periods=14).max().values
+    min_ll = pd.Series(dl).rolling(window=14, min_periods=14).min().values
+    # Choppiness Index
+    chop_raw = 100 * np.log10(tr_sum / (max_hh - min_ll)) / np.log10(14)
+    chop = chop_raw  # already aligned to daily index
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Align weekly levels to 12h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume spike: volume > 2.0 x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma20 * 1.5)
-    
-    # ATR filter: only trade when volatility is sufficient
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr > (atr_ma50 * 0.5)  # Only trade when ATR > 50% of its MA
+    volume_spike = volume > (vol_ma20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure all indicators are ready
+    start_idx = max(15+15+15+9, 20, 14)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(volatility_filter[i])):
+        if (np.isnan(trix_smooth[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R2 + volume confirmation + sufficient volatility
-            if close[i] > r2_aligned[i] and volume_filter[i] and volatility_filter[i]:
+            # Long: TRIX rising + volume spike + trending regime (CHOP < 38.2)
+            if trix_smooth[i] > trix_smooth[i-1] and volume_spike[i] and chop_aligned[i] < 38.2:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 + volume confirmation + sufficient volatility
-            elif close[i] < s2_aligned[i] and volume_filter[i] and volatility_filter[i]:
+            # Short: TRIX falling + volume spike + trending regime (CHOP < 38.2)
+            elif trix_smooth[i] < trix_smooth[i-1] and volume_spike[i] and chop_aligned[i] < 38.2:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S2 (reversal signal)
-            if close[i] < s2_aligned[i]:
+            # Long: exit if TRIX turns down or regime becomes ranging (CHOP > 61.8)
+            if trix_smooth[i] < trix_smooth[i-1] or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R2 (reversal signal)
-            if close[i] > r2_aligned[i]:
+            # Short: exit if TRIX turns up or regime becomes ranging (CHOP > 61.8)
+            if trix_smooth[i] > trix_smooth[i-1] or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
