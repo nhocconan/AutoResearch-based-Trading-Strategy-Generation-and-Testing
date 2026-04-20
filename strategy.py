@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "1d_1w_RSI_Momentum_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,37 +12,31 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1w and 1d data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1w) < 20 or len(df_1d) < 20:
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 1w: Trend filter (EMA34) ===
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # === 1d: Camarilla pivot levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d: RSI(14) for momentum ===
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss > 0, avg_loss, np.nan)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    r1 = close_1d + range_hl * 1.1 / 12
-    s1 = close_1d - range_hl * 1.1 / 12
+    # === 1w: SMA(20) for long-term trend ===
+    close_1w = df_1w['close'].values
+    sma20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === 12h: Price and volume ===
+    # === 1d: Price and volume ===
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
     # Volume ratio (current vs 20-period average)
@@ -52,50 +46,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Get values
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        ema_val = ema34_1w_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        rsi_val = rsi_1d_aligned[i]
+        sma_val = sma20_1w_aligned[i]
         
         # Skip if any value is NaN
-        if np.isnan(ema_val) or np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(vol_ratio_val):
+        if np.isnan(rsi_val) or np.isnan(sma_val) or np.isnan(vol_ratio_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Above 1w EMA34 + breaks above R1 + volume confirmation
-            if (close_val > ema_val and          # Above weekly trend
-                high_val > r1_val and            # Break above Camarilla R1
+            # Long: Uptrend + bullish momentum + volume confirmation
+            if (close_val > sma_val and          # Price above 1w SMA20 (long-term uptrend)
+                50 < rsi_val < 70 and            # 1d RSI in bullish momentum (not overbought)
                 vol_ratio_val > 1.5):            # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Below 1w EMA34 + breaks below S1 + volume confirmation
-            elif (close_val < ema_val and        # Below weekly trend
-                  low_val < s1_val and           # Break below Camarilla S1
+            # Short: Downtrend + bearish momentum + volume confirmation
+            elif (close_val < sma_val and        # Price below 1w SMA20 (long-term downtrend)
+                  30 < rsi_val < 50 and          # 1d RSI in bearish momentum (not oversold)
                   vol_ratio_val > 1.5):          # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or breaks below S1
-            if (close_val < ema_val or           # Below weekly trend
-                low_val < s1_val):               # Break below Camarilla S1
+            # Long exit: trend breakdown or momentum fade
+            if (close_val < sma_val or           # Price below 1w SMA20
+                rsi_val > 75 or                  # 1d RSI overbought
+                vol_ratio_val < 0.8):            # Low volume (losing momentum)
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or breaks above R1
-            if (close_val > ema_val or           # Above weekly trend
-                high_val > r1_val):              # Break above Camarilla R1
+            # Short exit: trend reversal or momentum fade
+            if (close_val > sma_val or           # Price above 1w SMA20
+                rsi_val < 25 or                  # 1d RSI oversold
+                vol_ratio_val < 0.8):            # Low volume (losing momentum)
                 signals[i] = 0.0
                 position = 0
             else:
