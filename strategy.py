@@ -1,3 +1,5 @@
+# 4h_1d_EMA50_VolumeRegime_Filter_v2
+# Hypothesis: Use 1-day EMA50 for trend, volume ratio >1.3 for confirmation, and Bollinger Band width ratio >0.8 to avoid extreme chop. This reduces whipsaw and focuses on trending moves with volume. Works in bull (trend-following) and bear (avoids false breakouts in chop). Target: 20-40 trades/year.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -8,7 +10,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend and regime
+    # Load 1d data for regime and trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -46,7 +48,7 @@ def generate_signals(prices):
     bb_width_ratio = bb_width / np.where(bb_width_ma == 0, 1, bb_width_ma)
     bb_width_ratio_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ratio)
     
-    # 12h price data (primary timeframe)
+    # 4h price data (primary timeframe)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -111,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_EMA50_VolumeRegime_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_EMA50_VolumeRegime_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
