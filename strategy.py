@@ -5,8 +5,16 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 24:
+    if n < 50:
         return np.zeros(n)
+    
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Load daily data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
@@ -47,9 +55,9 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(24, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_34_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,13 +67,13 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: break above R1 with volume and sufficient volatility
-            if price > r1_1d_aligned[i] and vol > 1.5 * vol_ma[i] and atr_1d_aligned[i] > 0:
+            # Long: break above R1 with volume, sufficient volatility, and above weekly EMA
+            if price > r1_1d_aligned[i] and vol > 1.5 * vol_ma[i] and atr_1d_aligned[i] > 0 and price > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: break below S1 with volume and sufficient volatility
-            elif price < s1_1d_aligned[i] and vol > 1.5 * vol_ma[i] and atr_1d_aligned[i] > 0:
+            # Short: break below S1 with volume, sufficient volatility, and below weekly EMA
+            elif price < s1_1d_aligned[i] and vol > 1.5 * vol_ma[i] and atr_1d_aligned[i] > 0 and price < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -88,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_PivotPoint_R1S1_Breakout_Volume_ATRFilter"
+name = "12h_PivotPoint_R1S1_Breakout_Volume_ATRFilter_V1"
 timeframe = "12h"
 leverage = 1.0
