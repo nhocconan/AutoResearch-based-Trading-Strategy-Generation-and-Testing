@@ -1,116 +1,102 @@
 #!/usr/bin/env python3
 """
-4h_1d_Donchian20_Breakout_Volume_ATRStop_v1
-Concept: 4h Donchian(20) breakout with 1d volume confirmation and ATR stop.
-- Long when price breaks above 4h Donchian high(20) with above-average 1d volume
-- Short when price breaks below 4h Donchian low(20) with above-average 1d volume
-- Exit via ATR-based trailing stop (3x ATR from extreme)
-- Works in bull/bear: Breakouts capture momentum, volume confirms institutional participation
+12h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v3
+Concept: Daily pivot point breakout with volume confirmation and trend filter on 12h timeframe.
+- Uses daily pivot points (R1, S1) as key support/resistance levels
+- Long when price breaks above R1 with volume confirmation and above 12h EMA50
+- Short when price breaks below S1 with volume confirmation and below 12h EMA50
+- Exit when price returns to central pivot point (mean reversion)
+- Conservative sizing (0.25) to manage drawdown
+- Works in bull/bear: Pivot points adapt to market conditions, volume confirms breakouts
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian20_Breakout_Volume_ATRStop_v1"
-timeframe = "4h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for volume filter
+    # Get daily data ONCE before loop for pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # === 4h: Donchian channel (20) ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === Calculate daily pivot points ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    
+    # Align pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === 12h: EMA50 trend filter ===
     close = prices['close'].values
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Donchian high/low with min_periods
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 4h: ATR(14) for stop loss ===
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # === 1d: Volume average (20-period) for confirmation ===
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    # === 12h: Volume ratio (current vs 20-period average) ===
+    volume = prices['volume'].values
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_high = 0.0  # For long trailing stop
-    lowest_low = 0.0    # For short trailing stop
     
-    start_idx = max(20, 14)  # Wait for Donchian and ATR
+    start_idx = 50  # Ensure enough data for EMA50
     
     for i in range(start_idx, n):
         # Get values
-        donch_high_val = donch_high[i]
-        donch_low_val = donch_low[i]
+        ema50_val = ema50[i]
         close_val = close[i]
-        atr_val = atr[i]
-        vol_ma_val = vol_ma20_aligned[i]
-        vol_1d_idx = i // 96  # Approximate 1d index from 4h (96 bars per day)
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
-        # Skip if any value is NaN or invalid
-        if (np.isnan(donch_high_val) or np.isnan(donch_low_val) or 
-            np.isnan(atr_val) or np.isnan(vol_ma_val) or 
-            vol_1d_idx >= len(vol_1d)):
+        # Skip if any value is NaN
+        if (np.isnan(ema50_val) or np.isnan(pivot_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_1d_val = vol_1d[vol_1d_idx]
-        vol_ma_1d_val = vol_ma20_1d[vol_1d_idx] if vol_1d_idx < len(vol_ma20_1d) else 0
-        
         if position == 0:
-            # Check for volume confirmation (1d volume above 20-day average)
-            vol_confirm = vol_1d_val > vol_ma_1d_val and vol_ma_1d_val > 0
+            # Long: Price breaks above R1 with volume confirmation and above EMA50
+            breakout_long = close_val > r1_val
+            vol_confirm = vol_ratio_val > 1.3  # Volume above average
             
-            # Long: Break above Donchian high with volume confirmation
-            if close_val > donch_high_val and vol_confirm:
+            if breakout_long and vol_confirm and close_val > ema50_val:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                highest_high = close_val
-            # Short: Break below Donchian low with volume confirmation
-            elif close_val < donch_low_val and vol_confirm:
+            # Short: Price breaks below S1 with volume confirmation and below EMA50
+            elif close_val < s1_val and vol_confirm and close_val < ema50_val:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                lowest_low = close_val
         
         elif position == 1:
-            # Update highest high for trailing stop
-            highest_high = max(highest_high, close_val)
-            # ATR trailing stop: exit if price drops 3*ATR from highest high
-            if close_val <= highest_high - 3.0 * atr_val:
+            # Long exit: Price returns to or below central pivot (mean reversion)
+            if close_val <= pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Update lowest low for trailing stop
-            lowest_low = min(lowest_low, close_val)
-            # ATR trailing stop: exit if price rises 3*ATR from lowest low
-            if close_val >= lowest_low + 3.0 * atr_val:
+            # Short exit: Price returns to or above central pivot (mean reversion)
+            if close_val >= pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
