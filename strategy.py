@@ -21,12 +21,12 @@ def generate_signals(prices):
     # Calculate 50-day EMA of daily close (long-term trend filter)
     ema_50d_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all 1d indicators to 6h timeframe
+    # Align all 1d indicators to 12h timeframe
     highest_20d_aligned = align_htf_to_ltf(prices, df_1d, highest_20d)
     lowest_20d_aligned = align_htf_to_ltf(prices, df_1d, lowest_20d)
     ema_50d_aligned = align_htf_to_ltf(prices, df_1d, ema_50d_1d)
     
-    # Calculate 6h ATR for volatility filter and stop sizing
+    # Calculate 12h ATR for volatility filter and stop sizing
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -35,12 +35,12 @@ def generate_signals(prices):
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Precompute hour of day for session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Volume filter: 6h volume > 20-period average
+    # Volume filter: 12h volume > 20-period average
     volume = prices['volume'].values
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -50,7 +50,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(highest_20d_aligned[i]) or np.isnan(lowest_20d_aligned[i]) or np.isnan(ema_50d_aligned[i]) or np.isnan(atr_6h[i]):
+        if np.isnan(highest_20d_aligned[i]) or np.isnan(lowest_20d_aligned[i]) or np.isnan(ema_50d_aligned[i]) or np.isnan(atr_12h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,7 +88,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Long exit: stop loss (2x ATR below entry) or price breaks below 20-day support
-            if price <= entry_price - 2.0 * atr_6h[i] or price < support:
+            if price <= entry_price - 2.0 * atr_12h[i] or price < support:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,7 +96,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: stop loss (2x ATR above entry) or price breaks above 20-day resistance
-            if price >= entry_price + 2.0 * atr_6h[i] or price > resistance:
+            if price >= entry_price + 2.0 * atr_12h[i] or price > resistance:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_20D_Donchian_EMA50_Trend_VolumeFilter"
-timeframe = "6h"
+name = "12h_20D_Donchian_EMA50_Trend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
