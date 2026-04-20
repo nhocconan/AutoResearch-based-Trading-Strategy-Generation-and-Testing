@@ -1,173 +1,102 @@
-# 12h_WILLIAMS_ALLIGATOR_Trend_With_1w_Filter
-# Hypothesis: Williams Alligator (Jaw=13, Teeth=8, Lips=5 SMMA) on 12h for trend direction.
-# Filtered by 1w EMA200 trend: long only when price > 1w EMA200, short only when price < 1w EMA200.
-# Alligator lines must be aligned (Jaw > Teeth > Lips for uptrend, reverse for downtrend).
-# ADX > 20 confirms trend strength to avoid whipsaw.
-# Uses SMMA (Smoothed Moving Average) for Alligator lines.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+#!/usr/bin/env python3
+# 4h_VWAP_Rewave_Pullback
+# Hypothesis: Pullbacks to volume-weighted average price (VWAP) with trend confirmation
+# using weekly EMA200. Long when price pulls back to VWAP in uptrend, short when
+# price rallies to VWAP in downtrend. Uses 4h VWAP and weekly EMA200 for trend filter.
+# Entry conditions: price crosses VWAP with volume above average and trend alignment.
+# Exit: price moves 1.5x ATR away from VWAP or trend reversal.
+# Designed for low trade frequency (<50/year) to minimize fee drag in ranging/bear markets.
 
-name = "12h_WILLIAMS_ALLIGATOR_Trend_With_1w_Filter"
-timeframe = "12h"
+name = "4h_VWAP_Rewave_Pullback"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(arr, period):
-    """Smoothed Moving Average (SMMA) - Wilder's smoothing"""
-    n = len(arr)
-    result = np.full(n, np.nan)
-    if n < period:
-        return result
-    
-    # Initial value: simple average of first 'period' values
-    result[period-1] = np.mean(arr[:period])
-    
-    # Wilder's smoothing: SMMA(t) = (SMMA(t-1) * (period-1) + price(t)) / period
-    for i in range(period, n):
-        result[i] = (result[i-1] * (period-1) + arr[i]) / period
-    
-    return result
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for trend filter
+    # Get weekly data for trend filter (EMA200)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA200 for trend filter
+    # Calculate weekly EMA200 for trend filter
     close_1w = df_1w['close'].values
     ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Williams Alligator on 12h data
-    # Jaw: 13-period SMMA of median price, shifted 8 bars forward
-    # Teeth: 8-period SMMA of median price, shifted 5 bars forward  
-    # Lips: 5-period SMMA of median price, shifted 3 bars forward
-    median_price = (high + low) / 2
+    # Calculate 4h VWAP (typical price * volume cumulative / volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    pv = typical_price * volume
+    cum_pv = np.nancumsum(pv)
+    cum_volume = np.nancumsum(volume)
+    # Avoid division by zero
+    vwap = np.divide(cum_pv, cum_volume, out=np.full_like(cum_pv, np.nan), where=cum_volume!=0)
     
-    jaw_raw = smma(median_price, 13)
-    teeth_raw = smma(median_price, 8)
-    lips_raw = smma(median_price, 5)
-    
-    # Shift forward as per Williams Alligator definition
-    jaw = np.full_like(jaw_raw, np.nan)
-    teeth = np.full_like(teeth_raw, np.nan)
-    lips = np.full_like(lips_raw, np.nan)
-    
-    # Jaw shifted 8 bars forward
-    if len(jaw) > 8:
-        jaw[8:] = jaw_raw[:-8]
-    # Teeth shifted 5 bars forward
-    if len(teeth) > 5:
-        teeth[5:] = teeth_raw[:-5]
-    # Lips shifted 3 bars forward
-    if len(lips) > 3:
-        lips[3:] = lips_raw[:-3]
-    
-    # ADX for trend strength confirmation
-    period = 14
-    
-    # True Range
+    # Calculate ATR for volatility filtering and exit
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values using Wilder's smoothing
-    atr = np.full_like(high, np.nan)
-    dm_plus_smooth = np.full_like(high, np.nan)
-    dm_minus_smooth = np.full_like(high, np.nan)
-    
-    # Initial values
-    if len(high) >= period:
-        atr[period] = np.nanmean(tr[1:period+1])
-        dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
-        dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
-        
-        # Wilder's smoothing
-        for i in range(period + 1, len(high)):
-            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
-    
-    # DI and DX
-    di_plus = np.full_like(high, np.nan)
-    di_minus = np.full_like(high, np.nan)
-    dx = np.full_like(high, np.nan)
-    
-    valid = ~np.isnan(atr) & (atr != 0)
-    di_plus[valid] = (dm_plus_smooth[valid] / atr[valid]) * 100
-    di_minus[valid] = (dm_minus_smooth[valid] / atr[valid]) * 100
-    
-    dx_valid = valid & ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
-    dx[dx_valid] = (np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])) * 100
-    
-    # ADX (smoothed DX)
-    adx = np.full_like(high, np.nan)
-    if len(high) >= 2 * period:
-        adx[2*period] = np.nanmean(dx[period+1:2*period+1])
-        for i in range(2*period + 1, len(high)):
-            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    # Volume filter: volume above 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(2*period + 1, 50, 13)  # Ensure enough data for all indicators
+    start_idx = max(100, 200)  # Ensure enough data for weekly EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema200_1w_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(ema200_1w_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment checks
-        jaw_gt_teeth = jaw[i] > teeth[i]
-        teeth_gt_lips = teeth[i] > lips[i]
-        jaw_lt_teeth = jaw[i] < teeth[i]
-        teeth_lt_lips = teeth[i] < lips[i]
+        # Trend determination from weekly EMA200
+        uptrend = close[i] > ema200_1w_aligned[i]
+        downtrend = close[i] < ema200_1w_aligned[i]
         
-        # Trend from 1w EMA200
-        uptrend_filter = close[i] > ema200_1w_aligned[i]
-        downtrend_filter = close[i] < ema200_1w_aligned[i]
+        # Volume confirmation
+        vol_ok = volume[i] > vol_ma[i]
         
         if position == 0:
-            # Long: uptrend filter + Alligator aligned up + ADX > 20
-            if uptrend_filter and jaw_gt_teeth and teeth_gt_lips and adx[i] > 20:
+            # Long: price crosses above VWAP in uptrend with volume
+            if uptrend and vol_ok and close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend filter + Alligator aligned down + ADX > 20
-            elif downtrend_filter and jaw_lt_teeth and teeth_lt_lips and adx[i] > 20:
+            # Short: price crosses below VWAP in downtrend with volume
+            elif downtrend and vol_ok and close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if Alligator alignment breaks or trend filter fails
-            if not (jaw_gt_teeth and teeth_gt_lips) or not uptrend_filter or adx[i] < 15:
+            # Long: exit if price moves 1.5*ATR away from VWAP or trend reverses
+            if (close[i] < vwap[i] - 1.5 * atr[i] or 
+                not uptrend or 
+                close[i] < vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if Alligator alignment breaks or trend filter fails
-            if not (jaw_lt_teeth and teeth_lt_lips) or not downtrend_filter or adx[i] < 15:
+            # Short: exit if price moves 1.5*ATR away from VWAP or trend reverses
+            if (close[i] > vwap[i] + 1.5 * atr[i] or 
+                not downtrend or 
+                close[i] > vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
