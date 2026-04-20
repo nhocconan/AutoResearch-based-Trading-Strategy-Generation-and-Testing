@@ -5,24 +5,26 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (weekly close only)
+    # Load daily and weekly data for trend and regime
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
     
     # Weekly EMA(12) for long-term trend
+    close_1w = df_1w['close'].values
     ema_12_1w = pd.Series(close_1w).ewm(span=12, adjust=False, min_periods=12).mean().values
     ema_12_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_12_1w)
     
-    # Daily data for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Daily EMA(26) for intermediate trend
     close_1d = df_1d['close'].values
+    ema_26_1d = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
+    ema_26_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_26_1d)
     
     # Daily ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -32,27 +34,28 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Daily volume ratio for confirmation
+    # Daily volume ratio (current / 20-period average)
     volume_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ratio_1d = volume_1d / np.where(vol_ma_20_1d == 0, 1, vol_ma_20_1d)
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # 12h price and volume data
+    # Close and volume for primary timeframe (1d)
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h volume filter (current / 20-period average)
+    # 1d volume filter (current / 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_12_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_12_1w_aligned[i]) or np.isnan(ema_26_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,20 +63,21 @@ def generate_signals(prices):
         
         price = close[i]
         ema_trend_1w = ema_12_1w_aligned[i]
+        ema_trend_1d = ema_26_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
         vol_ratio_1d = vol_ratio_1d_aligned[i]
-        vol_ratio_12h = vol_ratio[i]
+        vol_ratio_1d_local = vol_ratio[i]
         
-        # Trend filter: price above/below weekly EMA
-        trend_up = price > ema_trend_1w
-        trend_down = price < ema_trend_1w
+        # Multi-timeframe trend alignment
+        trend_up = (price > ema_trend_1w) and (ema_trend_1w > ema_trend_1d)
+        trend_down = (price < ema_trend_1w) and (ema_trend_1w < ema_trend_1d)
         
         # Volatility filter: avoid extremes
         atr_ma_20 = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values[i]
         vol_filter = (atr > 0.5 * atr_ma_20) and (atr < 3.0 * atr_ma_20)
         
-        # Volume filter: require above-average volume on both timeframes
-        vol_filter = vol_filter and (vol_ratio_12h > 1.5) and (vol_ratio_1d > 1.3)
+        # Volume filter: require above-average volume
+        vol_filter = vol_filter and (vol_ratio_1d_local > 1.5)
         
         if position == 0:
             # Enter long in strong uptrend with volume
@@ -103,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_1d_EMA_Trend_Volume_Filter_v1"
-timeframe = "12h"
+name = "1d_1w_1d_EMA_Trend_Volume_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
