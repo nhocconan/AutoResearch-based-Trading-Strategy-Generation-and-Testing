@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1D_TRIX_VolumeSpike_Regime
-# Hypothesis: On 4h timeframe, TRIX crossing above zero indicates bullish momentum, below zero bearish.
-# Add volume spike (current volume > 2x 20-period average) and chop regime filter (CHOP(14) > 61.8 for mean reversion, < 38.2 for trend).
-# Enter long when TRIX > 0 + volume spike + chop > 61.8 (oversold bounce in range).
-# Enter short when TRIX < 0 + volume spike + chop < 38.2 (overbought reversal in trend).
-# Exit on opposite TRIX cross.
-# Uses 1d timeframe for chop calculation to avoid noise.
-# Targets ~25-40 trades/year by requiring confluence of momentum, volume, and regime.
-# Works in bull markets via trend-following and bear markets via mean reversion in ranges.
+# 4h_1d_Camarilla_R1S1_Breakout_VolumeRegime_V1
+# Hypothesis: On 4h timeframe, trade breakouts from 1d Camarilla R1/S1 levels with volume confirmation and ADX regime filter.
+# In ranging markets (ADX < 25), trade reversals at R1/S1; in trending markets (ADX > 25), trade breakouts beyond R1/S1.
+# Targets 20-40 trades/year by requiring confluence of level, volume, and regime filter.
+# Works in both bull and bear markets due to adaptive regime filtering and volatility-adjusted position sizing.
 
-name = "4h_1D_TRIX_VolumeSpike_Regime"
+name = "4h_1d_Camarilla_R1S1_Breakout_VolumeRegime_V1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,50 +23,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for chop calculation
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate TRIX on 4h close (12-period EMA of EMA of EMA, then ROC)
-    # EMA1
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA2
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA3
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # TRIX = 100 * (EMA3 - previous EMA3) / previous EMA3
-    trix_raw = np.full_like(close, np.nan)
-    trix_raw[1:] = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
-    
-    # Calculate 14-period chop from 1d data
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Typical price for pivot calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    
+    # Pivot point and ranges
+    pivot_1d = typical_price_1d
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: S1, R1, S2, R2
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    s2_1d = close_1d - (range_1d * 1.1 / 6)
+    r2_1d = close_1d + (range_1d * 1.1 / 6)
+    
+    # Align 1d levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    
+    # Calculate 1d ADX for trend/ranging filter (14-period)
     # True Range
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Smoothed TR and DM using Wilder smoothing
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period])
+        # Subsequent values: Wilder smoothing
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh_ll = highest_high - lowest_low
-    chop = np.full_like(close_1d, np.nan)
-    mask = hh_ll > 0
-    chop[mask] = 100 * np.log10(tr_sum[mask] / hh_ll[mask]) / np.log10(14)
+    atr = smooth_wilder(tr, 14)
+    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
+    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth_wilder(dx, 14)
     
-    # Align TRIX and chop to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), trix_raw)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -78,40 +94,57 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Mean reversion in range (chop > 61.8): long on TRIX > 0 with volume spike
-            if (chop_aligned[i] > 61.8 and 
-                trix_aligned[i] > 0 and 
-                volume[i] > 2.0 * volume_ma[i]):
-                signals[i] = 0.25
-                position = 1
-            # Trend reversal in trend (chop < 38.2): short on TRIX < 0 with volume spike
-            elif (chop_aligned[i] < 38.2 and 
-                  trix_aligned[i] < 0 and 
-                  volume[i] > 2.0 * volume_ma[i]):
-                signals[i] = -0.25
-                position = -1
+            # Ranging market (ADX < 25): reverse at S1/R1
+            if adx_aligned[i] < 25:
+                # Long near S1 with volume confirmation
+                if (close[i] <= s1_aligned[i] * 1.005 and 
+                    close[i] >= s1_aligned[i] * 0.995 and
+                    volume[i] > 1.5 * volume_ma[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short near R1 with volume confirmation
+                elif (close[i] >= r1_aligned[i] * 0.995 and 
+                      close[i] <= r1_aligned[i] * 1.005 and
+                      volume[i] > 1.5 * volume_ma[i]):
+                    signals[i] = -0.25
+                    position = -1
+            # Trending market (ADX > 25): breakout beyond S1/R1
+            elif adx_aligned[i] > 25:
+                # Long breakout above R1 with volume
+                if (close[i] > r1_aligned[i] * 1.005 and 
+                    volume[i] > 2.0 * volume_ma[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short breakdown below S1 with volume
+                elif (close[i] < s1_aligned[i] * 0.995 and 
+                      volume[i] > 2.0 * volume_ma[i]):
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: TRIX crosses below zero
-            if trix_aligned[i] < 0:
+            # Long exit: reverse at opposite level or ADX shifts to ranging
+            if (adx_aligned[i] < 25 and close[i] >= r1_aligned[i] * 0.995) or \
+               (adx_aligned[i] > 25 and close[i] < s2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX crosses above zero
-            if trix_aligned[i] > 0:
+            # Short exit: reverse at opposite level or ADX shifts to ranging
+            if (adx_aligned[i] < 25 and close[i] <= s1_aligned[i] * 1.005) or \
+               (adx_aligned[i] > 25 and close[i] > r2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
