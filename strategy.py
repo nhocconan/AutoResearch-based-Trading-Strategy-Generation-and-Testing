@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R3S3_Breakout_Volume_Confirmation_v1"
-timeframe = "12h"
+name = "6h_1d_3day_RangeBreakout_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -14,31 +14,21 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # === 1d: Calculate Camarilla Pivot Points (R3, S3) ===
+    # === 1d: 3-day range (highest high, lowest low) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    window = 3
+    highest_high = pd.Series(high_1d).rolling(window=window, min_periods=window).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=window, min_periods=window).min().values
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Align to 6h
+    highest_high_aligned = align_htf_to_ltf(prices, df_1d, highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_1d, lowest_low)
     
-    # Camarilla R3 and S3 levels
-    # R3 = Close + (High - Low) * 1.1 / 4
-    # S3 = Close - (High - Low) * 1.1 / 4
-    r3_1d = close_1d + range_1d * 1.1 / 4.0
-    s3_1d = close_1d - range_1d * 1.1 / 4.0
-    
-    # Align R3 and S3 to 12h
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # === 12h: Indicators ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 6h: Indicators ===
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -46,6 +36,8 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stop loss
+    high = prices['high'].values
+    low = prices['low'].values
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -57,53 +49,50 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(40, 20)  # Ensure enough data for indicators
+    start_idx = max(30, 20)  # Ensure enough data
     
     for i in range(start_idx, n):
         # Get values
-        r3_val = r3_1d_aligned[i]
-        s3_val = s3_1d_aligned[i]
-        current_vol_ma = vol_ma[i]
-        current_volume = volume[i]
-        current_close = close[i]
-        current_high = high[i]
-        current_low = low[i]
-        current_atr = atr[i]
+        hh = highest_high_aligned[i]
+        ll = lowest_low_aligned[i]
+        vol_ma_val = vol_ma[i]
+        vol = volume[i]
+        c = close[i]
+        atr_val = atr[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r3_val) or np.isnan(s3_val) or 
-            np.isnan(current_vol_ma) or np.isnan(current_atr)):
+        if (np.isnan(hh) or np.isnan(ll) or np.isnan(vol_ma_val) or np.isnan(atr_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 2.5x 20-period average
-        vol_condition = current_volume > 2.5 * current_vol_ma
+        # Volume condition: current volume > 1.5x 20-period average
+        vol_condition = vol > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: price breaks above R3 with volume confirmation
-            if current_high > r3_val and vol_condition:
+            # Long: break above 3-day high + volume
+            if c > hh and vol_condition:
                 signals[i] = 0.25
                 position = 1
-                entry_price = current_close
-            # Short: price breaks below S3 with volume confirmation
-            elif current_low < s3_val and vol_condition:
+                entry_price = c
+            # Short: break below 3-day low + volume
+            elif c < ll and vol_condition:
                 signals[i] = -0.25
                 position = -1
-                entry_price = current_close
+                entry_price = c
         
         elif position == 1:
-            # Long exit: price falls below S3 OR stop loss
-            if current_low < s3_val or current_close < entry_price - 2.5 * current_atr:
+            # Long exit: close below 3-day low OR stop loss
+            if c < ll or c < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R3 OR stop loss
-            if current_high > r3_val or current_close > entry_price + 2.5 * current_atr:
+            # Short exit: close above 3-day high OR stop loss
+            if c > hh or c > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
