@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_With_Trend_Filter_And_Volume_Confirmation
-Hypothesis: Use KAMA trend direction on 12h timeframe filtered by weekly trend and volume spikes to reduce false signals.
-KAMA adapts to market noise, making it effective in both trending and ranging conditions.
-Long when KAMA trending up, weekly trend up, and volume spike; short when opposite.
-Designed for 12h timeframe to capture medium-term moves with reduced whipsaw.
-Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
-Works in bull/bear: weekly trend filter avoids counter-trend trades, volume filter reduces false signals.
+4h_Donchian20_VolumeBreakout_Camilla24h_Filter
+Hypothesis: Trade 4h Donchian(20) breakouts with volume confirmation and 24h CAMARILLA R3/S3 filter.
+Long when price breaks above Donchian upper band with volume > 1.8x 20-period average and close > 24h CAMARILLA R3.
+Short when breaks below Donchian lower band with volume spike and close < 24h CAMARILLA S3.
+Exit when price reverts to Donchian middle band (mean of upper/lower) or volume dries up.
+Designed to capture strong momentum bursts in both bull and bear markets while avoiding false breakouts in chop.
+Target: 80-160 total trades over 4 years (20-40/year) with position size 0.25.
+Uses volume spike to filter weak breakouts and CAMARILLA levels to ensure breakout occurs beyond key intraday resistance/support.
+Works in bull/bear: volume filter adapts to volatility regime, CAMARILLA levels provide dynamic support/resistance.
 """
 
-name = "12h_KAMA_With_Trend_Filter_And_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeBreakout_Camilla24h_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,112 +24,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for KAMA calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 24h data ONCE before loop for CAMARILLA levels
+    df_24h = get_htf_data(prices, '24h')
+    if len(df_24h) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    # Calculate 24h CAMARILLA levels (using prior 24h bar's high, low, close)
+    high_24h = df_24h['high'].values
+    low_24h = df_24h['low'].values
+    close_24h = df_24h['close'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    def kama(close_prices, er_period=10, fast_ema=2, slow_ema=30):
-        n = len(close_prices)
-        kama_vals = np.full(n, np.nan)
-        if n < er_period:
-            return kama_vals
-        
-        # Calculate Efficiency Ratio
-        change = np.abs(np.diff(close_prices, er_period))
-        volatility = np.sum(np.abs(np.diff(close_prices)), axis=0)
-        er = np.zeros(n)
-        for i in range(er_period, n):
-            if volatility[i] != 0:
-                er[i] = change[i-er_period] / volatility[i]
-            else:
-                er[i] = 0
-        
-        # Smoothing constants
-        sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-        
-        # Initialize KAMA
-        kama_vals[er_period] = close_prices[er_period]
-        for i in range(er_period+1, n):
-            kama_vals[i] = kama_vals[i-1] + sc[i] * (close_prices[i] - kama_vals[i-1])
-        
-        return kama_vals
+    # CAMARILLA formula: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
+    # We only need R3 and S3
+    range_24h = high_24h - low_24h
+    r3_24h = close_24h + range_24h * 1.1 / 4
+    s3_24h = close_24h - range_24h * 1.1 / 4
     
-    # Calculate KAMA on 12h data
-    kama_12h = kama(close_12h, 10, 2, 30)
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    # Align 24h CAMARILLA levels to 4h timeframe
+    r3_24h_aligned = align_htf_to_ltf(prices, df_24h, r3_24h)
+    s3_24h_aligned = align_htf_to_ltf(prices, df_24h, s3_24h)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate Donchian(20) channels
+    lookback = 20
+    upper = np.full_like(high, np.nan)
+    lower = np.full_like(low, np.nan)
+    middle = np.full_like(close, np.nan)
     
-    close_1w = df_1w['close'].values
+    for i in range(lookback, n):
+        upper[i] = np.max(high[i-lookback:i])
+        lower[i] = np.min(low[i-lookback:i])
+        middle[i] = (upper[i] + lower[i]) / 2.0
     
-    # Calculate EMA20 on 1w for trend filter
-    def ema(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            multiplier = 2.0 / (period + 1)
-            result[period-1] = np.mean(values[:period])
-            for i in range(period, len(values)):
-                result[i] = multiplier * values[i] + (1 - multiplier) * result[i-1]
-        return result
-    
-    ema20_1w = ema(close_1w, 20)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Calculate volume filter (volume > 2.0x 20-period average)
+    # Calculate volume filter (volume > 1.8x 20-period average)
     vol_ma20 = np.full_like(volume, np.nan)
-    for i in range(20, len(volume)):
+    for i in range(20, n):
         vol_ma20[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (2.0 * vol_ma20)
+    volume_filter = volume > (1.8 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 30  # Ensure indicators are ready (20 for Donchian + buffer)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_12h_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or
+            np.isnan(r3_24h_aligned[i]) or np.isnan(s3_24h_aligned[i]) or
             np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: KAMA trending up, weekly uptrend, volume spike
-            if (close[i] > kama_12h_aligned[i] and 
-                close[i] > ema20_1w_aligned[i] and 
-                volume_filter[i]):
+            # Long: price breaks above Donchian upper band with volume filter AND close > 24h R3
+            if close[i] > upper[i] and volume_filter[i] and close[i] > r3_24h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA trending down, weekly downtrend, volume spike
-            elif (close[i] < kama_12h_aligned[i] and 
-                  close[i] < ema20_1w_aligned[i] and 
-                  volume_filter[i]):
+            # Short: price breaks below Donchian lower band with volume filter AND close < 24h S3
+            elif close[i] < lower[i] and volume_filter[i] and close[i] < s3_24h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA turns down OR weekly trend turns down
-            if (close[i] < kama_12h_aligned[i] or 
-                close[i] < ema20_1w_aligned[i]):
+            # Long exit: price returns to Donchian middle band OR volume dries up
+            if close[i] < middle[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA turns up OR weekly trend turns up
-            if (close[i] > kama_12h_aligned[i] or 
-                close[i] > ema20_1w_aligned[i]):
+            # Short exit: price returns to Donchian middle band OR volume dries up
+            if close[i] > middle[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
