@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_1d_Pivot_R2S2_MomentumBreakout_v3
-# Hypothesis: Trade momentum breakouts from 1d R2/S2 levels on 12h timeframe with volume confirmation and volatility filter.
-# Uses a 50-period ATR-based volatility filter to avoid trading in extremely low volatility environments.
-# Focuses on clean breaks with strong volume to capture institutional participation.
-# Designed for 12-37 trades per year by requiring multiple confirmations.
+# 4h_1d_Pivot_R2S2_Breakout_Volume_v3
+# Hypothesis: Trade momentum breakouts from 1d R2/S2 levels on 4h timeframe with volume confirmation.
+# Uses R2/S2 levels from previous day's price action as institutional reference points.
+# Requires volume surge (2x 20-period average) to confirm institutional participation.
+# Designed for 20-50 trades per year by requiring multiple confirmations and using 4h timeframe.
+# Works in both bull and bear markets by capturing momentum continuation from key daily levels.
 
-name = "12h_1d_Pivot_R2S2_MomentumBreakout_v3"
-timeframe = "12h"
+name = "4h_1d_Pivot_R2S2_Breakout_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,19 +42,12 @@ def generate_signals(prices):
     s2_1d = close_1d - (range_1d * 1.1 / 6)
     r2_1d = close_1d + (range_1d * 1.1 / 6)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter (50-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,13 +57,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Volatility filter: only trade when ATR is above its 50-period median
-        atr_median = np.nanmedian(atr[max(0, i-49):i+1])
-        if atr[i] < 0.5 * atr_median:  # Avoid extremely low volatility
+            np.isnan(volume_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
@@ -86,7 +74,7 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Long exit: price below S2 or volume drops significantly
+            # Long exit: price below S2
             if close[i] < s2_aligned[i] * 0.997:
                 signals[i] = 0.0
                 position = 0
@@ -94,7 +82,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above R2 or volume drops significantly
+            # Short exit: price above R2
             if close[i] > r2_aligned[i] * 1.003:
                 signals[i] = 0.0
                 position = 0
