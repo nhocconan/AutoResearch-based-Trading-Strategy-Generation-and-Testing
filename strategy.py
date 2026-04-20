@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1
-Concept: 12h timeframe with daily pivot point breakout, volume confirmation, and EMA100 trend filter.
-- Uses daily pivot points (R1, S1) as key support/resistance levels
-- Long when price breaks above R1 with volume confirmation and above EMA100
-- Short when price breaks below S1 with volume confirmation and below EMA100
-- Exit when price returns to central pivot point (mean reversion)
-- Uses EMA100 for trend filter (reduces whipsaw vs shorter EMAs)
+4h_1d_Pivot_R1S1_Breakout_Volume_EMA200_Filter_v2
+Concept: Same as v1 but with stricter volume filter and tighter exit to reduce trades.
+- Uses daily pivot points (R1, S1) as key support/resistance
+- Long when price breaks above R1 with volume confirmation (>1.8x avg) and above EMA200
+- Short when price breaks below S1 with volume confirmation (>1.8x avg) and below EMA200
+- Exit when price returns to central pivot point
+- Uses EMA200 for trend filter
 - Conservative sizing (0.25) to manage drawdown
-- Works in bull/bear: Pivot points adapt to market conditions, volume confirms breakouts
-- Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_EMA200_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Get daily data ONCE before loop for pivot points
@@ -39,16 +37,16 @@ def generate_signals(prices):
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 12h: EMA100 trend filter ===
+    # === 4h: EMA200 trend filter ===
     close = prices['close'].values
-    ema100 = pd.Series(close).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # === 12h: Volume ratio (current vs 20-period average) ===
+    # === 4h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
@@ -56,11 +54,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for EMA100
+    start_idx = 200  # Ensure enough data for EMA200
     
     for i in range(start_idx, n):
         # Get values
-        ema100_val = ema100[i]
+        ema200_val = ema200[i]
         close_val = close[i]
         pivot_val = pivot_aligned[i]
         r1_val = r1_aligned[i]
@@ -68,7 +66,7 @@ def generate_signals(prices):
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema100_val) or np.isnan(pivot_val) or np.isnan(r1_val) or 
+        if (np.isnan(ema200_val) or np.isnan(pivot_val) or np.isnan(r1_val) or 
             np.isnan(s1_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -76,20 +74,20 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and above EMA100
+            # Long: Price breaks above R1 with volume confirmation and above EMA200
             breakout_long = close_val > r1_val
-            vol_confirm = vol_ratio_val > 1.3  # Volume above average
+            vol_confirm = vol_ratio_val > 1.8  # Higher threshold for volume
             
-            if breakout_long and vol_confirm and close_val > ema100_val:
+            if breakout_long and vol_confirm and close_val > ema200_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and below EMA100
-            elif close_val < s1_val and vol_confirm and close_val < ema100_val:
+            # Short: Price breaks below S1 with volume confirmation and below EMA200
+            elif close_val < s1_val and vol_confirm and close_val < ema200_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below central pivot (mean reversion)
+            # Long exit: Price returns to or below central pivot
             if close_val <= pivot_val:
                 signals[i] = 0.0
                 position = 0
@@ -97,7 +95,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above central pivot (mean reversion)
+            # Short exit: Price returns to or above central pivot
             if close_val >= pivot_val:
                 signals[i] = 0.0
                 position = 0
