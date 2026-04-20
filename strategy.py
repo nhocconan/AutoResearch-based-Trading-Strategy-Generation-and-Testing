@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
-# - Williams %R(14) on 4h: oversold < -80 for long, overbought > -20 for short
-# - Trend filter: 1d EMA50 - price must be above EMA50 for long, below for short
-# - Volume confirmation: current volume > 1.5x 20-period average
-# - Exit: Williams %R crosses back above -50 (long) or below -50 (short)
-# - Position size: 0.25 to limit drawdown
+# Hypothesis: 4h breakout above 1d VWAP with volume confirmation and ATR stop
+# - Uses 1-day VWAP as trend filter: price must be above VWAP for long, below for short
+# - Entry: price breaks above VWAP + volume > 2x 20-period average
+# - Exit: price crosses back below VWAP or ATR-based stop hit (2.5x ATR)
+# - VWAP is a strong institutional benchmark; breakouts often carry momentum
+# - Volume surge confirms institutional participation
+# - ATR stop manages risk during adverse moves
 # - Target: 20-35 trades per year per symbol (80-140 total over 4 years)
 
 def generate_signals(prices):
@@ -16,36 +17,49 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA50 trend filter
+    # Load 1d data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate EMA50 on 1d data
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate typical price and VWAP
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume_1d)
+    vwap_denominator = np.cumsum(volume_1d)
+    vwap_1d = vwap_numerator / vwap_denominator
+    vwap_1d[vwap_denominator == 0] = np.nan
     
-    # 4h data for Williams %R and volume
+    # Align VWAP to 4h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Calculate ATR for stop loss (using 1d data)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 4h price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate Williams %R(14) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(vwap_aligned[i]) or np.isnan(atr_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,29 +67,30 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        wr = williams_r[i]
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) + price above 1d EMA50 + volume surge
-            if wr < -80 and price > ema_50_1d_aligned[i] and vol > 1.5 * vol_ma[i]:
+            # Long entry: price above VWAP + breaks above VWAP + volume surge
+            if price > vwap_aligned[i] and price > vwap_aligned[i-1] and vol > 2.0 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R overbought (> -20) + price below 1d EMA50 + volume surge
-            elif wr > -20 and price < ema_50_1d_aligned[i] and vol > 1.5 * vol_ma[i]:
+                entry_price = price
+            # Short entry: price below VWAP + breaks below VWAP + volume surge
+            elif price < vwap_aligned[i] and price < vwap_aligned[i-1] and vol > 2.0 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: Williams %R crosses back above -50
-            if wr > -50:
+            # Long exit: price crosses below VWAP OR ATR stop hit (2.5*ATR)
+            if price < vwap_aligned[i] or price < entry_price - 2.5 * atr_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses back below -50
-            if wr < -50:
+            # Short exit: price crosses above VWAP OR ATR stop hit (2.5*ATR)
+            if price > vwap_aligned[i] or price > entry_price + 2.5 * atr_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_MeanReversion_1dTrendFilter_Volume"
+name = "4h_VWAP_Breakout_Volume_ATRStop"
 timeframe = "4h"
 leverage = 1.0
