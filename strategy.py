@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R2S2_Breakout_Volume_ATR_v1"
-timeframe = "12h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,27 +12,27 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 1d: Calculate pivot points (standard) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w: Calculate Camarilla pivot levels ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R2 = P + (H - L), S2 = P - (H - L)
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12, S1 = C - (H - L) * 1.1 / 12
+    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12
+    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12
     
-    # Align pivot levels
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Align pivot levels to daily
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # === 12h: ATR(14) for volatility and stop loss ===
+    # === Daily: ATR(14) for volatility and stop loss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -51,46 +51,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Get aligned values
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
+        r1 = r1_1w_aligned[i]
+        s1 = s1_1w_aligned[i]
         current_atr = atr[i]
         current_close = prices['close'].iloc[i]
         current_volume = prices['volume'].iloc[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r2) or np.isnan(s2) or np.isnan(current_atr)):
+        if (np.isnan(r1) or np.isnan(s1) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.3x 24-period 12h average volume ===
-        if i >= 24:
-            vol_ma = np.mean(prices['volume'].iloc[i-24:i].values)
-            vol_condition = current_volume > 1.3 * vol_ma
+        # === Volume condition: current volume > 1.5x 20-day average volume ===
+        if i >= 20:
+            vol_ma = np.mean(prices['volume'].iloc[i-20:i].values)
+            vol_condition = current_volume > 1.5 * vol_ma
         else:
             vol_condition = False
         
         if position == 0:
             # Long conditions:
-            # 1. Price breaks above R2 with volume
-            if current_close > r2 and vol_condition:
+            # 1. Price breaks above R1 with volume
+            if current_close > r1 and vol_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
             # Short conditions:
-            # 1. Price breaks below S2 with volume
-            elif current_close < s2 and vol_condition:
+            # 1. Price breaks below S1 with volume
+            elif current_close < s1 and vol_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
             # Long exit conditions:
-            # 1. Price falls back below R2 (breakout failed)
+            # 1. Price falls back below R1 (breakout failed)
             # 2. ATR-based stop loss
-            if current_close <= r2 or current_close < entry_price - 2.5 * current_atr:
+            if current_close <= r1 or current_close < entry_price - 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,9 +98,9 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit conditions:
-            # 1. Price rises back above S2 (breakdown failed)
+            # 1. Price rises back above S1 (breakdown failed)
             # 2. ATR-based stop loss
-            if current_close >= s2 or current_close > entry_price + 2.5 * current_atr:
+            if current_close >= s1 or current_close > entry_price + 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
