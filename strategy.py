@@ -3,43 +3,45 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_Volume_ATRFilter_v2"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_Volume_Confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d: Calculate pivot points (Camarilla style) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Daily: KAMA for trend direction ===
     close_1d = df_1d['close'].values
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close_1d, 10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # sum of |diff| over 10 periods
+    # Pad volatility to match length
+    volatility = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # Start after 10 periods
+    for i in range(10, len(close_1d)):
+        if np.isnan(kama[i-1]):
+            kama[i] = close_1d[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
-    # R2 = C + (H-L)*1.1/6, S2 = C - (H-L)*1.1/6
-    r2_1d = close_1d + (high_1d - low_1d) * 1.1 / 6
-    s2_1d = close_1d - (high_1d - low_1d) * 1.1 / 6
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Align all pivot levels
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # === 12h: ATR(14) for volatility and stop loss ===
+    # === 4h: ATR(20) for volatility ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -48,76 +50,60 @@ def generate_signals(prices):
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    
+    # === Volume: 4h volume > 1.5x 20-period average ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 60  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        # Get aligned values
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
+        # Get values
+        kama_val = kama_aligned[i]
+        current_close = close[i]
         current_atr = atr[i]
-        current_close = prices['close'].iloc[i]
-        current_volume = prices['volume'].iloc[i]
+        current_volume = volume[i]
+        current_vol_ma = vol_ma[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1) or np.isnan(s1) or np.isnan(r2) or np.isnan(s2) or np.isnan(current_atr)):
+        if (np.isnan(kama_val) or np.isnan(current_atr) or 
+            np.isnan(current_volume) or np.isnan(current_vol_ma)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.5x 24-period 12h average volume ===
-        if i >= 24:
-            vol_ma = np.mean(prices['volume'].iloc[i-24:i].values)
-            vol_condition = current_volume > 1.5 * vol_ma
-        else:
-            vol_condition = False
+        # Volume condition
+        vol_condition = current_volume > 1.5 * current_vol_ma
         
         if position == 0:
-            # Long conditions:
-            # 1. Price breaks above R1 with volume
-            # 2. Price is below R2 (not overextended)
-            if (current_close > r1 and
-                vol_condition and
-                current_close < r2):
+            # Long: price above KAMA (uptrend) + volume
+            if current_close > kama_val and vol_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
-            
-            # Short conditions:
-            # 1. Price breaks below S1 with volume
-            # 2. Price is above S2 (not overextended)
-            elif (current_close < s1 and
-                  vol_condition and
-                  current_close > s2):
+            # Short: price below KAMA (downtrend) + volume
+            elif current_close < kama_val and vol_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit conditions:
-            # 1. Price falls below S1 (strong support - take profit)
-            # 2. ATR-based stop loss
-            if (current_close <= s1 or
-                current_close < entry_price - 2.5 * current_atr):
+            # Long exit: price crosses below KAMA OR stop loss
+            if current_close < kama_val or current_close < entry_price - 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit conditions:
-            # 1. Price rises above R1 (strong resistance - take profit)
-            # 2. ATR-based stop loss
-            if (current_close >= r1 or
-                current_close > entry_price + 2.5 * current_atr):
+            # Short exit: price crosses above KAMA OR stop loss
+            if current_close > kama_val or current_close > entry_price + 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
