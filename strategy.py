@@ -1,39 +1,47 @@
-# 1d_PositionSize_VolatilityBreakout_v1
-# Hypothesis: Breakouts above/below 1-day volatility bands with volume confirmation
-# - Uses 1-day ATR to create adaptive volatility bands around the open
-# - Entry: Price breaks above/below 1.5*ATR bands with volume > 1.5x 20-period average
-# - Exit: Price returns to open level or time-based exit after 3 days
-# - Volatility targeting ensures consistent risk regardless of market conditions
-# - Works in both bull and bear markets by capturing volatility expansion moves
-# - Target: 15-25 trades per year per symbol (60-100 total over 4 years)
-
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h breakout above 12h EMA50 with volume confirmation and ATR stop
+# - Uses 12h EMA50 as trend filter: price must be above EMA50 for long, below for short
+# - Entry: price breaks above 12h EMA50 + volume > 1.5x 20-period average
+# - Exit: price crosses back below 12h EMA50 or ATR-based stop hit (2x ATR)
+# - Volume confirmation reduces false breakouts
+# - ATR stop manages risk during adverse moves
+# - Target: 20-35 trades per year per symbol (80-140 total over 4 years)
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Calculate daily open price (using previous day's close as proxy for open)
-    # For daily data, we'll use close as our primary price series
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Load 12h data for EMA calculation
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate ATR for volatility measurement
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate EMA50 on 12h data
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50)
+    
+    # Calculate ATR for stop loss (using 12h data)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_12h_4h = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Calculate average true range for volatility bands
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    # 4h price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -41,11 +49,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    entry_bar = 0
     
     for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(atr_ma[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_50_4h[i]) or np.isnan(atr_12h_4h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,48 +62,35 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Calculate volatility bands based on ATR
-            upper_band = close[i-1] + 1.5 * atr_ma[i]
-            lower_band = close[i-1] - 1.5 * atr_ma[i]
-            
-            # Long entry: price breaks above upper band with volume surge
-            if price > upper_band and vol > 1.5 * vol_ma[i]:
+            # Long entry: price above EMA50 + breaks above EMA50 + volume surge
+            if price > ema_50_4h[i] and price > ema_50_4h[i-1] and vol > 1.5 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-                entry_bar = i
-            # Short entry: price breaks below lower band with volume surge
-            elif price < lower_band and vol > 1.5 * vol_ma[i]:
+            # Short entry: price below EMA50 + breaks below EMA50 + volume surge
+            elif price < ema_50_4h[i] and price < ema_50_4h[i-1] and vol > 1.5 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
-                entry_bar = i
         
-        elif position != 0:
-            # Exit conditions:
-            # 1. Price returns to previous close (mean reversion)
-            # 2. Time-based exit after 3 bars (3 days)
-            # 3. Opposite band break (strong reversal)
-            
-            prev_close = close[i-1]
-            
-            if position == 1:  # Long position
-                exit_condition = (price <= prev_close) or \
-                                (i - entry_bar >= 3) or \
-                                (price < close[i-1] - 1.5 * atr_ma[i])
-            else:  # Short position
-                exit_condition = (price >= prev_close) or \
-                                (i - entry_bar >= 3) or \
-                                (price > close[i-1] + 1.5 * atr_ma[i])
-            
-            if exit_condition:
+        elif position == 1:
+            # Long exit: price crosses below EMA50 OR ATR stop hit (2*ATR)
+            if price < ema_50_4h[i] or price < entry_price - 2.0 * atr_12h_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price crosses above EMA50 OR ATR stop hit (2*ATR)
+            if price > ema_50_4h[i] or price > entry_price + 2.0 * atr_12h_4h[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_PositionSize_VolatilityBreakout_v1"
-timeframe = "1d"
+name = "4h_EMA50_Breakout_Volume_ATRStop"
+timeframe = "4h"
 leverage = 1.0
