@@ -1,7 +1,3 @@
-# 12h_ADX_Donchian_Breakout_Volume_Session_v1
-# Hypothesis: Uses daily ADX > 25 for strong trend filter, daily Donchian(20) breakouts for entry, volume confirmation, and session filter (8-20 UTC). Designed for 12h timeframe to capture medium-term trends while avoiding low-volume periods. Should work in both bull and bear markets by following trends with strict entry conditions to limit overtrading.
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -9,71 +5,41 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 14-period ADX for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 50-period SMA on 12h close
+    close_12h = df_12h['close'].values
+    sma_50_12h = pd.Series(close_12h).rolling(window=50, min_periods=50).mean().values
+    sma_50_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_50_12h)
+    
+    # Calculate 12-period ATR on 12h for volatility filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Wilder's smoothing
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        alpha = 1.0 / period
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_1d = wilder_smooth(tr, 14)
-    di_plus_1d = wilder_smooth(dm_plus, 14)
-    di_minus_1d = wilder_smooth(dm_minus, 14)
-    
-    # Avoid division by zero
-    di_sum = di_plus_1d + di_minus_1d
-    dx = np.where(di_sum != 0, 100 * np.abs(di_plus_1d - di_minus_1d) / di_sum, 0)
-    adx_1d = wilder_smooth(dx, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 20-period Donchian channels
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    
-    # Calculate 20-period average volume
-    volume_1d = df_1d['volume'].values
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    # Simple ATR (SMA of TR)
+    atr_12h = pd.Series(tr).rolling(window=12, min_periods=12).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour  # pre-compute before loop
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Session filter: only trade 8-20 UTC
         hour = hours[i]
         if hour < 8 or hour > 20:
@@ -84,41 +50,37 @@ def generate_signals(prices):
         
         # Get values
         close_val = prices['close'].iloc[i]
-        adx_val = adx_1d_aligned[i]
-        donch_high_val = donch_high_1d_aligned[i]
-        donch_low_val = donch_low_1d_aligned[i]
-        vol_val = prices['volume'].iloc[i]
-        vol_avg_val = vol_avg_20_aligned[i]
+        sma_val = sma_50_12h_aligned[i]
+        atr_val = atr_12h_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(adx_val) or np.isnan(donch_high_val) or 
-            np.isnan(donch_low_val) or np.isnan(vol_avg_val)):
+        if np.isnan(sma_val) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
-            if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
+            # Long: price above SMA + volatility filter (ATR > 0.5% of price)
+            if close_val > sma_val and atr_val > 0.005 * close_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
-            elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
+            # Short: price below SMA + volatility filter
+            elif close_val < sma_val and atr_val > 0.005 * close_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or ADX < 20 (trend weakening)
-            if close_val < donch_low_val or adx_val < 20:
+            # Long exit: price crosses below SMA
+            if close_val < sma_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or ADX < 20 (trend weakening)
-            if close_val > donch_high_val or adx_val < 20:
+            # Short exit: price crosses above SMA
+            if close_val > sma_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,13 +88,12 @@ def generate_signals(prices):
     
     return signals
 
-# 12h_ADX_Donchian_Breakout_Volume_Session_v1
-# Uses daily ADX for trend strength filter (ADX > 25)
-# Uses daily Donchian(20) breakouts for entry
-# Requires volume confirmation above 20-period average
-# Session filter: 8-20 UTC to avoid low-volume periods
-# Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 12h timeframe with ~15-30 trades/year
-name = "12h_ADX_Donchian_Breakout_Volume_Session_v1"
-timeframe = "12h"
+# 4h_SMA50_12h_VolatilityFilter_Session_v1
+# Uses 12h 50-period SMA for trend direction
+# Requires 12h ATR > 0.5% of price for volatility filter (avoids low-vol chop)
+# Session filter: 8-20 UTC to focus on active trading hours
+# Simple crossover system with fixed 0.25 position sizing
+# Designed for 4h timeframe with ~20-40 trades/year
+name = "4h_SMA50_12h_VolatilityFilter_Session_v1"
+timeframe = "4h"
 leverage = 1.0
