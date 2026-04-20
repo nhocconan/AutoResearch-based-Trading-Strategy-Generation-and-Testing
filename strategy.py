@@ -77,13 +77,13 @@ def generate_signals(prices):
             if (price > ema_20_1w_aligned[i] and 
                 adx_aligned[i] > 25 and 
                 vol > 1.5 * vol_ma_1d_aligned[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: price below weekly EMA20, strong trend (ADX > 25), volume confirmation
             elif (price < ema_20_1w_aligned[i] and 
                   adx_aligned[i] > 25 and 
                   vol > 1.5 * vol_ma_1d_aligned[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -92,7 +92,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Short exit: price crosses above weekly EMA20 or trend weakens (ADX < 20)
@@ -100,10 +100,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_WeeklyEMA20_ADX25_VolumeFilter"
-timeframe = "12h"
+name = "1d_WeeklyEMA20_ADX25_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
