@@ -8,38 +8,30 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for HTF analysis (Williams %R, volume, volatility)
+    # Load 1d data for HTF analysis (price action, volume, volatility)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d Williams %R (14-period) - mean reversion signal
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    williams_r[highest_high == lowest_low] = -50  # Avoid division by zero
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # 1d ATR(14) for volatility filter and position sizing
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # 1d Price Range (high - low) for volatility assessment
+    daily_range = high_1d - low_1d
+    range_ma_20 = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
+    range_ratio = daily_range / np.where(range_ma_20 == 0, 1, range_ma_20)
+    range_ratio_aligned = align_htf_to_ltf(prices, df_1d, range_ratio)
     
     # 1d Volume ratio (current volume / 20-period average)
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume_1d / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
-    # Load 6h data for entry timing and price action
-    # Note: prices dataframe is already at 6h timeframe
+    # 1d Close price for trend context
+    close_1d_ma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    close_1d_ma_50_aligned = align_htf_to_ltf(prices, df_1d, close_1d_ma_50)
+    
+    # Load 4h data for entry timing and price action
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -50,8 +42,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(range_ratio_aligned[i]) or np.isnan(vol_ratio_aligned[i]) or 
+            np.isnan(close_1d_aligned[i]) or np.isnan(close_1d_ma_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,38 +52,40 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         
-        # Williams %R thresholds: oversold < -80, overbought > -20
-        wr = williams_r_aligned[i]
-        
-        # Volatility filter: only trade when volatility is moderate (not too high, not too low)
-        atr = atr_14_aligned[i]
-        atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
-        vol_filter = (atr > 0.5 * atr_ma_20) and (atr < 2.0 * atr_ma_20)
+        # Range filter: only trade when daily range is expanded (volatile market)
+        range_ratio_val = range_ratio_aligned[i]
+        range_filter = range_ratio_val > 1.5
         
         # Volume filter: require above-average volume for confirmation
-        vol_filter = vol_filter and (vol_ratio_aligned[i] > 1.2)
+        vol_filter = vol_ratio_aligned[i] > 1.3
+        
+        # Trend filter: price above/below 50-day MA for directional bias
+        close_1d_val = close_1d_aligned[i]
+        close_1d_ma_50_val = close_1d_ma_50_aligned[i]
+        uptrend = close_1d_val > close_1d_ma_50_val
+        downtrend = close_1d_val < close_1d_ma_50_val
         
         if position == 0:
-            # Long when Williams %R indicates oversold conditions with volume confirmation
-            if (wr < -80) and vol_filter:
+            # Long when: expanded range, high volume, and uptrend bias
+            if range_filter and vol_filter and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short when Williams %R indicates overbought conditions with volume confirmation
-            elif (wr > -20) and vol_filter:
+            # Short when: expanded range, high volume, and downtrend bias
+            elif range_filter and vol_filter and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R returns to neutral territory or volatility spikes
-            if (wr > -50) or (atr > 3.0 * atr_ma_20):
+            # Long exit: when range contracts or trend reverses
+            if not range_filter or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R returns to neutral territory or volatility spikes
-            if (wr < -50) or (atr > 3.0 * atr_ma_20):
+            # Short exit: when range contracts or trend reverses
+            if not range_filter or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_MeanReversion_VolumeFilter_v1"
-timeframe = "6h"
+name = "4h_1d_Range_Volume_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
