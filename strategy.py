@@ -3,88 +3,77 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Bollinger Band Squeeze Breakout with Volume Confirmation
-# - Identify weekly BB squeeze (BB width < 20-period percentile 20)
-# - Long when price breaks above upper BB with volume > 1.5x 20-day average
-# - Short when price breaks below lower BB with volume > 1.5x 20-day average
-# - Exit when price re-enters BB bands or squeeze ends
-# - Uses weekly timeframe for structure, daily for entry/exit
-# - Target: 7-25 trades per year per symbol (30-100 total over 4 years)
-# - Designed to work in both bull and breakout markets
+# Hypothesis: 6h Volume-Weighted Average Price (VWAP) + 1d Trend Filter + Momentum Confirmation
+# - Long when price > VWAP(20) + price > 1d EMA(50) + RSI(14) > 50
+# - Short when price < VWAP(20) + price < 1d EMA(50) + RSI(14) < 50
+# - Exit when price crosses back through VWAP or momentum reverses
+# - Uses VWAP for intraday mean reversion, 1d EMA for trend filter, RSI for momentum
+# - Designed for 6h timeframe with selective entries to avoid overtrading
+# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for BB calculation
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # Load 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly Bollinger Bands (20, 2.0)
-    close_ser = pd.Series(close_weekly)
-    basis = close_ser.rolling(window=20, min_periods=20).mean()
-    dev = close_ser.rolling(window=20, min_periods=20).std()
-    upper = basis + 2.0 * dev
-    lower = basis - 2.0 * dev
-    bb_width = upper - lower
-    
-    # Calculate BB width percentile (20-period) for squeeze detection
-    bb_width_ser = pd.Series(bb_width.values)
-    width_percentile = bb_width_ser.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Squeeze condition: BB width < 20th percentile
-    squeeze = width_percentile < 20.0
-    
-    # Align weekly indicators to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_weekly, upper.values)
-    lower_aligned = align_htf_to_ltf(prices, df_weekly, lower.values)
-    squeeze_aligned = align_htf_to_ltf(prices, df_weekly, squeeze)
-    
-    # Daily volume average (20-period)
+    # Calculate VWAP(20) on 6h timeframe
+    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    tpv = typical_price * volume
+    vwap_numerator = pd.Series(tpv).rolling(window=20, min_periods=20).sum().values
+    vwap_denominator = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, 0)
+    
+    # Calculate RSI(14) on 6h timeframe
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):  # Start after EMA/VWAP/RSI warmup
         # Skip if NaN in indicators
-        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(squeeze_aligned[i]) or \
-           np.isnan(vol_ma[i]):
+        if np.isnan(vwap[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        vol = volume[i]
+        price = close[i]
         
         if position == 0:
-            # Look for breakout after squeeze
-            if squeeze_aligned[i] and vol > 1.5 * vol_ma[i]:
-                if price > upper_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif price < lower_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long entry: price > VWAP + price > 1d EMA(50) + bullish momentum
+            if price > vwap[i] and price > ema_50_1d_aligned[i] and rsi[i] > 50:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: price < VWAP + price < 1d EMA(50) + bearish momentum
+            elif price < vwap[i] and price < ema_50_1d_aligned[i] and rsi[i] < 50:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit: price re-enters BB or squeeze ends
-            if price < upper_aligned[i] or not squeeze_aligned[i]:
+            # Long exit: price < VWAP or momentum turns bearish
+            if price < vwap[i] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price re-enters BB or squeeze ends
-            if price > lower_aligned[i] or not squeeze_aligned[i]:
+            # Short exit: price > VWAP or momentum turns bullish
+            if price > vwap[i] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyBB_SqueezeBreakout_Volume"
-timeframe = "1d"
+name = "6h_VWAP_1dEMA50_Momentum"
+timeframe = "6h"
 leverage = 1.0
