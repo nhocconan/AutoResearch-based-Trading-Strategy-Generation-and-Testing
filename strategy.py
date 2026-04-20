@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# Strategy: 4h_12h_ChaikinMoneyFlow
-# Hypothesis: Chaikin Money Flow (CMF) on 12h measures institutional buying/selling pressure.
-# Long when CMF > +0.15 (strong accumulation) and price above 12h EMA50 (uptrend).
-# Short when CMF < -0.15 (strong distribution) and price below 12h EMA50 (downtrend).
-# Uses volume-weighted accumulation to filter false breakouts. Works in bull/bear by aligning with
-# institutional flow. Targets ~30 trades/year via strict CMF thresholds and EMA filter.
-# Includes ATR-based stop loss to limit drawdown.
+# Strategy: 6h_1W_SR1_R3_S3_Fade
+# Hypothesis: Price tends to fade from weekly S1/R1 and reverse from weekly S3/R3 levels.
+# In both bull and bear markets, weekly support/resistance acts as key liquidity zones.
+# Uses 1d timeframe for entry confirmation (price rejection at weekly levels) and volume.
+# Targets 20-40 trades per year by requiring weekly level proximity and volume spike.
+# Uses 6h as primary timeframe for lower noise and fewer false signals.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -15,91 +14,117 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for CMF and EMA
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Load weekly data for SR levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate weekly pivot and ranges
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # Calculate Chaikin Money Flow (CMF) over 20 periods
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    # CMF = 20-period sum of Money Flow Volume / 20-period sum of Volume
-    high_low = high_12h - low_12h
-    high_low[high_low == 0] = 1e-10  # Avoid division by zero
-    mfm = ((close_12h - low_12h) - (high_12h - close_12h)) / high_low
-    mfv = mfm * volume_12h
+    # Weekly S1, R1, S3, R3 levels (Camarilla-style)
+    S1_1w = pivot_1w - (range_1w * 1.1 / 12)
+    R1_1w = pivot_1w + (range_1w * 1.1 / 12)
+    S3_1w = pivot_1w - (range_1w * 1.1 / 4)
+    R3_1w = pivot_1w + (range_1w * 1.1 / 4)
     
-    # Sum over 20 periods
-    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume_12h).rolling(window=20, min_periods=20).sum().values
-    vol_sum[vol_sum == 0] = 1e-10  # Avoid division by zero
-    cmf = mfv_sum / vol_sum
-    cmf_aligned = align_htf_to_ltf(prices, df_12h, cmf)
+    # Align weekly levels to 6h
+    S1_1w_aligned = align_htf_to_ltf(prices, df_1w, S1_1w)
+    R1_1w_aligned = align_htf_to_ltf(prices, df_1w, R1_1w)
+    S3_1w_aligned = align_htf_to_ltf(prices, df_1w, S3_1w)
+    R3_1w_aligned = align_htf_to_ltf(prices, df_1w, R3_1w)
     
-    # 4h data for entry timing and stop loss
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Load daily data for trend and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # ATR for stop loss (14-period)
-    high_low_4h = high_4h - low_4h
-    high_close_4h = np.abs(high_4h - np.roll(close_4h, 1))
-    low_close_4h = np.abs(low_4h - np.roll(close_4h, 1))
-    high_low_4h[0] = high_4h[0] - low_4h[0]
-    high_close_4h[0] = np.abs(high_4h[0] - close_4h[0])
-    low_close_4h[0] = np.abs(low_4h[0] - close_4h[0])
-    tr = np.maximum(high_low_4h, np.maximum(high_close_4h, low_close_4h))
-    tr[0] = high_low_4h[0]
+    # Daily EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Daily volume average for spike detection
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Load 6h data for entry timing and price action
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # 6h ATR for stop loss
+    high_low = high_6h - low_6h
+    high_close = np.abs(high_6h - np.roll(close_6h, 1))
+    low_close = np.abs(low_6h - np.roll(close_6h, 1))
+    high_low[0] = high_6h[0] - low_6h[0]
+    high_close[0] = np.abs(high_6h[0] - close_6h[0])
+    low_close[0] = np.abs(low_6h[0] - close_6h[0])
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
+    atr_14_aligned = align_htf_to_ltf(prices, df_6h, atr_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(cmf_aligned[i]) or 
+        if (np.isnan(S1_1w_aligned[i]) or np.isnan(R1_1w_aligned[i]) or 
+            np.isnan(S3_1w_aligned[i]) or np.isnan(R3_1w_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
             np.isnan(atr_14_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
+        price = close_6h[i]
+        vol = volume_6h[i]
         
         if position == 0:
-            # Long: CMF > +0.15 (accumulation) and price above 12h EMA50 (uptrend)
-            if (cmf_aligned[i] > 0.15 and 
-                price > ema50_12h_aligned[i]):
+            # Long setup: price near weekly S1 or S3 with bullish rejection
+            near_S1 = abs(price - S1_1w_aligned[i]) < (0.5 * atr_14_aligned[i])
+            near_S3 = abs(price - S3_1w_aligned[i]) < (0.5 * atr_14_aligned[i])
+            bullish_rejection = (low_6h[i] <= min(S1_1w_aligned[i], S3_1w_aligned[i]) + 0.1 * atr_14_aligned[i]) and \
+                               (close_6h[i] > open_6h[i]) if 'open_6h' in df_6h.columns else (close_6h[i] > low_6h[i])
+            volume_confirm = vol > 1.5 * vol_ma_20_aligned[i]
+            uptrend = price > ema34_1d_aligned[i]
+            
+            if ((near_S1 or near_S3) and bullish_rejection and volume_confirm and uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short: CMF < -0.15 (distribution) and price below 12h EMA50 (downtrend)
-            elif (cmf_aligned[i] < -0.15 and 
-                  price < ema50_12h_aligned[i]):
+            
+            # Short setup: price near weekly R1 or R3 with bearish rejection
+            near_R1 = abs(price - R1_1w_aligned[i]) < (0.5 * atr_14_aligned[i])
+            near_R3 = abs(price - R3_1w_aligned[i]) < (0.5 * atr_14_aligned[i])
+            bearish_rejection = (high_6h[i] >= max(R1_1w_aligned[i], R3_1w_aligned[i]) - 0.1 * atr_14_aligned[i]) and \
+                               (close_6h[i] < open_6h[i]) if 'open_6h' in df_6h.columns else (close_6h[i] < high_6h[i])
+            downtrend = price < ema34_1d_aligned[i]
+            
+            if ((near_R1 or near_R3) and bearish_rejection and volume_confirm and downtrend):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: CMF turns negative or ATR-based stop
-            if (cmf_aligned[i] < 0 or 
-                price < low_4h[i] - 1.5 * atr_14_aligned[i]):
+            # Long exit: price crosses below weekly S1 or ATR stop
+            if (price < S1_1w_aligned[i] - 0.5 * atr_14_aligned[i] or 
+                price < low_6h[i] - 2.0 * atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: CMF turns positive or ATR-based stop
-            if (cmf_aligned[i] > 0 or 
-                price > high_4h[i] + 1.5 * atr_14_aligned[i]):
+            # Short exit: price crosses above weekly R1 or ATR stop
+            if (price > R1_1w_aligned[i] + 0.5 * atr_14_aligned[i] or 
+                price > high_6h[i] + 2.0 * atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_ChaikinMoneyFlow"
-timeframe = "4h"
+name = "6h_1W_SR1_R3_S3_Fade"
+timeframe = "6h"
 leverage = 1.0
