@@ -1,10 +1,14 @@
-#!/usr/bin/env python3
+# 4h_1d_Camarilla_R1S1_Breakout_Volume_ADXFilter_v5
+# Hypothesis: Combines daily Camarilla pivot breakouts (R1/S1) with volume confirmation and ADX filter to capture strong trending moves.
+# Uses 4h timeframe to reduce trade frequency vs lower timeframes, targeting 20-50 trades/year.
+# Should work in both bull and bear markets by capturing breakouts in trending regimes (ADX > 25) with volume validation.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_ADXFilter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_ADXFilter_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,17 +44,17 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === Volume Confirmation (12h) ===
+    # === Volume Confirmation (4h) ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === ADX Filter (12h) ===
+    # === ADX Filter (4h) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
