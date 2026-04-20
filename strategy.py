@@ -3,74 +3,34 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Adaptive_Range_Breakout_Volume_Confirm"
-timeframe = "12h"
+name = "1h_4h_1d_Trend_Follow_Volume_Confirmation_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
+    # Get 4h data ONCE before loop for trend
+    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data ONCE before loop for volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    
+    if len(df_4h) < 2 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily ADX for trend strength (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4h EMA21 for trend direction
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Directional Movement
-    up_move = np.diff(high_1d)
-    down_move = -np.diff(low_1d)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        smoothed = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return smoothed
-        smoothed[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
-        return smoothed
-    
-    atr_1d = smooth_wilder(tr, 14)
-    plus_di_1d = 100 * smooth_wilder(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * smooth_wilder(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = smooth_wilder(dx_1d, 14)
-    
-    # Daily range for range calculation
-    daily_range = high_1d - low_1d
-    range_ma = np.full_like(daily_range, np.nan)
-    for i in range(19, len(daily_range)):
-        range_ma[i] = np.mean(daily_range[i-19:i+1])
-    
-    # Align ADX and range MA to 12h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    range_ma_aligned = align_htf_to_ltf(prices, df_1d, range_ma)
-    
-    # Daily average volume for spike detection
+    # 1d average volume (20-period) for volume confirmation
     vol_1d = df_1d['volume'].values
-    vol_avg_1d = np.full_like(vol_1d, np.nan)
-    for i in range(19, len(vol_1d)):
-        vol_avg_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Calculate ATR for stop loss (14-period on 12h data)
+    # 1h ATR for exit (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -79,87 +39,75 @@ def generate_signals(prices):
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr = np.full_like(tr, np.nan)
-    for i in range(13, len(tr)):
-        atr[i] = np.nanmean(tr[i-13:i+1])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 20  # Need enough data for indicators
+    # Pre-compute hour filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Only trade when ADX < 25 (range-bound market)
-        if np.isnan(adx_1d_aligned[i]) or adx_1d_aligned[i] >= 25:
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.0
             continue
         
-        # Get previous completed daily bar for range calculation
-        if len(df_1d) < 2:
-            continue
-            
-        # Calculate daily range-based levels for previous day
-        j = len(df_1d) - 1  # Previous completed day
-        if j < 1:
-            continue
-            
-        prev_high = high_1d[j-1]
-        prev_low = low_1d[j-1]
-        prev_close = close_1d[j-1]
-        prev_range = prev_high - prev_low
-        
-        if prev_range <= 0:
-            continue
-            
-        # Adaptive range levels: 38.2% and 61.8% of range from low
-        range_level_low = prev_low + 0.382 * prev_range
-        range_level_high = prev_low + 0.618 * prev_range
-        
+        # Get aligned values
+        ema_trend = ema_21_4h_aligned[i]
+        vol_avg = vol_avg_1d_aligned[i]
+        current_atr = atr[i]
         current_close = prices['close'].iloc[i]
         current_volume = prices['volume'].iloc[i]
-        current_atr = atr[i]
+        
+        # Skip if any value is NaN
+        if np.isnan(ema_trend) or np.isnan(vol_avg) or np.isnan(current_atr):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         # Volume spike: current volume > 1.5x daily average volume
-        vol_spike = (not np.isnan(vol_avg_1d_aligned[i]) and 
-                     current_volume > 1.5 * vol_avg_1d_aligned[i])
+        vol_spike = current_volume > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price breaks above 61.8% level with volume spike in ranging market
-            if (current_close > range_level_high and vol_spike):
-                signals[i] = 0.25
+            # Long: price above 4h EMA21 with volume spike
+            if current_close > ema_trend and vol_spike:
+                signals[i] = 0.20
                 position = 1
                 entry_price = current_close
-            # Short: price breaks below 38.2% level with volume spike in ranging market
-            elif (current_close < range_level_low and vol_spike):
-                signals[i] = -0.25
+            # Short: price below 4h EMA21 with volume spike
+            elif current_close < ema_trend and vol_spike:
+                signals[i] = -0.20
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price breaks below 38.2% level or ATR stop loss
-            if current_close < range_level_low:
+            # Long exit: price below 4h EMA21 or ATR stop loss
+            if current_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
-            elif current_atr > 0 and current_close < entry_price - 2.0 * current_atr:
+            elif current_close < entry_price - 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price breaks above 61.8% level or ATR stop loss
-            if current_close > range_level_high:
+            # Short exit: price above 4h EMA21 or ATR stop loss
+            if current_close > ema_trend:
                 signals[i] = 0.0
                 position = 0
-            elif current_atr > 0 and current_close > entry_price + 2.0 * current_atr:
+            elif current_close > entry_price + 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
