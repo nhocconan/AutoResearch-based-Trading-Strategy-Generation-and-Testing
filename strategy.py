@@ -5,74 +5,70 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # 20-period EMA on daily close
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Load 4h data for entry signals
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # 20-period SMA for volume average
-    vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
+    # Donchian(20) channels on 4h
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # 14-period ATR on daily
-    tr = np.maximum(high_1d - low_1d, 
-                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                               np.abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # 4h volume confirmation
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(vol_sma_20_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(vol_ma_20_4h[i]) or 
+            np.isnan(close_4h[i]) or np.isnan(volume_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1d[i]
-        vol = volume_1d[i]
-        atr = atr_14_1d_aligned[i]
+        price = close_4h[i]
+        vol = volume_4h[i]
         
         if position == 0:
-            # Long: price above EMA20, volume spike, price near daily low (mean reversion in uptrend)
-            if (price > ema_20_1d_aligned[i] and 
-                vol > 2.0 * vol_sma_20_1d_aligned[i] and
-                price < low_1d[i] + 0.5 * atr):  # within 0.5 ATR of daily low
+            # Long: breakout above 20-period high, above 12h EMA34, volume confirmation
+            if (price > highest_20[i] and 
+                price > ema_34_12h_aligned[i] and 
+                vol > 1.5 * vol_ma_20_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA20, volume spike, price near daily high (mean reversion in downtrend)
-            elif (price < ema_20_1d_aligned[i] and 
-                  vol > 2.0 * vol_sma_20_1d_aligned[i] and
-                  price > high_1d[i] - 0.5 * atr):  # within 0.5 ATR of daily high
+            # Short: breakdown below 20-period low, below 12h EMA34, volume confirmation
+            elif (price < lowest_20[i] and 
+                  price < ema_34_12h_aligned[i] and 
+                  vol > 1.5 * vol_ma_20_4h[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below EMA20 or reaches daily high (take profit)
-            if price < ema_20_1d_aligned[i] or price >= high_1d[i]:
+            # Long exit: breakdown below 20-period low or below 12h EMA34
+            if price < lowest_20[i] or price < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA20 or reaches daily low (take profit)
-            if price > ema_20_1d_aligned[i] or price <= low_1d[i]:
+            # Short exit: breakout above 20-period high or above 12h EMA34
+            if price > highest_20[i] or price > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,6 +76,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA20_VolumeSpike_MeanReversion"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA34_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
