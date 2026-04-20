@@ -1,11 +1,3 @@
-# US30 Index - 6h Pivot Confluence Strategy
-# Strategy Type: Pivot Point Breakout with Volume Confirmation
-# Timeframe: 6h
-# Hypothesis: Combines daily pivot points with volume surge and trend alignment to capture
-# institutional breakouts. Works in bull/bear markets by trading breakouts in direction
-# of higher timeframe trend. Uses weekly trend filter to avoid counter-trend trades.
-# Target: 25-40 trades/year (100-160 over 4 years) with selective entries.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,66 +5,72 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate daily pivot points (standard formula)
+    # Calculate 14-period ADX for trend strength
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot Point = (High + Low + Close) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Resistance 1 = (2 * PP) - Low
-    r1 = (2 * pp) - low_1d
-    # Support 1 = (2 * PP) - High
-    s1 = (2 * pp) - high_1d
-    # Resistance 2 = PP + (High - Low)
-    r2 = pp + (high_1d - low_1d)
-    # Support 2 = PP - (High - Low)
-    s2 = pp - (high_1d - low_1d)
-    # Resistance 3 = High + 2*(PP - Low)
-    r3 = high_1d + 2 * (pp - low_1d)
-    # Support 3 = Low - 2*(High - PP)
-    s3 = low_1d - 2 * (high_1d - pp)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Wilder's smoothing
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        alpha = 1.0 / period
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Volume analysis: current vs 20-period average
+    atr_1d = wilder_smooth(tr, 14)
+    di_plus_1d = wilder_smooth(dm_plus, 14)
+    di_minus_1d = wilder_smooth(dm_minus, 14)
+    
+    # Avoid division by zero
+    di_sum = di_plus_1d + di_minus_1d
+    dx = np.where(di_sum != 0, 100 * np.abs(di_plus_1d - di_minus_1d) / di_sum, 0)
+    adx_1d = wilder_smooth(dx, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 20-period Donchian channels
+    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    
+    # Calculate 20-period average volume
     volume_1d = df_1d['volume'].values
     vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
-    # Session filter: 8-20 UTC (avoid low volume periods)
-    hours = prices.index.hour
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour  # Pre-compute before loop
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Session filter
+    for i in range(100, n):
+        # Session filter: only trade 8-20 UTC
         hour = hours[i]
         if hour < 8 or hour > 20:
             if position != 0:
@@ -80,53 +78,43 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Get current values
+        # Get values
         close_val = prices['close'].iloc[i]
+        adx_val = adx_1d_aligned[i]
+        donch_high_val = donch_high_1d_aligned[i]
+        donch_low_val = donch_low_1d_aligned[i]
         vol_val = prices['volume'].iloc[i]
         vol_avg_val = vol_avg_20_aligned[i]
-        ema_trend = ema_20_1w_aligned[i]
         
-        # Skip if any critical value is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_val) or 
-            np.isnan(ema_trend)):
+        # Skip if any value is NaN
+        if (np.isnan(adx_val) or np.isnan(donch_high_val) or 
+            np.isnan(donch_low_val) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume surge filter: at least 1.5x average volume
-        volume_surge = vol_val > (vol_avg_val * 1.5)
-        
         if position == 0:
-            # Long conditions: price above weekly EMA (uptrend), 
-            # breaks above R1 with volume surge
-            if (close_val > ema_trend and 
-                close_val > r1_aligned[i] and 
-                volume_surge):
+            # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
+            if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price below weekly EMA (downtrend),
-            # breaks below S1 with volume surge
-            elif (close_val < ema_trend and 
-                  close_val < s1_aligned[i] and 
-                  volume_surge):
+            # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
+            elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below pivot point or volume dries up
-            if (close_val < pp_aligned[i] or 
-                vol_val < (vol_avg_val * 0.8)):
+            # Long exit: price breaks below Donchian low or ADX < 20 (trend weakening)
+            if close_val < donch_low_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above pivot point or volume dries up
-            if (close_val > pp_aligned[i] or 
-                vol_val < (vol_avg_val * 0.8)):
+            # Short exit: price breaks above Donchian high or ADX < 20 (trend weakening)
+            if close_val > donch_high_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -134,13 +122,13 @@ def generate_signals(prices):
     
     return signals
 
-# 6h_Pivot_Confluence_VolumeTrend
-# Uses daily pivot points (R1/S1) for entry levels
-# Requires volume surge (1.5x 20-period average) for confirmation
-# Weekly EMA(20) filter ensures trades align with higher timeframe trend
-# Session filter: 8-20 UTC to avoid low-volume Asian session
-# Exits when price returns to pivot point or volume drops below 80% of average
-# Target: 25-40 trades/year with selective, high-probability breakouts
-name = "6h_Pivot_Confluence_VolumeTrend"
-timeframe = "6h"
+# 12h_ADX_Donchian_Breakout_Volume_Session
+# Uses daily ADX for trend strength filter (ADX > 25)
+# Uses daily Donchian(20) breakouts for entry
+# Requires volume confirmation above 20-period average
+# Session filter: 8-20 UTC to avoid low-volume periods
+# Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
+# Designed for 12h timeframe with ~15-35 trades/year
+name = "12h_ADX_Donchian_Breakout_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
