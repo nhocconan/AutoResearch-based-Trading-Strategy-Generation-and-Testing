@@ -3,17 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation.
-# The Alligator (three SMAs: Jaw=13, Teeth=8, Lips=5) identifies trend absence (all lines intertwined) 
-# vs presence (lines diverging in order). Trade only when Alligator is "awake" (JAW > TEETH > LIPS for long, 
-# JAW < TEETH < LIPS for short) and price is outside the Alligator's mouth. 
-# 1d EMA200 provides higher-timeframe trend filter to avoid counter-trend trades. 
-# Volume confirmation ensures institutional participation. 
-# This should work in both bull and bear markets by following higher timeframe trend and avoiding range-bound periods.
-# Target: 20-40 trades per year to minimize fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+# Donchian breakout captures breakouts in trending markets, EMA200 filters counter-trend trades,
+# volume confirmation ensures institutional participation. Target: 15-25 trades per year to minimize fee drag.
 
-name = "4h_Alligator_1dEMA200_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA200_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,17 +26,17 @@ def generate_signals(prices):
     ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # === Williams Alligator on 4h (Jaw=13, Teeth=8, Lips=5) ===
-    close = prices['close'].values
+    # === 12h Donchian(20) channels ===
     high = prices['high'].values
     low = prices['low'].values
-    median_price = (high + low) / 2  # Typical price for Alligator
+    close = prices['close'].values
     
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Upper band: 20-period high
+    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-period low
+    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Volume confirmation ===
+    # === 12h Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
@@ -50,50 +45,45 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):  # Start after Alligator warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Get values
         close_val = prices['close'].iloc[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
         ema_val = ema_200_aligned[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(jaw_val) or np.isnan(teeth_val) or 
-            np.isnan(lips_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(upper_val) or np.isnan(lower_val) or np.isnan(ema_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Alligator awake and aligned for long: JAW > TEETH > LIPS (uptrend)
-            # Price above Alligator's mouth (above JAW) with volume confirmation
-            if jaw_val > teeth_val and teeth_val > lips_val and close_val > jaw_val and vol_ratio_val > 1.5:
+            # Long breakout: price breaks above upper band with uptrend filter and volume
+            if close_val > upper_val and close_val > ema_val and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Alligator awake and aligned for short: JAW < TEETH < LIPS (downtrend)
-            # Price below Alligator's mouth (below LIPS) with volume confirmation
-            elif jaw_val < teeth_val and teeth_val < lips_val and close_val < lips_val and vol_ratio_val > 1.5:
+            # Short breakout: price breaks below lower band with downtrend filter and volume
+            elif close_val < lower_val and close_val < ema_val and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         
         elif position == 1:
-            # Long exit: Alligator sleeping (lines intertwine) or trend reversal
-            # Exit when JAW <= TEETH or price closes below TEETH
-            if jaw_val <= teeth_val or close_val < teeth_val:
+            # Long exit: price breaks below lower band or trend reversal
+            if close_val < lower_val or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Alligator sleeping (lines intertwine) or trend reversal
-            # Exit when JAW >= TEETH or price closes above TEETH
-            if jaw_val >= teeth_val or close_val > teeth_val:
+            # Short exit: price breaks above upper band or trend reversal
+            if close_val > upper_val or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
