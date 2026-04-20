@@ -32,11 +32,11 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # 6h price and volume data
+    # 12h price and volume data
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h volume filter (current / 20-period average)
+    # 12h volume filter (current / 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     
@@ -56,7 +56,7 @@ def generate_signals(prices):
         ema_trend_short = ema_20_1d_aligned[i]
         ema_trend_long = ema_50_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
-        vol_ratio_6h = vol_ratio[i]
+        vol_ratio_12h = vol_ratio[i]
         
         # Multi-timeframe trend alignment: price above both EMAs for uptrend
         trend_up = (price > ema_trend_short) and (ema_trend_short > ema_trend_long)
@@ -68,7 +68,7 @@ def generate_signals(prices):
         vol_filter = (atr > 0.5 * atr_ma_20) and (atr < 3.0 * atr_ma_20)
         
         # Volume filter: require above-average volume
-        vol_filter = vol_filter and (vol_ratio_6h > 1.3)
+        vol_filter = vol_filter and (vol_ratio_12h > 1.3)
         
         if position == 0:
             # Enter long in strong uptrend with volume
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_EMA20_50_Trend_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_1d_EMA20_50_Trend_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
