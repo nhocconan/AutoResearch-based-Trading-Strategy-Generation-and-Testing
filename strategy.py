@@ -1,23 +1,22 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_Pivot_Confluence_Strategy_v1
-Concept: Use 1d pivot points as structural support/resistance, combine with 6h price action and volume confirmation.
-- Long: Price breaks above R1 with volume > 1.5x average AND closes in upper half of candle
-- Short: Price breaks below S1 with volume > 1.5x average AND closes in lower half of candle
-- Exit: Price returns to pivot point (PP) or opposite extreme (S1/R1)
-- Timeframe: 6h (primary), HTF: 1d for pivot calculation
-- Position sizing: 0.25 (discrete to minimize fee churn)
-- Target: 50-150 trades over 4 years (12-37/year) - avoids fee drag while capturing meaningful moves
-- Works in bull/bear: Pivots adapt to market structure, volume filters avoid false breakouts
+1h_RSI_Trend_With_Volume_Filter_v1
+Concept: Use 4h EMA for trend direction, 1h RSI for entry timing, and volume spike for confirmation.
+- Long: Price above 4h EMA20 AND RSI(14) crosses above 50 AND volume > 1.5x average
+- Short: Price below 4h EMA20 AND RSI(14) crosses below 50 AND volume > 1.5x average
+- Exit: RSI crosses back to 50 or opposite extreme (70/30)
+- Timeframe: 1h (primary), HTF: 4h for EMA trend
+- Position sizing: 0.20 (discrete to minimize fee churn)
+- Target: 60-150 trades over 4 years (15-37/year) - avoids fee decay
+- Works in bull/bear: EMA filter adapts to trend, RSI captures momentum, volume avoids false signals
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Pivot_Confluence_Strategy_v1"
-timeframe = "6h"
+name = "1h_RSI_Trend_With_Volume_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,64 +24,51 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # === 1d: Calculate Pivot Points (Standard) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 4h: EMA20 for trend ===
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Pivot Point (PP) = (H + L + C) / 3
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*PP - L
-    r1_1d = 2 * pp_1d - low_1d
-    # S1 = 2*PP - H
-    s1_1d = 2 * pp_1d - high_1d
-    # R2 = PP + (H - L)
-    r2_1d = pp_1d + (high_1d - low_1d)
-    # S2 = PP - (H - L)
-    s2_1d = pp_1d - (high_1d - low_1d)
-    
-    # Align pivot levels to 6h
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # === 6h: Indicators ===
+    # === 1h: Indicators ===
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
+    
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     # Volume: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(30, 20)  # Ensure enough data for volume MA
+    start_idx = max(30, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Get values
-        pp_val = pp_1d_aligned[i]
-        r1_val = r1_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
-        r2_val = r2_1d_aligned[i]
-        s2_val = s2_1d_aligned[i]
+        ema_trend = ema_4h_aligned[i]
+        rsi_val = rsi[i]
+        rsi_prev = rsi[i-1] if i > 0 else 50
         current_vol_ma = vol_ma[i]
         current_volume = volume[i]
         current_close = close[i]
-        current_high = high[i]
-        current_low = low[i]
         
         # Skip if any value is NaN
-        if (np.isnan(pp_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
+        if (np.isnan(ema_trend) or np.isnan(rsi_val) or 
             np.isnan(current_vol_ma)):
             if position != 0:
                 signals[i] = 0.0
@@ -92,41 +78,34 @@ def generate_signals(prices):
         # Volume condition: current volume > 1.5x 20-period average
         vol_condition = current_volume > 1.5 * current_vol_ma
         
-        # Price position relative to candle
-        candle_range = current_high - current_low
-        if candle_range > 0:
-            close_position = (current_close - current_low) / candle_range  # 0=bottom, 1=top
-        else:
-            close_position = 0.5  # doji
-        
         if position == 0:
-            # Long: break above R1 with volume and strong close
-            if (current_close > r1_val and vol_condition and 
-                close_position > 0.6):  # closed in upper 40% of candle
-                signals[i] = 0.25
+            # Long: above EMA, RSI crosses above 50, volume confirmation
+            if (current_close > ema_trend and 
+                rsi_prev < 50 and rsi_val >= 50 and 
+                vol_condition):
+                signals[i] = 0.20
                 position = 1
-                entry_price = current_close
-            # Short: break below S1 with volume and weak close
-            elif (current_close < s1_val and vol_condition and 
-                  close_position < 0.4):  # closed in lower 40% of candle
-                signals[i] = -0.25
+            # Short: below EMA, RSI crosses below 50, volume confirmation
+            elif (current_close < ema_trend and 
+                  rsi_prev > 50 and rsi_val <= 50 and 
+                  vol_condition):
+                signals[i] = -0.20
                 position = -1
-                entry_price = current_close
         
         elif position == 1:
-            # Long exit: return to PP or break below S1
-            if current_close < pp_val or current_close < s1_val:
+            # Long exit: RSI crosses below 50 or RSI > 70 (overbought)
+            if rsi_val < 50 or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: return to PP or break above R1
-            if current_close > pp_val or current_close > r1_val:
+            # Short exit: RSI crosses above 50 or RSI < 30 (oversold)
+            if rsi_val > 50 or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
