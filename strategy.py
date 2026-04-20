@@ -15,7 +15,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily True Range and ATR(14)
+    # Daily ATR(14) - True Range calculation
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -61,33 +61,27 @@ def generate_signals(prices):
         # Volume filter: current volume must be above 20-day average
         vol_filter = vol > vol_ma_val
         
-        # Volatility filter: current ATR below 40th percentile of recent ATR (low volatility regime)
-        vol_pct = np.nanpercentile(atr_14_1d_aligned[:i+1], 40)
-        vol_filter_low = atr_val < vol_pct
-        
         if position == 0:
-            # Long: price above EMA200, volume confirmation, low volatility
-            if price > ema_200_val and vol_filter and vol_filter_low:
+            # Long: price above EMA200, volume confirmation, and low volatility
+            if price > ema_200_val and vol_filter and atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 40):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA50, volume confirmation, low volatility
-            elif price < ema_50_val and vol_filter and vol_filter_low:
+            # Short: price below EMA50, volume confirmation, and low volatility
+            elif price < ema_50_val and vol_filter and atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 40):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below EMA50 or volatility increases (above 60th percentile)
-            vol_pct_exit = np.nanpercentile(atr_14_1d_aligned[:i+1], 60)
-            if price < ema_50_val or atr_val > vol_pct_exit:
+            # Long exit: price below EMA50 or volatility spikes
+            if price < ema_50_val or atr_val > np.nanpercentile(atr_14_1d_aligned[:i+1], 60):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above EMA200 or volatility increases
-            vol_pct_exit = np.nanpercentile(atr_14_1d_aligned[:i+1], 60)
-            if price > ema_200_val or atr_val > vol_pct_exit:
+            # Short exit: price above EMA200 or volatility spikes
+            if price > ema_200_val or atr_val > np.nanpercentile(atr_14_1d_aligned[:i+1], 60):
                 signals[i] = 0.0
                 position = 0
             else:
