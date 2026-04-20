@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_R1S1_Breakout_Volume_Regime_v1"
-timeframe = "1h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Regime_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,12 +40,12 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 1h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # === 1h Volume Confirmation ===
+    # === 12h Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -81,23 +81,13 @@ def generate_signals(prices):
         else:
             chop[i] = 50  # neutral
     
-    # Align chop to 1h timeframe
+    # Align chop to 12h timeframe
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(80, n):
-        # Skip outside session
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
@@ -117,11 +107,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Break above R1 with volume confirmation in low chop (trending market)
             if close_val > r1_val and vol_ratio_val > 2.5 and chop_val < 40:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # Short: Break below S1 with volume confirmation in low chop
             elif close_val < s1_val and vol_ratio_val > 2.5 and chop_val < 40:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -130,7 +120,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Short exit: Price returns above pivot OR chop increases
@@ -138,6 +128,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
