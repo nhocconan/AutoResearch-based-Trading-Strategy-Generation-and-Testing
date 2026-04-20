@@ -3,147 +3,122 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_1d_Camarilla_R1S1_Breakout_Volume_Trend_v2"
-timeframe = "1h"
+name = "12h_1d_Choppiness_Donchian_Breakout_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 300:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Daily Close for Trend Filter ===
+    # === Daily Choppiness Index (14) for Regime Filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    sma200_1d = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
-    sma200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d)
     
-    # === Daily 4h for Camarilla Pivot Calculation ===
-    # Note: We use 4h data to calculate daily pivots (more granular than daily-only)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # ATR(14)
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Group 4h bars into days (6 bars per day)
-    # Calculate daily OHLC from 4h data
-    n_4h = len(high_4h)
-    days = n_4h // 6
-    if days < 2:
-        return np.zeros(n)
+    # Sum of true ranges over 14 periods
+    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Reshape to get daily OHLC from 4h
-    high_daily = np.max(high_4h[:days*6].reshape(days, 6), axis=1)
-    low_daily = np.min(low_4h[:days*6].reshape(days, 6), axis=1)
-    close_daily = close_4h[:days*6].reshape(days, 6)[:, -1]  # Last 4h bar of each day
+    # Highest high and lowest low over 14 periods
+    hh14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_daily, 1)
-    prev_low = np.roll(low_daily, 1)
-    prev_close = np.roll(close_daily, 1)
+    # Choppiness Index
+    chop = 100 * np.log10(sum_tr14 / (atr14 * 14)) / np.log10(14)
+    chop = np.where((hh14 - ll14) > 0, chop, 50)  # Avoid division by zero
+    chop = np.nan_to_num(chop, nan=50.0)
     
-    # Pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Camarilla levels
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
+    # === Daily Donchian Channel (20) for Breakout Signals ===
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Expand to 4h resolution (each day's levels apply to its 6 bars)
-    r1_4h = np.repeat(r1, 6)
-    s1_4h = np.repeat(s1, 6)
-    pivot_4h = np.repeat(pivot, 6)
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Align 4h data to 1h
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    pivot_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-    
-    # === 1h Data: Price, Volume, and Trend ===
+    # === 12h Price, Volume, and ATR for Position Sizing ===
     close = prices['close'].values
-    volume = prices['volume'].values
+    volume = volumes = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Volume ratio with proper initialization
+    # ATR(20) for 12h timeframe
+    tr_12h = np.maximum(high - low, np.maximum(np.abs(high - np.concatenate([[close[0]], close[:-1]])), np.abs(low - np.concatenate([[close[0]], close[:-1]]))))
+    atr_12h = pd.Series(tr_12h).rolling(window=20, min_periods=20).mean().values
+    
+    # Volume ratio (20-period)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma20 > 0, volume / vol_ma20, 0)
-    
-    # 1h SMA50 trend filter
-    close_series = pd.Series(close)
-    sma50 = close_series.rolling(window=50, min_periods=50).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
-        # Skip outside session
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
+    for i in range(50, n):
         # Get values
         close_val = close[i]
         vol_ratio_val = vol_ratio[i]
-        sma50_val = sma50[i]
-        sma200_1d_val = sma200_1d_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        pivot_val = pivot_aligned[i]
+        chop_val = chop_aligned[i]
+        high_20_val = high_20_aligned[i]
+        low_20_val = low_20_aligned[i]
+        atr_val = atr_12h[i]
         
-        # Skip if any value is invalid
-        if (np.isnan(vol_ratio_val) or np.isnan(sma50_val) or np.isnan(sma200_1d_val) or 
-            np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(pivot_val)):
+        # Skip if any value is NaN
+        if (np.isnan(vol_ratio_val) or np.isnan(chop_val) or 
+            np.isnan(high_20_val) or np.isnan(low_20_val) or np.isnan(atr_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and uptrend (1h & daily)
-            if (close_val > r1_val and 
-                vol_ratio_val > 2.0 and 
-                close_val > sma50_val and
-                close_val > sma200_1d_val):
-                signals[i] = 0.20
+            # Long: Price breaks above Donchian high in trending market (chop < 61.8) with volume
+            if (close_val > high_20_val and 
+                chop_val < 61.8 and 
+                vol_ratio_val > 1.5):
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and downtrend (1h & daily)
-            elif (close_val < s1_val and 
-                  vol_ratio_val > 2.0 and 
-                  close_val < sma50_val and
-                  close_val < sma200_1d_val):
-                signals[i] = -0.20
+            # Short: Price breaks below Donchian low in trending market (chop < 61.8) with volume
+            elif (close_val < low_20_val and 
+                  chop_val < 61.8 and 
+                  vol_ratio_val > 1.5):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot or volume dries up
-            if close_val < pivot_val or vol_ratio_val < 0.8:
+            # Long exit: Price returns below Donchian low or chop increases (range) or volume dries up
+            if (close_val < low_20_val or 
+                chop_val > 61.8 or 
+                vol_ratio_val < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot or volume dries up
-            if close_val > pivot_val or vol_ratio_val < 0.8:
+            # Short exit: Price returns above Donchian high or chop increases (range) or volume dries up
+            if (close_val > high_20_val or 
+                chop_val > 61.8 or 
+                vol_ratio_val < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
