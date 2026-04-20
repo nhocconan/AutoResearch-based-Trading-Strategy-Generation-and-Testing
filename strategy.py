@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_12h_Camarilla_R1S1_Breakout_VolumeFilter
-Hypothesis: Trade Camarilla pivot R1/S1 breakouts on 6h with 12h volume confirmation.
-Long when price breaks above R1 with volume spike; short when breaks below S1 with volume spike.
-Camarilla levels provide intraday support/resistance. Volume filter ensures institutional participation.
-Works in bull/bear: breaks indicate momentum continuation, volume confirms validity.
-Target: 60-120 total trades over 4 years (15-30/year) with position size 0.25.
+4h_KAMA_Trend_RSI_1d_Chop_Filter
+Hypothesis: KAMA trend direction on 4h + RSI momentum filter + 1d chop regime filter.
+Long when KAMA trending up, RSI > 50, and 1d chop > 61.8 (ranging market).
+Short when KAMA trending down, RSI < 50, and 1d chop > 61.8.
+Uses chop to avoid trending markets where mean reversion fails.
+Works in bull/bear: adapts to ranging conditions with mean reversion logic.
+Target: 80-150 total trades over 4 years (20-38/year) with position size 0.25.
 """
 
-name = "6h_12h_Camarilla_R1S1_Breakout_VolumeFilter"
-timeframe = "6h"
+name = "4h_KAMA_Trend_RSI_1d_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,74 +22,143 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Get 1d data ONCE before loop for chop regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h volume average for spike detection
-    vol_12h = df_12h['volume'].values
-    vol_avg_12h = np.full(len(vol_12h), np.nan)
-    for i in range(len(vol_12h)):
-        if i >= 19:  # 20-period average
-            vol_avg_12h[i] = np.mean(vol_12h[i-19:i+1])
-    vol_avg_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
+    # Calculate 1d chopiness index (EHLERS)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    atr_1d = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        atr_1d[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
+    
+    # True range sum over 14 periods
+    tr_sum_14 = np.zeros(len(close_1d))
+    for i in range(len(close_1d)):
+        if i >= 13:
+            tr_sum_14[i] = np.sum(atr_1d[i-13:i+1])
+    
+    # Highest high and lowest low over 14 periods
+    hh_14 = np.zeros(len(close_1d))
+    ll_14 = np.zeros(len(close_1d))
+    for i in range(len(close_1d)):
+        if i >= 13:
+            hh_14[i] = np.max(high_1d[i-13:i+1])
+            ll_14[i] = np.min(low_1d[i-13:i+1])
+    
+    # Chopiness index
+    chop_1d = np.full(len(close_1d), 50.0)
+    for i in range(len(close_1d)):
+        if i >= 13 and tr_sum_14[i] > 0 and hh_14[i] > ll_14[i]:
+            log_val = np.log10(tr_sum_14[i] / (hh_14[i] - ll_14[i]))
+            chop_1d[i] = 100 * log_val / np.log10(14)
+    
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Calculate KAMA on 4h
+    close = prices['close'].values
+    direction = np.abs(np.diff(close, n=9))  # 9-period net change
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) > 1 else np.zeros(len(close))
+    volatility = np.concatenate([[np.nan], volatility[:-1]])  # shift for alignment
+    
+    er = np.zeros(len(close))
+    for i in range(len(close)):
+        if i >= 9 and not np.isnan(volatility[i]) and volatility[i] > 0:
+            er[i] = direction[i] / volatility[i]
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    sc = np.zeros(len(close))
+    for i in range(len(close)):
+        if i >= 9:
+            sc[i] = (er[i] * (0.6667 - 0.0645) + 0.0645) ** 2
+        else:
+            sc[i] = 0
+    
+    kama = np.zeros(len(close))
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Calculate RSI on 4h
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(len(close))
+    avg_loss = np.zeros(len(close))
+    for i in range(len(close)):
+        if i >= 14:
+            if i == 14:
+                avg_gain[i] = np.mean(gain[1:15])
+                avg_loss[i] = np.mean(loss[1:15])
+            else:
+                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rsi = np.zeros(len(close))
+    for i in range(len(close)):
+        if i >= 14 and avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+        elif i >= 14 and avg_loss[i] == 0:
+            rsi[i] = 100
+        else:
+            rsi[i] = 50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for calculations (40*6h=10 days)
+    start_idx = max(30, 20)  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        # Need at least 1 day of prior data for Camarilla calculation (4 bars of 6h)
-        if i < 4:
+        # Skip if chop data not available
+        if np.isnan(chop_1d_aligned[i]):
             continue
             
-        # Calculate Camarilla levels using prior day's OHLC
-        # Look back 4 bars (4*6h = 24h) to get prior day's data
-        prior_day_high = np.max(prices['high'].iloc[i-4:i])
-        prior_day_low = np.min(prices['low'].iloc[i-4:i])
-        prior_day_close = prices['close'].iloc[i-1]  # Previous 6h bar close
-        
-        # Calculate Camarilla levels
-        range_val = prior_day_high - prior_day_low
-        if range_val <= 0:
+        # Only trade in ranging markets (chop > 61.8)
+        if chop_1d_aligned[i] <= 61.8:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
-            
-        # Camarilla R1 and S1 levels
-        r1 = prior_day_close + (range_val * 1.1 / 12)
-        s1 = prior_day_close - (range_val * 1.1 / 12)
         
-        current_close = prices['close'].iloc[i]
-        current_volume = prices['volume'].iloc[i]
-        
-        # Volume spike: current volume > 1.5x 12h average volume
-        vol_spike = (not np.isnan(vol_avg_12h_aligned[i]) and 
-                     current_volume > 1.5 * vol_avg_12h_aligned[i])
-        
+        # In ranging market: mean reversion at extremes
         if position == 0:
-            # Long: price breaks above R1 with volume spike
-            if current_close > r1 and vol_spike:
+            # Long when KAMA trending up and RSI > 50 (bullish momentum)
+            if kama[i] > kama[i-1] and rsi[i] > 50:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike
-            elif current_close < s1 and vol_spike:
+            # Short when KAMA trending down and RSI < 50 (bearish momentum)
+            elif kama[i] < kama[i-1] and rsi[i] < 50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or volume dries up
-            if current_close < s1 or (not np.isnan(vol_avg_12h_aligned[i]) and 
-                                    current_volume < 0.5 * vol_avg_12h_aligned[i]):
+            # Long exit: KAMA turns down or RSI < 50
+            if kama[i] < kama[i-1] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or volume dries up
-            if current_close > r1 or (not np.isnan(vol_avg_12h_aligned[i]) and 
-                                    current_volume < 0.5 * vol_avg_12h_aligned[i]):
+            # Short exit: KAMA turns up or RSI > 50
+            if kama[i] > kama[i-1] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
