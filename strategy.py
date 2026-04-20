@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Strategy: 12h_1d_Camarilla_R1S1_Breakout_Volume_RSIFilter_v1
-# Hypothesis: Breakout above daily Camarilla R1 or below S1 with volume confirmation and daily RSI filter on 12h timeframe.
-# Uses 12h bars for entries, filtering by daily RSI to avoid overbought/oversold extremes.
-# Volume > 2x 20-period MA confirms institutional interest. Designed for 12-37 trades/year to minimize fee drag.
-# Works in both bull and bear markets by using RSI filter to avoid extremes and volume confirmation for validity.
+# Strategy: 6h_12h_Pivot_R2S2_Breakout_Volume_ATRFilter_v1
+# Hypothesis: Breakout above 12h pivot R2 or below S2 with volume confirmation and ATR-based volatility filter.
+# Uses 6h candles for entries, filtered by 12h pivot levels and volume > 2x 20-period MA.
+# ATR filter ensures we only trade when volatility is sufficient to avoid whipsaws in low-volatility periods.
+# Designed for 15-35 trades/year to minimize fee drag and work in both bull and bear markets.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,86 +13,87 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for HTF analysis (RSI, pivot levels)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # 1d RSI(14) for filter
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14 = np.where(np.isfinite(rsi_14), rsi_14, 100)  # Replace inf/-inf with 100
-    rsi_14 = np.nan_to_num(rsi_14, nan=100.0)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    
-    # Daily Camarilla pivot levels
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    R1 = pivot_1d + (range_1d * 1.1 / 12)
-    S1 = pivot_1d - (range_1d * 1.1 / 12)
-    
-    # Align 1d indicators to 12h timeframe
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Load 12h data for entry timing, volume
+    # Load 12h data for pivot levels and ATR
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
     
-    # Volume spike detection (20-period on 12h)
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # 12h ATR(14) for volatility filter
+    high_low = high_12h - low_12h
+    high_close = np.abs(high_12h - np.roll(close_12h, 1))
+    low_close = np.abs(low_12h - np.roll(close_12h, 1))
+    high_close[0] = high_low[0]
+    low_close[0] = high_low[0]
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 12h Pivot points (R2, S2)
+    pivot_12h = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    R2 = pivot_12h + (range_12h * 1.1 / 6)  # R2 = pivot + 1.1 * range / 6
+    S2 = pivot_12h - (range_12h * 1.1 / 6)  # S2 = pivot - 1.1 * range / 6
+    
+    # Align 12h indicators to 6h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_12h, atr_14)
+    R2_aligned = align_htf_to_ltf(prices, df_12h, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_12h, S2)
+    
+    # Load 6h data for entry timing and volume
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # Volume spike detection (20-period on 6h)
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(rsi_14_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(R2_aligned[i]) or 
+            np.isnan(S2_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_12h[i]
-        vol = volume_12h[i]
+        price = close_6h[i]
+        vol = volume_6h[i]
+        atr = atr_14_aligned[i]
+        
+        # ATR filter: only trade when ATR is above its 50-period MA (avoid low volatility)
+        atr_ma_50 = pd.Series(atr_14_aligned).rolling(window=50, min_periods=50).mean()[i]
+        if np.isnan(atr_ma_50) or atr < atr_ma_50:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Long: price breaks above R1, RSI not overbought (<70), with volume confirmation
-            if (price > R1_aligned[i] and 
-                rsi_14_aligned[i] < 70 and 
-                vol > 2.0 * vol_ma_20_aligned[i]):
+            # Long: price breaks above R2, with volume confirmation
+            if price > R2_aligned[i] and vol > 2.0 * vol_ma_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, RSI not oversold (>30), with volume confirmation
-            elif (price < S1_aligned[i] and 
-                  rsi_14_aligned[i] > 30 and 
-                  vol > 2.0 * vol_ma_20_aligned[i]):
+            # Short: price breaks below S2, with volume confirmation
+            elif price < S2_aligned[i] and vol > 2.0 * vol_ma_20[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1
-            if price < S1_aligned[i]:
+            # Long exit: price breaks below S2
+            if price < S2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1
-            if price > R1_aligned[i]:
+            # Short exit: price breaks above R2
+            if price > R2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_RSIFilter_v1"
-timeframe = "12h"
+name = "6h_12h_Pivot_R2S2_Breakout_Volume_ATRFilter_v1"
+timeframe = "6h"
 leverage = 1.0
