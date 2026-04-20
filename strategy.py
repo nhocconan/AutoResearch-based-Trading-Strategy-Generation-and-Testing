@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h trend filter (EMA50) and volume confirmation.
-# The 12h EMA50 provides intermediate-term trend direction to avoid counter-trend trades.
-# Donchian(20) breakout captures momentum, volume confirms institutional interest.
-# This combination should work in both bull and bear markets by following the higher timeframe trend.
-# Target: 10-20 trades per year to minimize fee drag (50-80 total over 4 years).
+# Hypothesis: 4h Williams Alligator (Jaw/Teeth/Lips) with 1d trend filter and volume confirmation.
+# The Alligator uses SMAs (13,8,5) to identify trends: when aligned (Lips > Teeth > Jaw) = uptrend,
+# when reversed (Lips < Teeth < Jaw) = downtrend. Combined with 1d EMA200 for higher timeframe trend
+# and volume confirmation to filter false signals. Works in both bull/bear by following higher timeframe trend.
+# Target: 20-40 trades per year to minimize fee drag.
 
-name = "6h_Donchian20_12hEMA50_Volume"
-timeframe = "6h"
+name = "4h_Alligator_1dEMA200_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,25 +18,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for EMA50 trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data ONCE before loop for EMA200 trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 12h EMA50 for trend direction ===
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # === 1d EMA200 for trend direction ===
+    close_1d = df_1d['close'].values
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # === 6h Donchian channels (20-period) ===
+    # === 4h Williams Alligator ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    median_price = (high + low) / 2  # Typical price for Alligator
     
-    # Calculate rolling max/min for Donchian channels
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Jaw (13-period SMA), Teeth (8-period SMA), Lips (5-period SMA)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
     
-    # === 6h Volume confirmation ===
+    # === 4h Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
@@ -48,41 +51,42 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        ema_val = ema_50_aligned[i]
-        upper_channel = high_max[i]
-        lower_channel = low_min[i]
+        ema_val = ema_200_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(upper_channel) or np.isnan(lower_channel) or np.isnan(vol_ratio_val)):
+        if (np.isnan(ema_val) or np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper + uptrend (price > EMA50) + volume spike
-            if close_val > upper_channel and close_val > ema_val and vol_ratio_val > 1.5:
+            # Long: Alligator aligned up (Lips > Teeth > Jaw) + price > EMA200 + volume spike
+            if lips_val > teeth_val and teeth_val > jaw_val and close_val > ema_val and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short: price breaks below Donchian lower + downtrend (price < EMA50) + volume spike
-            elif close_val < lower_channel and close_val < ema_val and vol_ratio_val > 1.5:
+            # Short: Alligator aligned down (Lips < Teeth < Jaw) + price < EMA200 + volume spike
+            elif lips_val < teeth_val and teeth_val < jaw_val and close_val < ema_val and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         
         elif position == 1:
-            # Long exit: price breaks below Donchian lower or trend reversal
-            if close_val < lower_channel or close_val < ema_val:
+            # Long exit: Alligator alignment breaks or trend reversal
+            if not (lips_val > teeth_val and teeth_val > jaw_val) or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian upper or trend reversal
-            if close_val > upper_channel or close_val > ema_val:
+            # Short exit: Alligator alignment breaks or trend reversal
+            if not (lips_val < teeth_val and teeth_val < jaw_val) or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
