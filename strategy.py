@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation
-# Hypothesis: 4h breakouts above 1d Camarilla R1 or below S1 with volume confirmation capture institutional interest.
-# Works in both bull and bear markets: R1 breakouts for bull continuation, S1 breaks for bear continuation.
-# Volume filter reduces false breakouts. Uses 4h timeframe with 1d HTF pivot levels.
-# Target: 20-50 trades/year to stay under fee drag limits.
+# 12h_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation
+# Hypothesis: 12h Camarilla pivot levels (R1, S1) derived from 1d OHLC provide institutional support/resistance.
+# Breakout above R1 or below S1 with volume confirmation signals institutional interest.
+# In bull markets: R1 breakouts lead to continuation. In bear markets: S1 breaks lead to continuation.
+# Volume confirmation filters false breakouts. Works in both regimes via directional breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "4h_1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,6 +30,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous day's OHLC
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Where C, H, L are close, high, low of previous day
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -37,12 +40,13 @@ def generate_signals(prices):
     prev_close = np.roll(close_1d, 1)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
+    # First value will be invalid (no previous day), handled by alignment
     
     # Calculate Camarilla R1 and S1
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align to 4h timeframe (waits for 1d bar to close)
+    # Align to 12h timeframe (waits for 1d bar to close)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -73,7 +77,7 @@ def generate_signals(prices):
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 (reversal)
+            # Long: exit if price breaks below S1 (reversal) or loss of momentum
             if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -81,7 +85,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 (reversal)
+            # Short: exit if price breaks above R1 (reversal) or loss of momentum
             if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
