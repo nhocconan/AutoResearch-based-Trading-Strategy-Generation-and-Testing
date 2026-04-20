@@ -32,7 +32,7 @@ def generate_signals(prices):
     ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
     
-    # Main timeframe data (4h)
+    # Main timeframe data (6h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -95,7 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_EMA34_Trend_VolVolatilityFilter_v2"
-timeframe = "4h"
+name = "6h_1d_EMA34_Trend_VolVolatilityFilter_v1"
+timeframe = "6h"
 leverage = 1.0
-# %%
