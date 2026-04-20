@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 48:
         return np.zeros(n)
     
     # Load daily data for pivot points and ATR
@@ -19,7 +19,7 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align to 4h (previous day's levels available at 4h open)
+    # Align to 1h (previous day's levels available at 1h open)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -34,22 +34,33 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 4h price and volume
+    # 1h price and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: 4-period average (1 day of 4h bars)
+    # Volume confirmation: 4-period average (4 hours of 1h bars)
     vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(60, n):
+    # Precompute session hours (08-20 UTC)
+    hours = prices.index.hour
+    
+    for i in range(48, n):
         # Skip if NaN in critical values
         if np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,12 +72,12 @@ def generate_signals(prices):
         if position == 0:
             # Long: break above R1 with volume and sufficient volatility
             if price > r1_1d_aligned[i] and vol > 1.5 * vol_ma[i] and atr_1d_aligned[i] > 0:
-                signals[i] = 0.15
+                signals[i] = 0.20
                 position = 1
                 entry_price = price
             # Short: break below S1 with volume and sufficient volatility
             elif price < s1_1d_aligned[i] and vol > 1.5 * vol_ma[i] and atr_1d_aligned[i] > 0:
-                signals[i] = -0.15
+                signals[i] = -0.20
                 position = -1
                 entry_price = price
         
@@ -76,7 +87,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.15
+                signals[i] = 0.20
         
         elif position == -1:
             # Short exit: price crosses above R1 or volatility drops
@@ -84,10 +95,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.15
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_PivotPoint_R1S1_Breakout_Volume_ATRFilter_VeryTight"
-timeframe = "4h"
+name = "1h_PivotPoint_R1S1_Breakout_Volume_ATRFilter_Tight"
+timeframe = "1h"
 leverage = 1.0
