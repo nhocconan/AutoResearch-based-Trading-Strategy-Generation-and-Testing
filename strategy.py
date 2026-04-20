@@ -3,14 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_R1_S1_Breakout_Volume_Trend_v1"
-timezone = "UTC"
-timeframe = "12h"
+# Hypothesis: Weekly trend filter + Daily mean reversion at 1D support/resistance
+# Uses weekly EMA to filter direction and daily RSI for mean reversion entries.
+# Works in bull/bear by aligning with higher timeframe trend while capturing reversals.
+# Target: 15-25 trades/year with tight entry conditions to minimize fee drag.
+
+name = "1d_1w_EMA_RSI_MeanReversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
     # Get weekly data ONCE before loop
@@ -20,98 +24,81 @@ def generate_signals(prices):
     
     # === Weekly EMA Trend Filter ===
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Levels ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Daily RSI for Mean Reversion ===
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # RSI(14) calculation
+    roll_up = pd.Series(gain).rolling(window=14, min_periods=14).mean()
+    roll_down = pd.Series(loss).rolling(window=14, min_periods=14).mean()
+    rs = roll_up / roll_down.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
-    
-    # Align to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # === 12h: Price, Volume, and Trend ===
+    # Daily price data
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume ratio with proper initialization
+    # Volume filter: 20-period average
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
-    # 12h EMA50 trend filter
-    close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Get values
         close_val = close[i]
-        vol_ratio_val = vol_ratio[i]
-        ema50_val = ema50[i]
-        ema50_1w_val = ema50_1w_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        pivot_val = pivot_aligned[i]
+        rsi_val = rsi_values[i]
+        ema40_1w_val = ema40_1w_aligned[i]
+        vol_ma20_val = vol_ma20[i]
+        vol_val = volume[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(ema50_val) or np.isnan(ema50_1w_val) or 
-            np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(pivot_val)):
+        if (np.isnan(rsi_val) or np.isnan(ema40_1w_val) or 
+            np.isnan(vol_ma20_val) or vol_ma20_val == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        vol_ratio = vol_val / vol_ma20_val
+        
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and uptrend (12h & weekly)
-            if (close_val > r1_val and 
-                vol_ratio_val > 1.8 and 
-                close_val > ema50_val and
-                close_val > ema50_1w_val):
+            # Long: Uptrend (price > weekly EMA) + oversold RSI + volume confirmation
+            if (close_val > ema40_1w_val and 
+                rsi_val < 30 and 
+                vol_ratio > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and downtrend (12h & weekly)
-            elif (close_val < s1_val and 
-                  vol_ratio_val > 1.8 and 
-                  close_val < ema50_val and
-                  close_val < ema50_1w_val):
+            # Short: Downtrend (price < weekly EMA) + overbought RSI + volume confirmation
+            elif (close_val < ema40_1w_val and 
+                  rsi_val > 70 and 
+                  vol_ratio > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot or volume dries up
-            if close_val < pivot_val or vol_ratio_val < 0.7:
+            # Long exit: RSI returns to neutral or trend breaks
+            if rsi_val > 50 or close_val < ema40_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot or volume dries up
-            if close_val > pivot_val or vol_ratio_val < 0.7:
+            # Short exit: RSI returns to neutral or trend breaks
+            if rsi_val < 50 or close_val > ema40_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
