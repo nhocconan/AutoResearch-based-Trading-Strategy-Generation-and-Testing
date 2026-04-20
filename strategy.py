@@ -5,12 +5,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate 14-period RSI on 1d close
@@ -18,15 +18,12 @@ def generate_signals(prices):
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Calculate 20-period SMA on 1d close for trend filter
-    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
     
     # Calculate 14-period ATR on 1d for volatility filter
     high_1d = df_1d['high'].values
@@ -40,8 +37,8 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # ATR as SMA of TR
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ATR as EMA of TR
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Session filter: 8-20 UTC
@@ -50,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Session filter: only trade 8-20 UTC
         hour = hours[i]
         if hour < 8 or hour > 20:
@@ -62,40 +59,36 @@ def generate_signals(prices):
         # Get values
         close_val = prices['close'].iloc[i]
         rsi_val = rsi_1d_aligned[i]
-        sma_val = sma_20_1d_aligned[i]
         atr_val = atr_1d_aligned[i]
         
         # Skip if any value is NaN
-        if np.isnan(rsi_val) or np.isnan(sma_val) or np.isnan(atr_val):
+        if np.isnan(rsi_val) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility filter: require ATR > 0.5% of price
-        vol_filter = atr_val > 0.005 * close_val
-        
         if position == 0:
-            # Long: RSI oversold (<30) and price above SMA200 (uptrend filter)
-            if rsi_val < 30 and close_val > sma_val and vol_filter:
+            # Long: RSI < 30 (oversold) + volatility filter (ATR > 0.5% of price)
+            if rsi_val < 30 and atr_val > 0.005 * close_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) and price below SMA200 (downtrend filter)
-            elif rsi_val > 70 and close_val < sma_val and vol_filter:
+            # Short: RSI > 70 (overbought) + volatility filter
+            elif rsi_val > 70 and atr_val > 0.005 * close_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI overbought (>70) or price crosses below SMA
-            if rsi_val > 70 or close_val < sma_val:
+            # Long exit: RSI crosses above 50 (mean reversion)
+            if rsi_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI oversold (<30) or price crosses above SMA
-            if rsi_val < 30 or close_val > sma_val:
+            # Short exit: RSI crosses below 50 (mean reversion)
+            if rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,12 +96,12 @@ def generate_signals(prices):
     
     return signals
 
-# 4h_RSI14_1d_SMA20_TrendFilter_Session_v1
+# 12h_RSI14_1d_VolatilityFilter_Session_v1
 # Uses 1d 14-period RSI for mean reversion signals
-# Uses 1d 20-period SMA for trend filter (only trade in direction of trend)
-# Requires 1d ATR > 0.5% of price for volatility filter
+# Requires 1d ATR > 0.5% of price for volatility filter (avoids low-vol chop)
 # Session filter: 8-20 UTC to focus on active trading hours
-# Designed for 4h timeframe with ~20-40 trades/year
-name = "4h_RSI14_1d_SMA20_TrendFilter_Session_v1"
-timeframe = "4h"
+# Mean reversion: long when RSI<30, short when RSI>70, exit at RSI=50
+# Designed for 12h timeframe with ~15-30 trades/year
+name = "12h_RSI14_1d_VolatilityFilter_Session_v1"
+timeframe = "12h"
 leverage = 1.0
