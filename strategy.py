@@ -1,16 +1,10 @@
-# ANALYSIS: This strategy combines 12h trend following with 4h momentum entries and volume confirmation.
-# The 12h EMA50 provides the primary trend direction, reducing false signals during counter-trend moves.
-# The 4h RSI provides momentum confirmation, and volume spikes confirm institutional participation.
-# This approach should work in both bull and bear markets by following the higher timeframe trend.
-# Target: 20-40 trades per year to minimize fee drag while capturing significant moves.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_EMA50_RSI_Volume_Trend"
-timeframe = "4h"
+name = "1h_4h1d_Trend_Momentum_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,17 +12,27 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for EMA50 trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data ONCE before loop for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # === 12h EMA50 for trend direction ===
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Get 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # === 4h RSI for momentum ===
+    # === 4h EMA50 for trend direction ===
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # === 1d EMA200 for long-term trend filter ===
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # === 1h RSI for momentum ===
     close = prices['close'].values
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
@@ -38,55 +42,72 @@ def generate_signals(prices):
     rs = gain_ma / np.where(loss_ma > 0, loss_ma, np.nan)
     rsi = 100 - (100 / (1 + rs))
     
-    # === 4h Volume confirmation ===
+    # === 1h Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
+    
+    # Precompute session filter (8-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(100, n):
+        # Skip if outside session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
         close_val = prices['close'].iloc[i]
-        ema_val = ema_50_aligned[i]
+        ema_4h_val = ema_50_4h_aligned[i]
+        ema_1d_val = ema_200_1d_aligned[i]
         rsi_val = rsi[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(rsi_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(ema_4h_val) or np.isnan(ema_1d_val) or 
+            np.isnan(rsi_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above EMA50 (uptrend) + RSI > 55 (bullish momentum) + volume spike
-            if close_val > ema_val and rsi_val > 55 and vol_ratio_val > 1.8:
-                signals[i] = 0.25
+            # Long: price above 4h EMA50 (uptrend) + price above 1d EMA200 (long-term uptrend) 
+            #         + RSI > 55 (bullish momentum) + volume spike
+            if (close_val > ema_4h_val and close_val > ema_1d_val and 
+                rsi_val > 55 and vol_ratio_val > 1.8):
+                signals[i] = 0.20
                 position = 1
                 entry_price = close_val
-            # Short: price below EMA50 (downtrend) + RSI < 45 (bearish momentum) + volume spike
-            elif close_val < ema_val and rsi_val < 45 and vol_ratio_val > 1.8:
-                signals[i] = -0.25
+            # Short: price below 4h EMA50 (downtrend) + price below 1d EMA200 (long-term downtrend) 
+            #          + RSI < 45 (bearish momentum) + volume spike
+            elif (close_val < ema_4h_val and close_val < ema_1d_val and 
+                  rsi_val < 45 and vol_ratio_val > 1.8):
+                signals[i] = -0.20
                 position = -1
                 entry_price = close_val
         
         elif position == 1:
-            # Long exit: trend reversal or momentum fade
-            if close_val <= ema_val or rsi_val < 40:
+            # Long exit: trend reversal (4h or 1d) or momentum fade
+            if (close_val <= ema_4h_val or close_val <= ema_1d_val or rsi_val < 40):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: trend reversal or momentum fade
-            if close_val >= ema_val or rsi_val > 60:
+            # Short exit: trend reversal (4h or 1d) or momentum fade
+            if (close_val >= ema_4h_val or close_val >= ema_1d_val or rsi_val > 60):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
