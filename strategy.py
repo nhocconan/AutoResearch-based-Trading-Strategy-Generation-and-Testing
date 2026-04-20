@@ -3,53 +3,62 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R3S3_R4S4_MeanReversionBreakout_v1"
-timeframe = "4h"
+name = "12h_1d_KAMA_Trend_With_RSI_and_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Points (previous day) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Daily KAMA for trend direction ===
     close_1d = df_1d['close'].values
+    # Efficiency Ratio: price change over 10 periods divided by sum of absolute changes
+    price_change = np.abs(np.diff(close_1d, n=10))
+    abs_changes = np.abs(np.diff(close_1d, n=1))
+    # Sum of absolute changes over 10 periods
+    sum_abs_changes = np.convolve(abs_changes, np.ones(10), mode='full')
+    # Keep only valid part (same length as price_change)
+    sum_abs_changes = sum_abs_changes[9:len(close_1d)+9]
+    # Avoid division by zero
+    er = np.zeros_like(close_1d)
+    er[10:] = price_change / np.where(sum_abs_changes[10:] > 0, sum_abs_changes[10:], 1)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # === Daily RSI(14) for momentum filter ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Set first values to avoid look-ahead
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Align KAMA and RSI to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Classic pivot (same for Camarilla)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    r3 = pivot + (range_val * 1.1 / 4)  # Strong resistance
-    s3 = pivot - (range_val * 1.1 / 4)  # Strong support
-    r4 = pivot + (range_val * 1.1 / 2)  # Breakout level
-    s4 = pivot - (range_val * 1.1 / 2)  # Breakdown level
-    
-    # Align to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # === Volume Confirmation ===
+    # === Volume confirmation on 12h chart ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -58,56 +67,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r3_val) or 
-            np.isnan(s3_val) or np.isnan(r4_val) or 
-            np.isnan(s4_val) or np.isnan(pivot_val)):
+        if (np.isnan(kama_val) or np.isnan(rsi_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Fade at R3/S3: mean reversion with volume confirmation
-            if close_val < r3_val and close_val > r3_val * 0.995 and vol_ratio_val > 1.8:
-                # Near R3, short with volume
-                signals[i] = -0.25
-                position = -1
-            elif close_val > s3_val and close_val < s3_val * 1.005 and vol_ratio_val > 1.8:
-                # Near S3, long with volume
+            # Long: price above KAMA, RSI > 50, volume above average
+            if close_val > kama_val and rsi_val > 50 and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Breakout at R4/S4: trend continuation
-            elif close_val > r4_val and vol_ratio_val > 2.5:
-                # Strong break above R4
-                signals[i] = 0.25
-                position = 1
-            elif close_val < s4_val and vol_ratio_val > 2.5:
-                # Strong break below S4
+            # Short: price below KAMA, RSI < 50, volume above average
+            elif close_val < kama_val and rsi_val < 50 and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: return to pivot or stop at S3
-            if close_val < pivot_val or close_val < s3_val:
+            # Exit long: price below KAMA or RSI < 40
+            if close_val < kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: return to pivot or stop at R3
-            if close_val > pivot_val or close_val > r3_val:
+            # Exit short: price above KAMA or RSI > 60
+            if close_val > kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
