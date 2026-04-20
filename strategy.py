@@ -3,148 +3,134 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_Price_Action_Confluence_v1"
-timeframe = "4h"
+name = "1h_4h_1d_Pivot_Volume_Squeeze_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 12h and 1d data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 2 or len(df_1d) < 2:
+    if len(df_4h) < 2 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 12h: 20-period EMA for trend direction ===
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # === 4h: EMA20 for trend direction ===
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # === 1d: Calculate pivot points (standard) ===
+    # === 1d: Standard pivot points (P, R1, S1) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot = (H + L + C) / 3
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
-    # R2 = P + (H - L), S2 = P - (H - L)
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
     
-    # Align all pivot levels
+    # Align pivot levels
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # === 4h: ATR(14) for volatility and stop loss ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 1h: Bollinger Bands (20,2) for squeeze detection ===
     close = prices['close'].values
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper = sma_20 + 2 * std_20
+    lower = sma_20 - 2 * std_20
+    bb_width = (upper - lower) / sma_20
+    
+    # === 1h: Volume filter (current > 1.5x 20-period average) ===
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume / vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Get aligned values
-        ema_trend = ema_20_12h_aligned[i]
+        ema_trend = ema_20_4h_aligned[i]
         pivot = pivot_1d_aligned[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        current_atr = atr[i]
         current_close = prices['close'].iloc[i]
-        current_volume = prices['volume'].iloc[i]
+        current_bb_width = bb_width.iloc[i]
+        current_vol_ratio = vol_ratio.iloc[i]
         
         # Skip if any value is NaN
         if (np.isnan(ema_trend) or np.isnan(pivot) or np.isnan(r1) or np.isnan(s1) or
-            np.isnan(r2) or np.isnan(s2) or np.isnan(r3) or np.isnan(s3) or np.isnan(current_atr)):
+            np.isnan(current_bb_width) or np.isnan(current_vol_ratio)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.3x 24-period 4h average volume ===
-        if i >= 24:
-            vol_ma = np.mean(prices['volume'].iloc[i-24:i].values)
-            vol_condition = current_volume > 1.3 * vol_ma
+        # Squeeze condition: BB width below 20th percentile (tight range)
+        # Calculate percentile using lookback window
+        if i >= 50:
+            bb_width_past = bb_width.iloc[i-50:i]
+            bb_width_threshold = np.percentile(bb_width_past, 20)
+            squeeze = current_bb_width < bb_width_threshold
         else:
-            vol_condition = False
+            squeeze = False
         
         if position == 0:
             # Long conditions:
-            # 1. Price above 12h EMA20 (uptrend)
-            # 2. Price breaks above R1 with volume
-            # 3. Price is below R2 (not overextended)
+            # 1. Price above 4h EMA20 (uptrend)
+            # 2. Price breaks above R1 with volume and squeeze breakout
             if (current_close > ema_trend and
                 current_close > r1 and
-                vol_condition and
-                current_close < r2):
-                signals[i] = 0.25
+                current_vol_ratio > 1.5 and
+                squeeze):
+                signals[i] = 0.20
                 position = 1
                 entry_price = current_close
             
             # Short conditions:
-            # 1. Price below 12h EMA20 (downtrend)
-            # 2. Price breaks below S1 with volume
-            # 3. Price is above S2 (not overextended)
+            # 1. Price below 4h EMA20 (downtrend)
+            # 2. Price breaks below S1 with volume and squeeze breakout
             elif (current_close < ema_trend and
                   current_close < s1 and
-                  vol_condition and
-                  current_close > s2):
-                signals[i] = -0.25
+                  current_vol_ratio > 1.5 and
+                  squeeze):
+                signals[i] = -0.20
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit conditions:
-            # 1. Price falls below 12h EMA20 (trend change)
-            # 2. Price hits S1 (strong support - take profit)
-            # 3. ATR-based stop loss
+            # Exit conditions:
+            # 1. Price falls below 4h EMA20 (trend change)
+            # 2. Price hits S1 (take profit at support)
+            # 3. Squeeze re-enters (low volatility - exit)
             if (current_close < ema_trend or
                 current_close <= s1 or
-                current_close < entry_price - 2.5 * current_atr):
+                not squeeze):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit conditions:
-            # 1. Price rises above 12h EMA20 (trend change)
-            # 2. Price hits R1 (strong resistance - take profit)
-            # 3. ATR-based stop loss
+            # Exit conditions:
+            # 1. Price rises above 4h EMA20 (trend change)
+            # 2. Price hits R1 (take profit at resistance)
+            # 3. Squeeze re-enters (low volatility - exit)
             if (current_close > ema_trend or
                 current_close >= r1 or
-                current_close > entry_price + 2.5 * current_atr):
+                not squeeze):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
