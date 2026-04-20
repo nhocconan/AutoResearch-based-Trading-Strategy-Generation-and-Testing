@@ -3,108 +3,105 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h volume-weighted price action with 4h trend filter
-# Long when: 1h price closes above VWAP and 4h EMA50 is rising (bullish regime)
-# Short when: 1h price closes below VWAP and 4h EMA50 is falling (bearish regime)
-# VWAP acts as dynamic support/resistance; 4h EMA50 filters counter-trend trades
-# Volume confirmation via 1h volume > 1.5x 20-period average
-# Target: 60-150 total trades over 4 years (15-37/year) with session filter (08-20 UTC)
+# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1-day EMA13 trend filter and volume spike
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low
+# Long when Bull Power > 0 and rising, Bear Power < 0 and falling, with 1-day EMA13 up and volume spike
+# Short when Bear Power < 0 and falling, Bull Power > 0 and rising, with 1-day EMA13 down and volume spike
+# Uses 1-day trend to avoid counter-trend trades, volume spike for confirmation
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 4h data ONCE for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Load 1-day data ONCE for EMA13 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 4h EMA50 for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate 1-day EMA13 for trend filter
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # Calculate 1h VWAP (volume-weighted average price)
-    typical_price = (prices['high'].values + prices['low'].values + prices['close'].values) / 3.0
+    # Calculate 6-day Elder Ray components
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # EMA13 of 6h close for Elder Ray
+    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power = high - ema13_6h
+    # Bear Power = EMA13 - Low
+    bear_power = ema13_6h - low
+    
+    # Volume spike: 6h volume > 2.0 x 20-period average
     volume = prices['volume'].values
-    vwap_numerator = typical_price * volume
-    vwap_denominator = volume
-    
-    # Cumulative VWAP reset each day
-    vwap = np.zeros(n)
-    cum_num = 0.0
-    cum_den = 0.0
-    prev_date = None
-    
-    for i in range(n):
-        curr_date = prices['open_time'].iloc[i].date()
-        if prev_date is None or curr_date != prev_date:
-            cum_num = 0.0
-            cum_den = 0.0
-            prev_date = curr_date
-        cum_num += vwap_numerator[i]
-        cum_den += vwap_denominator[i]
-        if cum_den > 0:
-            vwap[i] = cum_num / cum_den
-        else:
-            vwap[i] = typical_price[i]
-    
-    # Volume spike: 1h volume > 1.5x 20-period average
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 1.5)
-    
-    # Session filter: 08-20 UTC (pre-compute hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if outside trading session or NaN in indicators
-        if not in_session[i] or np.isnan(ema50_4h_aligned[i]) or np.isnan(vwap[i]):
+    for i in range(100, n):
+        # Skip if NaN in indicators
+        if np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(volume_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        # Price and EMA levels
+        price = close[i]
+        ema13 = ema13_6h[i]
+        bp = bull_power[i]
+        bp_prev = bull_power[i-1] if i > 0 else 0
+        be = bear_power[i]
+        be_prev = bear_power[i-1] if i > 0 else 0
+        ema13_1d = ema13_1d_aligned[i]
+        ema13_1d_prev = ema13_1d_aligned[i-1] if i > 0 else ema13_1d
         
-        # 4h trend: rising EMA50 = bullish, falling EMA50 = bearish
-        if i > 0:
-            ema50_rising = ema50_4h_aligned[i] > ema50_4h_aligned[i-1]
-            ema50_falling = ema50_4h_aligned[i] < ema50_4h_aligned[i-1]
-        else:
-            ema50_rising = False
-            ema50_falling = False
+        # Trend conditions
+        ema13_1d_up = ema13_1d > ema13_1d_prev
+        ema13_1d_down = ema13_1d < ema13_1d_prev
+        
+        # Elder Ray conditions
+        bull_rising = bp > bp_prev
+        bull_positive = bp > 0
+        bear_falling = be < be_prev
+        bear_positive = be > 0  # Bear power positive means bearish pressure
         
         if position == 0:
-            # Long: price closes above VWAP, bullish 4h trend, volume spike
-            if price > vwap[i] and ema50_rising and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: Bull Power positive and rising, Bear Power negative, 1-day EMA13 up, volume spike
+            if bull_positive and bull_rising and (be < 0) and ema13_1d_up and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price closes below VWAP, bearish 4h trend, volume spike
-            elif price < vwap[i] and ema50_falling and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: Bear Power positive and falling, Bull Power negative, 1-day EMA13 down, volume spike
+            elif bear_positive and bear_falling and (bp < 0) and ema13_1d_down and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below VWAP or bearish 4h trend
-            if price < vwap[i] or ema50_falling:
+            # Long exit: Bull Power turns negative or 1-day EMA13 turns down
+            if not bull_positive or not ema13_1d_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above VWAP or bullish 4h trend
-            if price > vwap[i] or ema50_rising:
+            # Short exit: Bear Power turns negative or 1-day EMA13 turns up
+            if not bear_positive or not ema13_1d_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_VWAP_4hEMA50_Trend_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_ElderRay_BullBearPower_1dEMA13Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
