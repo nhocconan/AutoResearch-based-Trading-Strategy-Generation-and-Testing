@@ -1,89 +1,81 @@
-#!/usr/bin/env python3
+# !/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period High/Low on 1d for Donchian channel
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Donchian upper/lower bands
-    donch_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align to 1d timeframe
-    donch_upper_aligned = align_htf_to_ltf(prices, df_1d, donch_upper)
-    donch_lower_aligned = align_htf_to_ltf(prices, df_1d, donch_lower)
-    
-    # Calculate 1d ATR for volatility filter
+    # Calculate 14-period RSI on 1d close
     close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Calculate 50-period SMA on 1d close
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
-    # Calculate 50-period SMA on 1w close for trend
-    close_1w = df_1w['close'].values
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
         close_val = prices['close'].iloc[i]
-        upper_val = donch_upper_aligned[i]
-        lower_val = donch_lower_aligned[i]
-        atr_val = atr_1d_aligned[i]
-        sma_val = sma_50_1w_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
+        sma_val = sma_50_1d_aligned[i]
         
         # Skip if any value is NaN
-        if np.isnan(upper_val) or np.isnan(lower_val) or np.isnan(atr_val) or np.isnan(sma_val):
+        if np.isnan(rsi_val) or np.isnan(sma_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper + above weekly SMA + volatility filter
-            if close_val > upper_val and close_val > sma_val and atr_val > 0.01 * close_val:
+            # Long: RSI < 30 (oversold) and price above SMA (bullish bias)
+            if rsi_val < 30 and close_val > sma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + below weekly SMA + volatility filter
-            elif close_val < lower_val and close_val < sma_val and atr_val > 0.01 * close_val:
+            # Short: RSI > 70 (overbought) and price below SMA (bearish bias)
+            elif rsi_val > 70 and close_val < sma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below Donchian lower
-            if close_val < lower_val:
+            # Long exit: RSI > 70 (overbought) or price crosses below SMA
+            if rsi_val > 70 or close_val < sma_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Donchian upper
-            if close_val > upper_val:
+            # Short exit: RSI < 30 (oversold) or price crosses above SMA
+            if rsi_val < 30 or close_val > sma_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,12 +83,14 @@ def generate_signals(prices):
     
     return signals
 
-# 1d_Donchian20_WeeklySMA50_VolatilityFilter_v1
-# Uses daily Donchian(20) breakout for entry
-# Requires price to be above/below weekly 50 SMA for trend filter
-# Volatility filter: 1d ATR > 1% of price to avoid low-vol chop
-# Exit when price reverses to opposite Donchian band
-# Designed for 1d timeframe with ~10-25 trades/year
-name = "1d_Donchian20_WeeklySMA50_VolatilityFilter_v1"
-timeframe = "1d"
+# 6h_1d_RSI30_70_SMA50_Session_v1
+# Uses 1d RSI(14) for overbought/oversold signals
+# Uses 1d SMA(50) for trend bias
+# Entry: RSI < 30 + price > SMA50 (long) OR RSI > 70 + price < SMA50 (short)
+# Exit: RSI > 70 or price < SMA50 (long) OR RSI < 30 or price > SMA50 (short)
+# Session filter: 8-20 UTC to focus on active trading hours
+# Position size: 0.25 (25% of capital)
+# Designed for 6h timeframe with ~15-30 trades/year
+name = "6h_1d_RSI30_70_SMA50_Session_v1"
+timeframe = "6h"
 leverage = 1.0
