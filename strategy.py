@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Strategy: 1d_WeeklyEMA50_CamarillaBreakout_VolumeFilter
+# Hypothesis: Daily breakout above weekly EMA50-defined support/resistance (weekly EMA50 ± ATR) with volume confirmation.
+# Uses 1d bars for entries, filtered by weekly EMA50 trend to avoid counter-trend trades. Volume > 1.5x 20-day MA confirms institutional interest.
+# Designed for 10-30 trades/year to minimize fee drag and work in both bull/bear markets.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -8,71 +12,80 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1h and 4h data for analysis
-    df_1h = get_htf_data(prices, '1h')
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data for EMA50 and ATR
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Weekly EMA50 for trend
+    close_1w_series = pd.Series(close_1w)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 1h Bollinger Bands (20, 2)
-    close_1h = df_1h['close'].values
-    sma20 = pd.Series(close_1h).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close_1h).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2 * std20
-    lower_band = sma20 - 2 * std20
-    upper_band_aligned = align_htf_to_ltf(prices, df_1h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1h, lower_band)
+    # Weekly ATR for dynamic bands
+    high_low = high_1w - low_1w
+    high_close = np.abs(high_1w - np.roll(close_1w, 1))
+    low_close = np.abs(low_1w - np.roll(close_1w, 1))
+    high_low[0] = high_1w[0] - low_1w[0]
+    high_close[0] = np.abs(high_1w[0] - close_1w[0])
+    low_close[0] = np.abs(low_1w[0] - close_1w[0])
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_20_aligned = align_htf_to_ltf(prices, df_1w, atr_20)
     
-    # 1h volume spike (20-period)
-    volume_1h = df_1h['volume'].values
-    vol_ma_20 = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1h, vol_ma_20)
+    # Dynamic support/resistance: EMA50 ± 1.0 * ATR
+    upper_band = ema50_1w_aligned + 1.0 * atr_20_aligned
+    lower_band = ema50_1w_aligned - 1.0 * atr_20_aligned
+    
+    # Load daily data for entry timing, volume
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Volume spike detection (20-period on 1d)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
-            np.isnan(lower_band_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1h[i]
-        vol = volume_1h[i]
+        price = close_1d[i]
+        vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above upper BB, above 4h EMA50, with volume confirmation
-            if (price > upper_band_aligned[i] and 
-                price > ema50_4h_aligned[i] and 
-                vol > 2.0 * vol_ma_20_aligned[i]):
+            # Long: price breaks above upper band with volume confirmation
+            if (price > upper_band[i] and vol > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below lower BB, below 4h EMA50, with volume confirmation
-            elif (price < lower_band_aligned[i] and 
-                  price < ema50_4h_aligned[i] and 
-                  vol > 2.0 * vol_ma_20_aligned[i]):
+            # Short: price breaks below lower band with volume confirmation
+            elif (price < lower_band[i] and vol > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below lower BB or trend reversal
-            if (price < lower_band_aligned[i] or 
-                price < ema50_4h_aligned[i]):
+            # Long exit: price breaks below lower band
+            if price < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above upper BB or trend reversal
-            if (price > upper_band_aligned[i] or 
-                price > ema50_4h_aligned[i]):
+            # Short exit: price breaks above upper band
+            if price > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_BB_Trend_Volume"
-timeframe = "1h"
+name = "1d_WeeklyEMA50_CamarillaBreakout_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
