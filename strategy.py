@@ -11,14 +11,14 @@ def generate_signals(prices):
     # Load daily data for trend and regime filters
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily EMA(20) for intermediate trend
+    # Daily EMA(34) for intermediate trend
     close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily EMA(50) for long-term trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily EMA(89) for long-term trend
+    ema_89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
+    ema_89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
     
     # Daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
@@ -32,17 +32,11 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Load weekly data for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # 4h price and volume data
+    # 12h price and volume data
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h volume filter (current / 20-period average)
+    # 12h volume filter (current / 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     
@@ -51,41 +45,39 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_89_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema_trend_short = ema_20_1d_aligned[i]
-        ema_trend_long = ema_50_1d_aligned[i]
-        ema_trend_1w = ema_50_1w_aligned[i]
+        ema_trend_short = ema_34_1d_aligned[i]
+        ema_trend_long = ema_89_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
-        vol_ratio_4h = vol_ratio[i]
+        vol_ratio_12h = vol_ratio[i]
         
         # Multi-timeframe trend alignment: price above both EMAs for uptrend
-        trend_up = (price > ema_trend_short) and (ema_trend_short > ema_trend_long) and (ema_trend_long > ema_trend_1w)
+        trend_up = (price > ema_trend_short) and (ema_trend_short > ema_trend_long)
         # Price below both EMAs for downtrend
-        trend_down = (price < ema_trend_short) and (ema_trend_short < ema_trend_long) and (ema_trend_long < ema_trend_1w)
+        trend_down = (price < ema_trend_short) and (ema_trend_short < ema_trend_long)
         
         # Volatility filter: avoid low volatility (chop) and extreme volatility
         atr_ma_20 = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values[i]
         vol_filter = (atr > 0.5 * atr_ma_20) and (atr < 3.0 * atr_ma_20)
         
         # Volume filter: require above-average volume
-        vol_filter = vol_filter and (vol_ratio_4h > 1.3)
+        vol_filter = vol_filter and (vol_ratio_12h > 1.5)
         
         if position == 0:
             # Enter long in strong uptrend with volume
             if trend_up and vol_filter:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Enter short in strong downtrend with volume
             elif trend_down and vol_filter:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -94,7 +86,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit short: trend breakdown or volatility spike
@@ -102,10 +94,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_1d_1w_EMA20_50_Trend_WeeklyFilter_v1"
-timeframe = "4h"
+name = "12h_1d_EMA34_89_Trend_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
