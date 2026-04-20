@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_VolumeTrendFilter
-# Hypothesis: Keltner Channel breakouts with volume confirmation and EMA trend filter capture sustained moves in both bull and bear markets.
-# The 4h timeframe reduces trade frequency while Keltner Channels (ATR-based) adapt to volatility better than fixed bands.
-# Works in bull markets by catching breakouts above upper channel; in bear markets by catching breakdowns below lower channel.
-# Volume filter ensures institutional participation; EMA filter avoids counter-trend trades.
+# 6h_MarketStructure_Breakout_VolumeFilter
+# Hypothesis: Combine market structure (higher highs/lows) with 12h EMA trend filter and volume confirmation to capture breakouts in both bull and bear markets.
+# Market structure ensures trading with the trend, EMA filter avoids counter-trend trades, volume confirms institutional participation.
+# Works in bull markets by buying higher low breakouts; in bear markets by selling lower high breakdowns.
+# 6h timeframe balances trade frequency and signal quality.
 
-name = "4h_Keltner_Breakout_VolumeTrendFilter"
-timeframe = "4h"
+name = "6h_MarketStructure_Breakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,65 +23,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate EMA20 trend filter on daily timeframe
-    ema20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Calculate EMA20 trend filter on 12h timeframe
+    ema20_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
-    # Calculate Keltner Channel on 4h data (20-period EMA, 2*ATR)
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate market structure: higher highs and higher lows (uptrend) or lower highs and lower lows (downtrend)
+    # Look back 20 periods for swing points
+    lookback = 20
+    hh = np.full(n, np.nan)  # higher high
+    hl = np.full(n, np.nan)  # higher low
+    lh = np.full(n, np.nan)  # lower high
+    ll = np.full(n, np.nan)  # lower low
     
-    # True Range and ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    for i in range(lookback, n):
+        # Higher High: current high > highest high in lookback period
+        hh[i] = high[i] > np.max(high[i-lookback:i])
+        # Higher Low: current low > lowest low in lookback period
+        hl[i] = low[i] > np.min(low[i-lookback:i])
+        # Lower High: current high < highest high in lookback period
+        lh[i] = high[i] < np.max(high[i-lookback:i])
+        # Lower Low: current low < lowest low in lookback period
+        ll[i] = low[i] < np.min(low[i-lookback:i])
     
-    kc_upper = ema20 + 2 * atr
-    kc_lower = ema20 - 2 * atr
-    
-    # Volume filter: volume > 1.8x 20-period EMA (more selective than SMA)
+    # Volume filter: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > (vol_ema20 * 1.8)
+    volume_filter = volume > (vol_ema20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure all indicators are ready
+    start_idx = max(40, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(ema20_12h_aligned[i]) or np.isnan(hh[i]) or np.isnan(hl[i]) or
+            np.isnan(lh[i]) or np.isnan(ll[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Keltner + above daily EMA20 (uptrend) + volume confirmation
-            if close[i] > kc_upper[i] and close[i] > ema20_1d_aligned[i] and volume_filter[i]:
+            # Long: higher high + higher low (uptrend structure) + above 12h EMA20 + volume confirmation
+            if hh[i] and hl[i] and close[i] > ema20_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Keltner + below daily EMA20 (downtrend) + volume confirmation
-            elif close[i] < kc_lower[i] and close[i] < ema20_1d_aligned[i] and volume_filter[i]:
+            # Short: lower high + lower low (downtrend structure) + below 12h EMA20 + volume confirmation
+            elif lh[i] and ll[i] and close[i] < ema20_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below EMA20 (trend change) or below lower Keltner (mean reversion)
-            if close[i] < ema20[i] or close[i] < kc_lower[i]:
+            # Long: exit if market structure breaks (lower low) or price falls below 12h EMA20
+            if ll[i] or close[i] < ema20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above EMA20 (trend change) or above upper Keltner (mean reversion)
-            if close[i] > ema20[i] or close[i] > kc_upper[i]:
+            # Short: exit if market structure breaks (higher high) or price rises above 12h EMA20
+            if hh[i] or close[i] > ema20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
