@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Momentum_v1"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Target_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,25 +40,15 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === Volume Confirmation (4h) ===
+    # === Volume Confirmation (12h) ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
-    # === Momentum Confirmation (4h RSI) ===
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = gain_ma / np.where(loss_ma > 0, loss_ma, np.nan)
-    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,32 +58,31 @@ def generate_signals(prices):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
-        rsi_val = rsi[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(rsi_val) or np.isnan(r1_val) or np.isnan(s1_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or np.isnan(s1_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 with volume confirmation and bullish momentum (RSI > 50)
-            if close_val > r1_val and vol_ratio_val > 2.0 and rsi_val > 50:
+            # Long: break above R1 with volume confirmation
+            if close_val > r1_val and vol_ratio_val > 2.5:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short: break below S1 with volume confirmation and bearish momentum (RSI < 50)
-            elif close_val < s1_val and vol_ratio_val > 2.0 and rsi_val < 50:
+            # Short: break below S1 with volume confirmation
+            elif close_val < s1_val and vol_ratio_val > 2.5:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         
         elif position == 1:
             # Long exit: stop loss or return to S1
-            if close_val <= entry_price - 1.5 * (prices['high'].iloc[i] - prices['low'].iloc[i]):
+            if close_val <= entry_price - 2.0 * (prices['high'].iloc[i] - prices['low'].iloc[i]):
                 # Stop loss hit
                 signals[i] = 0.0
                 position = 0
@@ -106,7 +95,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: stop loss or return to S1
-            if close_val >= entry_price + 1.5 * (prices['high'].iloc[i] - prices['low'].iloc[i]):
+            if close_val >= entry_price + 2.0 * (prices['high'].iloc[i] - prices['low'].iloc[i]):
                 # Stop loss hit
                 signals[i] = 0.0
                 position = 0
