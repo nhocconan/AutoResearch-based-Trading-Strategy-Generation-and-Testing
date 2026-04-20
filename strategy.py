@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Donchian20_Breakout_TrendFilter"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R2S2_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,31 +17,35 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Daily Donchian Channels (20-day) ===
+    # === Daily Camarilla Pivot Points (previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    # 20-day rolling max/min (using previous day's data to avoid look-ahead)
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Fill initial values
-    donchian_high[:20] = high_1d[:20].max()
-    donchian_low[:20] = low_1d[:20].min()
-    
-    # Align to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # === Daily Trend Filter: 50-day EMA ===
     close_1d = df_1d['close'].values
-    close_series_1d = pd.Series(close_1d)
-    ema50 = close_series_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # === 6h Volume Confirmation ===
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    
+    # Set first values to avoid look-ahead
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Classic pivot (same for Camarilla)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla R2 and S2 levels (stronger breakout levels)
+    r2 = pivot + (range_val * 1.1 / 6)
+    s2 = pivot - (range_val * 1.1 / 6)
+    
+    # Align to 12h timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # === Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -53,43 +57,43 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        dh_val = donchian_high_aligned[i]
-        dl_val = donchian_low_aligned[i]
-        ema50_val = ema50_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(dh_val) or np.isnan(dl_val) or 
-            np.isnan(ema50_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or 
+            np.isnan(s2_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above Donchian High with volume and uptrend filter
-            if close_val > dh_val and vol_ratio_val > 1.5 and close_val > ema50_val:
-                signals[i] = 0.25
+            # Long: Break above R2 with volume confirmation
+            if close_val > r2_val and vol_ratio_val > 1.8:
+                signals[i] = 0.30
                 position = 1
-            # Short: Break below Donchian Low with volume and downtrend filter
-            elif close_val < dl_val and vol_ratio_val > 1.5 and close_val < ema50_val:
-                signals[i] = -0.25
+            # Short: Break below S2 with volume confirmation
+            elif close_val < s2_val and vol_ratio_val > 1.8:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below Donchian Low OR trend turns bearish
-            if close_val < dl_val or close_val < ema50_val:
+            # Long exit: Price returns below pivot
+            if close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: Price returns above Donchian High OR trend turns bullish
-            if close_val > dh_val or close_val > ema50_val:
+            # Short exit: Price returns above pivot
+            if close_val > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
