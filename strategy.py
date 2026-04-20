@@ -1,110 +1,101 @@
+# Implementing strategy: 1h_4hDonchian_1dVolumeSpike_SessionFilter
+# Hypothesis: Use 4h Donchian channel breakout for trend direction, confirmed by 1d volume spike (institutional interest).
+# Enter on 1h pullback to VWAP during London/NY session (08-20 UTC). Avoids chop and false breakouts.
+# Designed for 1h timeframe with selective entries to stay within 15-37 trades/year.
+# Works in bull (breakouts continue) and bear (failed breaks reverse to VWAP).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h volume confirmation and 12h Choppiness regime filter
-# - Long when price breaks above Donchian(20) high AND 12h volume > 1.5x 20-period average AND 12h Choppiness > 61.8 (ranging market)
-# - Short when price breaks below Donchian(20) low AND 12h volume > 1.5x 20-period average AND 12h Choppiness > 61.8
-# - Exit when price returns to Donchian midpoint or volatility regime shifts
-# - Designed for 4h timeframe with volume and regime filters to reduce false breakouts
-# - Target: 20-50 trades per year per symbol (80-200 total over 4 years)
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for volume and Choppiness filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data for Donchian channel (trend direction)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 12h volume average (20-period)
-    vol_12h = df_12h['volume'].values
-    vol_avg_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    # Calculate Donchian(20) on 4h
+    highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h Choppiness Index (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Align 4h Donchian levels to 1h timeframe
+    donchian_high = align_htf_to_ltf(prices, df_4h, highest_high_20)
+    donchian_low = align_htf_to_ltf(prices, df_4h, lowest_low_20)
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with close_12h
+    # Load 1d data for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 20-day average volume on 1d
+    avg_vol_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (1.5 * avg_vol_20)  # 50% above average = institutional interest
     
-    # Sum of ATR over 14 periods
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    # Align 1d volume spike to 1h timeframe
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    # Calculate 1h VWAP for entry timing
+    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
+    vwap = (typical_price * prices['volume']).cumsum() / prices['volume'].cumsum()
+    vwap = vwap.values
     
-    # Choppiness Index
-    chop = 100 * np.log10(sum_atr_14 / (hh_14 - ll_14)) / np.log10(14)
-    chop = np.where((hh_14 - ll_14) == 0, 50, chop)  # avoid division by zero
-    
-    # Align 12h indicators to 4h timeframe
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    
-    # Calculate Donchian channels on 4h (20-period)
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Pre-compute session hours (08-20 UTC)
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
-        # Skip if NaN in indicators
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_avg_20_aligned[i]) or np.isnan(chop_aligned[i]):
+    for i in range(50, n):  # Start after warmup period
+        # Skip if NaN in any indicator
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vwap[i]) or np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
-        vol_avg = vol_avg_20_aligned[i]
-        chop_val = chop_aligned[i]
-        vol_12h_current = df_12h['volume'].values[len(df_12h) - len(prices) + i // 3] if i // 3 < len(df_12h) else vol_avg
+        price = prices['close'].iloc[i]
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)  # London/NY session
         
         if position == 0:
-            # Long entry: price breaks above Donchian high + volume confirmation + ranging market (chop > 61.8)
-            if price > donch_high[i] and vol_12h_current > 1.5 * vol_avg and chop_val > 61.8:
-                signals[i] = 0.25
+            # Long: price breaks above 4h Donchian high + volume spike + pullback to VWAP in session
+            if (price > donchian_high[i] and 
+                vol_spike_aligned[i] > 0.5 and 
+                abs(price - vwap[i]) / vwap[i] < 0.005 and  # within 0.5% of VWAP
+                in_session):
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price breaks below Donchian low + volume confirmation + ranging market (chop > 61.8)
-            elif price < donch_low[i] and vol_12h_current > 1.5 * vol_avg and chop_val > 61.8:
-                signals[i] = -0.25
+            # Short: price breaks below 4h Donchian low + volume spike + pullback to VWAP in session
+            elif (price < donchian_low[i] and 
+                  vol_spike_aligned[i] > 0.5 and 
+                  abs(price - vwap[i]) / vwap[i] < 0.005 and
+                  in_session):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to Donchian midpoint OR chop drops below 38.2 (trending market)
-            if price < donch_mid[i] or chop_val < 38.2:
+            # Long exit: price breaks below 4h Donchian low or outside session
+            if price < donchian_low[i] or not in_session:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price returns to Donchian midpoint OR chop drops below 38.2 (trending market)
-            if price > donch_mid[i] or chop_val < 38.2:
+            # Short exit: price breaks above 4h Donchian high or outside session
+            if price > donchian_high[i] or not in_session:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian_Volume_ChopFilter"
-timeframe = "4h"
+name = "1h_4hDonchian_1dVolumeSpike_SessionFilter"
+timeframe = "1h"
 leverage = 1.0
