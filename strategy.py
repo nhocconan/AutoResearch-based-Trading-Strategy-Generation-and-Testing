@@ -10,7 +10,7 @@ def generate_signals(prices):
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d < 50):
         return np.zeros(n)
     
     # Calculate 14-period ADX for trend strength
@@ -52,9 +52,9 @@ def generate_signals(prices):
     adx_1d = wilder_smooth(dx, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 10-period Donchian channels (more sensitive)
-    donch_high_1d = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
+    # Calculate 20-period Donchian channels
+    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
     donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
@@ -111,12 +111,12 @@ def generate_signals(prices):
     
     return signals
 
-# 6h_ADX_Donchian_Breakout_Volume_v1
+# 4h_ADX_Donchian_Breakout_Volume
 # Uses daily ADX for trend strength filter (ADX > 25)
-# Uses daily Donchian(10) breakouts for entry (more sensitive than 20)
+# Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 6h timeframe with ~15-35 trades/year
-name = "6h_ADX_Donchian_Breakout_Volume_v1"
-timeframe = "6h"
+# Designed for 4h timeframe with ~20-40 trades/year
+name = "4h_ADX_Donchian_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
