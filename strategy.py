@@ -34,7 +34,7 @@ def generate_signals(prices):
     vol_ratio_1d = volume_1d / np.where(vol_ma_20_1d == 0, 1, vol_ma_20_1d)
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # 12h price data (primary timeframe)
+    # 4h price data (primary timeframe)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -96,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_VolumeTrend_Filter_v1"
-timeframe = "12h"
+name = "4h_EMA34_VolumeTrend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
