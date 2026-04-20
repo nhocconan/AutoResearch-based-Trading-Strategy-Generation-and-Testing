@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Filter_v2"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,12 +12,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
+    
+    # === 1w: Calculate weekly trend using EMA20 ===
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # === 1d: Calculate daily Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
     
-    # === 1d: Calculate Camarilla pivot levels ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -27,11 +36,11 @@ def generate_signals(prices):
     R1 = pivot + (range_1d * 1.1 / 12)
     S1 = pivot - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1d (already daily, but for consistency)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # === 4h: Price and volume ===
+    # === 1d: Price and volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -46,24 +55,25 @@ def generate_signals(prices):
     for i in range(50, n):
         # Get values
         close_val = close[i]
+        ema_20_val = ema_20_1w_aligned[i]
         r1_val = R1_aligned[i]
         s1_val = S1_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(vol_ratio_val):
+        if np.isnan(ema_20_val) or np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(vol_ratio_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation
-            if close_val > r1_val and vol_ratio_val > 2.0:
+            # Long: Price breaks above R1 with volume confirmation AND above weekly EMA20 (uptrend)
+            if close_val > r1_val and vol_ratio_val > 2.0 and close_val > ema_20_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation
-            elif close_val < s1_val and vol_ratio_val > 2.0:
+            # Short: Price breaks below S1 with volume confirmation AND below weekly EMA20 (downtrend)
+            elif close_val < s1_val and vol_ratio_val > 2.0 and close_val < ema_20_val:
                 signals[i] = -0.25
                 position = -1
         
