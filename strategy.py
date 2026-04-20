@@ -8,36 +8,29 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE for HTF regime (ATR-based volatility)
+    # Load daily data ONCE for HTF regime (10-day Donchian)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 14-day ATR on daily data
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate 10-day Donchian channels on daily data
+    highest_10d = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
+    lowest_10d = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
     
-    # Calculate 20-day SMA on daily close for trend filter
-    sma_20d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align daily ATR and SMA to 4h timeframe
-    atr_14d_aligned = align_htf_to_ltf(prices, df_1d, atr_14d)
-    sma_20d_aligned = align_htf_to_ltf(prices, df_1d, sma_20d)
+    # Align daily Donchian levels to 4h timeframe
+    highest_10d_aligned = align_htf_to_ltf(prices, df_1d, highest_10d)
+    lowest_10d_aligned = align_htf_to_ltf(prices, df_1d, lowest_10d)
     
     # Calculate 4h ATR for volatility filter
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    tr1_4h = high[1:] - low[1:]
-    tr2_4h = np.abs(high[1:] - close[:-1])
-    tr3_4h = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Precompute hour of day for session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -51,7 +44,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if NaN in HTF indicators
-        if np.isnan(atr_14d_aligned[i]) or np.isnan(sma_20d_aligned[i]) or np.isnan(atr_4h[i]):
+        if np.isnan(highest_10d_aligned[i]) or np.isnan(lowest_10d_aligned[i]) or np.isnan(atr_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,32 +62,32 @@ def generate_signals(prices):
         # Volume filter
         vol_filter = volume[i] > volume_ma_20[i]
         
-        # Trend filter: close above/below 20-day SMA
+        # Price levels
+        upper_band = highest_10d_aligned[i]
+        lower_band = lowest_10d_aligned[i]
         price = close[i]
-        trend_up = price > sma_20d_aligned[i]
-        trend_down = price < sma_20d_aligned[i]
         
         if position == 0:
-            # Long: price above 20-day SMA + volatility expansion + volume
-            if trend_up and atr_4h[i] > atr_14d_aligned[i] and vol_filter:
+            # Long breakout: price breaks above 10-day high with volume
+            if price > upper_band and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 20-day SMA + volatility expansion + volume
-            elif trend_down and atr_4h[i] > atr_14d_aligned[i] and vol_filter:
+            # Short breakdown: price breaks below 10-day low with volume
+            elif price < lower_band and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal or volatility contraction
-            if not trend_up or atr_4h[i] <= atr_14d_aligned[i]:
+            # Long exit: price breaks below 10-day low
+            if price < lower_band:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend reversal or volatility contraction
-            if not trend_down or atr_4h[i] <= atr_14d_aligned[i]:
+            # Short exit: price breaks above 10-day high
+            if price > upper_band:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATRExpansion_TrendFilter_Volume"
+name = "4h_Donchian10_Breakout_VolumeFilter_Session"
 timeframe = "4h"
 leverage = 1.0
