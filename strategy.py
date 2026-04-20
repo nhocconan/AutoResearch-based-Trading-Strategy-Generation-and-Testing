@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_S1S2_Breakout_Volume_ATRFilter_v1"
+name = "4h_1d_Pivot_S1S2_Breakout_Volume_ATRFilter_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -83,13 +83,13 @@ def generate_signals(prices):
             # Long: price breaks above daily S1 with volume spike
             if (not np.isnan(daily_s1_aligned[i]) and 
                 current_close > daily_s1_aligned[i] and vol_spike):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             # Short: price breaks below daily S2 with volume spike
             elif (not np.isnan(daily_s2_aligned[i]) and 
                   current_close < daily_s2_aligned[i] and vol_spike):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
@@ -103,7 +103,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Short exit: price breaks above daily S1 or ATR stop loss
@@ -115,6 +115,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
