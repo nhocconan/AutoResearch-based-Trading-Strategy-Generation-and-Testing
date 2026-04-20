@@ -1,17 +1,11 @@
-#!/usr/bin/env python3
-"""
-4h_ADX_Donchian_Breakout_Volume
-Hypothesis: Trade breakouts from Donchian(20) channels with ADX trend filter and volume confirmation.
-Long when price breaks above upper band + ADX > 25 + volume > 1.5x average.
-Short when price breaks below lower band + ADX > 25 + volume > 1.5x average.
-ADX ensures we only trade in trending markets, avoiding whipsaws in ranging conditions.
-Volume confirmation adds conviction to breakouts.
-Target: 15-30 trades/year per symbol with position size 0.25.
-Works in bull/bear: ADX filter avoids false breakouts in ranging markets.
-"""
+# 6h_MeanReversion_RSI_BollingerBand_1DTrend
+# Hypothesis: Mean-reversion on 6h timeframe using RSI + Bollinger Band reversals,
+# filtered by daily trend to avoid counter-trend trades. Works in both bull and bear markets
+# by only taking mean-reversion trades aligned with higher timeframe momentum.
+# Target: 50-150 total trades over 4 years with position size 0.25.
 
-name = "4h_ADX_Donchian_Breakout_Volume"
-timeframe = "4h"
+name = "6h_MeanReversion_RSI_BollingerBand_1DTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,118 +17,91 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    lookback = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    # Get daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 10:
+        return np.zeros(n)
     
-    for i in range(lookback-1, n):
-        upper[i] = np.max(high[i-lookback+1:i+1])
-        lower[i] = np.min(low[i-lookback+1:i+1])
+    # Calculate daily EMA50 for trend filter
+    close_daily = df_daily['close'].values
+    ema50_daily = np.full_like(close_daily, np.nan)
+    if len(close_daily) >= 50:
+        multiplier = 2.0 / (50 + 1)
+        ema50_daily[49] = np.mean(close_daily[:50])
+        for i in range(50, len(close_daily)):
+            ema50_daily[i] = multiplier * close_daily[i] + (1 - multiplier) * ema50_daily[i-1]
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
     
-    # ADX (14-period) - measures trend strength
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # align with original array
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        plus_dm = np.concatenate([[0], plus_dm])
-        minus_dm = np.concatenate([[0], minus_dm])
-        
-        # Smoothed values
-        atr = np.full(n, np.nan)
-        plus_di = np.full(n, np.nan)
-        minus_di = np.full(n, np.nan)
-        
-        if len(tr) >= period:
-            # Initial ATR
-            atr[period-1] = np.nanmean(tr[1:period+1])
-            for i in range(period, n):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            
-            # Initial DI
-            plus_di[period-1] = 100 * np.nanmean(plus_dm[1:period+1]) / atr[period-1]
-            minus_di[period-1] = 100 * np.nanmean(minus_dm[1:period+1]) / atr[period-1]
-            
-            for i in range(period, n):
-                plus_di[i] = 100 * ((plus_di[i-1] * (period-1) + plus_dm[i]) / period) / atr[i]
-                minus_di[i] = 100 * ((minus_di[i-1] * (period-1) + minus_dm[i]) / period) / atr[i]
-        
-        # DX and ADX
-        dx = np.full(n, np.nan)
-        adx = np.full(n, np.nan)
-        
-        if len(plus_di) >= period:
-            for i in range(period, n):
-                if plus_di[i] + minus_di[i] > 0:
-                    dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-            
-            if len(dx) >= 2*period-1:
-                adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
-                for i in range(2*period-1, n):
-                    adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    adx = calculate_adx(high, low, close, 14)
+    # Wilder's smoothing
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Volume average (20-period)
-    vol_avg = np.full(n, np.nan)
+    rs = np.zeros(n)
+    rsi = np.zeros(n)
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100
+    
+    # Calculate Bollinger Bands (20, 2)
+    sma20 = np.full(n, np.nan)
+    std20 = np.full(n, np.nan)
     for i in range(20, n):
-        vol_avg[i] = np.mean(volume[i-20:i])
+        sma20[i] = np.mean(close[i-20:i])
+        std20[i] = np.std(close[i-20:i])
+    
+    upper_band = sma20 + (2 * std20)
+    lower_band = sma20 - (2 * std20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 30)  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_avg[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(rsi[i]) or np.isnan(sma20[i]) or np.isnan(std20[i]) or 
+            np.isnan(ema50_daily_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.5x average
-        vol_condition = volume[i] > 1.5 * vol_avg[i]
-        
         if position == 0:
-            # Long: break above upper band + ADX > 25 + volume confirmation
-            if close[i] > upper[i] and adx[i] > 25 and vol_condition:
+            # Long: RSI < 30 (oversold) + price touches lower band + daily uptrend
+            if rsi[i] < 30 and close[i] <= lower_band[i] and close[i] > ema50_daily_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band + ADX > 25 + volume confirmation
-            elif close[i] < lower[i] and adx[i] > 25 and vol_condition:
+            # Short: RSI > 70 (overbought) + price touches upper band + daily downtrend
+            elif rsi[i] > 70 and close[i] >= upper_band[i] and close[i] < ema50_daily_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle of channel OR ADX weakens
-            mid = (upper[i] + lower[i]) / 2
-            if close[i] < mid or adx[i] < 20:
+            # Long exit: RSI > 50 (mean reversion complete) OR price reaches middle band
+            if rsi[i] > 50 or close[i] >= sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle of channel OR ADX weakens
-            mid = (upper[i] + lower[i]) / 2
-            if close[i] > mid or adx[i] < 20:
+            # Short exit: RSI < 50 (mean reversion complete) OR price reaches middle band
+            if rsi[i] < 50 or close[i] <= sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
