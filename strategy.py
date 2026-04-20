@@ -3,90 +3,112 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI divergence with 1d trend filter and volume confirmation
-# - Long when: 1d EMA200 up + 4h RSI < 30 (oversold) + volume > 1.5x 20-period average
-# - Short when: 1d EMA200 down + 4h RSI > 70 (overbought) + volume > 1.5x 20-period average
-# - Exit when: RSI returns to neutral zone (40-60) or opposite extreme reached
-# - Uses 1d for trend filter (EMA200) and 4h for RSI and execution
-# - Designed to work in both bull (buy dips) and bear (sell rallies) markets
-# - Target: 20-35 trades per year per symbol (80-140 total over 4 years)
+# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
+# - Weekly trend: price above/below weekly EMA200 (long-term bias)
+# - Entry: daily price breaks Donchian(20) high/low with volume > 1.5x 20-day average
+# - Exit: price crosses back through Donchian(10) or ATR-based stop
+# - Position size: 0.30 (30% of capital) to manage drawdown
+# - Target: 15-25 trades per year per symbol (60-100 total over 4 years)
+# - Works in bull/bear: weekly trend filter avoids counter-trend trades in strong regimes
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter
+    # Load daily data for Donchian and ATR
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_slope = np.diff(ema200_1d, prepend=ema200_1d[0])
-    ema200_up = ema200_1d_slope > 0
-    ema200_down = ema200_1d_slope < 0
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align trend filter to 4h
-    ema200_up_4h = align_htf_to_ltf(prices, df_1d, ema200_up)
-    ema200_down_4h = align_htf_to_ltf(prices, df_1d, ema200_down)
+    # Calculate ATR(14) for stop loss
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 4h data
+    # Weekly EMA200 for trend filter
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Daily Donchian channels
+    # Donchian(20) for entry
+    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Donchian(10) for exit (tighter)
+    donch_high_10 = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
+    donch_low_10 = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
+    
+    # Align all to daily timeframe (no shift needed as already daily)
+    donch_high_20_1d = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_1d = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    donch_high_10_1d = align_htf_to_ltf(prices, df_1d, donch_high_10)
+    donch_low_10_1d = align_htf_to_ltf(prices, df_1d, donch_low_10)
+    
+    # Daily price and volume
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(ema200_up_4h[i]) or np.isnan(ema200_down_4h[i]):
+        if np.isnan(donch_high_20_1d[i]) or np.isnan(donch_low_20_1d[i]) or \
+           np.isnan(donch_high_10_1d[i]) or np.isnan(donch_low_10_1d[i]) or \
+           np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_ma[i]) or \
+           np.isnan(atr_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        price = close[i]
+        vol = volume[i]
+        
         if position == 0:
-            # Long entry: uptrend + RSI oversold + volume surge
-            if ema200_up_4h[i] and rsi[i] < 30 and volume[i] > 1.5 * vol_ma[i]:
-                signals[i] = 0.25
+            # Long entry: price breaks above Donchian(20) high + volume surge + above weekly EMA200
+            if price > donch_high_20_1d[i] and vol > 1.5 * vol_ma[i] and price > ema200_1w_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short entry: downtrend + RSI overbought + volume surge
-            elif ema200_down_4h[i] and rsi[i] > 70 and volume[i] > 1.5 * vol_ma[i]:
-                signals[i] = -0.25
+                entry_price = price
+            # Short entry: price breaks below Donchian(20) low + volume surge + below weekly EMA200
+            elif price < donch_low_20_1d[i] and vol > 1.5 * vol_ma[i] and price < ema200_1w_aligned[i]:
+                signals[i] = -0.30
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: RSI returns to neutral or becomes overbought
-            if rsi[i] >= 40:  # Exit when RSI reaches neutral or overbought
+            # Long exit: price crosses below Donchian(10) high OR ATR stop hit (2.5*ATR)
+            if price < donch_high_10_1d[i] or price < entry_price - 2.5 * atr_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: RSI returns to neutral or becomes oversold
-            if rsi[i] <= 60:  # Exit when RSI reaches neutral or oversold
+            # Short exit: price crosses above Donchian(10) low OR ATR stop hit (2.5*ATR)
+            if price > donch_low_10_1d[i] or price > entry_price + 2.5 * atr_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_RSI_Divergence_TrendFilter_Volume"
-timeframe = "4h"
+name = "1d_Donchian_WeeklyTrend_Filter_Volume"
+timeframe = "1d"
 leverage = 1.0
