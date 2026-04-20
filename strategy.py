@@ -3,87 +3,108 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Donchian_Breakout_Trend_HTF"
-timeframe = "4h"
+name = "1h_4d_1d_Camarilla_R1S1_Breakout_Volume_Control"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # === 12h: Trend filter (EMA50) ===
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # === 4h: Donchian channel (20) ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # === 1d: Calculate Camarilla pivot levels (using previous day's data) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Upper band: highest high of last 20 periods
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Use previous day's OHLC for today's levels
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    # Set first day's values to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    
+    # Calculate Camarilla levels: R1, S1
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align 1d levels to 1h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # === 4h: Volume ratio (current vs 20-period average) ===
+    volume_4h = df_4h['volume'].values
+    vol_ma20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_4h = volume_4h / np.where(vol_ma20_4h > 0, vol_ma20_4h, np.nan)
+    vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
+    
+    # === 1h: Session filter (08-20 UTC) ===
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
+        # Skip if outside session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
-        close_val = close[i]
-        upper_band = donchian_high[i]
-        lower_band = donchian_low[i]
-        ema50_trend = ema50_12h_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        close_val = prices['close'].iloc[i]
+        r1_level = camarilla_r1_aligned[i]
+        s1_level = camarilla_s1_aligned[i]
+        vol_ratio_val = vol_ratio_4h_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(upper_band) or np.isnan(lower_band) or 
-            np.isnan(ema50_trend) or np.isnan(vol_ratio_val)):
+        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above upper band + uptrend + volume
-            if (close_val > upper_band and    # Donchian breakout up
-                close_val > ema50_trend and   # Price above 12h EMA50 (uptrend)
-                vol_ratio_val > 1.5):         # Volume confirmation
-                signals[i] = 0.25
+            # Long: Price breaks above R1 with volume confirmation
+            if (close_val > r1_level and   # Break above R1
+                vol_ratio_val > 2.0):      # Strong volume confirmation
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below lower band + downtrend + volume
-            elif (close_val < lower_band and  # Donchian breakout down
-                  close_val < ema50_trend and # Price below 12h EMA50 (downtrend)
-                  vol_ratio_val > 1.5):       # Volume confirmation
-                signals[i] = -0.25
+            # Short: Price breaks below S1 with volume confirmation
+            elif (close_val < s1_level and   # Break below S1
+                  vol_ratio_val > 2.0):      # Strong volume confirmation
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: Price drops below lower band (mean reversion)
-            if close_val < lower_band:
+            # Long exit: Price drops back below R1 (reversion to mean)
+            if close_val < r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Price rises above upper band (mean reversion)
-            if close_val > upper_band:
+            # Short exit: Price rises back above S1 (reversion to mean)
+            if close_val > s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
