@@ -8,36 +8,32 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly trend using 20-period EMA
-    weekly_close = df_weekly['close'].values
-    ema_20_weekly = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_trend = ema_20_weekly[-1] > ema_20_weekly[-2]  # upward if today > yesterday
-    weekly_trend_array = np.full(len(weekly_close), weekly_trend, dtype=bool)
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_weekly, weekly_trend_array.astype(float))
-    
-    # Calculate daily ATR for volatility filter
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
+    # Calculate 14-period ADX for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_d - low_d
-    tr2 = np.abs(high_d - np.roll(close_d, 1))
-    tr3 = np.abs(low_d - np.roll(close_d, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     
-    # Wilder's smoothing for ATR
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Wilder's smoothing
     def wilder_smooth(data, period):
         result = np.zeros_like(data)
         alpha = 1.0 / period
@@ -46,32 +42,35 @@ def generate_signals(prices):
             result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
         return result
     
-    atr_d = wilder_smooth(tr, 14)
-    atr_d_aligned = align_htf_to_ltf(prices, df_daily, atr_d)
+    atr_1d = wilder_smooth(tr, 14)
+    di_plus_1d = wilder_smooth(dm_plus, 14)
+    di_minus_1d = wilder_smooth(dm_minus, 14)
     
-    # Calculate 6-period RSI for momentum
-    close_p = prices['close'].values
-    delta = np.diff(close_p, prepend=close_p[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Avoid division by zero
+    di_sum = di_plus_1d + di_minus_1d
+    dx = np.where(di_sum != 0, 100 * np.abs(di_plus_1d - di_minus_1d) / di_sum, 0)
+    adx_1d = wilder_smooth(dx, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 20-period Donchian channels
+    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Volume filter: 20-period average volume
-    volume_p = prices['volume'].values
-    vol_avg = pd.Series(volume_p).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period average volume
+    volume_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    hours = pd.DatetimeIndex(prices["open_time"]).hour  # pre-compute before loop
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
-        # Session filter
+    for i in range(100, n):
+        # Session filter: only trade 8-20 UTC
         hour = hours[i]
         if hour < 8 or hour > 20:
             if position != 0:
@@ -80,49 +79,53 @@ def generate_signals(prices):
             continue
         
         # Get values
-        close_val = close_p[i]
-        rsi_val = rsi[i]
-        weekly_trend_val = weekly_trend_aligned[i]
-        atr_val = atr_d_aligned[i]
-        vol_val = volume_p[i]
-        vol_avg_val = vol_avg[i]
+        close_val = prices['close'].iloc[i]
+        adx_val = adx_1d_aligned[i]
+        donch_high_val = donch_high_1d_aligned[i]
+        donch_low_val = donch_low_1d_aligned[i]
+        vol_val = prices['volume'].iloc[i]
+        vol_avg_val = vol_avg_20_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(rsi_val) or np.isnan(weekly_trend_val) or 
-            np.isnan(atr_val) or np.isnan(vol_avg_val)):
+        if (np.isnan(adx_val) or np.isnan(donch_high_val) or 
+            np.isnan(donch_low_val) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Weekly uptrend, RSI > 50 (bullish momentum), volume above average
-            if weekly_trend_val > 0.5 and rsi_val > 50 and vol_val > vol_avg_val:
-                signals[i] = 0.25
+            # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
+            if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
+                signals[i] = 0.30
                 position = 1
-            # Short: Weekly downtrend, RSI < 50 (bearish momentum), volume above average
-            elif weekly_trend_val < 0.5 and rsi_val < 50 and vol_val > vol_avg_val:
-                signals[i] = -0.25
+            # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
+            elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Long exit: Weekly trend turns down OR RSI < 40 (momentum loss)
-            if weekly_trend_val < 0.5 or rsi_val < 40:
+            # Long exit: price breaks below Donchian low or ADX < 20 (trend weakening)
+            if close_val < donch_low_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: Weekly trend turns up OR RSI > 60 (momentum loss)
-            if weekly_trend_val > 0.5 or rsi_val > 60:
+            # Short exit: price breaks above Donchian high or ADX < 20 (trend weakening)
+            if close_val > donch_high_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_WeeklyTrend_RSI_Momentum_Volume"
-timeframe = "6h"
+# Hypothesis: Uses daily ADX for trend strength filter (ADX > 25) and daily Donchian(20) breakouts for entry with volume confirmation. 
+# Session filter (8-20 UTC) avoids low-volume periods. Exits when price breaks opposite Donchian level or trend weakens (ADX < 20). 
+# Designed for 12h timeframe with ~15-25 trades/year to avoid overtrading. 
+# Works in bull markets via trend following and bear markets via short signals during downtrends.
+name = "12h_ADX_Donchian_Breakout_Volume_Session_v2"
+timeframe = "12h"
 leverage = 1.0
