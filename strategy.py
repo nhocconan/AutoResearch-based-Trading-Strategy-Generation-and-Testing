@@ -3,25 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_Camarilla_R2S2_Breakout_Volume_Trend"
-timeframe = "1h"
+name = "12h_1d_Camarilla_R2S2_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    
-    # === Daily 4h Trend Filter (4h EMA34) ===
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # === Daily Camarilla Pivot Points (previous day) ===
     high_1d = df_1d['high'].values
@@ -46,7 +40,7 @@ def generate_signals(prices):
     r2 = pivot + (range_val * 1.1 / 6)
     s2 = pivot - (range_val * 1.1 / 6)
     
-    # Align to 1h timeframe
+    # Align to 12h timeframe
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
@@ -57,60 +51,49 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip outside session
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
+    for i in range(50, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        ema_val = ema_4h_aligned[i]
         vol_ratio_val = vol_ratio[i]
         r2_val = r2_aligned[i]
         s2_val = s2_aligned[i]
         pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(vol_ratio_val) or 
-            np.isnan(r2_val) or np.isnan(s2_val) or np.isnan(pivot_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or 
+            np.isnan(s2_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R2 with volume confirmation AND above 4h EMA34
-            if close_val > r2_val and vol_ratio_val > 1.8 and close_val > ema_val:
-                signals[i] = 0.20
+            # Long: Break above R2 with volume confirmation
+            if close_val > r2_val and vol_ratio_val > 2.0:
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below S2 with volume confirmation AND below 4h EMA34
-            elif close_val < s2_val and vol_ratio_val > 1.8 and close_val < ema_val:
-                signals[i] = -0.20
+            # Short: Break below S2 with volume confirmation
+            elif close_val < s2_val and vol_ratio_val > 2.0:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot OR breaks below 4h EMA34
-            if close_val < pivot_val or close_val < ema_val:
+            # Long exit: Price returns below pivot
+            if close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot OR breaks above 4h EMA34
-            if close_val > pivot_val or close_val > ema_val:
+            # Short exit: Price returns above pivot
+            if close_val > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
