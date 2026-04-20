@@ -1,12 +1,3 @@
-# [68799] 6h_1d_Ichimoku_TK_Cross_Cloud_Filter_v1
-# Hypothesis: Ichimoku TK cross with cloud filter on daily timeframe provides reliable trend signals.
-# In bull markets: price above cloud + TK cross bullish = long signal.
-# In bear markets: price below cloud + TK cross bearish = short signal.
-# The cloud acts as dynamic support/resistance, reducing whipsaws.
-# Timeframe: 6h, HTF: 1d for Ichimoku calculations.
-# Target: 20-50 trades/year, low frequency to avoid fee drag.
-# Position size: 0.25 (discrete levels to minimize churn).
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -14,79 +5,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Ichimoku calculation (HTF)
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Load daily data
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Daily ATR for volatility filter
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_low[0] = high_1d[0] - low_1d[0]
+    high_close[0] = np.abs(high_1d[0] - close_1d[0])
+    low_close[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
-    
-    # Align Ichimoku components to 6h timeframe (with proper look-ahead avoidance)
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    # Daily volume for confirmation
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1d[i]  # Use daily close for signal generation (aligned to 6h via Ichimoku)
-        
-        # Cloud top and bottom
-        cloud_top = max(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom = min(senkou_a_6h[i], senkou_b_6h[i])
+        price = close_1d[i]
+        vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above cloud + TK cross bullish (Tenkan > Kijun)
-            if (price > cloud_top and tenkan_6h[i] > kijun_6h[i]):
+            # Long: price above weekly EMA50 with volume confirmation and sufficient volatility
+            if (price > ema_50_1w_aligned[i] and 
+                vol > 1.5 * vol_ma_1d_aligned[i] and 
+                atr_1d_aligned[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below cloud + TK cross bearish (Tenkan < Kijun)
-            elif (price < cloud_bottom and tenkan_6h[i] < kijun_6h[i]):
+            # Short: price below weekly EMA50 with volume confirmation and sufficient volatility
+            elif (price < ema_50_1w_aligned[i] and 
+                  vol > 1.5 * vol_ma_1d_aligned[i] and 
+                  atr_1d_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price drops below cloud OR TK cross turns bearish
-            if price < cloud_bottom or tenkan_6h[i] < kijun_6h[i]:
+            # Long exit: price crosses below weekly EMA50 or volatility drops significantly
+            if price < ema_50_1w_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above cloud OR TK cross turns bullish
-            if price > cloud_top or tenkan_6h[i] > kijun_6h[i]:
+            # Short exit: price crosses above weekly EMA50 or volatility drops significantly
+            if price > ema_50_1w_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Ichimoku_TK_Cross_Cloud_Filter_v1"
-timeframe = "6h"
+name = "1d_WeeklyEMA50_VolumeFilter_V3"
+timeframe = "1d"
 leverage = 1.0
