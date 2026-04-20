@@ -3,8 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_VolumeTrend_v3"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d trend filter (price > SMA200)
+# Works in bull: breakouts capture momentum; works in bear: SMA200 filter avoids shorts in strong downtrends, longs only in residual strength
+# Target: 20-40 trades/year (80-160 total over 4 years) to avoid fee drag
+name = "4h_Donchian20_Volume_SMA200Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,93 +15,73 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
+    # Get daily data ONCE before loop for SMA200 filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Points (previous day) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Daily SMA200 for trend filter ===
     close_1d = df_1d['close'].values
+    sma200_1d = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
+    sma200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d)
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # === 4h Donchian channels (20-period) ===
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Set first values to avoid look-ahead
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Upper band: highest high of past 20 bars (excluding current)
+    high_series = pd.Series(high)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    # Lower band: lowest low of past 20 bars (excluding current)
+    low_series = pd.Series(low)
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Classic pivot (same for Camarilla)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla R1 and S1 levels (core breakout levels)
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
-    
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # === Volume Trend Filter ===
+    # === Volume confirmation: volume > 1.5x 20-period average ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Price Trend Filter: 12h EMA50 > EMA200 for long, < for short ===
-    close_series = pd.Series(prices['close'].values)
-    ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after warmup period
         # Get values
         close_val = prices['close'].iloc[i]
+        upper_val = donchian_upper[i]
+        lower_val = donchian_lower[i]
         vol_ratio_val = vol_ratio[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        pivot_val = pivot_aligned[i]
-        ema50_val = ema50[i]
-        ema200_val = ema200[i]
+        sma200_val = sma200_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(pivot_val) or 
-            np.isnan(ema50_val) or np.isnan(ema200_val)):
+        if (np.isnan(upper_val) or np.isnan(lower_val) or 
+            np.isnan(vol_ratio_val) or np.isnan(sma200_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with volume confirmation and uptrend (EMA50 > EMA200)
-            if close_val > r1_val and vol_ratio_val > 2.0 and ema50_val > ema200_val:
+            # Long: Break above upper Donchian band with volume confirmation and price > daily SMA200
+            if close_val > upper_val and vol_ratio_val > 1.5 and close_val > sma200_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume confirmation and downtrend (EMA50 < EMA200)
-            elif close_val < s1_val and vol_ratio_val > 2.0 and ema50_val < ema200_val:
+            # Short: Break below lower Donchian band with volume confirmation and price < daily SMA200
+            elif close_val < lower_val and vol_ratio_val > 1.5 and close_val < sma200_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot OR trend breaks down
-            if close_val < pivot_val or ema50_val < ema200_val:
+            # Long exit: Price returns below lower Donchian band OR volume drops
+            if close_val < lower_val or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot OR trend breaks up
-            if close_val > pivot_val or ema50_val > ema200_val:
+            # Short exit: Price returns above upper Donchian band OR volume drops
+            if close_val > upper_val or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
