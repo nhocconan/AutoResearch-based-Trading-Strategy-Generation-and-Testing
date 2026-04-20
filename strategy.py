@@ -3,120 +3,83 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with weekly trend filter and volume confirmation
-# Bullish fractal breakout (price above recent fractal high) when above weekly EMA200 (uptrend)
-# Bearish fractal breakout (price below recent fractal low) when below weekly EMA200 (downtrend)
-# Volume filter ensures breakouts have participation. Targets 50-150 total trades over 4 years.
+# Hypothesis: 4h RSI(2) mean reversion with 200-day moving average filter
+# In bull markets: buy RSI(2) < 10 when price > 200-day MA
+# In bear markets: sell RSI(2) > 90 when price < 200-day MA
+# Uses 1-day timeframe for MA filter to avoid look-ahead
+# Target: 100-200 total trades over 4 years (25-50/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 250:
         return np.zeros(n)
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA200 (trend filter)
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    
-    # Load daily data ONCE for Williams Fractals
+    # Load daily data ONCE for 200-day MA filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams Fractals (5-bar pattern)
-    # Bullish fractal: low[n-2] < low[n-1] and low[n] < low[n-1] and low[n+1] < low[n-1] and low[n+2] < low[n-1]
-    # Bearish fractal: high[n-2] > high[n-1] and high[n] > high[n-1] and high[n+1] > high[n-1] and high[n+2] > high[n-1]
-    n_1d = len(high_1d)
-    bullish_fractal = np.full(n_1d, np.nan)
-    bearish_fractal = np.full(n_1d, np.nan)
+    # Calculate 200-day MA
+    ma_200 = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
     
-    for i in range(2, n_1d - 2):
-        if (low_1d[i-2] > low_1d[i-1] and low_1d[i] > low_1d[i-1] and 
-            low_1d[i+1] > low_1d[i-1] and low_1d[i+2] > low_1d[i-1]):
-            bearish_fractal[i-1] = high_1d[i-1]  # Bearish fractal at i-1
-        if (high_1d[i-2] < high_1d[i-1] and high_1d[i] < high_1d[i-1] and 
-            high_1d[i+1] < high_1d[i-1] and high_1d[i+2] < high_1d[i-1]):
-            bullish_fractal[i-1] = low_1d[i-1]   # Bullish fractal at i-1
+    # Align daily MA to 4h timeframe
+    ma_200_aligned = align_htf_to_ltf(prices, df_1d, ma_200)
     
-    # Align fractals to 6h timeframe with 2-bar confirmation delay
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    
-    # Calculate 6h ATR for volatility filter and stop sizing
-    high = prices['high'].values
-    low = prices['low'].values
+    # Calculate 4h RSI(2)
     close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Wilder's smoothing
+    alpha = 1.0 / 2
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
     
-    # Precompute hour of day for session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    for i in range(1, len(gain)):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
     
-    # Volume filter: 6h volume > 20-period average
-    volume = prices['volume'].values
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(100, n):
-        # Skip if NaN in indicators
-        if np.isnan(ema200_1w_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or \
-           np.isnan(bearish_fractal_aligned[i]) or np.isnan(atr_6h[i]):
+    for i in range(200, n):
+        # Skip if MA not ready
+        if np.isnan(ma_200_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume filter
-        vol_filter = volume[i] > volume_ma_20[i]
-        
-        # Price levels
-        bullish_fractal_level = bullish_fractal_aligned[i]
-        bearish_fractal_level = bearish_fractal_aligned[i]
-        weekly_ema = ema200_1w_aligned[i]
         price = close[i]
+        ma = ma_200_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: price above bullish fractal support, above weekly EMA200 (uptrend), with volume
-            if not np.isnan(bullish_fractal_level) and price > bullish_fractal_level and price > weekly_ema and vol_filter:
+            # Long: RSI(2) < 10 and price > 200-day MA
+            if rsi_val < 10 and price > ma:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price below bearish fractal resistance, below weekly EMA200 (downtrend), with volume
-            elif not np.isnan(bearish_fractal_level) and price < bearish_fractal_level and price < weekly_ema and vol_filter:
+            # Short: RSI(2) > 90 and price < 200-day MA
+            elif rsi_val > 90 and price < ma:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: stop loss (2x ATR below entry) or price breaks below bullish fractal support
-            if price <= entry_price - 2.0 * atr_6h[i] or (not np.isnan(bullish_fractal_level) and price < bullish_fractal_level):
+            # Long exit: RSI(2) > 50 or price < 200-day MA
+            if rsi_val > 50 or price < ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: stop loss (2x ATR above entry) or price breaks above bearish fractal resistance
-            if price >= entry_price + 2.0 * atr_6h[i] or (not np.isnan(bearish_fractal_level) and price > bearish_fractal_level):
+            # Short exit: RSI(2) < 50 or price > 200-day MA
+            if rsi_val < 50 or price > ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsFractal_Breakout_WeeklyEMA200_VolumeFilter"
-timeframe = "6h"
+name = "4h_RSI2_MA200_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
