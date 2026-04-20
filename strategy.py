@@ -3,76 +3,77 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 4x4 Grid Trading with Daily Trend Filter
-# - Buy when price breaks above 4x4 grid upper resistance (20-period high)
-# - Sell when price breaks below 4x4 grid lower support (20-period low)
-# - Only take long when price > 1d 200-day EMA, short when price < 1d 200-day EMA
-# - Grid provides clear support/resistance levels based on recent price action
-# - Daily EMA filter ensures alignment with higher timeframe trend
+# Hypothesis: 4h Donchian Breakout with 1d Trend and Volume Confirmation
+# - Long when price breaks above Donchian(20) high + price above 1d EMA50 + volume > 1.5x average
+# - Short when price breaks below Donchian(20) low + price below 1d EMA50 + volume > 1.5x average
+# - Exit when price crosses back through Donchian midpoint or trend reverses
+# - Uses price channel breakout with higher timeframe trend filter and volume confirmation
 # - Designed for 4h timeframe with selective entries to avoid overtrading
-# - Target: 15-35 trades per year per symbol (60-140 total over 4 years)
+# - Target: 20-50 trades per year per symbol (80-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA filter
+    # Load 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 200-day EMA on 1d timeframe
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4x4 grid levels on 4h timeframe
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
+    # Calculate Donchian channels on 4h data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Upper resistance: 20-period high
-    grid_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    # Lower support: 20-period low
-    grid_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Donchian(20) channels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Volume average for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(grid_upper[i]) or np.isnan(grid_lower[i]) or np.isnan(ema_200_1d_aligned[i]):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or \
+           np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine price position relative to grid and 1d EMA
-        price_above_grid = close_4h[i] > grid_upper[i]
-        price_below_grid = close_4h[i] < grid_lower[i]
-        price_above_ema = close_4h[i] > ema_200_1d_aligned[i]
-        price_below_ema = close_4h[i] < ema_200_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
         if position == 0:
-            # Long entry: price breaks above grid + above 1d EMA
-            if price_above_grid and price_above_ema:
+            # Long entry: price breaks above Donchian high + above 1d EMA50 + volume confirmation
+            if close[i] > donch_high[i] and close[i] > ema_50_1d_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below grid + below 1d EMA
-            elif price_below_grid and price_below_ema:
+            # Short entry: price breaks below Donchian low + below 1d EMA50 + volume confirmation
+            elif close[i] < donch_low[i] and close[i] < ema_50_1d_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below grid OR falls below 1d EMA
-            if price_below_grid or price_below_ema:
+            # Long exit: price crosses below Donchian midpoint or trend reverses (price < 1d EMA50)
+            if close[i] < donch_mid[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above grid OR rises above 1d EMA
-            if price_above_grid or price_above_ema:
+            # Short exit: price crosses above Donchian midpoint or trend reverses (price > 1d EMA50)
+            if close[i] > donch_mid[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_4x4_Grid_1dEMA200_Filter"
+name = "4h_Donchian_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
