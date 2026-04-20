@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_RSI_Divergence_Trend"
-timeframe = "1h"
+name = "6h_1d_ElderRay_BullBearPower"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,102 +12,81 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily and 4h data ONCE before loop
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_1d) < 20 or len(df_4h) < 20:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # === Daily Trend Filter (1d EMA50) ===
+    # === Daily EMA13 for Elder Ray (standard period) ===
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === 4h RSI for divergence detection ===
-    close_4h = df_4h['close'].values
-    delta = pd.Series(close_4h).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_values = rsi_4h.values
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h_values)
+    # Calculate EMA13 manually to avoid pandas overhead
+    ema13 = np.zeros_like(close_1d)
+    ema13[0] = close_1d[0]
+    alpha = 2.0 / (13 + 1)
+    for i in range(1, len(close_1d)):
+        ema13[i] = alpha * close_1d[i] + (1 - alpha) * ema13[i-1]
     
-    # === 1h RSI for entry timing ===
-    close_series = pd.Series(prices['close'])
-    delta_1h = close_series.diff()
-    gain_1h = delta_1h.where(delta_1h > 0, 0)
-    loss_1h = -delta_1h.where(delta_1h < 0, 0)
-    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_1h = avg_gain_1h / avg_loss_1h
-    rsi_1h = 100 - (100 / (1 + rs_1h))
-    rsi_1h_values = rsi_1h.values
+    # Elder Ray components
+    bull_power = high_1d - ema13   # Bull Power = High - EMA13
+    bear_power = low_1d - ema13    # Bear Power = Low - EMA13
     
-    # Session filter: 8-20 UTC
-    hours = prices.index.hour
+    # Align to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
+    
+    # === 6h EMA13 for trend filter (avoid counter-trend trades) ===
+    close_6h = prices['close'].values
+    ema13_6h = np.zeros_like(close_6h)
+    ema13_6h[0] = close_6h[0]
+    for i in range(1, len(close_6h)):
+        ema13_6h[i] = alpha * close_6h[i] + (1 - alpha) * ema13_6h[i-1]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip outside session
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
+    for i in range(13, n):  # Start after EMA warmup
         # Get values
         close_val = prices['close'].iloc[i]
-        rsi_1h_val = rsi_1h_values[i]
-        rsi_4h_val = rsi_4h_aligned[i]
-        ema_50_1d_val = ema_50_1d_aligned[i]
+        ema13_6h_val = ema13_6h[i]
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(rsi_1h_val) or np.isnan(rsi_4h_val) or 
-            np.isnan(ema_50_1d_val)):
+        if (np.isnan(ema13_6h_val) or np.isnan(bull_val) or 
+            np.isnan(bear_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Uptrend + bullish RSI divergence (4h RSI making higher low while price makes lower low)
-            # Simplified: RSI oversold recovery in uptrend
-            if (close_val > ema_50_1d_val and 
-                rsi_1h_val < 30 and 
-                rsi_4h_val > 30 and 
-                rsi_4h_val < 50):
-                signals[i] = 0.20
+            # Long: Strong bull power AND price above EMA13 (uptrend)
+            if bull_val > 0 and close_val > ema13_6h_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: Downtrend + bearish RSI divergence (4h RSI making lower high while price makes higher high)
-            # Simplified: RSI overbought rejection in downtrend
-            elif (close_val < ema_50_1d_val and 
-                  rsi_1h_val > 70 and 
-                  rsi_4h_val < 70 and 
-                  rsi_4h_val > 50):
-                signals[i] = -0.20
+            # Short: Strong bear power AND price below EMA13 (downtrend)
+            elif bear_val < 0 and close_val < ema13_6h_val:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI overbought or trend break
-            if (rsi_1h_val > 70 or 
-                close_val < ema_50_1d_val):
+            # Long exit: Bear power turns negative (selling pressure)
+            if bear_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI oversold or trend break
-            if (rsi_1h_val < 30 or 
-                close_val > ema_50_1d_val):
+            # Short exit: Bull power turns positive (buying pressure)
+            if bull_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
