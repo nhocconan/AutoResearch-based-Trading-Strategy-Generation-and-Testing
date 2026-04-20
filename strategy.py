@@ -3,92 +3,85 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1-day volume confirmation + ATR volatility filter
-# Long when price breaks above 4h Donchian upper channel + daily volume > 20-day average + ATR(14) > 0.5 * ATR(50)
-# Short when price breaks below 4h Donchian lower channel + daily volume > 20-day average + ATR(14) > 0.5 * ATR(50)
-# Exit when price crosses the 4h Donchian midline (average of upper/lower) or ATR volatility drops below threshold
-# Designed to capture strong breakouts in both bull and bear markets with volume confirmation to avoid false signals
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Hypothesis: 12h Williams Alligator system with 1-day volume confirmation
+# Uses Williams Alligator (Jaw=13, Teeth=8, Lips=5 SMAs) to identify trend direction
+# Long when Lips > Teeth > Jaw (bullish alignment), Short when Lips < Teeth < Jaw (bearish)
+# Entry confirmed by 1-day volume spike (>1.5x 20-day average)
+# Exit when Alligator lines re-cross or volume drops below average
+# Designed to capture trends while avoiding choppy markets
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for volume average
+    # Load daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     volume_1d = df_1d['volume'].values
-    avg_vol_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
     
-    # Calculate 4h Donchian channels (20-period)
-    high = prices['high'].values
-    low = prices['low'].values
+    # Calculate 20-day average volume for spike detection
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Calculate Williams Alligator components on 12h timeframe
     close = prices['close'].values
     
-    # Donchian upper and lower channels
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Jaw: 13-period SMMA (smoothed moving average)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
     
-    # Calculate ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Teeth: 8-period SMMA
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
     
-    # Calculate long-term ATR (50-period) for dynamic threshold
-    atr_long = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Lips: 5-period SMMA
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(avg_vol_20_aligned[i]) or np.isnan(atr[i]) or np.isnan(atr_long[i]):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current daily volume > 20-day average
-        vol_confirm = volume_1d[i // 16] > avg_vol_20_aligned[i] if i // 16 < len(volume_1d) else False
-        
-        # Volatility filter: ATR(14) > 0.5 * ATR(50)
-        vol_filter = atr[i] > 0.5 * atr_long[i]
+        # Volume confirmation: current day volume > 1.5x 20-day average
+        # Get current day's volume (need to map 12h bar to day)
+        day_idx = i // 2  # 2 twelve-hour bars per day
+        if day_idx >= len(volume_1d):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        current_volume = volume_1d[day_idx]
+        vol_spike = current_volume > (1.5 * vol_ma_20_aligned[i*2]) if (i*2) < len(vol_ma_20_aligned) else False
         
         price = close[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian upper + volume confirmation + volatility filter
-            long_signal = (price > donch_high[i]) and vol_confirm and vol_filter
-            
-            # Enter short: price breaks below Donchian lower + volume confirmation + volatility filter
-            short_signal = (price < donch_low[i]) and vol_confirm and vol_filter
-            
-            if long_signal:
+            # Enter long: Lips > Teeth > Jaw (bullish alignment) + volume spike
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            elif short_signal:
+            # Enter short: Lips < Teeth < Jaw (bearish alignment) + volume spike
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Donchian midline OR volatility drops below threshold
-            exit_signal = (price < donch_mid[i]) or (atr[i] <= 0.5 * atr_long[i])
-            
-            if exit_signal:
+            # Exit long: Alligator re-crosses against trend OR volume drops
+            if lips[i] < teeth[i] or teeth[i] < jaw[i]:  # Bullish alignment broken
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Donchian midline OR volatility drops below threshold
-            exit_signal = (price > donch_mid[i]) or (atr[i] <= 0.5 * atr_long[i])
-            
-            if exit_signal:
+            # Exit short: Alligator re-crosses against trend OR volume drops
+            if lips[i] > teeth[i] or teeth[i] > jaw[i]:  # Bearish alignment broken
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_VolumeVolatilityFilter"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
