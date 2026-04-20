@@ -1,21 +1,20 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Regime_v2"
-timeframe = "4h"
+name = "6h_1d_Camarilla_R2S2_Breakout_VolumeTrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # === Daily Camarilla Pivot Points (previous day) ===
@@ -33,99 +32,73 @@ def generate_signals(prices):
     prev_low[0] = low_1d[0]
     prev_close[0] = close_1d[0]
     
-    # Camarilla pivot (same as classic)
+    # Classic pivot (same for Camarilla)
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Camarilla R1 and S1 levels
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
+    # Camarilla R2 and S2 levels (tighter breakout levels)
+    r2 = pivot + (range_val * 1.1 / 6)
+    s2 = pivot - (range_val * 1.1 / 6)
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 6h timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # === 4h Volume Confirmation ===
+    # === Volume Trend Filter ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Chopiness Index (1d) for regime filter ===
-    # Calculate daily chopiness index: higher = ranging, lower = trending
-    high_low = df_1d['high'].values - df_1d['low'].values
-    atr1 = np.zeros_like(high_low)
-    atr1[0] = high_low[0]
-    for i in range(1, len(high_low)):
-        tr = max(
-            high_low[i],
-            abs(df_1d['high'].values[i] - df_1d['close'].values[i-1]),
-            abs(df_1d['low'].values[i] - df_1d['close'].values[i-1])
-        )
-        atr1[i] = 0.9 * atr1[i-1] + 0.1 * tr
-    
-    # Sum of absolute returns over 14 days
-    abs_returns = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    sum_abs_ret = np.zeros_like(abs_returns)
-    for i in range(len(abs_returns)):
-        if i < 14:
-            sum_abs_ret[i] = np.sum(abs_returns[:i+1])
-        else:
-            sum_abs_ret[i] = np.sum(abs_returns[i-13:i+1])
-    
-    # Chopiness index formula
-    chop = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if sum_abs_ret[i] > 0 and atr1[i] > 0:
-            chop[i] = 100 * np.log10(sum_abs_ret[i] / (atr1[i] * 14)) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral
-    
-    # Align chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # === Price Trend Filter: 6h EMA50 > EMA200 for long, < for short ===
+    close_series = pd.Series(prices['close'].values)
+    ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(80, n):
+    for i in range(50, n):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
         pivot_val = pivot_aligned[i]
-        chop_val = chop_aligned[i]
+        ema50_val = ema50[i]
+        ema200_val = ema200[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(pivot_val) or np.isnan(chop_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or 
+            np.isnan(s2_val) or np.isnan(pivot_val) or 
+            np.isnan(ema50_val) or np.isnan(ema200_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with volume confirmation in low chop (trending market)
-            if close_val > r1_val and vol_ratio_val > 2.5 and chop_val < 40:
+            # Long: Break above R2 with volume confirmation and uptrend (EMA50 > EMA200)
+            if close_val > r2_val and vol_ratio_val > 2.0 and ema50_val > ema200_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume confirmation in low chop
-            elif close_val < s1_val and vol_ratio_val > 2.5 and chop_val < 40:
+            # Short: Break below S2 with volume confirmation and downtrend (EMA50 < EMA200)
+            elif close_val < s2_val and vol_ratio_val > 2.0 and ema50_val < ema200_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot OR chop increases (rangy market)
-            if close_val < pivot_val or chop_val > 60:
+            # Long exit: Price returns below pivot OR trend breaks down
+            if close_val < pivot_val or ema50_val < ema200_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot OR chop increases
-            if close_val > pivot_val or chop_val > 60:
+            # Short exit: Price returns above pivot OR trend breaks up
+            if close_val > pivot_val or ema50_val > ema200_val:
                 signals[i] = 0.0
                 position = 0
             else:
