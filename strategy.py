@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for indicators (HTF)
+    # Load 1d data for trend and volatility (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ATR(14) for volatility
+    # 1d ATR(14) for volatility and stop
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -34,7 +34,7 @@ def generate_signals(prices):
     vol_ratio_1d = volume_1d / np.where(vol_ma_20_1d == 0, 1, vol_ma_20_1d)
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # 1d daily price data (primary timeframe)
+    # 12h price data (primary timeframe)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -96,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_VolumeTrend_Filter_v1"
-timeframe = "1d"
+name = "12h_EMA34_VolumeTrend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
