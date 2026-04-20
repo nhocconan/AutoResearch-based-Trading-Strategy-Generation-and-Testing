@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-# 12h_Trix_Zero_Cross_Volume
-# Hypothesis: On 12h timeframe, use TRIX (15-period) zero cross with volume confirmation.
-# TRIX filters noise and captures momentum; volume confirms strength.
-# Works in bull (rides trends) and bear (captures reversals) due to momentum focus.
-# Targets 15-30 trades per year.
+# 4h_1d_Pivot_R1S1_Breakout_Volume_Trend
+# Hypothesis: Trade breakouts from daily Camarilla R1/S1 levels on 4h timeframe with volume confirmation and 4h EMA trend filter.
+# Works in bull and bear markets by using price action breakouts (direction agnostic) filtered by higher timeframe trend.
 
-name = "12h_Trix_Zero_Cross_Volume"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,6 +16,8 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -26,16 +26,29 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily TRIX: EMA(EMA(EMA(close, 15), 15), 15) - 1-period percent change
-    close_series = pd.Series(df_1d['close'].values)
-    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix_raw = ((ema3 / ema3.shift(1)) - 1) * 100  # percent change
-    trix = trix_raw.values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align daily TRIX to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Typical price for pivot calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    
+    # Pivot point and ranges
+    pivot_1d = typical_price_1d
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: R1, S1
+    s1_1d = close_1d - (range_1d * 1.1 / 6)
+    r1_1d = close_1d + (range_1d * 1.1 / 6)
+    
+    # Align daily levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    
+    # 4h EMA34 for trend filter
+    close_series = pd.Series(close)
+    ema_34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,31 +60,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(ema_34[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long when TRIX crosses above zero with volume confirmation
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and volume[i] > 1.5 * volume_ma[i]:
+            # Long breakout above R1 with volume and trend confirmation
+            if (close[i] > r1_aligned[i] * 1.002 and 
+                volume[i] > 1.5 * volume_ma[i] and
+                close[i] > ema_34[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short when TRIX crosses below zero with volume
-            elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and volume[i] > 1.5 * volume_ma[i]:
+            # Short breakdown below S1 with volume and trend confirmation
+            elif (close[i] < s1_aligned[i] * 0.998 and 
+                  volume[i] > 1.5 * volume_ma[i] and
+                  close[i] < ema_34[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: TRIX crosses below zero
-            if trix_aligned[i] < 0 and trix_aligned[i-1] >= 0:
+            # Long exit: breakdown below S1
+            if close[i] < s1_aligned[i] * 0.998:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TRIX crosses above zero
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0:
+            # Short exit: breakout above R1
+            if close[i] > r1_aligned[i] * 1.002:
                 signals[i] = 0.0
                 position = 0
             else:
