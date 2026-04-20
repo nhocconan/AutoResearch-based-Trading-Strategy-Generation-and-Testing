@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyTrend_Volume_Confirmation_v1"
-timeframe = "1d"
+name = "12h_Camilla_R1S1_Breakout_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,25 +12,34 @@ def generate_signals(prices):
     if n < 30:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop for trend
-    df_weekly = get_htf_data(prices, '1w')
-    # Get daily data ONCE before loop for volume average
-    df_daily = get_htf_data(prices, '1d')
+    # Get daily data ONCE before loop for Camarilla levels and volume
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_weekly) < 2 or len(df_daily) < 2:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly EMA10 for trend direction
-    close_weekly = df_weekly['close'].values
-    ema_10_weekly = pd.Series(close_weekly).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_10_weekly)
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily average volume (20-period) for volume confirmation
-    vol_daily = df_daily['volume'].values
-    vol_avg_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
-    vol_avg_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_daily)
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # R1 and S1
+    r1 = close_1d + 1.1 * (high_1d - low_1d) / 12.0
+    s1 = close_1d - 1.1 * (high_1d - low_1d) / 12.0
     
-    # Daily ATR for exit (14-period)
+    # Align to 12h timeframe (use previous day's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Daily volume average (20-period) for volume confirmation
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
+    # 12h ATR for exit (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -45,55 +54,67 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
+    # Pre-compute hour filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     start_idx = 30  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Get aligned values
-        ema_trend = ema_10_weekly_aligned[i]
-        vol_avg = vol_avg_daily_aligned[i]
-        current_atr = atr[i]
-        current_close = prices['close'].iloc[i]
-        current_volume = prices['volume'].iloc[i]
-        
-        # Skip if any value is NaN
-        if np.isnan(ema_trend) or np.isnan(vol_avg) or np.isnan(current_atr):
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.5x daily average volume
-        vol_spike = current_volume > 1.5 * vol_avg
+        # Get aligned values
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        vol_avg = vol_avg_1d_aligned[i]
+        current_atr = atr[i]
+        current_close = prices['close'].iloc[i]
+        current_volume = prices['volume'].iloc[i]
+        
+        # Skip if any value is NaN
+        if np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_avg) or np.isnan(current_atr):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume spike: current volume > 1.8x daily average volume
+        vol_spike = current_volume > 1.8 * vol_avg
         
         if position == 0:
-            # Long: price above weekly EMA10 with volume spike
-            if current_close > ema_trend and vol_spike:
+            # Long: price breaks above R1 with volume spike
+            if current_close > r1_level and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
-            # Short: price below weekly EMA10 with volume spike
-            elif current_close < ema_trend and vol_spike:
+            # Short: price breaks below S1 with volume spike
+            elif current_close < s1_level and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price below weekly EMA10 or ATR stop loss
-            if current_close < ema_trend:
+            # Long exit: price breaks below S1 or ATR stop loss
+            if current_close < s1_level:
                 signals[i] = 0.0
                 position = 0
-            elif current_close < entry_price - 2.5 * current_atr:
+            elif current_close < entry_price - 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above weekly EMA10 or ATR stop loss
-            if current_close > ema_trend:
+            # Short exit: price breaks above R1 or ATR stop loss
+            if current_close > r1_level:
                 signals[i] = 0.0
                 position = 0
-            elif current_close > entry_price + 2.5 * current_atr:
+            elif current_close > entry_price + 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
