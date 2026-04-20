@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_S1S2_Breakout_Volume_ATRFilter_v3"
+name = "4h_1d_Pivot_S1S2_Breakout_Volume_ATRFilter_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,15 +17,14 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily average volume for spike detection (20-period)
+    # Calculate daily average volume for spike detection (20-period) with vectorized approach
     vol_1d = df_1d['volume'].values
     vol_avg_1d = np.full(len(vol_1d), np.nan)
-    for i in range(len(vol_1d)):
-        if i >= 19:  # 20-period average
-            vol_avg_1d[i] = np.mean(vol_1d[i-19:i+1])
+    for i in range(19, len(vol_1d)):
+        vol_avg_1d[i] = np.mean(vol_1d[i-19:i+1])
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Calculate ATR for stop loss (14-period on 4h data)
+    # Calculate ATR for stop loss (14-period on 4h data) with vectorized approach
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -35,9 +34,8 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     atr = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i >= 13:  # 14-period
-            atr[i] = np.nanmean(tr[i-13:i+1])
+    for i in range(13, len(tr)):
+        atr[i] = np.nanmean(tr[i-13:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
