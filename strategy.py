@@ -8,29 +8,39 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data once before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1w data for weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Load 1d data for daily pivot
     df_1d = get_htf_data(prices, '1d')
-    
-    # 4h Donchian breakout
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
-    donchian_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
-    
-    # 1d EMA200 for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # 1h volume confirmation
+    # Calculate daily pivot and support/resistance levels
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    # R1 = pivot + range/3, S1 = pivot - range/3 (more sensitive)
+    r1_1d = pivot_1d + range_1d / 3.0
+    s1_1d = pivot_1d - range_1d / 3.0
+    
+    # Align to 6h (previous day's levels available at 6h open)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # 6h price and volume
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 24h
     
-    # Session filter: 8-20 UTC
-    hours = prices.index.hour
+    # Volume confirmation: 24-period average (4 days of 6h bars)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -38,54 +48,45 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if np.isnan(donchian_high_4h_aligned[i]) or np.isnan(donchian_low_4h_aligned[i]) or \
-           np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        price = prices['close'].iloc[i]
+        price = close[i]
         vol = volume[i]
         
-        # Session filter: only trade 8-20 UTC
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         if position == 0:
-            # Long: break above 4h Donchian high with volume, above 1d EMA200
-            if price > donchian_high_4h_aligned[i] and price > ema_200_1d_aligned[i] and vol > 1.5 * vol_ma[i]:
-                signals[i] = 0.20
+            # Long: break above R1 with volume, above weekly EMA50 (uptrend)
+            if price > r1_1d_aligned[i] and price > ema_50_1w_aligned[i] and vol > 1.3 * vol_ma[i]:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: break below 4h Donchian low with volume, below 1d EMA200
-            elif price < donchian_low_4h_aligned[i] and price < ema_200_1d_aligned[i] and vol > 1.5 * vol_ma[i]:
-                signals[i] = -0.20
+            # Short: break below S1 with volume, below weekly EMA50 (downtrend)
+            elif price < s1_1d_aligned[i] and price < ema_50_1w_aligned[i] and vol > 1.3 * vol_ma[i]:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price crosses below 4h Donchian low or trend fails
-            if price < donchian_low_4h_aligned[i] or price < ema_200_1d_aligned[i]:
+            # Long exit: price crosses below S1 (mean reversion) or weekly trend fails
+            if price < s1_1d_aligned[i] or price < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 4h Donchian high or trend fails
-            if price > donchian_high_4h_aligned[i] or price > ema_200_1d_aligned[i]:
+            # Short exit: price crosses above R1 (mean reversion) or weekly trend fails
+            if price > r1_1d_aligned[i] or price > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Donchian20_4hVol_1dEMA200Trend_Session"
-timeframe = "1h"
+name = "6h_WeeklyTrend_DailyPivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
