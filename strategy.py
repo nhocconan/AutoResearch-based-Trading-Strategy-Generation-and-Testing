@@ -1,37 +1,29 @@
 #!/usr/bin/env python3
-"""
-4h_1w_Camarilla_R1S1_Breakout_Volume_ATRFilter_v2
-Hypothesis: Trade 4-hour chart using weekly Camarilla pivot R1/S1 breakouts with volume confirmation and ATR-based stop loss.
-Weekly Camarilla levels provide strong weekly support/resistance. Breakouts with volume indicate institutional participation.
-ATR stop loss manages risk during adverse moves. Works in bull/bear markets: breaks indicate momentum continuation.
-Target: 20-50 total trades over 4 years (5-12/year) with position size 0.30.
-"""
-
-name = "4h_1w_Camarilla_R1S1_Breakout_Volume_ATRFilter_v2"
-timeframe = "4h"
-leverage = 1.0
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "4h_1d_Pivot_S1S2_Breakout_Volume_ATRFilter_v1"
+timeframe = "4h"
+leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop for Camarilla levels and volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data ONCE before loop for pivot levels and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly average volume for spike detection (20-period)
-    vol_1w = df_1w['volume'].values
-    vol_avg_1w = np.full(len(vol_1w), np.nan)
-    for i in range(len(vol_1w)):
+    # Calculate daily average volume for spike detection (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = np.full(len(vol_1d), np.nan)
+    for i in range(len(vol_1d)):
         if i >= 19:  # 20-period average
-            vol_avg_1w[i] = np.mean(vol_1w[i-19:i+1])
-    vol_avg_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_1w)
+            vol_avg_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     # Calculate ATR for stop loss (14-period on 4h data)
     high = prices['high'].values
@@ -54,56 +46,57 @@ def generate_signals(prices):
     start_idx = 20  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Get previous completed weekly bar for Camarilla calculation
-        if len(df_1w) < 2:
+        # Get previous completed daily bar for pivot calculation
+        if len(df_1d) < 2:
             continue
             
-        # Calculate weekly Camarilla levels for each weekly bar
-        weekly_high = df_1w['high'].values
-        weekly_low = df_1w['low'].values
-        weekly_close = df_1w['close'].values
+        # Calculate daily pivot levels for each daily bar
+        daily_high = df_1d['high'].values
+        daily_low = df_1d['low'].values
+        daily_close = df_1d['close'].values
         
-        # Arrays to store weekly R1 and S1 levels
-        weekly_r1 = np.full_like(weekly_close, np.nan)
-        weekly_s1 = np.full_like(weekly_close, np.nan)
+        # Arrays to store daily S1 and S2 levels
+        daily_s1 = np.full_like(daily_close, np.nan)
+        daily_s2 = np.full_like(daily_close, np.nan)
         
-        # Calculate for each weekly bar (starting from index 1 to avoid look-ahead)
-        for j in range(1, len(weekly_close)):
-            range_val = weekly_high[j-1] - weekly_low[j-1]
+        # Calculate for each daily bar (starting from index 1 to avoid look-ahead)
+        for j in range(1, len(daily_close)):
+            pivot = (daily_high[j-1] + daily_low[j-1] + daily_close[j-1]) / 3.0
+            range_val = daily_high[j-1] - daily_low[j-1]
             if range_val > 0:
-                weekly_r1[j] = weekly_close[j-1] + (range_val * 1.1 / 12)
-                weekly_s1[j] = weekly_close[j-1] - (range_val * 1.1 / 12)
+                daily_s1[j] = pivot - range_val
+                daily_s2[j] = pivot - 2.0 * range_val
         
-        # Align the weekly R1/S1 to 4h timeframe
-        weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-        weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+        # Align the daily S1/S2 to 4h timeframe
+        daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
+        daily_s2_aligned = align_htf_to_ltf(prices, df_1d, daily_s2)
         
         current_close = prices['close'].iloc[i]
         current_volume = prices['volume'].iloc[i]
         current_atr = atr[i]
         
-        # Volume spike: current volume > 1.5x weekly average volume
-        vol_spike = (not np.isnan(vol_avg_1w_aligned[i]) and 
-                     current_volume > 1.5 * vol_avg_1w_aligned[i])
+        # Volume spike: current volume > 1.5x daily average volume
+        vol_spike = (not np.isnan(vol_avg_1d_aligned[i]) and 
+                     current_volume > 1.5 * vol_avg_1d_aligned[i])
         
         if position == 0:
-            # Long: price breaks above weekly R1 with volume spike
-            if (not np.isnan(weekly_r1_aligned[i]) and 
-                current_close > weekly_r1_aligned[i] and vol_spike):
+            # Long: price breaks above daily S1 with volume spike
+            if (not np.isnan(daily_s1_aligned[i]) and 
+                current_close > daily_s1_aligned[i] and vol_spike):
                 signals[i] = 0.30
                 position = 1
                 entry_price = current_close
-            # Short: price breaks below weekly S1 with volume spike
-            elif (not np.isnan(weekly_s1_aligned[i]) and 
-                  current_close < weekly_s1_aligned[i] and vol_spike):
+            # Short: price breaks below daily S2 with volume spike
+            elif (not np.isnan(daily_s2_aligned[i]) and 
+                  current_close < daily_s2_aligned[i] and vol_spike):
                 signals[i] = -0.30
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price breaks below weekly S1 or ATR stop loss
-            if (not np.isnan(weekly_s1_aligned[i]) and 
-                current_close < weekly_s1_aligned[i]):
+            # Long exit: price breaks below daily S2 or ATR stop loss
+            if (not np.isnan(daily_s2_aligned[i]) and 
+                current_close < daily_s2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             elif current_atr > 0 and current_close < entry_price - 2.0 * current_atr:
@@ -113,9 +106,9 @@ def generate_signals(prices):
                 signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price breaks above weekly R1 or ATR stop loss
-            if (not np.isnan(weekly_r1_aligned[i]) and 
-                current_close > weekly_r1_aligned[i]):
+            # Short exit: price breaks above daily S1 or ATR stop loss
+            if (not np.isnan(daily_s1_aligned[i]) and 
+                current_close > daily_s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             elif current_atr > 0 and current_close > entry_price + 2.0 * current_atr:
