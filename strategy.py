@@ -8,20 +8,14 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    
-    # Load 1d data for signal generation
+    # Load daily data for pivot calculation and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ATR for volatility filter
+    # Calculate daily ATR (14-day)
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
@@ -32,7 +26,19 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1d volume MA for confirmation
+    # Calculate daily pivot points (R1, S1)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    
+    # Align R1 and S1 to 12h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Daily volume moving average (20-day)
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
@@ -41,8 +47,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,30 +58,30 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above 12h EMA20 with volume confirmation and sufficient volatility
-            if (price > ema_20_12h_aligned[i] and 
+            # Long: price breaks above R1 with volume confirmation and sufficient volatility
+            if (price > r1_1d_aligned[i] and 
                 vol > 1.3 * vol_ma_1d_aligned[i] and 
                 atr_1d_aligned[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 12h EMA20 with volume confirmation and sufficient volatility
-            elif (price < ema_20_12h_aligned[i] and 
+            # Short: price breaks below S1 with volume confirmation and sufficient volatility
+            elif (price < s1_1d_aligned[i] and 
                   vol > 1.3 * vol_ma_1d_aligned[i] and 
                   atr_1d_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 12h EMA20 or volatility drops significantly
-            if price < ema_20_12h_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
+            # Long exit: price falls back below pivot or volume drops significantly
+            if price < pivot_1d[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 12h EMA20 or volatility drops significantly
-            if price > ema_20_12h_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
+            # Short exit: price rises back above pivot or volume drops significantly
+            if price > pivot_1d[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA20_1dVolumeVolatilityFilter"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_Breakout_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
