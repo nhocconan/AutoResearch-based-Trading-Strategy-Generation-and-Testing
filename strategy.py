@@ -1,93 +1,118 @@
-#1d_1w_WeeklyTrend_DailyBreakout_v3
-# Hypothesis: Weekly trend (1w EMA50) + Daily breakout (Donchian20) + Volume confirmation
-# Works in bull (trend + breakout) and bear (avoid counter-trend via weekly filter)
-# Target: 20-50 trades/year, low frequency to minimize fee drag
-# Timeframe: 1d, HTF: 1w
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_WeeklyTrend_DailyBreakout_v3"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Weekly: Trend filter (EMA50) ===
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # === 1d: Calculate Camarilla pivot levels ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Daily: Donchian channels (20-period) ===
+    # Calculate pivot and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    r1 = pivot + (range_hl * 1.1 / 12)
+    r2 = pivot + (range_hl * 1.1 / 6)
+    r3 = pivot + (range_hl * 1.1 / 4)
+    r4 = pivot + (range_hl * 1.1 / 2)
+    s1 = pivot - (range_hl * 1.1 / 12)
+    s2 = pivot - (range_hl * 1.1 / 6)
+    s3 = pivot - (range_hl * 1.1 / 4)
+    s4 = pivot - (range_hl * 1.1 / 2)
+    
+    # Align S1 and R1 levels to 12h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    
+    # === 12h: Price and volume ===
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian upper/lower (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
+    # ATR for stop loss (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
+        # Skip outside session
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
-        ema_val = ema50_1w_aligned[i]
-        donch_high_val = donch_high[i]
-        donch_low_val = donch_low[i]
         close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
+        s1_val = s1_aligned[i]
+        r1_val = r1_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(ema_val) or np.isnan(donch_high_val) or np.isnan(donch_low_val) or np.isnan(vol_ratio_val):
+        if np.isnan(s1_val) or np.isnan(r1_val) or np.isnan(vol_ratio_val) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Weekly uptrend + price breaks above Donchian high + volume confirmation
-            if (close_val > ema_val and           # Weekly uptrend (price above weekly EMA50)
-                close_val > donch_high_val and    # Break above Donchian high (20)
-                vol_ratio_val > 1.5):             # Volume confirmation
+            # Long: Price breaks above R1 with volume confirmation
+            if (close_val > r1_val and vol_ratio_val > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly downtrend + price breaks below Donchian low + volume confirmation
-            elif (close_val < ema_val and         # Weekly downtrend (price below weekly EMA50)
-                  close_val < donch_low_val and   # Break below Donchian low (20)
-                  vol_ratio_val > 1.5):           # Volume confirmation
+                entry_price = close_val
+            # Short: Price breaks below S1 with volume confirmation
+            elif (close_val < s1_val and vol_ratio_val > 1.8):
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         
         elif position == 1:
-            # Long exit: trend reversal or breakdown below Donchian low
-            if (close_val < ema_val or           # Weekly trend turned down
-                close_val < donch_low_val):      # Broke below Donchian low
+            # Long exit: stop loss or price re-enters pivot range
+            if (close_val <= entry_price - 1.5 * atr_val or  # Stop loss
+                close_val <= s1_val):  # Price back below S1
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or breakout above Donchian high
-            if (close_val > ema_val or           # Weekly trend turned up
-                close_val > donch_high_val):     # Broke above Donchian high
+            # Short exit: stop loss or price re-enters pivot range
+            if (close_val >= entry_price + 1.5 * atr_val or  # Stop loss
+                close_val >= r1_val):  # Price back above R1
                 signals[i] = 0.0
                 position = 0
             else:
