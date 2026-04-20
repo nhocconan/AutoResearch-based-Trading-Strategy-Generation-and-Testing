@@ -3,102 +3,108 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1h mean reversion with 4h/1d regime filter
+# - Uses 4h EMA(34) for trend direction, 1d RSI(14) for overbought/oversold
+# - 1h RSI(14) for entry timing in mean reversion zones
+# - Session filter (08-20 UTC) to avoid low-liquidity hours
+# - Targets 15-35 trades/year by requiring multi-timeframe alignment
+# - Works in bull/bear via mean reversion in ranging markets and trend filters
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for indicator calculations
+    # Load 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    
+    # Load 1d data for regime filter (RSI)
     df_1d = get_htf_data(prices, '1d')
-    
-    # Daily high, low, close for Williams %R
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Williams %R(14) calculation: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Align Williams %R to 6h timeframe (with 1-day delay for signal confirmation)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r, additional_delay_bars=1)
-    
-    # 6h price and volume data
+    # 1h data
     close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # 60-period (5-day) high/low for breakout levels
-    highest_high_60 = pd.Series(high).rolling(window=60, min_periods=60).max().values
-    lowest_low_60 = pd.Series(low).rolling(window=60, min_periods=60).min().values
+    # 1h RSI(14) for entry timing
+    delta_1h = np.diff(close, prepend=close[0])
+    gain_1h = np.where(delta_1h > 0, delta_1h, 0)
+    loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
+    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_1h = avg_gain_1h / np.where(avg_loss_1h == 0, 1e-10, avg_loss_1h)
+    rsi_14_1h = 100 - (100 / (1 + rs_1h))
     
-    # 20-period volume average for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(highest_high_60[i]) or np.isnan(lowest_low_60[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(rsi_14_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-        williams_r_val = williams_r_aligned[i]
+        ema_trend = ema_34_4h_aligned[i]
+        rsi_daily = rsi_14_1d_aligned[i]
+        rsi_hourly = rsi_14_1h[i]
+        hour = hours[i]
         
-        # Breakout conditions with volume confirmation
-        bullish_breakout = (price > highest_high_60[i]) and (vol_ratio > 1.5)
-        bearish_breakout = (price < lowest_low_60[i]) and (vol_ratio > 1.5)
+        # Regime filters
+        uptrend_regime = price > ema_trend
+        downtrend_regime = price < ema_trend
+        oversold = rsi_daily < 30
+        overbought = rsi_daily > 70
         
-        # Williams %R conditions for mean reversion in ranging markets
-        oversold = williams_r_val < -80
-        overbought = williams_r_val > -20
+        # Entry conditions with session filter
+        in_session = 8 <= hour <= 20
         
-        if position == 0:
-            # Enter long on bullish breakout with volume
-            if bullish_breakout:
-                signals[i] = 0.25
-                position = 1
-            # Enter short on bearish breakout with volume
-            elif bearish_breakout:
-                signals[i] = -0.25
-                position = -1
-            # Mean reversion entries in ranging markets
-            elif oversold and (price > lowest_low_60[i]):  # Avoid catching falling knives
+        if position == 0 and in_session:
+            # Long: uptrend regime + daily oversold + hourly RSI < 30
+            if uptrend_regime and oversold and rsi_hourly < 30:
                 signals[i] = 0.20
                 position = 1
-            elif overbought and (price < highest_high_60[i]):  # Avoid catching rising tops
+            # Short: downtrend regime + daily overbought + hourly RSI > 70
+            elif downtrend_regime and overbought and rsi_hourly > 70:
                 signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish breakout or overbought conditions
-            if bearish_breakout or overbought:
+            # Exit long: RSI > 50 or trend breakdown
+            if rsi_hourly > 50 or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: bullish breakout or oversold conditions
-            if bullish_breakout or oversold:
+            # Exit short: RSI < 50 or trend breakdown
+            if rsi_hourly < 50 or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "6h_WilliamsR_Breakout_MeanReversion_V1"
-timeframe = "6h"
+name = "1h_4h_1d_RSI_MeanReversion_Regime_v1"
+timeframe = "1h"
 leverage = 1.0
