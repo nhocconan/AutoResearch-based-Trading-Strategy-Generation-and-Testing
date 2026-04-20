@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_1d_OrderBlock_Trend_Follow_v1
-# Hypothesis: On 6h timeframe, trade breakouts from 1d order blocks with trend following.
-# In bull/bear markets, price respects institutional order blocks (accumulation/distribution zones).
-# Uses 1d volume profile to identify high-volume nodes (HVNs) as support/resistance.
-# Trend filter: 1d EMA50 - only trade in direction of higher timeframe trend.
-# Targets 20-40 trades/year by requiring confluence of order block, volume, and trend.
+# 12h_1W_Donchian_Breakout_Volume_TrendFilter_v1
+# Hypothesis: On 12h timeframe, trade breakouts of weekly Donchian channels (20-period) with volume confirmation and weekly EMA trend filter.
+# In bull markets, buy breakouts above upper band; in bear markets, sell breakdowns below lower band.
+# Weekly EMA20 filters trend direction: only long when price > EMA20, short when price < EMA20.
+# Volume must be above 1.5x 20-period average to confirm breakout strength.
+# Targets 15-30 trades/year by requiring confluence of breakout, volume, and trend filter.
 
-name = "6h_1d_OrderBlock_Trend_Follow_v1"
-timeframe = "6h"
+name = "12h_1W_Donchian_Breakout_Volume_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,49 +24,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Donchian upper and lower bands
+    upper_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lower_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Identify 1d order blocks (high volume nodes)
-    # For each day, if volume > 1.5x 20-day average, mark the close as significant level
-    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * volume_ma_20)
+    # Align weekly Donchian levels to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
     
-    # Create order block levels: use close of high volume days
-    ob_levels = np.where(volume_spike, close_1d, np.nan)
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
-    # Forward fill to create persistent levels until next significant volume day
-    ob_series = pd.Series(ob_levels)
-    ob_filled = ob_series.ffill().bfill().values  # Fill both directions for robustness
-    
-    # Alternative: use volume-weighted average price for significant days
-    vwap_1d_num = (high_1d + low_1d + close_1d) * volume_1d  # Typical price * volume
-    vwap_1d_den = volume_1d
-    vwap_1d = np.where(vwap_1d_den > 0, vwap_1d_num / vwap_1d_den, 0)
-    
-    # Use VWAP of high volume days as stronger support/resistance
-    vwap_ob = np.where(volume_spike, vwap_1d, np.nan)
-    vwap_ob_series = pd.Series(vwap_ob)
-    vwap_ob_filled = vwap_ob_series.ffill().bfill().values
-    
-    # Align to 6h timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ob_level_aligned = align_htf_to_ltf(prices, df_1d, ob_filled)
-    vwap_ob_aligned = align_htf_to_ltf(prices, df_1d, vwap_ob_filled)
-    
-    # Volume average for spike detection on 6h
-    volume_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average for spike detection
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,57 +56,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_aligned[i]) or np.isnan(ob_level_aligned[i]) or 
-            np.isnan(vwap_ob_aligned[i]) or np.isnan(volume_ma_6h[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Look for breakouts from order block levels in direction of 1d trend
-            # Uptrend: price > EMA50, look for long breakouts above OB/VWAP
-            # Downtrend: price < EMA50, look for short breakdowns below OB/VWAP
-            
-            if close[i] > ema50_aligned[i]:  # Uptrend filter
-                # Long breakout above order block or VWAP with volume
-                ob_level = ob_level_aligned[i]
-                vwap_level = vwap_ob_aligned[i]
-                
-                # Use the higher of OB or VWAP as resistance in uptrend
-                resistance = max(ob_level, vwap_level) if not (np.isnan(ob_level) or np.isnan(vwap_level)) else \
-                            (ob_level if not np.isnan(ob_level) else vwap_level)
-                
-                if not np.isnan(resistance):
-                    if (close[i] > resistance * 1.002 and  # 0.2% breakout
-                        volume[i] > 1.5 * volume_ma_6h[i]):
-                        signals[i] = 0.25
-                        position = 1
-                        
-            elif close[i] < ema50_aligned[i]:  # Downtrend filter
-                # Short breakdown below order block or VWAP with volume
-                ob_level = ob_level_aligned[i]
-                vwap_level = vwap_ob_aligned[i]
-                
-                # Use the lower of OB or VWAP as support in downtrend
-                support = min(ob_level, vwap_level) if not (np.isnan(ob_level) or np.isnan(vwap_level)) else \
-                         (ob_level if not np.isnan(ob_level) else vwap_level)
-                
-                if not np.isnan(support):
-                    if (close[i] < support * 0.998 and  # 0.2% breakdown
-                        volume[i] > 1.5 * volume_ma_6h[i]):
-                        signals[i] = -0.25
-                        position = -1
+            # Long breakout above upper Donchian with volume and trend filter
+            if (close[i] > upper_aligned[i] and 
+                close[i] > ema_20_aligned[i] and
+                volume[i] > 1.5 * volume_ma[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown below lower Donchian with volume and trend filter
+            elif (close[i] < lower_aligned[i] and 
+                  close[i] < ema_20_aligned[i] and
+                  volume[i] > 1.5 * volume_ma[i]):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or return to order block
-            if close[i] < ema50_aligned[i] or close[i] < ob_level_aligned[i] * 0.995:
+            # Long exit: price crosses below EMA20 or breakdown below lower Donchian
+            if close[i] < ema_20_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                
+        
         elif position == -1:
-            # Short exit: trend reversal or return to order block
-            if close[i] > ema50_aligned[i] or close[i] > ob_level_aligned[i] * 1.005:
+            # Short exit: price crosses above EMA20 or breakout above upper Donchian
+            if close[i] > ema_20_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
