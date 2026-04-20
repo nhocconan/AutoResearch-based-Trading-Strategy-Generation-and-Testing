@@ -5,21 +5,22 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 50:  # Warmup period
         return np.zeros(n)
     
-    # Load daily data for trend filter
+    # Load daily data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily EMA21 for trend
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate daily ATR for volatility filter
+    # Calculate daily indicators
+    # Daily ATR for volatility filter and position sizing
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
@@ -30,16 +31,20 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate daily volume average for confirmation
+    # Daily volume average for confirmation
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Weekly EMA for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -50,30 +55,30 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above EMA21 with volume > 1.5x average and sufficient volatility
-            if (price > ema_21_1d_aligned[i] and 
+            # Long: price above weekly EMA with volume confirmation and sufficient volatility
+            if (price > ema_20_1w_aligned[i] and 
                 vol > 1.5 * vol_ma_1d_aligned[i] and 
-                atr_1d_aligned[i] > 0.01 * price):  # Ensure meaningful volatility
+                atr_1d_aligned[i] > 0.5 * np.mean(atr_1d_aligned[max(0, i-20):i+1])):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA21 with volume > 1.5x average and sufficient volatility
-            elif (price < ema_21_1d_aligned[i] and 
+            # Short: price below weekly EMA with volume confirmation and sufficient volatility
+            elif (price < ema_20_1w_aligned[i] and 
                   vol > 1.5 * vol_ma_1d_aligned[i] and 
-                  atr_1d_aligned[i] > 0.01 * price):
+                  atr_1d_aligned[i] > 0.5 * np.mean(atr_1d_aligned[max(0, i-20):i+1])):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below EMA21 or volume drops significantly
-            if price < ema_21_1d_aligned[i] or vol < 0.7 * vol_ma_1d_aligned[i]:
+            # Long exit: price crosses below weekly EMA or volatility drops significantly
+            if price < ema_20_1w_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA21 or volume drops significantly
-            if price > ema_21_1d_aligned[i] or vol < 0.7 * vol_ma_1d_aligned[i]:
+            # Short exit: price crosses above weekly EMA or volatility drops significantly
+            if price > ema_20_1w_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA21_VolumeSurge"
+name = "1d_WeeklyEMA20_VolumeVolatilityFilter"
 timeframe = "1d"
 leverage = 1.0
