@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # 4h_1d_Camarilla_R1S1_Breakout_VolumeTrend
-# Hypothesis: Trade breakouts from 1d Camarilla R1/S1 levels on 4h timeframe with volume confirmation and 1d EMA34 trend filter.
-# R1/S1 provide reliable breakout levels with lower false signals than R4/S4. Uses 1d EMA34 to align with daily trend.
-# Targets 20-50 trades per year by requiring strong breakouts with volume confirmation.
-# Works in bull markets (buy R1 breakouts in uptrend) and bear markets (sell S1 breakdowns in downtrend).
+# Hypothesis: On 4h timeframe, trade breakouts from 1d-derived Camarilla R1/S1 levels with volume spike confirmation and 1d EMA trend filter.
+# R1/S1 provide tighter breakout levels than R4/S4, improving win rate while 1d EMA34 filter ensures alignment with daily trend.
+# Volume spike (2x 20-period average) confirms institutional participation. Designed for 20-40 trades/year to avoid fee drag.
+# Works in bull markets (buy R1 breakouts in uptrends) and bear markets (sell S1 breakdowns in downtrends).
 
 name = "4h_1d_Camarilla_R1S1_Breakout_VolumeTrend"
 timeframe = "4h"
@@ -37,7 +37,7 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: R1 and S1 (reliable breakout levels)
+    # Camarilla levels: R1 and S1 (inner breakout levels)
     s1_1d = close_1d - (range_1d * 1.1 / 6)
     r1_1d = close_1d + (range_1d * 1.1 / 6)
     
@@ -68,13 +68,13 @@ def generate_signals(prices):
         if position == 0:
             # Long: price above R1, volume spike, and price above 1d EMA34 (uptrend)
             if (close[i] > r1_aligned[i] * 1.002 and 
-                volume[i] > 1.8 * volume_ma[i] and
+                volume[i] > 2.0 * volume_ma[i] and
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: price below S1, volume spike, and price below 1d EMA34 (downtrend)
             elif (close[i] < s1_aligned[i] * 0.998 and 
-                  volume[i] > 1.8 * volume_ma[i] and
+                  volume[i] > 2.0 * volume_ma[i] and
                   close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
