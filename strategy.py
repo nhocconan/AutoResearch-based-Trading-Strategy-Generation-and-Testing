@@ -1,13 +1,15 @@
-# 4h_Donchian_Breakout_Volume_Trend
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h trend filter (EMA34) for trend strength.
-# Long when price breaks above 20-period high + volume > 1.5x average + EMA34 rising.
-# Short when price breaks below 20-period low + volume > 1.5x average + EMA34 falling.
-# Designed to capture trends with filtered entries, reducing false breakouts in ranging markets.
-# Position size 0.25 balances return and drawdown control.
-# Target: 20-50 trades/year to minimize fee drag.
+#!/usr/bin/env python3
+"""
+12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume
+Hypothesis: Use daily Camarilla pivot levels (R1, S1) as support/resistance. 
+Break above R1 with volume confirmation = long; break below S1 with volume confirmation = short.
+Filter trades using 12h ADX > 25 to ensure trending markets (avoid whipsaw in ranging markets).
+Position size 0.25 to balance risk and reward. Target: 15-35 trades/year per symbol.
+Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
+"""
 
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,78 +26,110 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 40:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA34 for trend filter
-    def calculate_ema(data, period):
-        ema = np.full_like(data, np.nan)
-        if len(data) < period:
-            return ema
-        multiplier = 2 / (period + 1)
-        ema[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
-        return ema
+    # Calculate daily Camarilla pivot levels (R1, S1)
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    ema34_12h = calculate_ema(close_12h, 34)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Align to 12h timeframe (wait for daily close)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate Donchian channels (20-period) and average volume
-    lookback = 20
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    avg_volume = np.full_like(volume, np.nan)
+    # Calculate 12h ADX(14) for trend filter
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        # Plus Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Wilder's smoothing
+        def wilder_smoothing(data, period):
+            result = np.full_like(data, np.nan)
+            if len(data) < period:
+                return result
+            alpha = 1.0 / period
+            result[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+            return result
+        
+        atr = wilder_smoothing(tr, period)
+        # Avoid division by zero
+        atr_safe = np.where(atr == 0, 1e-10, atr)
+        plus_di = 100 * wilder_smoothing(plus_dm, period) / atr_safe
+        minus_di = 100 * wilder_smoothing(minus_dm, period) / atr_safe
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = wilder_smoothing(dx, period)
+        return adx
     
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
-        avg_volume[i] = np.mean(volume[i-lookback+1:i+1])
+    adx_12h = calculate_adx(high, low, close, 14)
     
-    # Volume threshold: 1.5x average
-    volume_threshold = avg_volume * 1.5
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = np.zeros_like(volume)
+    vol_ma[:] = np.nan
+    for i in range(20, len(volume)):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, lookback-1)  # Ensure indicators are ready
+    start_idx = max(30, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_threshold[i]) or np.isnan(ema34_12h_aligned[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(adx_12h[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above 20-period high + volume confirmation + EMA34 rising
-            if (close[i] > highest_high[i] and 
-                volume[i] > volume_threshold[i] and 
-                ema34_12h_aligned[i] > ema34_12h_aligned[i-1]):
+            # Long: price breaks above R1 with volume and ADX > 25
+            if (close[i] > r1_1d_aligned[i] and 
+                vol_filter[i] and 
+                adx_12h[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low + volume confirmation + EMA34 falling
-            elif (close[i] < lowest_low[i] and 
-                  volume[i] > volume_threshold[i] and 
-                  ema34_12h_aligned[i] < ema34_12h_aligned[i-1]):
+            # Short: price breaks below S1 with volume and ADX > 25
+            elif (close[i] < s1_1d_aligned[i] and 
+                  vol_filter[i] and 
+                  adx_12h[i] > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below 20-period low OR EMA34 turns down
-            if close[i] < lowest_low[i] or ema34_12h_aligned[i] < ema34_12h_aligned[i-1]:
+            # Long exit: price returns below pivot OR ADX weak (< 20)
+            if close[i] < pivot_1d_aligned[i] or adx_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 20-period high OR EMA34 turns up
-            if close[i] > highest_high[i] or ema34_12h_aligned[i] > ema34_12h_aligned[i-1]:
+            # Short exit: price returns above pivot OR ADX weak (< 20)
+            if close[i] > pivot_1d_aligned[i] or adx_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
