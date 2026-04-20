@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_v3
-# Hypothesis: Daily Camarilla R1/S1 breakouts on 4h timeframe with volume and ATR filter capture institutional moves while avoiding chop.
-# Works in bull markets by catching breaks above R1; in bear markets by catching breaks below S1.
-# Volume filter ensures institutional participation, ATR filter avoids low-volatility false breakouts.
-# Target: 20-50 trades/year to minimize fee discount.
+# 1d_1w_Donchian_Breakout_Trend_Weekly
+# Hypothesis: Weekly Donchian breakouts with daily trend alignment capture major trends in both bull and bear markets.
+# Uses weekly price channels to avoid whipsaw, daily EMA for trend filter, and volume confirmation for institutional participation.
+# Target: 10-25 trades/year to minimize fee drag while capturing major moves.
 
-name = "4h_1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_v3"
-timeframe = "4h"
+name = "1d_1w_Donchian_Breakout_Trend_Weekly"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,72 +22,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = pivot + (high_1d - low_1d) * 1.1 / 12
-    s1 = pivot - (high_1d - low_1d) * 1.1 / 12
+    # Weekly upper channel: highest high of last 20 weeks
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Weekly lower channel: lowest low of last 20 weeks
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Align daily Camarilla levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly channels to daily timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # Volume filter: volume > 2.0x 20-period EMA (more stringent to reduce trades)
+    # Daily trend filter: EMA(50)
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
+    
+    # Volume filter: volume > 1.5x 20-day EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > (vol_ema20 * 2.0)
-    
-    # ATR filter: avoid low-volatility breakouts
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_filter = atr > (atr_ma * 0.8)  # Only trade when volatility is above 80% of its 50-period average
+    volume_filter = volume > (vol_ema20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure ATR MA is ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(atr_filter[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
+            np.isnan(ema_50[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + volume + volatility confirmation
-            if close[i] > r1_aligned[i] and volume_filter[i] and atr_filter[i]:
+            # Long: price breaks above weekly upper channel + above daily EMA50 + volume
+            if close[i] > upper_20_aligned[i] and close[i] > ema_50[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume + volatility confirmation
-            elif close[i] < s1_aligned[i] and volume_filter[i] and atr_filter[i]:
+            # Short: price breaks below weekly lower channel + below daily EMA50 + volume
+            elif close[i] < lower_20_aligned[i] and close[i] < ema_50[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below pivot (mean reversion) or volatility drops
-            if close[i] < pivot_aligned[i] or not atr_filter[i]:
+            # Long: exit if price breaks below weekly lower channel or below EMA50
+            if close[i] < lower_20_aligned[i] or close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above pivot (mean reversion) or volatility drops
-            if close[i] > pivot_aligned[i] or not atr_filter[i]:
+            # Short: exit if price breaks above weekly upper channel or above EMA50
+            if close[i] > upper_20_aligned[i] or close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
