@@ -3,95 +3,122 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 12h trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; 12h EMA provides trend direction
-# Volume > 1.5x 20-period average confirms momentum; designed for 4h timeframe
-# Target: 12-37 trades per year per symbol (50-150 total over 4 years)
+# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and 1d volatility filter
+# RSI < 30 (oversold) in uptrend (price > 4h EMA20) for long entries
+# RSI > 70 (overbought) in downtrend (price < 4h EMA20) for short entries
+# 1d ATR ratio filter to avoid low volatility chop
+# Session filter: 08-20 UTC to avoid low volume periods
+# Position size: 0.20 (20%)
+# Target: 15-37 trades/year (60-150 over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate 20-period EMA on 12h timeframe for trend filter
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    # Calculate 20-period EMA on 4h timeframe for trend filter
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Calculate Williams %R (14-period) on 4h data
-    high = prices['high'].values
-    low = prices['low'].values
+    # Load 1d data for volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate ATR(14) on 1d timeframe
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
+    tr = np.concatenate([[np.inf], tr2])  # first TR is undefined
+    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 50-period SMA of ATR for volatility regime
+    atr_ma50 = pd.Series(atr14_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr14_1d / atr_ma50  # >1 = high volatility, <1 = low volatility
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Calculate RSI(14) on 1h price data
+    delta = pd.Series(close_1d).diff().values  # This is wrong - need to use 1h data
+    # Fix: calculate RSI on actual 1h close prices
     close = prices['close'].values
+    delta = np.diff(close)
+    delta = np.concatenate([[0], delta])  # prepend 0 for first element
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing (equivalent to RMA)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: volume > 1.2x 20-period average
     volume = prices['volume'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    
-    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    vol_filter = volume > (vol_ma * 1.2)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(ema20_12h_aligned[i]) or \
-           np.isnan(williams_r[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema20_4h_aligned[i]) or np.isnan(rsi[i]) or \
+           np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 12h trend
-        is_uptrend = close[i] > ema20_12h_aligned[i]
-        is_downtrend = close[i] < ema20_12h_aligned[i]
-        
-        # Volume confirmation
+        # Apply filters
+        in_session = session_filter[i]
         has_volume = vol_filter[i]
+        high_vol = atr_ratio_aligned[i] > 1.2  # Only trade in elevated volatility
         
         price = close[i]
+        rsi_val = rsi[i]
+        is_uptrend = price > ema20_4h_aligned[i]
+        is_downtrend = price < ema20_4h_aligned[i]
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) + uptrend + volume
-            long_signal = (williams_r[i] < -80) and is_uptrend and has_volume
+            # Long entry: RSI < 30 (oversold) + uptrend + high vol + session + volume
+            long_signal = (rsi_val < 30) and is_uptrend and high_vol and in_session and has_volume
             
-            # Short entry: Williams %R overbought (> -20) + downtrend + volume
-            short_signal = (williams_r[i] > -20) and is_downtrend and has_volume
+            # Short entry: RSI > 70 (overbought) + downtrend + high vol + session + volume
+            short_signal = (rsi_val > 70) and is_downtrend and high_vol and in_session and has_volume
             
             if long_signal:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
             elif short_signal:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: Williams %R returns to neutral (> -50)
-            if williams_r[i] > -50:
+            # Long exit: RSI > 50 (mean reversion) or trend change
+            if rsi_val > 50 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Williams %R returns to neutral (< -50)
-            if williams_r[i] < -50:
+            # Short exit: RSI < 50 (mean reversion) or trend change
+            if rsi_val < 50 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_WilliamsR_12hTrendFilter_Volume"
-timeframe = "4h"
+name = "1h_RSI14_4hTrend_1dVolFilter_Session"
+timeframe = "1h"
 leverage = 1.0
