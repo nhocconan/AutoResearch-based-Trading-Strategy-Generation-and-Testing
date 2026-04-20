@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 4h_12h_Pivot_R3S3_SwingRejection_Volume
-# Hypothesis: Fade at 12h Pivot R3/S3 levels with swing rejection and volume confirmation on 4h.
-# Uses 12h trend filter to only trade with the 12h trend (long in uptrend, short in downtrend).
-# Entry: Price rejects S3/R3 with volume > 2x average, closes back inside the pivot range.
-# Exit: Price reaches opposite pivot level (R3 for long, S3 for short) or shows weakness.
-# Designed for fewer trades (~20-40/year) with high win rate in both bull and bear markets.
+# 6h_1d_Pivot_R4S4_Breakout_Volume_TrendFilter
+# Hypothesis: Breakout beyond daily pivot R4/S4 with volume confirmation and 1w trend filter.
+# R4/S4 represent strong breakout levels; trading in direction of 1w trend avoids counter-trend whipsaws.
+# Works in bull/bear via 1w trend filter - only trade with the weekly trend.
+# Target: 60-120 trades over 4 years (15-30/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Pivot_R3S3_SwingRejection_Volume"
-timeframe = "4h"
+name = "6h_1d_Pivot_R4S4_Breakout_Volume_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,37 +18,43 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data ONCE before loop for pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === Calculate 12h pivot levels (R3, S3) and pivot point ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # === Calculate 1d pivot levels (R4, S4) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Pivot point and range
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Camarilla levels: R3 = close + (range * 1.1/4), S3 = close - (range * 1.1/4)
-    r3_12h = close_12h + (range_12h * 1.1 / 4)
-    s3_12h = close_12h - (range_12h * 1.1 / 4)
+    # Camarilla levels: R4 = close + (range * 1.1/2), S4 = close - (range * 1.1/2)
+    r4_1d = close_1d + (range_1d * 1.1 / 2)
+    s4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # === 12h trend filter: EMA(34) on close ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # === 1w trend filter: EMA(34) direction ===
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_1w = ema_34_1w > np.roll(ema_34_1w, 1)
+    trend_up_1w[0] = False  # First value has no previous
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # === 6h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # Align all 12h levels to 4h
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Align all 1d levels and 1w trend to 6h
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,49 +62,43 @@ def generate_signals(prices):
     for i in range(34, n):  # Start after EMA warmup
         # Get values
         close_val = prices['close'].iloc[i]
-        pivot_val = pivot_12h_aligned[i]
-        r3_12h_val = r3_12h_aligned[i]
-        s3_12h_val = s3_12h_aligned[i]
-        ema_34_val = ema_34_12h_aligned[i]
+        r4_1d_val = r4_1d_aligned[i]
+        s4_1d_val = s4_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        trend_up_1w_val = trend_up_1w_aligned[i] > 0.5
         
         # Skip if any value is NaN
-        if (np.isnan(pivot_val) or np.isnan(r3_12h_val) or np.isnan(s3_12h_val) or 
-            np.isnan(ema_34_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(r4_1d_val) or np.isnan(s4_1d_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price rejects S3 (bounces off support) with volume confirmation
-            # Only in 12h uptrend (price > EMA34)
-            if (close_val > pivot_val and  # Price is above pivot (bullish bias)
-                s3_12h_val < close_val <= s3_12h_val * 1.005 and  # Price near S3 (within 0.5%)
-                ema_34_val < close_val and  # 12h uptrend filter
-                vol_ratio_val > 2.0):  # Volume confirmation
+            # Long: Break above R4 with volume confirmation and 1w uptrend
+            if (close_val > r4_1d_val and  # Price broke above R4
+                vol_ratio_val > 2.0 and  # Volume confirmation
+                trend_up_1w_val):  # 1w uptrend filter
                 signals[i] = 0.25
                 position = 1
-            # Short: Price rejects R3 (bounces off resistance) with volume confirmation
-            # Only in 12h downtrend (price < EMA34)
-            elif (close_val < pivot_val and  # Price is below pivot (bearish bias)
-                  r3_12h_val * 0.995 <= close_val < r3_12h_val and  # Price near R3 (within 0.5%)
-                  ema_34_val > close_val and  # 12h downtrend filter
-                  vol_ratio_val > 2.0):  # Volume confirmation
+            # Short: Break below S4 with volume confirmation and 1w downtrend
+            elif (close_val < s4_1d_val and  # Price broke below S4
+                  vol_ratio_val > 2.0 and  # Volume confirmation
+                  not trend_up_1w_val):  # 1w downtrend filter
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price reaches R3 or shows weakness (breaks below pivot)
-            if close_val >= r3_12h_val or close_val < pivot_val:
+            # Long exit: Price returns below R4 or shows weakness
+            if close_val < r4_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price reaches S3 or shows weakness (breaks above pivot)
-            if close_val <= s3_12h_val or close_val > pivot_val:
+            # Short exit: Price returns above S4 or shows weakness
+            if close_val > s4_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
