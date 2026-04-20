@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_R1S1_Breakout_Volume_Trend
-# Hypothesis: On 12h timeframe, trade breakouts from 1d-derived Camarilla R1/S1 levels with volume spike confirmation and 1d EMA34 trend filter.
-# Uses 1d EMA34 to filter trades in trending markets. Targets 15-30 trades per year. Works in bull/bear via trend-aligned breakouts.
-# Breakouts are confirmed by volume > 2x 20-period average and price beyond 0.5% buffer around R1/S1.
-# Exits on reversal below/above S1/R1 or trend flip (price crosses 1d EMA34).
+# 4h_1d_KAMA_Trend_Filtered_Breakout
+# Hypothesis: On 4h timeframe, trade breakouts from 4h price channels when aligned with 1d KAMA trend direction.
+# Uses 1d KAMA to filter trades in trending markets and 4h Donchian breakout for entry with volume confirmation.
+# Designed to work in both bull and bear markets by aligning with higher timeframe trend.
+# Targets 20-30 trades per year to minimize fee drag.
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_1d_KAMA_Trend_Filtered_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,74 +25,77 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d KAMA (ER=10)
     close_1d = df_1d['close'].values
-    
-    # Typical price for pivot calculation
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    
-    # Pivot point and ranges
-    pivot_1d = typical_price_1d
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: R1 and S1
-    s1_1d = close_1d - (range_1d * 1.1 / 6)
-    r1_1d = close_1d + (range_1d * 1.1 / 6)
-    
-    # 1d EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d levels to 12h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Efficiency Ratio
+    change = abs(close_1d_series - close_1d_series.shift(10))
+    volatility = abs(close_1d_series - close_1d_series.shift(1)).rolling(10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    
+    # Smoothing constants
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # Seed
+    
+    for i in range(10, len(close_1d)):
+        if not np.isnan(sc.iloc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close_1d[i] - kama[i-1])
+    
+    # 4h Donchian channel (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Align 1d KAMA to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are ready
+    start_idx = 100  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(close[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(kama_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above R1, volume spike, and price above 1d EMA34 (uptrend)
-            if (close[i] > r1_aligned[i] * 1.005 and 
-                volume[i] > 2.0 * volume_ma[i] and
-                close[i] > ema_34_aligned[i]):
+            # Long: price breaks above Donchian high, volume spike, and price above 1d KAMA (uptrend)
+            if (close[i] > donch_high[i] and 
+                volume[i] > 1.5 * volume_ma[i] and
+                close[i] > kama_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below S1, volume spike, and price below 1d EMA34 (downtrend)
-            elif (close[i] < s1_aligned[i] * 0.995 and 
-                  volume[i] > 2.0 * volume_ma[i] and
-                  close[i] < ema_34_aligned[i]):
+            # Short: price breaks below Donchian low, volume spike, and price below 1d KAMA (downtrend)
+            elif (close[i] < donch_low[i] and 
+                  volume[i] > 1.5 * volume_ma[i] and
+                  close[i] < kama_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below S1 or trend reversal (below EMA34)
-            if close[i] < s1_aligned[i] * 0.995 or close[i] < ema_34_aligned[i]:
+            # Long exit: price breaks below Donchian low or trend reversal (below KAMA)
+            if close[i] < donch_low[i] or close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above R1 or trend reversal (above EMA34)
-            if close[i] > r1_aligned[i] * 1.005 or close[i] > ema_34_aligned[i]:
+            # Short exit: price breaks above Donchian high or trend reversal (above KAMA)
+            if close[i] > donch_high[i] or close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
