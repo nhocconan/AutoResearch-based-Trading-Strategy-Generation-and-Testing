@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 6h_1d_Pivot_R3S3_Breakout_Volume
-# Hypothesis: Trade breakouts from daily R3/S3 levels on 6h timeframe with volume confirmation.
-# Uses daily pivot levels as institutional support/resistance. Works in bull (breakout continuation) and bear (fade/reversal) via price action at key levels.
-# Target: 12-30 trades per year. Uses volume spike (>2x 20-period MA) to filter false breakouts.
+# 12h_1d_Camarilla_R3S3_VolumeSpike_TrendFilter
+# Hypothesis: On 12h timeframe, trade breakouts from daily Camarilla R3/S3 levels with volume spike confirmation and daily EMA trend filter.
+# Uses daily EMA34 to filter trades in trending markets. Targets 15-25 trades per year. Works in bull/bear via trend-aligned breakouts.
 
-name = "6h_1d_Pivot_R3S3_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R3S3_VolumeSpike_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,35 +23,36 @@ def generate_signals(prices):
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily pivot point (standard)
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    # Typical price for pivot calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    
+    # Pivot point and ranges
+    pivot_1d = typical_price_1d
     range_1d = high_1d - low_1d
     
-    # Standard pivot levels: R3, S3
-    s3_1d = pivot_1d - 2 * (high_1d - pivot_1d)
-    r3_1d = pivot_1d + 2 * (pivot_1d - low_1d)
+    # Camarilla levels: R3, S3
+    s3_1d = close_1d - (range_1d * 1.1 / 4)
+    r3_1d = close_1d + (range_1d * 1.1 / 4)
     
-    # Align daily levels to 6h timeframe
+    # Daily EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align daily levels to 12h timeframe
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Volatility filter: ATR(14) to avoid choppy markets
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,38 +62,35 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Volatility filter: require ATR > 0 to avoid dead markets
-        if atr[i] <= 0:
+            np.isnan(volume_ma[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long breakout above R3 with volume confirmation
+            # Long: price above R3, volume spike, and price above daily EMA34 (uptrend)
             if (close[i] > r3_aligned[i] * 1.005 and 
-                volume[i] > 2.0 * volume_ma[i]):
+                volume[i] > 2.0 * volume_ma[i] and
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown below S3 with volume
+            # Short: price below S3, volume spike, and price below daily EMA34 (downtrend)
             elif (close[i] < s3_aligned[i] * 0.995 and 
-                  volume[i] > 2.0 * volume_ma[i]):
+                  volume[i] > 2.0 * volume_ma[i] and
+                  close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: breakdown below S3
-            if close[i] < s3_aligned[i] * 0.995:
+            # Long exit: price below S3 or trend reversal (below EMA34)
+            if close[i] < s3_aligned[i] * 0.995 or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: breakout above R3
-            if close[i] > r3_aligned[i] * 1.005:
+            # Short exit: price above R3 or trend reversal (above EMA34)
+            if close[i] > r3_aligned[i] * 1.005 or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
