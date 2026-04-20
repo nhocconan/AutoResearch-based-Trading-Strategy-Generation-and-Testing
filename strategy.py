@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1
-Concept: Daily pivot point breakout with volume confirmation on 12h timeframe.
+4h_1d_Pivot_R1S1_Breakout_Volume_Trend_v3
+Concept: Daily pivot point breakout with volume confirmation and trend filter on 4h timeframe.
 - Uses daily pivot points (R1, S1) as key support/resistance levels
-- Long when price breaks above R1 with volume confirmation
-- Short when price breaks below S1 with volume confirmation
+- Long when price breaks above R1 with volume confirmation and above 4h EMA50
+- Short when price breaks below S1 with volume confirmation and below 4h EMA50
 - Exit when price returns to central pivot point (mean reversion)
 - Conservative sizing (0.25) to manage drawdown
 - Works in bull/bear: Pivot points adapt to market conditions, volume confirms breakouts
-- Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,12 +37,16 @@ def generate_signals(prices):
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 12h: Volume ratio (current vs 20-period average) ===
+    # === 4h: EMA50 trend filter ===
+    close = prices['close'].values
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # === 4h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
@@ -51,34 +54,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume MA
+    start_idx = 50  # Ensure enough data for EMA50
     
     for i in range(start_idx, n):
         # Get values
-        close_val = prices['close'].iloc[i]
+        ema50_val = ema50[i]
+        close_val = close[i]
         pivot_val = pivot_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(pivot_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
-            np.isnan(vol_ratio_val)):
+        if (np.isnan(ema50_val) or np.isnan(pivot_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation
+            # Long: Price breaks above R1 with volume confirmation and above EMA50
             breakout_long = close_val > r1_val
-            vol_confirm = vol_ratio_val > 1.5  # Volume above average
+            vol_confirm = vol_ratio_val > 1.3  # Volume above average
             
-            if breakout_long and vol_confirm:
+            if breakout_long and vol_confirm and close_val > ema50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation
-            elif close_val < s1_val and vol_confirm:
+            # Short: Price breaks below S1 with volume confirmation and below EMA50
+            elif close_val < s1_val and vol_confirm and close_val < ema50_val:
                 signals[i] = -0.25
                 position = -1
         
