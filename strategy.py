@@ -3,78 +3,81 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with Daily Trend Filter
-# - Williams %R(14) on 12h for overbought/oversold signals
-# - Daily EMA(50) as trend filter: only long when price > EMA50, short when price < EMA50
-# - Williams %R provides mean reversion signals in ranging markets
-# - Daily EMA filter ensures alignment with higher timeframe trend
-# - Designed for 12h timeframe with selective entries to avoid overtrading
-# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
+# Hypothesis: 4-hour Donchian breakout with 12-hour volume confirmation and ATR stop
+# - Enter long when price breaks above Donchian(20) high on 4h
+# - Enter short when price breaks below Donchian(20) low on 4h
+# - Require 12h volume > 1.5x 20-period average for confirmation
+# - Exit on opposite Donchian breakout or ATR-based stop
+# - Designed for 4h timeframe with selective entries to avoid overtrading
+# - Target: 20-50 trades per year per symbol (80-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for EMA filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load 4h data for Donchian calculation (already 4h but using helper for consistency)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate EMA(50) on daily timeframe
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Donchian channels on 4h
+    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align daily EMA to 12h timeframe
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Load 12h data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
-    # Calculate Williams %R(14) on 12h timeframe
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
+    # Calculate ATR for stop loss
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if NaN in indicators
-        if np.isnan(williams_r[i]) or np.isnan(ema_50_12h[i]):
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_12h[i]
-        ema_filter = ema_50_12h[i]
-        
-        # Determine trend based on price relative to daily EMA50
-        price_above_ema = price > ema_filter
-        price_below_ema = price < ema_filter
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        vol_ratio = volume_12h[i // 48] / vol_ma_20_aligned[i] if i >= 20 and not np.isnan(vol_ma_20_aligned[i]) else 0
+        vol_confirmed = vol_ratio > 1.5
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) + price above daily EMA50
-            if williams_r[i] < -80 and price_above_ema:
+            # Long entry: price breaks above Donchian high + volume confirmation
+            if close_4h[i] > high_20[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R overbought (> -20) + price below daily EMA50
-            elif williams_r[i] > -20 and price_below_ema:
+                entry_price = close_4h[i]
+            # Short entry: price breaks below Donchian low + volume confirmation
+            elif close_4h[i] < low_20[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_4h[i]
         
         elif position == 1:
-            # Long exit: Williams %R overbought (> -20) or price falls below EMA
-            if williams_r[i] > -20 or price < ema_filter:
+            # Long exit: price breaks below Donchian low or ATR stop
+            if close_4h[i] < low_20[i] or close_4h[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R oversold (< -80) or price rises above EMA
-            if williams_r[i] < -80 or price > ema_filter:
+            # Short exit: price breaks above Donchian high or ATR stop
+            if close_4h[i] > high_20[i] or close_4h[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_1dEMA50_Filter"
-timeframe = "12h"
+name = "4h_Donchian_Volume_ATR_Stop"
+timeframe = "4h"
 leverage = 1.0
