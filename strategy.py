@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R2S2_Breakout_V1"
-timeframe = "12h"
+name = "1h_4d_OrderBlock_BullBear_Signal_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -17,96 +17,84 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Points (previous day) ===
+    # === Daily Order Block Detection (Bullish/Bearish) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Bullish Order Block: Down candle followed by up candle with volume
+    bullish_ob = (close_1d[1:] < high_1d[:-1]) & (close_1d[:-1] < open_1d) & (volume_1d[1:] > volume_1d[:-1] * 1.5)
+    bearish_ob = (close_1d[1:] > low_1d[:-1]) & (close_1d[:-1] > open_1d) & (volume_1d[1:] > volume_1d[:-1] * 1.5)
     
-    # Set first values to avoid look-ahead
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Get open prices for OB detection
+    open_1d = df_1d['open'].values
+    bullish_ob = (close_1d[1:] < open_1d[:-1]) & (close_1d[:-1] > open_1d[:-1]) & (volume_1d[1:] > volume_1d[:-1] * 1.5)
+    bearish_ob = (close_1d[1:] > open_1d[:-1]) & (close_1d[:-1] < open_1d[:-1]) & (volume_1d[1:] > volume_1d[:-1] * 1.5)
     
-    # Classic pivot (same for Camarilla)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    # Create signal arrays (previous candle properties)
+    bullish_signal = np.zeros(len(close_1d))
+    bearish_signal = np.zeros(len(close_1d))
+    bullish_signal[1:] = bullish_ob
+    bearish_signal[1:] = bearish_ob
     
-    # Camarilla R2 and S2 levels (stronger breakout levels)
-    r2 = pivot + (range_val * 1.1 / 6)
-    s2 = pivot - (range_val * 1.1 / 6)
+    # Align to 1h timeframe
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_signal)
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_signal)
     
-    # Align to 12h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # === Volume Confirmation (12h) ===
+    # === 1h Entry Filters ===
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
-    vol_series = pd.Series(volume)
-    vol_ma10 = vol_series.rolling(window=10, min_periods=10).mean().values
-    vol_ratio = volume / np.where(vol_ma10 > 0, vol_ma10, np.nan)
     
-    # === Momentum Filter: 12h RSI > 50 for long, < 50 for short ===
-    close_series = pd.Series(prices['close'].values)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma20 * 1.5)
+    
+    # Momentum filter: price > 20-period EMA for long, < 20-period EMA for short
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Get values
-        close_val = prices['close'].iloc[i]
-        vol_ratio_val = vol_ratio[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        pivot_val = pivot_aligned[i]
-        rsi_val = rsi_values[i]
-        
-        # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or 
-            np.isnan(s2_val) or np.isnan(pivot_val) or 
-            np.isnan(rsi_val)):
+    for i in range(20, n):
+        # Skip if any filter is not ready
+        if np.isnan(vol_ma20[i]) or np.isnan(ema20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        bullish_signal_val = bullish_aligned[i]
+        bearish_signal_val = bearish_aligned[i]
+        
         if position == 0:
-            # Long: Break above R2 with volume confirmation and bullish momentum
-            if close_val > r2_val and vol_ratio_val > 1.5 and rsi_val > 50:
-                signals[i] = 0.25
+            # Long: Bullish order block + volume + price above EMA20
+            if bullish_signal_val and vol_filter[i] and close[i] > ema20[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Break below S2 with volume confirmation and bearish momentum
-            elif close_val < s2_val and vol_ratio_val > 1.5 and rsi_val < 50:
-                signals[i] = -0.25
+            # Short: Bearish order block + volume + price below EMA20
+            elif bearish_signal_val and vol_filter[i] and close[i] < ema20[i]:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot OR momentum turns bearish
-            if close_val < pivot_val or rsi_val < 50:
+            # Long exit: Price breaks below EMA20 or bearish signal appears
+            if close[i] < ema20[i] or bearish_signal_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Price returns above pivot OR momentum turns bullish
-            if close_val > pivot_val or rsi_val > 50:
+            # Short exit: Price breaks above EMA20 or bullish signal appears
+            if close[i] > ema20[i] or bullish_signal_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
