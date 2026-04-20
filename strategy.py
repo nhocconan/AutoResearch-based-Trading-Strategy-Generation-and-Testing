@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -30,13 +30,13 @@ def generate_signals(prices):
     # Daily volume moving average (20-period)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    # 12h price data
+    # 4h price data
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -89,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA50_EMA200_VolumeVolatilityFilter"
-timeframe = "12h"
+name = "4h_EMA50_EMA200_VolumeVolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
