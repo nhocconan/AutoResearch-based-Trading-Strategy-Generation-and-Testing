@@ -1,52 +1,56 @@
 #!/usr/bin/env python3
+"""
+4h_1d_Camarilla_R1S1_Pullback_Strategy_v1
+Trade on 1d Camarilla R1/S1 levels with volume confirmation and pullback entry.
+Aims for 20-40 trades/year by requiring confluence of price at level + volume spike.
+Works in bull/bear: mean reversion at S1/R1 in range, breakout continuation in trend.
+Position size: 0.25
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R2S2_Breakout_Volume_12h_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Pullback_Strategy_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d Previous Day Prices for Pivot Calculation ===
+    # === 1d Camarilla Pivot Points (previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values (no look-ahead)
+    # Previous day's values for pivot calculation
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
     
-    # Set first values to current day's values to avoid look-ahead
+    # Set first values to avoid look-ahead (use same day's values)
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
     prev_close[0] = close_1d[0]
     
-    # Classic pivot (base for Camarilla)
+    # Classic pivot point
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Camarilla levels: R2, S2, R3, S3
-    r2 = pivot + (range_val * 1.1 / 6)
-    s2 = pivot - (range_val * 1.1 / 6)
-    r3 = pivot + (range_val * 1.1 / 4)
-    s3 = pivot - (range_val * 1.1 / 4)
+    # Camarilla levels - R1 and S1 are the key levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 12h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # === Volume Confirmation ===
@@ -58,55 +62,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or np.isnan(s2_val) or
-            np.isnan(r3_val) or np.isnan(s3_val) or np.isnan(pivot_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Mean reversion at R2/S2 (strong support/resistance)
-            if close_val < r2_val and close_val > r2_val * 0.995 and vol_ratio_val > 1.8:
-                # Near R2, short with volume
-                signals[i] = -0.25
-                position = -1
-            elif close_val > s2_val and close_val < s2_val * 1.005 and vol_ratio_val > 1.8:
-                # Near S2, long with volume
+            # Long setup: price near S1 with volume (mean reversion)
+            if close_val > s1_val and close_val < s1_val * 1.002 and vol_ratio_val > 1.8:
                 signals[i] = 0.25
                 position = 1
-            # Breakout at R3/S3 with strong volume
-            elif close_val > r3_val and vol_ratio_val > 2.5:
-                # Strong break above R3
-                signals[i] = 0.25
-                position = 1
-            elif close_val < s3_val and vol_ratio_val > 2.5:
-                # Strong break below S3
+            # Short setup: price near R1 with volume (mean reversion)
+            elif close_val < r1_val and close_val > r1_val * 0.998 and vol_ratio_val > 1.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: return to pivot or stop at S2
-            if close_val < pivot_val or close_val < s2_val:
+            # Long exit: price returns to pivot or breaks below S1
+            if close_val < pivot_val or close_val < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: return to pivot or stop at R2
-            if close_val > pivot_val or close_val > r2_val:
+            # Short exit: price returns to pivot or breaks above R1
+            if close_val > pivot_val or close_val > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
