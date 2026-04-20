@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_1D_ParabolicSAR_Reversal_V1
-# Hypothesis: On 4h timeframe, trade reversals using Parabolic SAR with 1d trend filter.
-# Parabolic SAR provides clear entry/exit signals. 1d EMA200 filters trend direction:
-#   Long only when price > 1d EMA200 (bullish bias), short only when price < 1d EMA200 (bearish bias).
-# Volume confirmation reduces false signals. Targets 20-40 trades/year by requiring trend alignment.
-# Works in both bull and bear markets: in bull markets takes longs, in bear markets takes shorts.
+# 1d_1w_Keltner_MR_Reversal_V1
+# Hypothesis: On daily timeframe, price mean-reverts from Keltner Channel extremes during low-volatility regimes.
+# In ranging markets (weekly ATR < 20-day ATR), price tends to revert from upper/lower Keltner bands.
+# In high volatility (weekly ATR >= 20-day ATR), trend continues. Uses volume confirmation for reversals.
+# Targets 10-25 trades/year by requiring volatility regime + band touch + volume spike.
+# Works in bull/bear markets via volatility regime filter.
 
-name = "4h_1D_ParabolicSAR_Reversal_V1"
-timeframe = "4h"
+name = "1d_1w_Keltner_MR_Reversal_V1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,99 +24,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate 20-day ATR for volatility regime
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate Parabolic SAR on 4h data
-    # Initialize
-    psar = np.zeros(n)
-    bull = True  # Start assuming bullish
-    af = 0.02    # Acceleration factor
-    max_af = 0.2
-    ep = high[0] if bull else low[0]  # Extreme point
-    psar[0] = low[0] if bull else high[0]
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(1, n):
-        # PSAR formula
-        psar[i] = psar[i-1] + af * (ep - psar[i-1])
-        
-        # Handle reversals
-        if bull:
-            # Ensure PSAR doesn't exceed previous two lows
-            psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
-            # Check for bearish reversal
-            if low[i] < psar[i]:
-                bull = False
-                psar[i] = ep  # SAR becomes prior EP
-                ep = low[i]   # Reset EP to current low
-                af = 0.02     # Reset AF
-            else:
-                # Continue bullish
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + 0.02, max_af)
-        else:
-            # Ensure PSAR doesn't fall below previous two highs
-            psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
-            # Check for bullish reversal
-            if high[i] > psar[i]:
-                bull = True
-                psar[i] = ep  # SAR becomes prior EP
-                ep = high[i]  # Reset EP to current high
-                af = 0.02     # Reset AF
-            else:
-                # Continue bearish
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + 0.02, max_af)
+    # Calculate weekly ATR (using weekly high/low/close)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Volume average for confirmation
+    tr1w = high_1w[1:] - low_1w[1:]
+    tr2w = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3w = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_w = np.concatenate([[np.nan], np.maximum(tr1w, np.maximum(tr2w, tr3w))])
+    
+    atr_1w = pd.Series(tr_w).rolling(window=6, min_periods=6).mean().values  # 6 weeks ~ 1.5 months
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    
+    # Calculate Keltner Channel (20-day EMA +/- 2*ATR)
+    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    upper_keltner = ema_20 + 2 * atr_20
+    lower_keltner = ema_20 - 2 * atr_20
+    
+    # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 40  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema200_aligned[i]) or np.isnan(volume_ma[i]):
+        if (np.isnan(ema_20[i]) or np.isnan(upper_keltner[i]) or 
+            np.isnan(lower_keltner[i]) or np.isnan(atr_1w_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Look for SAR reversal with trend and volume confirmation
-            # Bullish SAR flip (PSAR moves below price) + uptrend filter + volume
-            if (psar[i] < close[i] and psar[i-1] >= close[i-1] and  # Bullish flip
-                close[i] > ema200_aligned[i] and                    # Above 1d EMA200
-                volume[i] > 1.5 * volume_ma[i]):                    # Volume confirmation
-                signals[i] = 0.25
-                position = 1
-            # Bearish SAR flip (PSAR moves above price) + downtrend filter + volume
-            elif (psar[i] > close[i] and psar[i-1] <= close[i-1] and  # Bearish flip
-                  close[i] < ema200_aligned[i] and                    # Below 1d EMA200
-                  volume[i] > 1.5 * volume_ma[i]):                    # Volume confirmation
-                signals[i] = -0.25
-                position = -1
+            # Low volatility regime: weekly ATR < 2x daily ATR (range-bound market)
+            if atr_1w_aligned[i] < 2 * atr_20[i]:
+                # Mean reversion from lower band with volume confirmation
+                if (close[i] <= lower_keltner[i] * 1.002 and 
+                    volume[i] > 1.8 * volume_ma[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Mean reversion from upper band with volume confirmation
+                elif (close[i] >= upper_keltner[i] * 0.998 and 
+                      volume[i] > 1.8 * volume_ma[i]):
+                    signals[i] = -0.25
+                    position = -1
+            # High volatility regime: trend continuation (no mean reversion)
+            # Optional: could add trend-following logic here if desired
         
         elif position == 1:
-            # Long exit: SAR flip to bearish or price drops below EMA200
-            if psar[i] > close[i] or close[i] < ema200_aligned[i]:
+            # Long exit: return to mean (EMA) or volatility regime shifts
+            if (close[i] >= ema_20[i] * 0.998) or (atr_1w_aligned[i] >= 2 * atr_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: SAR flip to bullish or price rises above EMA200
-            if psar[i] < close[i] or close[i] > ema200_aligned[i]:
+            # Short exit: return to mean (EMA) or volatility regime shifts
+            if (close[i] <= ema_20[i] * 1.002) or (atr_1w_aligned[i] >= 2 * atr_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
