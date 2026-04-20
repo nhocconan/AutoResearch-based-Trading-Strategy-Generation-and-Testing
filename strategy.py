@@ -3,57 +3,58 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction + volume confirmation
-# - Long when price breaks above Donchian(20) high AND weekly pivot > prior weekly pivot (bullish bias)
-# - Short when price breaks below Donchian(20) low AND weekly pivot < prior weekly pivot (bearish bias)
-# - Requires volume > 1.5x 20-period average for confirmation
-# - Uses weekly pivot points from prior week (no look-ahead)
-# - Designed to capture momentum in trending markets while avoiding chop
-# - Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 12h Chaikin Money Flow (CMF) with 1-day trend filter
+# CMF(20) measures money flow volume to detect accumulation/distribution
+# In bull market (price > 1-day EMA50): buy when CMF > 0.1, sell when CMF < -0.1
+# In bear market (price < 1-day EMA50): sell when CMF > 0.1, buy when CMF < -0.1
+# Requires volume confirmation: volume > 1.5x 20-period average
+# Designed to capture institutional money flow shifts with trend alignment
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for pivot calculation (prior week's data)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Load daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot point: (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Align to 6h timeframe (prior week's pivot is known after weekly close)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # Calculate 50-period EMA on daily timeframe for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 6h Donchian channels
+    # Load 12h data for CMF and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period Chaikin Money Flow
+    mf_multiplier = ((close - low) - (high - close)) / (high - low + 1e-10)
+    mf_volume = mf_multiplier * volume
+    mf_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
+    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    cmf = mf_sum / (vol_sum + 1e-10)
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Calculate volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(pivot_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(cmf[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly pivot bias (using prior week's pivot)
-        pivot_bullish = pivot_1w_aligned[i] > pivot_1w_aligned[i-1] if i > 0 else False
-        pivot_bearish = pivot_1w_aligned[i] < pivot_1w_aligned[i-1] if i > 0 else False
+        # Determine market trend
+        is_bull = close[i] > ema50_1d_aligned[i]
+        is_bear = close[i] < ema50_1d_aligned[i]
         
         # Volume confirmation
         has_volume = vol_filter[i]
@@ -61,16 +62,16 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: breakout above Donchian high with bullish weekly pivot bias
+            # Enter long conditions: bullish money flow in bull OR bear market
             long_signal = False
-            if has_volume and pivot_bullish:
-                if price > highest_high[i]:
+            if has_volume:
+                if cmf[i] > 0.1:  # Bullish money flow
                     long_signal = True
             
-            # Enter short: breakdown below Donchian low with bearish weekly pivot bias
+            # Enter short conditions: bearish money flow in bull OR bear market
             short_signal = False
-            if has_volume and pivot_bearish:
-                if price < lowest_low[i]:
+            if has_volume:
+                if cmf[i] < -0.1:  # Bearish money flow
                     short_signal = True
             
             if long_signal:
@@ -81,16 +82,24 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: breakdown below Donchian low
-            if price < lowest_low[i]:
+            # Exit long: bearish money flow
+            exit_signal = False
+            if has_volume and cmf[i] < -0.1:  # Bearish money flow
+                exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: breakout above Donchian high
-            if price > highest_high[i]:
+            # Exit short: bullish money flow
+            exit_signal = False
+            if has_volume and cmf[i] > 0.1:  # Bullish money flow
+                exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivotDirection_Volume"
-timeframe = "6h"
+name = "12h_CMF_TrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
