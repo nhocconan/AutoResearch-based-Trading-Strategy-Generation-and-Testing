@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-# Strategy: 12h_1d_Pivot_R1S1_Breakout_VolumeATRFilter
-# Hypothesis: Price breakouts above daily R1 or below daily S1 with volume confirmation and ATR-based trend filter capture strong momentum moves. The ATR filter ensures trades align with volatility regime, reducing false breakouts in low-volatility environments. Works in bull/bear markets by capturing breakout momentum regardless of direction. Targets 15-30 trades/year by requiring clear breakouts with volume surge and ATR filter.
+# Strategy: 4h_12h_ChaikinMoneyFlow
+# Hypothesis: Chaikin Money Flow (CMF) on 12h measures institutional buying/selling pressure.
+# Long when CMF > +0.15 (strong accumulation) and price above 12h EMA50 (uptrend).
+# Short when CMF < -0.15 (strong distribution) and price below 12h EMA50 (downtrend).
+# Uses volume-weighted accumulation to filter false breakouts. Works in bull/bear by aligning with
+# institutional flow. Targets ~30 trades/year via strict CMF thresholds and EMA filter.
+# Includes ATR-based stop loss to limit drawdown.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -10,101 +15,91 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for HTF analysis
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate ATR for trend filter (14-period on 1d)
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    high_low[0] = high_1d[0] - low_1d[0]
-    high_close[0] = np.abs(high_1d[0] - close_1d[0])
-    low_close[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Calculate daily pivot points
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    R1 = pivot_1d + (range_1d * 1.1 / 12)
-    S1 = pivot_1d - (range_1d * 1.1 / 12)
-    
-    # Align pivot levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # 12h data for entry timing and volume
+    # Load 12h data for CMF and EMA
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     volume_12h = df_12h['volume'].values
     
-    # Volume spike detection (20-period)
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # Calculate 12h EMA50 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # ATR for volatility filter (14-period on 12h)
-    high_low_12h = high_12h - low_12h
-    high_close_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    low_close_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    high_low_12h[0] = high_12h[0] - low_12h[0]
-    high_close_12h[0] = np.abs(high_12h[0] - close_12h[0])
-    low_close_12h[0] = np.abs(low_12h[0] - close_12h[0])
-    tr_12h = np.maximum(high_low_12h, np.maximum(high_close_12h, low_close_12h))
-    tr_12h[0] = high_low_12h[0]
-    atr_14_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
+    # Calculate Chaikin Money Flow (CMF) over 20 periods
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Money Flow Volume = Money Flow Multiplier * Volume
+    # CMF = 20-period sum of Money Flow Volume / 20-period sum of Volume
+    high_low = high_12h - low_12h
+    high_low[high_low == 0] = 1e-10  # Avoid division by zero
+    mfm = ((close_12h - low_12h) - (high_12h - close_12h)) / high_low
+    mfv = mfm * volume_12h
+    
+    # Sum over 20 periods
+    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
+    vol_sum = pd.Series(volume_12h).rolling(window=20, min_periods=20).sum().values
+    vol_sum[vol_sum == 0] = 1e-10  # Avoid division by zero
+    cmf = mfv_sum / vol_sum
+    cmf_aligned = align_htf_to_ltf(prices, df_12h, cmf)
+    
+    # 4h data for entry timing and stop loss
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # ATR for stop loss (14-period)
+    high_low_4h = high_4h - low_4h
+    high_close_4h = np.abs(high_4h - np.roll(close_4h, 1))
+    low_close_4h = np.abs(low_4h - np.roll(close_4h, 1))
+    high_low_4h[0] = high_4h[0] - low_4h[0]
+    high_close_4h[0] = np.abs(high_4h[0] - close_4h[0])
+    low_close_4h[0] = np.abs(low_4h[0] - close_4h[0])
+    tr = np.maximum(high_low_4h, np.maximum(high_close_4h, low_close_4h))
+    tr[0] = high_low_4h[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_14_12h_aligned[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(cmf_aligned[i]) or 
+            np.isnan(atr_14_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_12h[i]
-        vol = volume_12h[i]
+        price = close_4h[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation and ATR filter (avoid low volatility breakouts)
-            if (price > R1_aligned[i] and 
-                vol > 2.0 * vol_ma_20_aligned[i] and
-                atr_14_12h_aligned[i] > 0.5 * atr_14_1d_aligned[i]):  # Ensure sufficient volatility
+            # Long: CMF > +0.15 (accumulation) and price above 12h EMA50 (uptrend)
+            if (cmf_aligned[i] > 0.15 and 
+                price > ema50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation and ATR filter
-            elif (price < S1_aligned[i] and 
-                  vol > 2.0 * vol_ma_20_aligned[i] and
-                  atr_14_12h_aligned[i] > 0.5 * atr_14_1d_aligned[i]):
+            # Short: CMF < -0.15 (distribution) and price below 12h EMA50 (downtrend)
+            elif (cmf_aligned[i] < -0.15 and 
+                  price < ema50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below pivot or ATR-based stop
-            if (price < pivot_1d_aligned[i] or 
-                price < low_12h[i] - 2.0 * atr_14_12h_aligned[i]):
+            # Long exit: CMF turns negative or ATR-based stop
+            if (cmf_aligned[i] < 0 or 
+                price < low_4h[i] - 1.5 * atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above pivot or ATR-based stop
-            if (price > pivot_1d_aligned[i] or 
-                price > high_12h[i] + 2.0 * atr_14_12h_aligned[i]):
+            # Short exit: CMF turns positive or ATR-based stop
+            if (cmf_aligned[i] > 0 or 
+                price > high_4h[i] + 1.5 * atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R1S1_Breakout_VolumeATRFilter"
-timeframe = "12h"
+name = "4h_12h_ChaikinMoneyFlow"
+timeframe = "4h"
 leverage = 1.0
