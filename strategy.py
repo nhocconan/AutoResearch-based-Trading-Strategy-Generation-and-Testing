@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v1"
+name = "4h_1d_Keltner_Channel_Squeeze_Breakout"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need sufficient data
+    if n < 100:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
@@ -17,30 +17,42 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1d: Calculate Camarilla pivot levels (using previous day's data) ===
+    # === 1d: Keltner Channel Width (volatility squeeze) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Use previous day's OHLC for today's levels
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
+    # Calculate ATR (10-period)
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
+                               np.abs(low_1d[1:] - close_1d[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Set first day's values to NaN
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # EMA (20-period)
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels: R1, S1
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Keltner Channel Width = (Upper - Lower) / EMA
+    kc_upper = ema_20 + 2 * atr_10
+    kc_lower = ema_20 - 2 * atr_10
+    kc_width = (kc_upper - kc_lower) / np.where(ema_20 > 0, ema_20, np.nan)
+    
+    # Bollinger Band Width (20, 2) for squeeze detection
+    bb_mid = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / np.where(bb_mid > 0, bb_mid, np.nan)
+    
+    # Squeeze condition: KC width < BB width (volatility contraction)
+    squeeze = kc_width < bb_width
     
     # Align 1d indicators to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # === 4h: Volume confirmation ===
     close = prices['close'].values
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,43 +61,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Get values
         close_val = close[i]
-        r1_level = camarilla_r1_aligned[i]
-        s1_level = camarilla_s1_aligned[i]
+        squeeze_val = squeeze_aligned[i]
+        kc_upper_val = kc_upper_aligned[i]
+        kc_lower_val = kc_lower_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val)):
+        if (np.isnan(squeeze_val) or np.isnan(kc_upper_val) or 
+            np.isnan(kc_lower_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation
-            if (close_val > r1_level and   # Break above R1
-                vol_ratio_val > 2.0):      # Strong volume confirmation
+            # Long: Break above upper KC after squeeze + volume
+            if (squeeze_val and                    # Volatility squeeze
+                close_val > kc_upper_val and       # Break above upper KC
+                vol_ratio_val > 1.8):              # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation
-            elif (close_val < s1_level and   # Break below S1
-                  vol_ratio_val > 2.0):      # Strong volume confirmation
+            # Short: Break below lower KC after squeeze + volume
+            elif (squeeze_val and                   # Volatility squeeze
+                  close_val < kc_lower_val and      # Break below lower KC
+                  vol_ratio_val > 1.8):             # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price drops back below R1 (reversion to mean)
-            if close_val < r1_level:
+            # Long exit: Close below middle KC (EMA20) or volatility expansion
+            bb_mid_4h = pd.Series(close).rolling(window=20, min_periods=20).mean().iloc[i]
+            if close_val < bb_mid_4h:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises back above S1 (reversion to mean)
-            if close_val > s1_level:
+            # Short exit: Close above middle KC (EMA20) or volatility expansion
+            bb_mid_4h = pd.Series(close).rolling(window=20, min_periods=20).mean().iloc[i]
+            if close_val > bb_mid_4h:
                 signals[i] = 0.0
                 position = 0
             else:
