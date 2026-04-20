@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_Filter_Strategy
-# Hypothesis: On 12h timeframe, use Kaufman Adaptive Moving Average (KAMA) to determine trend direction.
-# Enter long when price crosses above KAMA with volume confirmation and low chop regime.
-# Enter short when price crosses below KAMA with volume confirmation and low chop regime.
-# Use chop filter (Choppiness Index) to avoid ranging markets and reduce false signals.
-# Position size 0.25 to manage risk and reduce drawdown. Target 12-37 trades/year.
+# 4h_ThreeBarReversal_VolumeTrend
+# Hypothesis: Three-bar reversal patterns (bullish/bearish) at key price levels (support/resistance)
+# combined with volume confirmation and trend filter (ADX > 25) capture institutional reversals.
+# Works in both bull and bear markets by identifying exhaustion points. Target: 20-50 trades/year.
 
-name = "12h_KAMA_Trend_Filter_Strategy"
-timeframe = "12h"
+name = "4h_ThreeBarReversal_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,111 +22,121 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for chop filter (Choppiness Index)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for calculations
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate KAMA (10, 2, 30) - ER=10, Fast=2, Slow=30
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period net change
-    abs_sum = np.zeros_like(close)
-    for i in range(1, len(close)):
-        abs_sum[i] = abs_sum[i-1] + np.abs(close[i] - close[i-1])
-    er = np.zeros_like(close)
-    er[10:] = change[10:] / np.maximum(abs_sum[10:], 1e-10)  # Avoid division by zero
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Calculate 3-bar reversal patterns
+    # Bullish: 3 consecutive lower lows followed by a higher close
+    # Bearish: 3 consecutive higher highs followed by a lower close
+    bullish_rev = np.zeros(len(high_4h), dtype=bool)
+    bearish_rev = np.zeros(len(high_4h), dtype=bool)
     
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    for i in range(3, len(high_4h)):
+        # Bullish reversal: lower lows for 3 bars, then higher close
+        if (low_4h[i-3] > low_4h[i-2] > low_4h[i-1] and 
+            close_4h[i] > close_4h[i-1]):
+            bullish_rev[i] = True
+        # Bearish reversal: higher highs for 3 bars, then lower close
+        if (high_4h[i-3] < high_4h[i-2] < high_4h[i-1] and 
+            close_4h[i] < close_4h[i-1]):
+            bearish_rev[i] = True
     
-    # Chop filter (Choppiness Index) on daily timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align reversal signals to LTF
+    bullish_rev_aligned = align_htf_to_ltf(prices, df_4h, bullish_rev.astype(float))
+    bearish_rev_aligned = align_htf_to_ltf(prices, df_4h, bearish_rev.astype(float))
     
+    # Calculate ADX (14-period) for trend strength
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Sum of True Range over 14 periods
-    tr_sum_14 = np.full_like(tr_1d, np.nan)
-    for i in range(len(tr_1d)):
-        if i >= 13:  # 14-period sum
-            tr_sum_14[i] = np.nansum(tr_1d[i-13:i+1])
+    # Directional Movement
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # High-Low range over 14 periods
-    max_high_14 = np.full_like(high_1d, np.nan)
-    min_low_14 = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 13:
-            max_high_14[i] = np.max(high_1d[i-13:i+1])
-            min_low_14[i] = np.min(low_1d[i-13:i+1])
+    # Smooth TR and DM (14-period)
+    tr_sum = np.full_like(high_4h, np.nan)
+    dm_plus_sum = np.full_like(high_4h, np.nan)
+    dm_minus_sum = np.full_like(high_4h, np.nan)
     
-    # Choppiness Index
-    chop = np.full_like(close_1d, 50.0)  # Default to middle
-    for i in range(len(chop)):
-        if not np.isnan(tr_sum_14[i]) and tr_sum_14[i] > 0:
-            range_14 = max_high_14[i] - min_low_14[i]
-            if range_14 > 0:
-                chop[i] = 100 * np.log10(tr_sum_14[i] / range_14) / np.log10(14)
+    for i in range(len(high_4h)):
+        if i >= 13:  # 14-period smoothing
+            tr_sum[i] = np.nansum(tr[i-13:i+1])
+            dm_plus_sum[i] = np.nansum(dm_plus[i-13:i+1])
+            dm_minus_sum[i] = np.nansum(dm_minus[i-13:i+1])
     
-    # Align chop to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Directional Indicators
+    di_plus = np.full_like(high_4h, np.nan)
+    di_minus = np.full_like(high_4h, np.nan)
+    dx = np.full_like(high_4h, np.nan)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma20 * 1.5)
+    valid = ~np.isnan(tr_sum) & (tr_sum != 0)
+    di_plus[valid] = 100 * dm_plus_sum[valid] / tr_sum[valid]
+    di_minus[valid] = 100 * dm_minus_sum[valid] / tr_sum[valid]
+    dx[valid] = 100 * np.abs(di_plus[valid] - di_minus[valid]) / (di_plus[valid] + di_minus[valid])
+    
+    # ADX (smoothed DX)
+    adx = np.full_like(high_4h, np.nan)
+    for i in range(len(high_4h)):
+        if i >= 27:  # 14 + 13 for ADX smoothing
+            valid_dx = dx[i-13:i+1]
+            if not np.all(np.isnan(valid_dx)):
+                adx[i] = np.nanmean(valid_dx)
+    
+    # Align ADX to LTF
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
+    vol_ma20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume_4h > (vol_ma20 * 1.3)
+    volume_filter_aligned = align_htf_to_ltf(prices, df_4h, volume_filter.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # Ensure KAMA and volume MA are calculated
+    start_idx = max(28, 20)  # Ensure ADX and patterns are calculated
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(bullish_rev_aligned[i]) or np.isnan(bearish_rev_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_filter_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Chop filter: only trade when chop < 61.8 (trending market)
-        if chop_aligned[i] >= 61.8:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: price crosses above KAMA with volume confirmation
-            if close[i] > kama[i] and close[i-1] <= kama[i-1] and volume_filter[i]:
+            # Long: bullish reversal + ADX > 25 + volume confirmation
+            if bullish_rev_aligned[i] > 0.5 and adx_aligned[i] > 25 and volume_filter_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below KAMA with volume confirmation
-            elif close[i] < kama[i] and close[i-1] >= kama[i-1] and volume_filter[i]:
+            # Short: bearish reversal + ADX > 25 + volume confirmation
+            elif bearish_rev_aligned[i] > 0.5 and adx_aligned[i] > 25 and volume_filter_aligned[i] > 0.5:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses below KAMA
-            if close[i] < kama[i] and close[i-1] >= kama[i-1]:
+            # Long: exit on bearish reversal or ADX weakness
+            if bearish_rev_aligned[i] > 0.5 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses above KAMA
-            if close[i] > kama[i] and close[i-1] <= kama[i-1]:
+            # Short: exit on bullish reversal or ADX weakness
+            if bullish_rev_aligned[i] > 0.5 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
