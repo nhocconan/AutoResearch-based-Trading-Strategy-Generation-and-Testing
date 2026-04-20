@@ -3,47 +3,33 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Cam_Pivot_R1S1_SwingReject"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily pivot points
+    # === 1d: Donchian(20) channels ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    # R2 = P + (H - L), S2 = P - (H - L)
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    # Calculate 20-period rolling high/low
+    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align pivot levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align to 4h timeframe
+    donchian_high_20 = align_htf_to_ltf(prices, df_1d, high_max_20)
+    donchian_low_20 = align_htf_to_ltf(prices, df_1d, low_min_20)
     
-    # Calculate 12h ATR(14) for volatility filtering
+    # === 4h: ATR(14) for volatility and stop loss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -54,74 +40,61 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h volume average for confirmation
-    vol_ma = pd.Series(prices['volume'].values).rolling(window=24, min_periods=24).mean().values
+    # === 4h: 20-period volume moving average ===
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 30  # Need enough data for ATR and volume MA
+    start_idx = 60  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Get aligned values
-        pivot = pivot_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
+        upper = donchian_high_20[i]
+        lower = donchian_low_20[i]
         current_atr = atr[i]
-        current_vol = prices['volume'].iloc[i]
-        current_vol_ma = vol_ma[i]
         current_close = prices['close'].iloc[i]
+        current_volume = volume[i]
+        vol_ma = vol_ma_20[i]
         
         # Skip if any value is NaN
-        if (np.isnan(pivot) or np.isnan(r1) or np.isnan(s1) or
-            np.isnan(r2) or np.isnan(s2) or np.isnan(r3) or np.isnan(s3) or
-            np.isnan(current_atr) or np.isnan(current_vol_ma)):
+        if (np.isnan(upper) or np.isnan(lower) or np.isnan(current_atr) or np.isnan(vol_ma)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.5x 24-period average
-        vol_condition = current_vol > 1.5 * current_vol_ma
+        # Volume condition: current volume > 1.5x 20-period average
+        vol_condition = current_volume > 1.5 * vol_ma
         
         if position == 0:
-            # Long: Price rejects S1 support with volume (bounce)
-            if (current_close > s1 and
-                current_close < pivot and
-                vol_condition and
-                prices['close'].iloc[i-1] <= s1):
-                signals[i] = 0.25
+            # Long: break above upper Donchian band with volume
+            if current_close > upper and vol_condition:
+                signals[i] = 0.30
                 position = 1
                 entry_price = current_close
-            
-            # Short: Price rejects R1 resistance with volume (rejection)
-            elif (current_close < r1 and
-                  current_close > pivot and
-                  vol_condition and
-                  prices['close'].iloc[i-1] >= r1):
-                signals[i] = -0.25
+            # Short: break below lower Donchian band with volume
+            elif current_close < lower and vol_condition:
+                signals[i] = -0.30
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price breaks below S1 or reaches R1
-            if current_close <= s1 or current_close >= r1:
+            # Long exit: close below lower Donchian band or ATR stop
+            if current_close < lower or current_close < entry_price - 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price breaks above R1 or reaches S1
-            if current_close >= r1 or current_close <= s1:
+            # Short exit: close above upper Donchian band or ATR stop
+            if current_close > upper or current_close > entry_price + 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
