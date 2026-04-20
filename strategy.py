@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-4h_1d_Pivot_R1S1_Breakout_Volume_Trend_v1
-Concept: Daily pivot point breakout with volume confirmation and 1d trend filter on 4h timeframe.
+12h_Daily_Pivot_R1S1_Breakout_Volume_Conservative_v1
+Concept: Daily pivot point breakout with volume confirmation on 12h timeframe.
 - Uses daily pivot points (R1, S1) as key support/resistance levels
-- Long when price breaks above R1 with volume confirmation and above 1d EMA50
-- Short when price breaks below S1 with volume confirmation and below 1d EMA50
+- Long when price breaks above R1 with volume confirmation
+- Short when price breaks below S1 with volume confirmation
 - Exit when price returns to central pivot point (mean reversion)
-- Conservative sizing (0.25) to manage drawdown and reduce trade frequency
+- Conservative sizing (0.25) to manage drawdown
 - Works in bull/bear: Pivot points adapt to market conditions, volume confirms breakouts
-- Target: 20-40 trades/year to avoid fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "12h_Daily_Pivot_R1S1_Breakout_Volume_Conservative_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +23,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for pivot points and trend filter
+    # Get daily data ONCE before loop for pivot points
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
@@ -38,53 +37,47 @@ def generate_signals(prices):
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 1d: EMA50 trend filter ===
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # === 4h: Volume ratio (current vs 20-period average) ===
-    close = prices['close'].values
+    # === 12h: Volume ratio (current vs 10-period average) ===
     volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    vol_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    vol_ratio = volume / np.where(vol_ma10 > 0, vol_ma10, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA50
+    start_idx = 10  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
         # Get values
-        close_val = close[i]
+        close_val = prices['close'].iloc[i]
         pivot_val = pivot_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema50_val = ema50_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema50_val) or np.isnan(pivot_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(pivot_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and above 1d EMA50
+            # Long: Price breaks above R1 with volume confirmation
             breakout_long = close_val > r1_val
-            vol_confirm = vol_ratio_val > 1.5  # Higher threshold to reduce trades
+            vol_confirm = vol_ratio_val > 1.5  # Volume above average
             
-            if breakout_long and vol_confirm and close_val > ema50_val:
+            if breakout_long and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and below 1d EMA50
-            elif close_val < s1_val and vol_confirm and close_val < ema50_val:
+            # Short: Price breaks below S1 with volume confirmation
+            elif close_val < s1_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
