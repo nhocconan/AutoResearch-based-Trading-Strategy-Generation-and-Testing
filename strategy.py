@@ -5,41 +5,42 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 14-period RSI on 1d close
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Calculate 14-period ATR on 1d for volatility filter
+    # Calculate daily ATR(14) for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
+    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # ATR as EMA of TR
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate daily Donchian(20) for breakout signals
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
     # Session filter: 8-20 UTC
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -47,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Session filter: only trade 8-20 UTC
         hour = hours[i]
         if hour < 8 or hour > 20:
@@ -58,37 +59,47 @@ def generate_signals(prices):
         
         # Get values
         close_val = prices['close'].iloc[i]
-        rsi_val = rsi_1d_aligned[i]
-        atr_val = atr_1d_aligned[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
+        atr_14_1d_val = atr_14_1d_aligned[i]
+        high_20_val = high_20_aligned[i]
+        low_20_val = low_20_aligned[i]
         
         # Skip if any value is NaN
-        if np.isnan(rsi_val) or np.isnan(atr_val):
+        if (np.isnan(ema_50_1w_val) or np.isnan(atr_14_1d_val) or 
+            np.isnan(high_20_val) or np.isnan(low_20_val)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volatility filter: avoid extremely low volatility
+        if atr_14_1d_val < 0.005 * close_val:  # Less than 0.5% ATR
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volatility filter (ATR > 0.5% of price)
-            if rsi_val < 30 and atr_val > 0.005 * close_val:
+            # Long: price breaks above Donchian high + weekly uptrend
+            if close_val > high_20_val and close_val > ema_50_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + volatility filter
-            elif rsi_val > 70 and atr_val > 0.005 * close_val:
+            # Short: price breaks below Donchian low + weekly downtrend
+            elif close_val < low_20_val and close_val < ema_50_1w_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI crosses above 50 (mean reversion)
-            if rsi_val > 50:
+            # Long exit: price crosses below Donchian low
+            if close_val < low_20_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI crosses below 50 (mean reversion)
-            if rsi_val < 50:
+            # Short exit: price crosses above Donchian high
+            if close_val > high_20_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,12 +107,12 @@ def generate_signals(prices):
     
     return signals
 
-# 12h_RSI14_1d_VolatilityFilter_Session_v1
-# Uses 1d 14-period RSI for mean reversion signals
-# Requires 1d ATR > 0.5% of price for volatility filter (avoids low-vol chop)
+# 1d_Donchian20_WeeklyEMA50_TrendFilter_Session_v1
+# Uses daily Donchian(20) breakouts for entry
+# Weekly EMA(50) filter ensures alignment with higher timeframe trend
 # Session filter: 8-20 UTC to focus on active trading hours
-# Mean reversion: long when RSI<30, short when RSI>70, exit at RSI=50
-# Designed for 12h timeframe with ~15-30 trades/year
-name = "12h_RSI14_1d_VolatilityFilter_Session_v1"
-timeframe = "12h"
+# Volatility filter avoids low-volatility chop
+# Designed for 1d timeframe with ~15-25 trades/year
+name = "1d_Donchian20_WeeklyEMA50_TrendFilter_Session_v1"
+timeframe = "1d"
 leverage = 1.0
