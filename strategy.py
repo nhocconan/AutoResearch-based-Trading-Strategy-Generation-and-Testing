@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Candlestick Pattern + 1d Trend Filter + Volume Confirmation
-# Uses bullish/bearish engulfing patterns for precise entry signals, filtered by 1d EMA50 trend
-# Volume > 1.5x 20-period average confirms institutional participation
-# Designed for 12h timeframe with selective entries to avoid overtrading
-# Target: 12-37 trades per year per symbol (50-150 total over 4 years)
+# Hypothesis: 4h Williams %R + 1d EMA Trend Filter + Volume Spike
+# Williams %R identifies overbought/oversold conditions on 4h timeframe
+# 1d EMA50 filters for higher timeframe trend alignment to avoid counter-trend trades
+# Volume > 2x 20-period average confirms institutional participation in breakouts
+# Designed for 4h timeframe with selective entries to avoid overtrading
+# Target: 20-50 trades per year per symbol (80-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,30 +23,20 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate price and volume arrays
+    # Calculate Williams %R on 4h timeframe (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    
+    # Volume filter: volume > 2x 20-period average
     volume = prices['volume'].values
-    open_price = prices['open'].values
-    
-    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
-    
-    # Bullish engulfing: current candle engulfs previous bearish candle
-    bullish_engulfing = (close > open_price) & (open_price < close) & \
-                        (close > high[1:]) & (open_price < low[1:])  # shifted comparison
-    
-    # Bearish engulfing: current candle engulfs previous bullish candle
-    bearish_engulfing = (close < open_price) & (open_price > close) & \
-                        (close < low[1:]) & (open_price > high[1:])  # shifted comparison
-    
-    # Shift engulfing signals to align with current bar (avoid look-ahead)
-    bullish_engulfing = np.roll(bullish_engulfing, 1)
-    bearish_engulfing = np.roll(bearish_engulfing, 1)
-    bullish_engulfing[0] = False
-    bearish_engulfing[0] = False
+    vol_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,7 +44,9 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if NaN in indicators
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema50_1d_aligned[i]) or \
+           np.isnan(williams_r[i]) or \
+           np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,11 +62,11 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long entry: bullish engulfing + uptrend + volume
-            long_signal = bullish_engulfing[i] and is_uptrend and has_volume
+            # Long entry: Williams %R oversold (< -80) + uptrend + volume
+            long_signal = (williams_r[i] < -80) and is_uptrend and has_volume
             
-            # Short entry: bearish engulfing + downtrend + volume
-            short_signal = bearish_engulfing[i] and is_downtrend and has_volume
+            # Short entry: Williams %R overbought (> -20) + downtrend + volume
+            short_signal = (williams_r[i] > -20) and is_downtrend and has_volume
             
             if long_signal:
                 signals[i] = 0.25
@@ -85,16 +78,16 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Long exit: bearish engulfing or trend reversal
-            if bearish_engulfing[i] or not is_uptrend:
+            # Long exit: Williams %R returns above -50 (momentum fading)
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish engulfing or trend reversal
-            if bullish_engulfing[i] or not is_downtrend:
+            # Short exit: Williams %R returns below -50 (momentum fading)
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Engulfing_1dTrendFilter_Volume"
-timeframe = "12h"
+name = "4h_WilliamsR_1dEMA50_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
