@@ -1,137 +1,158 @@
-#!/usr/bin/env python3
+# 1d_KAMA_RSI_ChopFilter  
+# Hypothesis: Daily trend following using Kaufman Adaptive Moving Average (KAMA) for direction,  
+# RSI for momentum confirmation, and Choppiness Index (CHOP) to avoid ranging markets.  
+# Long when KAMA slope > 0, RSI > 50, and CHOP > 61.8 (trending regime).  
+# Short when KAMA slope < 0, RSI < 50, and CHOP > 61.8.  
+# Uses discrete position sizing (0.30) to limit drawdown and reduce trade frequency.  
+# Designed for low trade frequency (<25/year) to minimize fee impact in bear markets.  
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with weekly trend filter and volume confirmation
-# In bull markets: go long when Alligator lines align bullish (jaw < teeth < lips) and price above lips, with weekly uptrend
-# In bear markets: go short when Alligator lines align bearish (jaw > teeth > lips) and price below lips, with weekly downtrend
-# Volume filter ensures sufficient participation
-# Target: 50-150 total trades over 4 years (12-37/year)
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE for trend filter
+    # Load weekly data ONCE for higher timeframe context
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA for trend filter (13-period)
-    ema_13w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_34w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_55w = pd.Series(close_1w).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # Calculate weekly EMA200 as long-term trend filter
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Align weekly EMAs to 12h timeframe
-    ema_13w_aligned = align_htf_to_ltf(prices, df_1w, ema_13w)
-    ema_34w_aligned = align_htf_to_ltf(prices, df_1w, ema_34w)
-    ema_55w_aligned = align_htf_to_ltf(prices, df_1w, ema_55w)
+    # Load daily data ONCE for KAMA and RSI
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h Williams Alligator (SMMA of median price)
-    median_price = (prices['high'].values + prices['low'].values) / 2.0
+    # Calculate KAMA ( Kaufman Adaptive Moving Average )
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # placeholder, will fix below
+    # Correct calculation of volatility (sum of absolute changes over 10 periods)
+    volatility = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < 10:
+            volatility[i] = np.nan
+        else:
+            volatility[i] = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Jaw (13-period SMMA, 8-bar shift)
-    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaw = np.concatenate([np.full(8, np.nan), jaw_raw[:-8]]) if len(jaw_raw) > 8 else np.full_like(jaw_raw, np.nan)
+    # Align KAMA to daily (already daily, but for consistency)
+    kama_aligned = kama  # already on daily timeframe
     
-    # Teeth (8-period SMMA, 5-bar shift)
-    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.concatenate([np.full(5, np.nan), teeth_raw[:-5]]) if len(teeth_raw) > 5 else np.full_like(teeth_raw, np.nan)
+    # Calculate RSI(14) on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Lips (5-period SMMA, 3-bar shift)
-    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.concatenate([np.full(3, np.nan), lips_raw[:-3]]) if len(lips_raw) > 3 else np.full_like(lips_raw, np.nan)
+    # Calculate Choppiness Index (CHOP) on daily
+    # True Range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Max and min over 14 periods
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # CHOP formula
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
     
-    # Calculate 12h ATR for volatility filter
+    # Align indicators to daily (already aligned)
+    rsi_aligned = rsi
+    chop_aligned = chop
+    ema200_1w_daily = ema200_1w_aligned  # weekly EMA200 aligned to daily
+    
+    # Prepare price and volume arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Precompute hour of day for session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # Volume filter: 12h volume > 20-period average
     volume = prices['volume'].values
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Signals array
     signals = np.zeros(n)
+    
+    # State tracking
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(55, n):  # Start after Alligator warmup
-        # Skip if NaN in indicators
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
-           np.isnan(ema_13w_aligned[i]) or np.isnan(ema_34w_aligned[i]) or np.isnan(ema_55w_aligned[i]) or np.isnan(atr_12h[i]):
+    # Main loop
+    for i in range(100, n):  # Start after warmup period
+        # Skip if any key indicator is NaN
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or \
+           np.isnan(chop_aligned[i]) or np.isnan(ema200_1w_daily[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume filter
-        vol_filter = volume[i] > volume_ma_20[i]
-        
-        # Price and Alligator levels
+        # Get current values
         price = close[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        weekly_fast = ema_13w_aligned[i]
-        weekly_slow = ema_34w_aligned[i]
-        weekly_trend = ema_55w_aligned[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
+        chop_val = chop_aligned[i]
+        ema200_val = ema200_1w_daily[i]
         
+        # Determine KAMA slope (using 1-period change)
+        if i > 0:
+            kama_slope = kama_val - kama_aligned[i-1]
+        else:
+            kama_slope = 0
+        
+        # Entry conditions
         if position == 0:
-            # Bullish Alligator alignment: jaw < teeth < lips
-            bullish_align = jaw_val < teeth_val < lips_val
-            # Bearish Alligator alignment: jaw > teeth > lips
-            bearish_align = jaw_val > teeth_val > lips_val
-            
-            # Long: bullish alignment, price above lips, weekly uptrend (fast > slow), with volume
-            if bullish_align and price > lips_val and weekly_fast > weekly_slow and vol_filter:
-                signals[i] = 0.25
+            # Long: KAMA rising, RSI > 50, CHOP > 61.8 (trending), price above weekly EMA200
+            if kama_slope > 0 and rsi_val > 50 and chop_val > 61.8 and price > ema200_val:
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
-            # Short: bearish alignment, price below lips, weekly downtrend (fast < slow), with volume
-            elif bearish_align and price < lips_val and weekly_fast < weekly_slow and vol_filter:
-                signals[i] = -0.25
+            # Short: KAMA falling, RSI < 50, CHOP > 61.8 (trending), price below weekly EMA200
+            elif kama_slope < 0 and rsi_val < 50 and chop_val > 61.8 and price < ema200_val:
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
+        # Exit conditions
         elif position == 1:
-            # Long exit: price crosses below teeth or weekly trend turns down
-            if price < teeth_val or weekly_fast < weekly_slow:
+            # Exit long: KAMA slope turns negative OR RSI < 45
+            if kama_slope < 0 or rsi_val < 45:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price crosses above teeth or weekly trend turns up
-            if price > teeth_val or weekly_fast > weekly_slow:
+            # Exit short: KAMA slope turns positive OR RSI > 55
+            if kama_slope > 0 or rsi_val > 55:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_WilliamsAlligator_WeeklyTrend_VolumeFilter"
-timeframe = "12h"
+name = "1d_KAMA_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
