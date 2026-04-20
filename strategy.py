@@ -1,134 +1,132 @@
 #!/usr/bin/env python3
 """
-12h_1w_4h_Keltner_Breakout_Signal
-Concept: Use 1-week Keltner channels to define trend and volatility, 4h for momentum confirmation, 12h for entry timing.
-- Long: Close > Keltner Upper (1w) AND 4h RSI > 50 AND 12h volume > 1.5x 24-period average
-- Short: Close < Keltner Lower (1w) AND 4h RSI < 50 AND 12h volume > 1.5x 24-period average
-- Exit: Close crosses back below/above 20-period EMA (12h)
-- Position sizing: 0.28
-- Designed for low frequency (<30 trades/year) and robustness in bull/bear markets via volatility-adaptive channels
+12h_1w_1d_Adaptive_Breakout_With_Pullback_v1
+Concept: Adaptive breakout strategy using weekly pivot points for trend, daily Donchian channels for entry timing,
+         and volume confirmation to avoid false breakouts. Designed to work in both bull and bear markets.
+- Trend: Use weekly pivot points - price above weekly PP = bullish bias, below = bearish bias
+- Entry: In bullish bias, buy when price breaks above daily Donchian upper (20) with volume confirmation
+         In bearish bias, sell when price breaks below daily Donchian lower (20) with volume confirmation
+- Exit: Exit when price returns to the weekly pivot point (mean reversion to equilibrium)
+- Volume: Require volume > 1.5x 20-period average for breakout confirmation
+- Position sizing: 0.25 to manage risk
+- Timeframe: 12h (primary), HTF: 1w (trend), 1d (entry/exit levels)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_4h_Keltner_Breakout_Signal"
+name = "12h_1w_1d_Adaptive_Breakout_With_Pullback_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1w data ONCE before loop
+    # Get weekly data ONCE before loop for trend bias
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
+    # Get daily data ONCE before loop for entry/exit levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # === 1w: Keltner Channel (20, 1.5) ===
+    # === Weekly: Pivot Points for Trend Bias ===
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # EMA20 of typical price
-    tp_1w = (high_1w + low_1w + close_1w) / 3.0
-    ema_tp = pd.Series(tp_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Weekly Pivot Point (PP) = (H + L + C) / 3
+    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    # R1 = 2*PP - L
+    r1_1w = 2 * pp_1w - low_1w
+    # S1 = 2*PP - H
+    s1_1w = 2 * pp_1w - high_1w
     
-    # ATR(20)
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]
-    tr2[0] = high_1w[0] - close_1w[0]
-    tr3[0] = low_1w[0] - close_1w[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Align weekly pivot levels to 12h
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    keltner_upper = ema_tp + 1.5 * atr
-    keltner_lower = ema_tp - 1.5 * atr
+    # === Daily: Donchian Channel for Entry/Exit ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Keltner bands to 12h
-    keltner_upper_12h = align_htf_to_ltf(prices, df_1w, keltner_upper)
-    keltner_lower_12h = align_htf_to_ltf(prices, df_1w, keltner_lower)
+    # Donchian Channel (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # === 4h: RSI(14) ===
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_4h = align_htf_to_ltf(prices, df_4h, rsi)
+    # Align Donchian levels to 12h
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
     # === 12h: Indicators ===
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA20 for exit
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    
-    # Volume: 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume: 20-period average for breakout confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Ensure enough data for volume MA and EMA
+    start_idx = 20  # Ensure enough data for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Get values
-        kup = keltner_upper_12h[i]
-        klow = keltner_lower_12h[i]
-        rsi_val = rsi_4h[i]
-        vol_ma_val = vol_ma[i]
-        vol = volume[i]
-        close_val = close[i]
-        ema_val = ema_20[i]
+        pp_val = pp_1w_aligned[i]
+        r1_val = r1_1w_aligned[i]
+        s1_val = s1_1w_aligned[i]
+        upper_20 = high_20_aligned[i]
+        lower_20 = low_20_aligned[i]
+        current_vol_ma = vol_ma[i]
+        current_volume = volume[i]
+        current_close = close[i]
         
         # Skip if any value is NaN
-        if (np.isnan(kup) or np.isnan(klow) or np.isnan(rsi_val) or 
-            np.isnan(vol_ma_val)):
+        if (np.isnan(pp_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
+            np.isnan(upper_20) or np.isnan(lower_20) or np.isnan(current_vol_ma)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.5x 24-period average
-        vol_condition = vol > 1.5 * vol_ma_val
+        # Volume condition: current volume > 1.5x 20-period average
+        vol_condition = current_volume > 1.5 * current_vol_ma
+        
+        # Determine bias: above weekly PP = bullish, below = bearish
+        is_bullish_bias = current_close > pp_val
+        is_bearish_bias = current_close < pp_val
         
         if position == 0:
-            # Long: close above Keltner Upper AND RSI > 50 AND volume confirmation
-            if close_val > kup and rsi_val > 50 and vol_condition:
-                signals[i] = 0.28
+            # Long entry: bullish bias + price breaks above Donchian high + volume
+            if is_bullish_bias and current_close > upper_20 and vol_condition:
+                signals[i] = 0.25
                 position = 1
-            # Short: close below Keltner Lower AND RSI < 50 AND volume confirmation
-            elif close_val < klow and rsi_val < 50 and vol_condition:
-                signals[i] = -0.28
+            # Short entry: bearish bias + price breaks below Donchian low + volume
+            elif is_bearish_bias and current_close < lower_20 and vol_condition:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below EMA20
-            if close_val < ema_val:
+            # Long exit: price returns to weekly pivot (mean reversion)
+            if current_close < pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above EMA20
-            if close_val > ema_val:
+            # Short exit: price returns to weekly pivot (mean reversion)
+            if current_close > pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.25
     
     return signals
