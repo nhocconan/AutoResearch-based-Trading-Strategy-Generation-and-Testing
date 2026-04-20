@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WilliamsR_MeanReversion"
-timeframe = "6h"
+name = "12h_1w_Donchian20_WeeklyTrend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,40 +12,71 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data ONCE before loop (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === Daily Williams %R (14-period) ===
+    # === Weekly SuperTrend for Trend Direction ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # ATR calculation
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[tr1[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    
+    # SuperTrend calculation
+    hl2 = (high_1w + low_1w) / 2
+    upperband = hl2 + (3 * atr)
+    lowerband = hl2 - (3 * atr)
+    
+    # Initialize SuperTrend
+    supertrend = np.zeros_like(close_1w)
+    uptrend = np.ones_like(close_1w, dtype=bool)
+    
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > upperband[i-1]:
+            uptrend[i] = True
+        elif close_1w[i] < lowerband[i-1]:
+            uptrend[i] = False
+        else:
+            uptrend[i] = uptrend[i-1]
+            if uptrend[i] and lowerband[i] < lowerband[i-1]:
+                lowerband[i] = lowerband[i-1]
+            if not uptrend[i] and upperband[i] > upperband[i-1]:
+                upperband[i] = upperband[i-1]
+        
+        supertrend[i] = lowerband[i] if uptrend[i] else upperband[i]
+    
+    # Align SuperTrend to 12h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
+    uptrend_aligned = align_htf_to_ltf(prices, df_1w, uptrend.astype(float))
+    
+    # === Daily Donchian Channel (20-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Donchian channels
+    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
     
-    # === 6h RSI for momentum confirmation ===
-    close_series = pd.Series(prices['close'].values)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # === 6h Volume ratio for confirmation ===
+    # === Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
-    vol_ma10 = vol_series.rolling(window=10, min_periods=10).mean().values
-    vol_ratio = volume / np.where(vol_ma10 > 0, vol_ma10, np.nan)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,12 +84,15 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        wr_val = williams_r_aligned[i]
-        rsi_val = rsi_values[i]
+        upper_val = upper_aligned[i]
+        lower_val = lower_aligned[i]
+        supertrend_val = supertrend_aligned[i]
+        uptrend_val = uptrend_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(wr_val) or np.isnan(rsi_val) or 
+        if (np.isnan(upper_val) or np.isnan(lower_val) or 
+            np.isnan(supertrend_val) or np.isnan(uptrend_val) or 
             np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -66,26 +100,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + bullish RSI (> 50) + volume confirmation
-            if wr_val < -80 and rsi_val > 50 and vol_ratio_val > 1.3:
+            # Long: Price breaks above upper Donchian with weekly uptrend and volume
+            if close_val > upper_val and uptrend_val >= 0.5 and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) + bearish RSI (< 50) + volume confirmation
-            elif wr_val > -20 and rsi_val < 50 and vol_ratio_val > 1.3:
+            # Short: Price breaks below lower Donchian with weekly downtrend and volume
+            elif close_val < lower_val and uptrend_val < 0.5 and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R returns to neutral (> -50) OR RSI turns bearish
-            if wr_val > -50 or rsi_val < 50:
+            # Long exit: Price returns below lower Donchian OR trend turns down
+            if close_val < lower_val or uptrend_val < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R returns to neutral (< -50) OR RSI turns bullish
-            if wr_val < -50 or rsi_val > 50:
+            # Short exit: Price returns above upper Donchian OR trend turns up
+            if close_val > upper_val or uptrend_val >= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
