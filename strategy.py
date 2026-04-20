@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v1"
-timeframe = "6h"
+name = "4h_1d_KAMA_RSI_Chop_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -17,29 +17,53 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Levels (based on previous day) ===
+    # === Daily KAMA for trend direction ===
+    close_1d = df_1d['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        if volatility[i] != 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # === Daily RSI for momentum ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Daily Chopiness Index for regime filter ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(np.roll(high_1d, 1) - close_1d)
+    tr3 = np.abs(np.roll(low_1d, 1) - close_1d)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
     
-    # Calculate pivot and ranges from previous day's data
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Align to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Camarilla levels
-    R1 = close_1d + (range_1d * 1.1 / 12)
-    S1 = close_1d - (range_1d * 1.1 / 12)
-    R2 = close_1d + (range_1d * 1.1 / 6)
-    S2 = close_1d - (range_1d * 1.1 / 6)
-    
-    # Align to 6h timeframe (use previous day's levels)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    
-    # === 6h: Price and volume ===
+    # === 4h: Price and volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -48,53 +72,46 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === 6h: EMA 34 for trend filter ===
-    close_series = pd.Series(close)
-    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Get values
         close_val = close[i]
-        ema34_val = ema34[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
+        chop_val = chop_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
-        R2_val = R2_aligned[i]
-        S2_val = S2_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema34_val) or np.isnan(vol_ratio_val) or 
-            np.isnan(R1_val) or np.isnan(S1_val) or 
-            np.isnan(R2_val) or np.isnan(S2_val)):
+        if (np.isnan(kama_val) or np.isnan(rsi_val) or np.isnan(chop_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and uptrend
-            if close_val > R1_val and vol_ratio_val > 1.8 and close_val > ema34_val:
+            # Long: Price above KAMA, RSI > 50, chop < 61.8 (trending), volume confirmation
+            if close_val > kama_val and rsi_val > 50 and chop_val < 61.8 and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and downtrend
-            elif close_val < S1_val and vol_ratio_val > 1.8 and close_val < ema34_val:
+            # Short: Price below KAMA, RSI < 50, chop < 61.8 (trending), volume confirmation
+            elif close_val < kama_val and rsi_val < 50 and chop_val < 61.8 and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price falls below S1 or trend turns down
-            if close_val < S1_val or close_val < ema34_val:
+            # Long exit: Price below KAMA or RSI < 40 or chop > 61.8 (ranging)
+            if close_val < kama_val or rsi_val < 40 or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises above R1 or trend turns up
-            if close_val > R1_val or close_val > ema34_val:
+            # Short exit: Price above KAMA or RSI > 60 or chop > 61.8 (ranging)
+            if close_val > kama_val or rsi_val > 60 or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
