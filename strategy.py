@@ -3,155 +3,186 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_TRIX_VolumeSpike_CHR"
-timeframe = "4h"
+name = "1h_4d_CAMARILLA_R1S1_BREAKOUT_VOLUME_REGIME"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # === Get 1d data ONCE before loop ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 12h: TRIX (12-period EMA triple smoothed) ===
-    close_12h = df_12h['close'].values
-    close_series = pd.Series(close_12h)
-    # TRIX = EMA(EMA(EMA(close), 12), 12), 12) then percent change
-    ema1 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix_raw = 100 * (ema3.pct_change())
-    trix = trix_raw.values
+    # === Calculate 1d CAMARILLA LEVELS ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 12h: Volume spike detection ===
-    volume_12h = df_12h['volume'].values
-    vol_series = pd.Series(volume_12h)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
-    vol_ratio = (vol_series / vol_ma).values
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Align TRIX and volume ratio to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio)
+    # Align levels
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # === 4h: Choppiness Index (CHOP) regime filter ===
+    # === 1h INDICATORS ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # True Range
+    # ATR(14) for stop loss
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    
-    # ATR(14)
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Sum of TRUE RANGE over 14 periods
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Volume condition: current volume > 1.5x 24-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=24, min_periods=24).mean().values
+    vol_condition = volume > 1.5 * vol_ma
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # === REGIME FILTER: Choppiness Index (1d) ===
+    # High CHOP = ranging (mean revert), Low CHOP = trending (follow trend)
+    # We'll use CHOP > 61.8 for ranging, CHOP < 38.2 for trending
+    # Calculate using 1d data
+    atr_1d_list = []
+    for i in range(len(high_1d)):
+        if i == 0:
+            tr_1d = 0
+        else:
+            tr_1d = max(
+                abs(high_1d[i] - low_1d[i]),
+                abs(high_1d[i] - close_1d[i-1]),
+                abs(low_1d[i] - close_1d[i-1])
+            )
+        atr_1d_list.append(tr_1d)
     
-    # CHOP = 100 * log10(sumTR / (HH - LL)) / log10(14)
-    range_hl = highest_high - lowest_low
-    chop = np.where(range_hl > 0, 100 * np.log10(sum_tr / range_hl) / np.log10(14), 50)
-    chop = np.where(np.isnan(chop), 50, chop)
+    atr_1d_series = pd.Series(atr_1d_list)
+    atr_1d_sum = atr_1d_series.rolling(window=14, min_periods=14).sum().values
+    high_low_1d = np.abs(high_1d - low_1d)
+    high_low_sum = pd.Series(high_low_1d).rolling(window=14, min_periods=14).sum().values
     
-    # === 4h: Volume spike for confirmation ===
-    volume = prices['volume'].values
-    vol_series_4h = pd.Series(volume)
-    vol_ma_4h = vol_series_4h.rolling(window=20, min_periods=20).mean()
-    vol_ratio_4h = (vol_series_4h / vol_ma_4h).values
+    # Avoid division by zero
+    chop_1d = 100 * np.log10(high_low_sum / atr_1d_sum) / np.log10(14)
+    chop_1d = np.where((atr_1d_sum > 0) & (high_low_sum > 0), chop_1d, 50)  # neutral when invalid
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # === SESSION FILTER: 08-20 UTC ===
+    hours = prices.index.hour  # already datetime64
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 30  # Need enough data for all indicators
+    start_idx = 100  # Need enough data
     
     for i in range(start_idx, n):
-        # Get aligned values
-        trix_val = trix_aligned[i]
-        vol_ratio_12h = vol_ratio_aligned[i]
-        current_chop = chop[i]
-        current_atr = atr[i]
-        current_close = close[i]
-        current_vol_ratio = vol_ratio_4h[i]
-        
-        # Skip if any value is NaN
-        if (np.isnan(trix_val) or np.isnan(vol_ratio_12h) or 
-            np.isnan(current_chop) or np.isnan(current_atr) or 
-            np.isnan(current_vol_ratio)):
+        # Skip outside session
+        if not session_mask[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Conditions ===
-        # TRIX momentum: positive = bullish, negative = bearish
-        # Volume spike: > 1.8x average
-        # Chop regime: > 61.8 = ranging (mean revert), < 38.2 = trending (follow momentum)
-        vol_spike_12h = vol_ratio_12h > 1.8
-        vol_spike_4h = current_vol_ratio > 1.8
+        # Get values
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        current_atr = atr[i]
+        current_close = close[i]
+        current_vol_cond = vol_condition[i]
+        chop = chop_1d_aligned[i]
+        
+        # Skip if any value is NaN
+        if (np.isnan(r1) or np.isnan(s1) or np.isnan(current_atr) or np.isnan(chop)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # === REGIME RULES ===
+        # CHOP > 61.8 = ranging -> mean revert at S1/R1
+        # CHOP < 38.2 = trending -> breakout
+        is_ranging = chop > 61.8
+        is_trending = chop < 38.2
         
         if position == 0:
-            # Long: TRIX turning up + volume spike + trending market (CHOP < 38.2)
-            if trix_val > 0 and trix_val > trix_aligned[i-1] and vol_spike_12h and vol_spike_4h and current_chop < 38.2:
-                signals[i] = 0.25
-                position = 1
-                entry_price = current_close
-            
-            # Short: TRIX turning down + volume spike + trending market (CHOP < 38.2)
-            elif trix_val < 0 and trix_val < trix_aligned[i-1] and vol_spike_12h and vol_spike_4h and current_chop < 38.2:
-                signals[i] = -0.25
-                position = -1
-                entry_price = current_close
-            
-            # Mean reversion in ranging markets: fade extremes
-            elif current_chop > 61.8:
-                # Buy near low, sell near high in range
-                if current_close <= lowest_low[i] + 0.1 * range_hl[i]:  # Near low
+            # In ranging market: buy at S1, sell at R1 (mean reversion)
+            if is_ranging and current_vol_cond:
+                if current_close <= s1:  # bounce at support
                     signals[i] = 0.20
                     position = 1
                     entry_price = current_close
-                elif current_close >= highest_high[i] - 0.1 * range_hl[i]:  # Near high
+                elif current_close >= r1:  # rejection at resistance
+                    signals[i] = -0.20
+                    position = -1
+                    entry_price = current_close
+            
+            # In trending market: breakout entries
+            elif is_trending and current_vol_cond:
+                if current_close > r1:  # bullish breakout
+                    signals[i] = 0.20
+                    position = 1
+                    entry_price = current_close
+                elif current_close < s1:  # bearish breakout
                     signals[i] = -0.20
                     position = -1
                     entry_price = current_close
         
         elif position == 1:
-            # Long exit: TRIX turns down OR stop loss OR range high
-            if trix_val < 0 and trix_val < trix_aligned[i-1]:
-                signals[i] = 0.0
-                position = 0
-            elif current_close < entry_price - 2.0 * current_atr:
-                signals[i] = 0.0
-                position = 0
-            elif current_chop > 61.8 and current_close >= highest_high[i] - 0.1 * range_hl[i]:
+            # Long exit conditions
+            exit_signal = False
+            
+            if is_ranging:
+                # In ranging: take profit at R1 or stop loss
+                if current_close >= r1:
+                    exit_signal = True
+                elif current_close < entry_price - 1.5 * current_atr:
+                    exit_signal = True
+            else:  # trending
+                # In trending: trail with ATR or reverse at S1
+                if current_close < s1:  # trend reversal
+                    exit_signal = True
+                elif current_close < entry_price - 2.0 * current_atr:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: TRIX turns up OR stop loss OR range low
-            if trix_val > 0 and trix_val > trix_aligned[i-1]:
-                signals[i] = 0.0
-                position = 0
-            elif current_close > entry_price + 2.0 * current_atr:
-                signals[i] = 0.0
-                position = 0
-            elif current_chop > 61.8 and current_close <= lowest_low[i] + 0.1 * range_hl[i]:
+            # Short exit conditions
+            exit_signal = False
+            
+            if is_ranging:
+                # In ranging: take profit at S1 or stop loss
+                if current_close <= s1:
+                    exit_signal = True
+                elif current_close > entry_price + 1.5 * current_atr:
+                    exit_signal = True
+            else:  # trending
+                # In trending: trail with ATR or reverse at R1
+                if current_close > r1:  # trend reversal
+                    exit_signal = True
+                elif current_close > entry_price + 2.0 * current_atr:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
