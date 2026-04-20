@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_RVOL_Breakout_VolumeTrend"
-timeframe = "6h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -17,80 +17,87 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Daily Range Volatility (RVOL) for breakout strength ===
+    # === Daily Pivot Points (previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
     
-    # Daily range and body
-    daily_range = high_1d - low_1d
-    daily_body = np.abs(close_1d - open_1d)
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Range expansion: current range vs 20-day average
-    range_series = pd.Series(daily_range)
-    range_ma20 = range_series.rolling(window=20, min_periods=20).mean().values
-    range_expansion = daily_range / np.where(range_ma20 > 0, range_ma20, np.nan)
+    # Set first values to avoid look-ahead
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Body strength: body as percentage of range
-    body_strength = daily_body / np.where(daily_range > 0, daily_range, np.nan)
+    # Standard pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Align RVOL metrics to 6h timeframe
-    range_expansion_aligned = align_htf_to_ltf(prices, df_1d, range_expansion)
-    body_strength_aligned = align_htf_to_ltf(prices, df_1d, body_strength)
+    # Pivot R1 and S1 levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
     
-    # === 6h Volume Confirmation ===
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # === 4h Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === 6h Trend Filter: Price above/below 50-period EMA ===
-    close_series = pd.Series(prices['close'].values)
-    ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    # === 4h Trend Filter: EMA34 > EMA89 ===
+    close_series = pd.Series(prices['close'])
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89 = close_series.ewm(span=89, adjust=False, min_periods=89).mean().values
+    uptrend = ema34 > ema89
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        ema50_val = ema50[i]
         vol_ratio_val = vol_ratio[i]
-        range_exp_val = range_expansion_aligned[i]
-        body_str_val = body_strength_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        pivot_val = pivot_aligned[i]
+        uptrend_val = uptrend[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(range_exp_val) or 
-            np.isnan(body_str_val) or np.isnan(ema50_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(pivot_val) or np.isnan(uptrend_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Strong bullish candle with range expansion and volume
-            if (close_val > open_1d[-1] if i >= len(open_1d) else close_val > prices['open'].iloc[i]) and \
-               body_str_val > 0.6 and range_exp_val > 1.5 and vol_ratio_val > 2.0:
+            # Long: Break above R1 with volume confirmation in uptrend
+            if close_val > r1_val and vol_ratio_val > 2.0 and uptrend_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Strong bearish candle with range expansion and volume
-            elif (close_val < open_1d[-1] if i >= len(open_1d) else close_val < prices['open'].iloc[i]) and \
-                 body_str_val > 0.6 and range_exp_val > 1.5 and vol_ratio_val > 2.0:
+            # Short: Break below S1 with volume confirmation in downtrend
+            elif close_val < s1_val and vol_ratio_val > 2.0 and not uptrend_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Loss of momentum or trend reversal
-            if close_val < ema50_val or body_str_val < 0.3:
+            # Long exit: Price returns below pivot OR trend reverses
+            if close_val < pivot_val or not uptrend_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Loss of momentum or trend reversal
-            if close_val > ema50_val or body_str_val < 0.3:
+            # Short exit: Price returns above pivot OR trend reverses
+            if close_val > pivot_val or uptrend_val:
                 signals[i] = 0.0
                 position = 0
             else:
