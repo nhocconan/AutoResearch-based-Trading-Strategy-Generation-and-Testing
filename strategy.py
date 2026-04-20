@@ -1,74 +1,54 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1S1_Breakout_Volume_Trend_v2
-Concept: 4h Camarilla R1/S1 breakout with volume confirmation and EMA trend filter.
-- Long: Price breaks above R1 (resistance) with volume > 1.5x average and price > EMA50
-- Short: Price breaks below S1 (support) with volume > 1.5x average and price < EMA50
-- Exit: Price crosses EMA50 (trend reversal) or opposite S1/R1 level touched
-- Uses daily pivots calculated from previous day's OHLC
+1d_RSI_Extreme_Trend_Filter_v1
+Concept: Daily RSI extremes with weekly EMA trend filter and volume confirmation for mean-reversion entries.
+- Long: RSI < 30 AND close > weekly EMA50 AND volume > 1.5x average volume
+- Short: RSI > 70 AND close < weekly EMA50 AND volume > 1.5x average volume
+- Exit: RSI crosses back to neutral zone (40-60)
 - Position sizing: 0.25
-- Target: 20-40 trades/year (80-160 total over 4 years)
-- Works in bull/bear: EMA50 defines trend, pivot breaks capture momentum, volume confirms
+- Target: 10-25 trades/year (40-100 total over 4 years)
+- Works in bull/bear: Weekly EMA defines trend, RSI extremes capture reversals, volume confirms momentum
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Pivot_R1S1_Breakout_Volume_Trend_v2"
-timeframe = "4h"
+name = "1d_RSI_Extreme_Trend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    pivot = (high + low + close) / 3.0
-    range_ = high - low
-    r1 = close + (range_ * 1.1 / 12)
-    s1 = close - (range_ * 1.1 / 12)
-    r2 = close + (range_ * 1.1 / 6)
-    s2 = close - (range_ * 1.1 / 6)
-    r3 = close + (range_ * 1.1 / 4)
-    s3 = close - (range_ * 1.1 / 4)
-    r4 = close + (range_ * 1.1 / 2)
-    s4 = close - (range_ * 1.1 / 2)
-    return r1, s1, r2, s2, r3, s3, r4, s4
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 4h: EMA50 trend filter ===
+    # === Daily: RSI for mean reversion signals ===
     close = prices['close'].values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Daily: Volume confirmation ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Daily: Calculate Camarilla pivots from previous day's OHLC ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate pivots for each day (using previous day's data)
-    r1_1d = np.full_like(close_1d, np.nan)
-    s1_1d = np.full_like(close_1d, np.nan)
-    
-    for i in range(1, len(close_1d)):
-        r1, s1, _, _, _, _, _, _ = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-        r1_1d[i] = r1
-        s1_1d[i] = s1
-    
-    # Align daily pivots to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # === Weekly: EMA50 trend filter ===
+    weekly_close = df_1w['close'].values
+    ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,41 +57,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Get values
-        ema50_val = ema50[i]
+        rsi_val = rsi[i]
         close_val = close[i]
+        ema50_val = ema50_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        r1_val = r1_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema50_val) or np.isnan(close_val) or np.isnan(vol_ratio_val) or 
-            np.isnan(r1_val) or np.isnan(s1_val)):
+        if (np.isnan(rsi_val) or np.isnan(ema50_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and uptrend
-            if close_val > r1_val and vol_ratio_val > 1.5 and close_val > ema50_val:
+            # Long: RSI oversold AND price above weekly EMA50 AND volume confirmation
+            rsi_oversold = rsi_val < 30
+            trend_up = close_val > ema50_val
+            vol_confirm = vol_ratio_val > 1.5
+            
+            if rsi_oversold and trend_up and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and downtrend
-            elif close_val < s1_val and vol_ratio_val > 1.5 and close_val < ema50_val:
+            # Short: RSI overbought AND price below weekly EMA50 AND volume confirmation
+            elif rsi_val > 70 and close_val < ema50_val and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses below EMA50 or touches S1
-            if close_val < ema50_val or close_val <= s1_val:
+            # Long exit: RSI crosses above 40 (exiting oversold zone)
+            if rsi_val > 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses above EMA50 or touches R1
-            if close_val > ema50_val or close_val >= r1_val:
+            # Short exit: RSI crosses below 60 (exiting overbought zone)
+            if rsi_val < 60:
                 signals[i] = 0.0
                 position = 0
             else:
