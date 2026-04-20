@@ -8,39 +8,35 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h and 1d data for multi-timeframe analysis
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data for trend and regime filters
     df_1d = get_htf_data(prices, '1d')
     
-    # 12h ATR(14) for volatility filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # Daily EMA(20) for intermediate trend
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # Daily EMA(50) for long-term trend
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Daily ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # 12h volume ratio (current / 20-period average)
-    volume_12h = df_12h['volume'].values
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = volume_12h / np.where(vol_ma_20_12h == 0, 1, vol_ma_20_12h)
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
-    
-    # 1d close for trend
-    close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
-    
-    # 6h price and volume data
+    # 4h price and volume data
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h volume ratio (current / 20-period average)
+    # 4h volume filter (current / 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     
@@ -49,36 +45,37 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(atr_14_12h_aligned[i]) or np.isnan(vol_ratio_12h_aligned[i]) or 
-            np.isnan(sma_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        atr = atr_14_12h_aligned[i]
-        vol_ratio_12h = vol_ratio_12h_aligned[i]
-        sma_50_1d = sma_50_1d_aligned[i]
-        vol_ratio_6h = vol_ratio[i]
+        ema_trend_short = ema_20_1d_aligned[i]
+        ema_trend_long = ema_50_1d_aligned[i]
+        atr = atr_14_1d_aligned[i]
+        vol_ratio_4h = vol_ratio[i]
         
-        # Volatility filter: avoid extremes
-        atr_ma_20 = pd.Series(atr_14_12h_aligned).rolling(window=20, min_periods=20).mean().values[i]
+        # Multi-timeframe trend alignment: price above both EMAs for uptrend
+        trend_up = (price > ema_trend_short) and (ema_trend_short > ema_trend_long)
+        # Price below both EMAs for downtrend
+        trend_down = (price < ema_trend_short) and (ema_trend_short < ema_trend_long)
+        
+        # Volatility filter: avoid low volatility (chop) and extreme volatility
+        atr_ma_20 = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values[i]
         vol_filter = (atr > 0.5 * atr_ma_20) and (atr < 3.0 * atr_ma_20)
         
-        # Volume filter: require above-average volume on both timeframes
-        vol_filter = vol_filter and (vol_ratio_6h > 1.5) and (vol_ratio_12h > 1.3)
-        
-        # Trend filter: price above/below 1d SMA50
-        trend_up = price > sma_50_1d
-        trend_down = price < sma_50_1d
+        # Volume filter: require above-average volume
+        vol_filter = vol_filter and (vol_ratio_4h > 1.3)
         
         if position == 0:
-            # Enter long in uptrend with volume and volatility filter
+            # Enter long in strong uptrend with volume
             if trend_up and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short in downtrend with volume and volatility filter
+            # Enter short in strong downtrend with volume
             elif trend_down and vol_filter:
                 signals[i] = -0.25
                 position = -1
@@ -101,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_ATR_Volume_Trend_Filter_v1"
-timeframe = "6h"
+name = "4h_1d_EMA20_50_Trend_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
