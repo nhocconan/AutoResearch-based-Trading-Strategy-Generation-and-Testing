@@ -5,14 +5,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 50:  # Minimum for warmup
         return np.zeros(n)
     
-    # Load weekly data for trend filter (using 1w as specified)
+    # Load weekly data for trend filter (1w)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA for trend (21-period EMA, common setting)
     ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
@@ -38,25 +36,13 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate daily RSI for additional filter
-    delta = np.diff(close_1d)
-    delta = np.insert(delta, 0, 0)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if NaN in critical values
         if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(close_1d[i])):
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,24 +52,22 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above weekly EMA with volume confirmation, RSI not overbought
+            # Long: price above weekly EMA with volume confirmation and sufficient volatility
             if (price > ema_21_1w_aligned[i] and 
-                vol > 1.3 * vol_ma_1d_aligned[i] and 
-                rsi_1d_aligned[i] < 70 and 
+                vol > 1.2 * vol_ma_1d_aligned[i] and 
                 atr_1d_aligned[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly EMA with volume confirmation, RSI not oversold
+            # Short: price below weekly EMA with volume confirmation and sufficient volatility
             elif (price < ema_21_1w_aligned[i] and 
-                  vol > 1.3 * vol_ma_1d_aligned[i] and 
-                  rsi_1d_aligned[i] > 30 and 
+                  vol > 1.2 * vol_ma_1d_aligned[i] and 
                   atr_1d_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long exit: price crosses below weekly EMA or volatility drops significantly
-            if price < ema_21_1w_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
+            if price < ema_21_1w_aligned[i] or vol < 0.7 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,7 +75,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price crosses above weekly EMA or volatility drops significantly
-            if price > ema_21_1w_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
+            if price > ema_21_1w_aligned[i] or vol < 0.7 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA_Volume_RSI_Filter"
-timeframe = "1d"
+name = "12h_WeeklyEMA25_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
