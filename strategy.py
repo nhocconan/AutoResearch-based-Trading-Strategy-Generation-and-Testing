@@ -3,41 +3,39 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day mean reversion at weekly Bollinger Bands with volume confirmation.
-# In both bull and bear markets, price tends to revert to the mean after reaching extreme bands.
-# Weekly Bollinger Bands provide dynamic support/resistance; volume confirms institutional interest.
-# Weekly trend filter avoids counter-trend trades in strong moves.
-# Target: 10-25 trades/year per symbol with disciplined exits.
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for Bollinger Bands and trend
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Weekly Bollinger Bands (20, 2.0)
-    bb_period = 20
-    bb_std = 2.0
-    sma_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma_20 + bb_std * std_20
-    lower_bb = sma_20 - bb_std * std_20
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
+    # Calculate 12h EMA(34) for trend
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Load daily data
+    # Load daily data for Camarilla pivot levels and volume
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
+    # Calculate daily ATR for volatility filter
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_low[0] = high_1d[0] - low_1d[0]
+    high_close[0] = np.abs(high_1d[0] - close_1d[0])
+    low_close[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
     # Daily volume average for confirmation
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
@@ -45,40 +43,57 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(sma_20_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(close_1d[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Calculate Camarilla pivot levels from previous day's data
+        if i == 0:
+            continue
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_ = prev_high - prev_low
+        
+        # Camarilla levels
+        r4 = prev_close + range_ * 1.500
+        r3 = prev_close + range_ * 1.250
+        s3 = prev_close - range_ * 1.250
+        s4 = prev_close - range_ * 1.500
+        
         price = close_1d[i]
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price touches or crosses below lower Bollinger Band with volume confirmation
-            if (price <= lower_bb_aligned[i] and 
-                vol > 1.5 * vol_ma_1d_aligned[i]):
+            # Long breakout: price breaks above R4 with volume and trend confirmation
+            if (price > r4 and 
+                price > ema_34_12h_aligned[i] and 
+                vol > 1.5 * vol_ma_1d_aligned[i] and 
+                atr_1d_aligned[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or crosses above upper Bollinger Band with volume confirmation
-            elif (price >= upper_bb_aligned[i] and 
-                  vol > 1.5 * vol_ma_1d_aligned[i]):
+            # Short breakdown: price breaks below S4 with volume and trend confirmation
+            elif (price < s4 and 
+                  price < ema_34_12h_aligned[i] and 
+                  vol > 1.5 * vol_ma_1d_aligned[i] and 
+                  atr_1d_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to weekly SMA (mean reversion complete) or volume drops
-            if price >= sma_20_aligned[i] or vol < 0.8 * vol_ma_1d_aligned[i]:
+            # Long exit: price falls back below R3 (mean reversion) or trend breaks
+            if price < r3 or price < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to weekly SMA or volume drops
-            if price <= sma_20_aligned[i] or vol < 0.8 * vol_ma_1d_aligned[i]:
+            # Short exit: price rises back above S3 (mean reversion) or trend breaks
+            if price > s3 or price > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyBollingerMeanReversion_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R4S4_Breakout_Volume_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
