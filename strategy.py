@@ -3,97 +3,105 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WilliamsFractal_Breakout_Volume"
-timeframe = "6h"
+name = "1h_4h1d_RSI_Momentum_Trend"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
+    # Get 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 5:
+    if len(df_4h) < 14 or len(df_1d) < 14:
         return np.zeros(n)
     
-    # === 1d: Williams Fractals (5-point: 2 left, 2 right) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 4h: Trend filter (EMA21) ===
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
     
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
+    # === 1d: RSI(14) ===
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Need at least 5 points: i-2, i-1, i, i+1, i+2
-    for i in range(2, len(high_1d) - 2):
-        # Bearish fractal: high[i] is highest of the 5
-        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        
-        # Bullish fractal: low[i] is lowest of the 5
-        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
-    
-    # Williams fractals need 2 extra bars for confirmation (after the center bar)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # === 6h: Price and volume ===
+    # === 1h: Price and volume ===
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
     # Volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):
+        # Skip outside session
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        bear_fractal = bearish_fractal_aligned[i]
-        bull_fractal = bullish_fractal_aligned[i]
+        ema_val = ema21_4h_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if np.isnan(bear_fractal) or np.isnan(bull_fractal) or np.isnan(vol_ratio_val):
+        if np.isnan(ema_val) or np.isnan(rsi_val) or np.isnan(vol_ratio_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above bullish fractal (support) with volume
-            if (close_val > bull_fractal and vol_ratio_val > 1.5):
-                signals[i] = 0.25
+            # Long: Uptrend + bullish momentum + volume confirmation
+            if (close_val > ema_val and          # Price above 4h EMA21 (uptrend)
+                40 < rsi_val < 70 and            # 1d RSI in bullish range (not overbought)
+                vol_ratio_val > 1.5):            # Volume confirmation
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below bearish fractal (resistance) with volume
-            elif (close_val < bear_fractal and vol_ratio_val > 1.5):
-                signals[i] = -0.25
+            # Short: Downtrend + bearish momentum + volume confirmation
+            elif (close_val < ema_val and        # Price below 4h EMA21 (downtrend)
+                  30 < rsi_val < 60 and          # 1d RSI in bearish range (not oversold)
+                  vol_ratio_val > 1.5):          # Volume confirmation
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: Price breaks below bullish fractal or low volume
-            if (close_val < bull_fractal or vol_ratio_val < 0.8):
+            # Long exit: trend breakdown or momentum fade
+            if (close_val < ema_val or           # Price below 4h EMA21
+                rsi_val > 75 or                  # 1d RSI overbought
+                vol_ratio_val < 0.8):            # Low volume (losing momentum)
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Price breaks above bearish fractal or low volume
-            if (close_val > bear_fractal or vol_ratio_val < 0.8):
+            # Short exit: trend reversal or momentum fade
+            if (close_val > ema_val or           # Price above 4h EMA21
+                rsi_val < 25 or                  # 1d RSI oversold
+                vol_ratio_val < 0.8):            # Low volume (losing momentum)
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
