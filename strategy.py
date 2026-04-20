@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_Breakout_Volume
-# Hypothesis: Trade momentum breakouts from weekly R1/S1 levels on daily timeframe with volume confirmation.
-# Weekly R1/S1 levels provide strong institutional support/resistance that hold across market cycles.
-# Uses volume spike confirmation to ensure institutional participation. Works in both bull and bear markets.
-# Targets 15-25 trades per year by requiring strong weekly level breaks with volume confirmation.
+# 12h_1d_Pivot_R2S2_MomentumBreakout
+# Hypothesis: Trade momentum breakouts from 1d R2/S2 levels on 12h timeframe with volume confirmation.
+# R2/S2 levels provide balanced breakout points that capture momentum while filtering noise.
+# Uses volume spike confirmation to ensure institutional participation.
+# Works in both bull and bear markets by trading breakouts in direction of momentum.
+# Targets 12-37 trades per year by requiring strong momentum breaks with volume confirmation.
 
-name = "1d_WeeklyPivot_Breakout_Volume"
-timeframe = "1d"
+name = "12h_1d_Pivot_R2S2_MomentumBreakout"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,27 +24,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly R1 and S1 levels using previous week's data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d R2 and S2 levels using previous day's data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly pivot point and range
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
+    # Pivot point and range
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Weekly R1 and S1 levels (key institutional levels)
-    s1_1w = pivot_1w - range_1w * 1.0
-    r1_1w = pivot_1w + range_1w * 1.0
+    # Camarilla levels: R2 and S2 (momentum breakout levels)
+    s2_1d = close_1d - (range_1d * 1.1 / 6)
+    r2_1d = close_1d + (range_1d * 1.1 / 6)
     
-    # Align weekly levels to daily timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    # Align 1d levels to 12h timeframe
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,34 +56,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+        if (np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or 
             np.isnan(volume_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above weekly R1 with volume spike
-            if (close[i] > r1_aligned[i] * 1.003 and 
-                volume[i] > 2.0 * volume_ma[i]):
+            # Long: price above R2 with volume spike
+            if (close[i] > r2_aligned[i] * 1.002 and 
+                volume[i] > 1.8 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly S1 with volume spike
-            elif (close[i] < s1_aligned[i] * 0.997 and 
-                  volume[i] > 2.0 * volume_ma[i]):
+            # Short: price below S2 with volume spike
+            elif (close[i] < s2_aligned[i] * 0.998 and 
+                  volume[i] > 1.8 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below weekly S1 or momentum loss
-            if close[i] < s1_aligned[i] * 0.997:
+            # Long exit: price below S2 or momentum loss
+            if close[i] < s2_aligned[i] * 0.998:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above weekly R1 or momentum loss
-            if close[i] > r1_aligned[i] * 1.003:
+            # Short exit: price above R2 or momentum loss
+            if close[i] > r2_aligned[i] * 1.002:
                 signals[i] = 0.0
                 position = 0
             else:
