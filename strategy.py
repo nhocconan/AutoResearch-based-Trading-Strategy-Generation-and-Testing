@@ -3,34 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1-day volume spike and 1-week EMA200 trend filter
-# In bull markets: buy breakout above 20-period high when weekly EMA200 is rising with volume spike
-# In bear markets: sell breakdown below 20-period low when weekly EMA200 is falling with volume spike
-# Volume spike confirms institutional participation. Weekly EMA200 filter avoids counter-trend trades.
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 4h Donchian(20) breakout with 1-day volume spike and 1-day trend filter (EMA21)
+# Buy when price breaks above 4h Donchian high with daily EMA21 rising and volume spike
+# Sell when price breaks below 4h Donchian low with daily EMA21 falling and volume spike
+# Volume spike confirms institutional participation. Daily EMA21 filter avoids counter-trend trades.
+# Target: 100-200 total trades over 4 years (25-50/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA200 for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    
-    # Load daily data ONCE for volume spike
+    # Load daily data ONCE for EMA21 trend filter
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily volume 20-period average
-    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20)
-    volume_spike = volume_1d > (volume_ma_20_aligned * 2.0)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Calculate daily EMA21 for trend filter
+    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
     
     # Calculate 4h Donchian channels (20-period high/low)
     high = prices['high'].values
@@ -49,15 +39,19 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_4h = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
+    # Volume spike: 4h volume > 2.0 x 20-period average
+    volume = prices['volume'].values
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma_20 * 2.0)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if NaN in indicators
         if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(ema200_1w_aligned[i]) or np.isnan(atr_4h[i]) or \
-           np.isnan(volume_spike_aligned[i]):
+           np.isnan(ema21_1d_aligned[i]) or np.isnan(atr_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,18 +62,18 @@ def generate_signals(prices):
         lower_band = donchian_low[i]
         price = close[i]
         
-        # Weekly trend: rising EMA200 = bullish, falling EMA200 = bearish
-        weekly_trend_up = ema200_1w_aligned[i] > ema200_1w_aligned[i-1] if i > 0 else False
-        weekly_trend_down = ema200_1w_aligned[i] < ema200_1w_aligned[i-1] if i > 0 else False
+        # Daily trend: rising EMA21 = bullish, falling EMA21 = bearish
+        daily_trend_up = ema21_1d_aligned[i] > ema21_1d_aligned[i-1] if i > 0 else False
+        daily_trend_down = ema21_1d_aligned[i] < ema21_1d_aligned[i-1] if i > 0 else False
         
         if position == 0:
-            # Long: price breaks above upper band, weekly trend up, volume spike
-            if price > upper_band and weekly_trend_up and volume_spike_aligned[i]:
+            # Long: price breaks above upper band, daily trend up, volume spike
+            if price > upper_band and daily_trend_up and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below lower band, weekly trend down, volume spike
-            elif price < lower_band and weekly_trend_down and volume_spike_aligned[i]:
+            # Short: price breaks below lower band, daily trend down, volume spike
+            elif price < lower_band and daily_trend_down and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -102,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_WeeklyEMA200Trend_DailyVolumeSpike"
+name = "4h_Donchian20_DailyEMA21Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
