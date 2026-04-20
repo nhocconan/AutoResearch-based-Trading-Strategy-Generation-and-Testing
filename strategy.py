@@ -1,123 +1,132 @@
 #!/usr/bin/env python3
 """
-1h_Pivot_R1S1_Breakout_Volume_Filter_v1
-Concept: 1h Camarilla R1/S1 breakout with volume confirmation, filtered by 4h trend (EMA50) and 1d volume regime.
-- Long: 1h close > R1 AND 4h close > EMA50 AND 1h volume > 1.5x 20-bar avg AND 1d volume ratio > 0.8
-- Short: 1h close < S1 AND 4h close < EMA50 AND 1h volume > 1.5x 20-bar avg AND 1d volume ratio > 0.8
-- Exit: Opposite breakout (S1 for longs, R1 for shorts) OR 4h trend flip
-- Position sizing: 0.20
-- Target: 15-37 trades/year (60-150 total over 4 years)
-- Uses Camarilla pivots from prior day for intraday structure, volume for confirmation, multi-timeframe trend filter
+12h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1
+Concept: 12h Camarilla pivot breakout with daily volume confirmation and ADX trend filter.
+- Long: Price breaks above R1 AND volume > 1.3x daily average AND ADX > 20 (trending)
+- Short: Price breaks below S1 AND volume > 1.3x daily average AND ADX > 20 (trending)
+- Exit: Price crosses back below R1 (long) or above S1 (short)
+- Position sizing: 0.25
+- Target: 12-37 trades/year (50-150 total over 4 years)
+- Works in bull/bear: ADX ensures we trade only in trending conditions, avoiding chop
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Pivot_R1S1_Breakout_Volume_Filter_v1"
-timeframe = "1h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # === Get 4h data ONCE before loop for trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # === Get 1d data ONCE before loop for volume regime and pivot calculation ===
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h: EMA50 trend filter ===
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # === 12h: Close prices ===
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1d: Volume regime (avoid low volume days) ===
+    # === 12h: ADX for trend strength ===
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM and TR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / np.where(tr_smooth > 0, tr_smooth, np.nan)
+    minus_di = 100 * minus_dm_smooth / np.where(tr_smooth > 0, tr_smooth, np.nan)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) > 0, (plus_di + minus_di), np.nan)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # === Daily: Pivot points (Camarilla) ===
+    # Previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla levels
+    range_ = prev_high - prev_low
+    r1 = prev_close + range_ * 1.1 / 12
+    s1 = prev_close - range_ * 1.1 / 12
+    
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === Daily: Volume context ===
     vol_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ratio_1d = vol_1d / np.where(vol_ma20_1d > 0, vol_ma20_1d, np.nan)
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # === 1d: Prior day OHLC for Camarilla pivot calculation (use previous day's data) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day, then align to 1h
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_mult = 1.1 / 12
-    r1_1d = close_1d + (high_1d - low_1d) * camarilla_mult
-    s1_1d = close_1d - (high_1d - low_1d) * camarilla_mult
-    
-    # Align pivot levels to 1h timeframe (use prior day's levels for current day's trading)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # === 1h: Volume confirmation ===
-    volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume MA
+    start_idx = 14  # Ensure enough data for ADX
     
     for i in range(start_idx, n):
         # Get values
-        close_val = prices['close'].iloc[i]
-        r1_val = r1_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
-        ema50_4h_val = ema50_4h_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        close_val = close[i]
+        adx_val = adx[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         vol_ratio_1d_val = vol_ratio_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema50_4h_val) or 
-            np.isnan(vol_ratio_val) or np.isnan(vol_ratio_1d_val)):
+        if (np.isnan(close_val) or np.isnan(adx_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(vol_ratio_1d_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with 4h uptrend and volume confirmation
-            if (close_val > r1_val and 
-                ema50_4h_val > 0 and  # Valid EMA value
-                close_val > ema50_4h_val and  # Price above 4h EMA50 (uptrend)
-                vol_ratio_val > 1.5 and 
-                vol_ratio_1d_val > 0.8):
-                signals[i] = 0.20
+            # Long: Price breaks above R1 AND volume confirmation AND trending (ADX > 20)
+            if close_val > r1_val and vol_ratio_1d_val > 1.3 and adx_val > 20:
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with 4h downtrend and volume confirmation
-            elif (close_val < s1_val and 
-                  ema50_4h_val > 0 and  # Valid EMA value
-                  close_val < ema50_4h_val and  # Price below 4h EMA50 (downtrend)
-                  vol_ratio_val > 1.5 and 
-                  vol_ratio_1d_val > 0.8):
-                signals[i] = -0.20
+            # Short: Price breaks below S1 AND volume confirmation AND trending (ADX > 20)
+            elif close_val < s1_val and vol_ratio_1d_val > 1.3 and adx_val > 20:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Break below S1 (failed breakout) OR 4h trend flip to downtrend
-            if close_val < s1_val or close_val < ema50_4h_val:
+            # Long exit: Price crosses back below R1
+            if close_val < r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Break above R1 (failed breakdown) OR 4h trend flip to uptrend
-            if close_val > r1_val or close_val > ema50_4h_val:
+            # Short exit: Price crosses back above S1
+            if close_val > s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
