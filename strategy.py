@@ -1,47 +1,51 @@
-# 6H_1D_CAMARILLA_R3S3_FADE_R4S4_BREAKOUT_VOLUME_CONFIRM
-# Hypothesis: Use daily Camarilla pivot levels for 6h trading.
-# Fade at R3/S3 levels (mean reversion), breakout continuation at R4/S4 (trend following).
-# Add volume confirmation (>1.5x 20-period average) to avoid false signals.
-# Works in both bull and bear markets by adapting to price action at key levels.
-# Target: 50-150 total trades over 4 years (12-37/year)
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 12h Keltner Channel breakout with 1-day trend filter and volume confirmation
+# Keltner Channel (EMA20 ± 2*ATR10) identifies volatility-based breakouts
+# In bull market (price > 1-day EMA50): buy upper band breakout, sell lower band breakout
+# In bear market (price < 1-day EMA50): sell upper band breakout, buy lower band breakout
+# Volume confirmation: require volume > 1.5x 20-period average
+# Designed to capture breakouts in trending markets while filtering false signals in ranges
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Camarilla pivots
+    # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for previous day
-    # R4 = Close + 1.5 * (High - Low)
-    # R3 = Close + 1.0 * (High - Low)
-    # S3 = Close - 1.0 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
-    hl_range = high_1d - low_1d
-    r4_1d = close_1d + 1.5 * hl_range
-    r3_1d = close_1d + 1.0 * hl_range
-    s3_1d = close_1d - 1.0 * hl_range
-    s4_1d = close_1d - 1.5 * hl_range
+    # Calculate 50-period EMA on daily timeframe for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align to 6h timeframe (use previous day's levels)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Price and volume data
+    # Calculate ATR for Keltner Channel (using 10-period ATR)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # True Range calculation
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # ATR(10)
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    
+    # EMA(20) for Keltner Channel middle line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Channel bands
+    kc_upper = ema20 + 2 * atr
+    kc_lower = ema20 - 2 * atr
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,45 +56,35 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in indicators
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(ema20[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        # Determine market trend
+        is_bull = close[i] > ema50_1d_aligned[i]
+        is_bear = close[i] < ema50_1d_aligned[i]
+        
+        # Volume confirmation
         has_volume = vol_filter[i]
         
-        # Get pivot levels
-        r4 = r4_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        s4 = s4_1d_aligned[i]
+        price = close[i]
+        upper_band = kc_upper[i]
+        lower_band = kc_lower[i]
         
         if position == 0:
-            # Long conditions
+            # Enter long: upper band breakout in bull OR lower band breakout in bear
             long_signal = False
-            # Fade at S3 (mean reversion) - price rejects S3 and moves back up
-            if price > s3 and has_volume:
-                # Check if we bounced from S3 (price was at or below S3 previous bar)
-                if i > 0 and low[i-1] <= s3:
+            if has_volume:
+                if (is_bull and price > upper_band) or (is_bear and price > upper_band):
                     long_signal = True
-            # Breakout above R4 (trend following)
-            elif price > r4 and has_volume:
-                long_signal = True
             
-            # Short conditions
+            # Enter short: lower band breakout in bull OR upper band breakout in bear
             short_signal = False
-            # Fade at R3 (mean reversion) - price rejects R3 and moves back down
-            if price < r3 and has_volume:
-                # Check if we rejected R3 (price was at or above R3 previous bar)
-                if i > 0 and high[i-1] >= r3:
+            if has_volume:
+                if (is_bull and price < lower_band) or (is_bear and price < lower_band):
                     short_signal = True
-            # Breakdown below S4 (trend following)
-            elif price < s4 and has_volume:
-                short_signal = True
             
             if long_signal:
                 signals[i] = 0.25
@@ -100,13 +94,9 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: fade at R3 or stop loss
+            # Exit long: price crosses below middle line (EMA20)
             exit_signal = False
-            # Take profit at R3 (fade level)
-            if price < r3:
-                exit_signal = True
-            # Stop loss if price breaks below S3
-            elif price < s3:
+            if price < ema20[i]:
                 exit_signal = True
             
             if exit_signal:
@@ -116,13 +106,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: fade at S3 or stop loss
+            # Exit short: price crosses above middle line (EMA20)
             exit_signal = False
-            # Take profit at S3 (fade level)
-            if price > s3:
-                exit_signal = True
-            # Stop loss if price breaks above R3
-            elif price > r3:
+            if price > ema20[i]:
                 exit_signal = True
             
             if exit_signal:
@@ -133,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_1D_CAMARILLA_R3S3_FADE_R4S4_BREAKOUT_VOLUME_CONFIRM"
-timeframe = "6h"
+name = "12h_KeltnerBreakout_TrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
