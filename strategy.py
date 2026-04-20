@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load weekly data for trend filter
@@ -36,13 +36,29 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
+    # ADX calculation for trend strength (14-period)
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if NaN in critical values
         if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,37 +68,37 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above weekly EMA50 with volume confirmation and sufficient volatility
+            # Long: price above weekly EMA50, strong trend (ADX > 25), volume confirmation
             if (price > ema_50_1w_aligned[i] and 
-                vol > 1.5 * vol_ma_1d_aligned[i] and 
-                atr_1d_aligned[i] > 0):
-                signals[i] = 0.30
+                adx_aligned[i] > 25 and 
+                vol > 1.5 * vol_ma_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price below weekly EMA50 with volume confirmation and sufficient volatility
+            # Short: price below weekly EMA50, strong trend (ADX > 25), volume confirmation
             elif (price < ema_50_1w_aligned[i] and 
-                  vol > 1.5 * vol_ma_1d_aligned[i] and 
-                  atr_1d_aligned[i] > 0):
-                signals[i] = -0.30
+                  adx_aligned[i] > 25 and 
+                  vol > 1.5 * vol_ma_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly EMA50 or volatility drops significantly
-            if price < ema_50_1w_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
+            # Long exit: price crosses below weekly EMA50 or trend weakens (ADX < 20)
+            if price < ema_50_1w_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly EMA50 or volatility drops significantly
-            if price > ema_50_1w_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
+            # Short exit: price crosses above weekly EMA50 or trend weakens (ADX < 20)
+            if price > ema_50_1w_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_WeeklyEMA50_VolumeFilter_V2"
+name = "1d_WeeklyEMA50_ADX25_VolumeFilter"
 timeframe = "1d"
 leverage = 1.0
