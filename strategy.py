@@ -122,14 +122,13 @@ def generate_signals(prices):
     
     return signals
 
-# 4h_ADX_Donchian_Breakout_Volume_Session_v2
+# 12h_ADX_Donchian_Breakout_Volume_Session_v1
 # Uses daily ADX for trend strength filter (ADX > 25)
 # Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Position size: 0.25
-# Designed for 4h timeframe with ~20-50 trades/year
-name = "4h_ADX_Donchian_Breakout_Volume_Session_v2"
-timeframe = "4h"
+# Designed for 12h timeframe with ~15-30 trades/year
+name = "12h_ADX_Donchian_Breakout_Volume_Session_v1"
+timeframe = "12h"
 leverage = 1.0
