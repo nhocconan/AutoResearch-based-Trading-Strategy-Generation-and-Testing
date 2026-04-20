@@ -1,22 +1,21 @@
-# US-based AI Researcher
 #!/usr/bin/env python3
 """
-4h_Pivot_R1_S1_Breakout_Volume_Conservative_v1
-Concept: 4h breakout at daily Camarilla R1/S1 levels with volume confirmation and volume filter.
-- Long: Close above R1 + volume > 1.5x avg volume (20-period) + price > VWAP (4h)
-- Short: Close below S1 + volume > 1.5x avg volume (20-period) + price < VWAP (4h)
-- Exit: Close crosses VWAP (4h) in opposite direction
+1d_1w_Stochastic_Trend_v1
+Concept: Weekly Stochastic(14,3,3) as trend filter with daily price action for entry.
+- Long: %K > 50 and %D > 50 (bullish weekly trend) AND daily close > daily open (bullish daily candle)
+- Short: %K < 50 and %D < 50 (bearish weekly trend) AND daily close < daily open (bearish daily candle)
+- Exit: Weekly trend reversal (%K crosses below/above 50)
 - Position sizing: 0.25
-- Target: 20-50 trades/year (80-200 total over 4 years)
-- Works in bull/bear: Camarilla levels adapt to volatility, volume confirms breakout strength, VWAP filters false breakouts
+- Target: 10-25 trades/year (40-100 total over 4 years)
+- Works in bull/bear: Weekly Stochastic defines primary trend, daily price action provides precise entry/exit
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_Conservative_v1"
-timeframe = "4h"
+name = "1d_1w_Stochastic_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,82 +23,68 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data ONCE before loop for Stochastic calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # === 4h: VWAP calculation (typical price * volume) / cumulative volume ===
-    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
-    vwap_numerator = (typical_price * prices['volume']).cumsum()
-    vwap_denominator = prices['volume'].cumsum()
-    vwap = vwap_numerator / vwap_denominator
-    vwap = vwap.values
+    # === Weekly: Stochastic(14,3,3) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 4h: Volume average (20-period) ===
-    volume_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    # Calculate %K (fast stochastic)
+    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    k_fast = 100 * (close_1w - lowest_low) / (highest_high - lowest_low)
+    # Handle division by zero
+    k_fast = np.where((highest_high - lowest_low) == 0, 50, k_fast)
     
-    # === Daily: Calculate Camarilla pivot levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate %D (3-period SMA of %K)
+    d_slow = pd.Series(k_fast).rolling(window=3, min_periods=3).mean().values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly indicators to daily timeframe
+    k_aligned = align_htf_to_ltf(prices, df_1w, k_fast)
+    d_aligned = align_htf_to_ltf(prices, df_1w, d_slow)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume MA
+    start_idx = 14  # Ensure enough data for Stochastic
     
     for i in range(start_idx, n):
         # Get values
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        vwap_val = vwap[i]
-        volume_ma_val = volume_ma[i]
-        close_val = prices['close'].iloc[i]
-        volume_val = prices['volume'].iloc[i]
+        k_val = k_aligned[i]
+        d_val = d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(vwap_val) or 
-            np.isnan(volume_ma_val)):
+        if np.isnan(k_val) or np.isnan(d_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close above R1 + volume > 1.5x avg volume + price > VWAP
-            if (close_val > r1_val and 
-                volume_val > 1.5 * volume_ma_val and 
-                close_val > vwap_val):
+            # Long: Weekly bullish trend (%K>50 and %D>50) AND daily bullish candle
+            if k_val > 50 and d_val > 50 and prices['close'].iloc[i] > prices['open'].iloc[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 + volume > 1.5x avg volume + price < VWAP
-            elif (close_val < s1_val and 
-                  volume_val > 1.5 * volume_ma_val and 
-                  close_val < vwap_val):
+            # Short: Weekly bearish trend (%K<50 and %D<50) AND daily bearish candle
+            elif k_val < 50 and d_val < 50 and prices['close'].iloc[i] < prices['open'].iloc[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close crosses below VWAP
-            if close_val < vwap_val:
+            # Long exit: Weekly trend turns bearish (%K crosses below 50)
+            if k_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close crosses above VWAP
-            if close_val > vwap_val:
+            # Short exit: Weekly trend turns bullish (%K crosses above 50)
+            if k_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
