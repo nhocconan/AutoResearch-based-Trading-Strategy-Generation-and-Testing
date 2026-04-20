@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_1d_WeeklyPivot_Breakout_VolumeTrend
-# Hypothesis: Use weekly pivot points from 1w timeframe to determine trend direction, then trade breakouts
-# of 1d support/resistance levels on 6h timeframe with volume confirmation. Weekly pivot > price = long bias,
-# weekly pivot < price = short bias. This combines multi-timeframe trend filtering with intraday breakout
-# logic, working in both bull (breakouts with trend) and bear (mean reversion at extremes) markets.
-# Targets 20-40 trades/year by requiring weekly alignment, level proximity, and volume surge.
+# 12h_1D_Donchian_Breakout_Volume_Trend_Regime
+# Hypothesis: On 12h timeframe, capture breakouts from 20-period Donchian channels with volume confirmation and trend filter.
+# Uses 1-day ADX to filter trending (ADX > 25) for breakouts and ranging (ADX < 20) for mean reversion at channel midpoints.
+# Volume must exceed 1.5x 20-period average to confirm breakouts.
+# Targets 15-30 trades/year by requiring confluence of breakout, volume, and trend regime.
+# Works in both bull and bear markets by adapting to trend conditions.
 
-name = "6h_1d_WeeklyPivot_Breakout_VolumeTrend"
-timeframe = "6h"
+name = "12h_1D_Donchian_Breakout_Volume_Trend_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,49 +24,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data ONCE before loop
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week's data)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot point: (H + L + C) / 3
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-    
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # Calculate 1d support/resistance levels (pivot-based)
+    # Calculate 1-day ADX for trend/ranging filter (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily pivot point
-    daily_pivot = (high_1d + low_1d + close_1d) / 3.0
-    daily_range = high_1d - low_1d
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Key levels: R1, S1, R2, S2
-    r1_1d = 2 * daily_pivot - low_1d
-    s1_1d = 2 * daily_pivot - high_1d
-    r2_1d = daily_pivot + daily_range
-    s2_1d = daily_pivot - daily_range
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Align 1d levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Smoothed TR and DM using Wilder smoothing
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period])
+        # Subsequent values: Wilder smoothing
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Volume average for spike detection (20-period)
+    atr = smooth_wilder(tr, 14)
+    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
+    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth_wilder(dx, 14)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 20-period Donchian channels on 12h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
+    
+    # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -76,46 +85,53 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long bias: weekly pivot above price -> look for longs at support
-            if weekly_pivot_aligned[i] > close[i]:
-                # Long near S1 or S2 with volume confirmation
-                if (((close[i] <= s1_aligned[i] * 1.002 and close[i] >= s1_aligned[i] * 0.998) or
-                     (close[i] <= s2_aligned[i] * 1.002 and close[i] >= s2_aligned[i] * 0.998)) and
-                    volume[i] > 1.8 * volume_ma[i]):
-                    signals[i] = 0.25
+            # Trending market (ADX > 25): breakout trades
+            if adx_aligned[i] > 25:
+                # Long breakout above upper band with volume confirmation
+                if (high[i] > highest_high[i] and 
+                    volume[i] > 1.5 * volume_ma[i]):
+                    signals[i] = 0.30
                     position = 1
-            # Short bias: weekly pivot below price -> look for shorts at resistance
-            elif weekly_pivot_aligned[i] < close[i]:
-                # Short near R1 or R2 with volume confirmation
-                if (((close[i] >= r1_aligned[i] * 0.998 and close[i] <= r1_aligned[i] * 1.002) or
-                     (close[i] >= r2_aligned[i] * 0.998 and close[i] <= r2_aligned[i] * 1.002)) and
-                    volume[i] > 1.8 * volume_ma[i]):
-                    signals[i] = -0.25
+                # Short breakdown below lower band with volume confirmation
+                elif (low[i] < lowest_low[i] and 
+                      volume[i] > 1.5 * volume_ma[i]):
+                    signals[i] = -0.30
+                    position = -1
+            # Ranging market (ADX < 20): mean reversion at midpoint
+            elif adx_aligned[i] < 20:
+                # Long near support with volume confirmation
+                if (low[i] <= lowest_low[i] * 1.002 and 
+                    close[i] > donchian_mid[i] and
+                    volume[i] > 1.3 * volume_ma[i]):
+                    signals[i] = 0.20
+                    position = 1
+                # Short near resistance with volume confirmation
+                elif (high[i] >= highest_high[i] * 0.998 and 
+                      close[i] < donchian_mid[i] and
+                      volume[i] > 1.3 * volume_ma[i]):
+                    signals[i] = -0.20
                     position = -1
         
         elif position == 1:
-            # Long exit: price reaches weekly pivot or shows weakness
-            if close[i] >= weekly_pivot_aligned[i] * 0.998 or \
-               (close[i] <= s1_aligned[i] * 0.995 and volume[i] < 0.8 * volume_ma[i]):
+            # Long exit: breakdown below lower band or ADX drops to ranging
+            if low[i] < lowest_low[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price reaches weekly pivot or shows weakness
-            if close[i] <= weekly_pivot_aligned[i] * 1.002 or \
-               (close[i] >= r1_aligned[i] * 1.005 and volume[i] < 0.8 * volume_ma[i]):
+            # Short exit: breakout above upper band or ADX drops to ranging
+            if high[i] > highest_high[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
