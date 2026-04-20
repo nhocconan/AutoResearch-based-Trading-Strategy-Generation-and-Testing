@@ -3,110 +3,94 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d RSI + 1-week Stochastic RSI with Volume Confirmation
-# - RSI(14) on 1d for momentum (oversold <30, overbought >70)
-# - Stochastic RSI(14) on 1w to confirm momentum direction
-# - Volume spike (>1.5x 20-period average) to filter false signals
-# - Only trade in direction of weekly trend: long when weekly close > weekly open
-# - Designed for 1d timeframe with selective entries to avoid overtrading
-# - Target: 7-25 trades per year per symbol (30-100 total over 4 years)
-# - Works in bull/bear: RSI captures reversals, weekly trend filters counter-trend trades
+# Hypothesis: 6h Donchian Breakout with Weekly Pivot Direction Filter
+# - Use 60-period Donchian channel on 6h for breakout signals
+# - Filter trades by weekly pivot direction (long above weekly pivot, short below)
+# - Volume confirmation: require volume > 1.5x 20-period average
+# - Weekly pivot provides institutional reference point, filters counter-trend noise
+# - Designed for 6h timeframe with selective entries to avoid overtrading
+# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for Stochastic RSI and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Load weekly data for pivot calculation
+    df_w = get_htf_data(prices, '1w')
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate Stochastic RSI on weekly data
-    # RSI(14) on weekly close
-    delta_1w = pd.Series(close_1w).diff()
-    gain_1w = delta_1w.where(delta_1w > 0, 0)
-    loss_1w = -delta_1w.where(delta_1w < 0, 0)
-    avg_gain_1w = gain_1w.rolling(window=14, min_periods=14).mean()
-    avg_loss_1w = loss_1w.rolling(window=14, min_periods=14).mean()
-    rs_1w = avg_gain_1w / avg_loss_1w.replace(0, np.nan)
-    rsi_1w = 100 - (100 / (1 + rs_1w))
-    rsi_1w = rsi_1w.fillna(50).values
+    # Calculate weekly pivot points (standard formula)
+    pivot_w = (high_w + low_w + close_w) / 3
+    r1_w = 2 * pivot_w - low_w
+    s1_w = 2 * pivot_w - high_w
+    r2_w = pivot_w + (high_w - low_w)
+    s2_w = pivot_w - (high_w - low_w)
     
-    # Stochastic RSI: (RSI - min RSI) / (max RSI - min RSI) over 14 periods
-    min_rsi_1w = pd.Series(rsi_1w).rolling(window=14, min_periods=14).min().values
-    max_rsi_1w = pd.Series(rsi_1w).rolling(window=14, min_periods=14).max().values
-    stoch_rsi_1w = (rsi_1w - min_rsi_1w) / (max_rsi_1w - min_rsi_1w)
-    stoch_rsi_1w = np.where(max_rsi_1w - min_rsi_1w == 0, 0.5, stoch_rsi_1w)
+    # Align weekly pivot to 6h
+    pivot_w_6h = align_htf_to_ltf(prices, df_w, pivot_w)
+    r1_w_6h = align_htf_to_ltf(prices, df_w, r1_w)
+    s1_w_6h = align_htf_to_ltf(prices, df_w, s1_w)
+    r2_w_6h = align_htf_to_ltf(prices, df_w, r2_w)
+    s2_w_6h = align_htf_to_ltf(prices, df_w, s2_w)
     
-    # Align Stochastic RSI to 1d timeframe
-    stoch_rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, stoch_rsi_1w)
+    # Calculate 60-period Donchian channel on 6h
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
     
-    # Weekly trend filter: bullish when weekly close > weekly open
-    weekly_bullish = close_1w > df_1w['open'].values
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    donchian_high = pd.Series(high_6h).rolling(window=60, min_periods=60).max().values
+    donchian_low = pd.Series(low_6h).rolling(window=60, min_periods=60).min().values
     
-    # Load daily data for RSI and volume
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate RSI(14) on daily data
-    delta_1d = pd.Series(close_1d).diff()
-    gain_1d = delta_1d.where(delta_1d > 0, 0)
-    loss_1d = -delta_1d.where(delta_1d < 0, 0)
-    avg_gain_1d = gain_1d.rolling(window=14, min_periods=14).mean()
-    avg_loss_1d = loss_1d.rolling(window=14, min_periods=14).mean()
-    rs_1d = avg_gain_1d / avg_loss_1d.replace(0, np.nan)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d = rsi_1d.fillna(50).values
-    
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (vol_ma_20 * 1.5)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume_6h > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(60, n):
         # Skip if NaN in indicators
-        if np.isnan(rsi_1d[i]) or np.isnan(stoch_rsi_1w_aligned[i]) or np.isnan(weekly_bullish_aligned[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(pivot_w_6h[i]) or np.isnan(r1_w_6h[i]) or np.isnan(s1_w_6h[i]) or \
+           np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Entry conditions
-        rsi_oversold = rsi_1d[i] < 30
-        rsi_overbought = rsi_1d[i] > 70
-        stoch_bullish = stoch_rsi_1w_aligned[i] > 0.5
-        stoch_bearish = stoch_rsi_1w_aligned[i] < 0.5
-        vol_spike = volume_spike[i]
-        weekly_bull = weekly_bullish_aligned[i] > 0.5
+        # Breakout conditions
+        breakout_up = close_6h[i] > donchian_high[i-1]  # Break above prior high
+        breakout_down = close_6h[i] < donchian_low[i-1]  # Break below prior low
+        
+        # Weekly pivot direction filter
+        above_pivot = close_6h[i] > pivot_w_6h[i]
+        below_pivot = close_6h[i] < pivot_w_6h[i]
         
         if position == 0:
-            # Long entry: RSI oversold + stoch bullish + volume spike + weekly bullish
-            if rsi_oversold and stoch_bullish and vol_spike and weekly_bull:
+            # Long entry: upward breakout + above weekly pivot + volume
+            if breakout_up and above_pivot and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI overbought + stoch bearish + volume spike + weekly bearish
-            elif rsi_overbought and stoch_bearish and vol_spike and not weekly_bull:
+            # Short entry: downward breakout + below weekly pivot + volume
+            elif breakout_down and below_pivot and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI overbought or stoch bearish
-            if rsi_overbought or stoch_bearish:
+            # Long exit: price breaks below Donchian low or falls below weekly pivot
+            if close_6h[i] < donchian_low[i] or close_6h[i] < pivot_w_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI oversold or stoch bullish
-            if rsi_oversold or stoch_bullish:
+            # Short exit: price breaks above Donchian high or rises above weekly pivot
+            if close_6h[i] > donchian_high[i] or close_6h[i] > pivot_w_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_StochasticRSI_VolumeFilter"
-timeframe = "1d"
+name = "6h_Donchian_WeeklyPivot_DirectionFilter"
+timeframe = "6h"
 leverage = 1.0
