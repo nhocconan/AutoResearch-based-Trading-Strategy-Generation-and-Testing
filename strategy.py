@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R3S3_Breakout_VolumeTrend_v2"
+name = "12h_1w_1d_Camarilla_R3S3_Breakout_Volume_Trend_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -12,10 +12,16 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
+    # Get 1w and 1d data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1w) < 2 or len(df_1d) < 2:
         return np.zeros(n)
+    
+    # === 1w: Calculate weekly trend (EMA50) ===
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # === 1d: Calculate Camarilla pivot points ===
     high_1d = df_1d['high'].values
@@ -40,10 +46,6 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA34 for trend filter
-    close_s = pd.Series(close)
-    ema34 = close_s.ewm(span=34, min_periods=34, adjust=False).mean().values
-    
     # ATR(14) for stop loss
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
@@ -60,36 +62,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Get aligned values
+        weekly_trend = ema50_1w_aligned[i]
         r3 = r3_1d_aligned[i]
         s3 = s3_1d_aligned[i]
-        current_ema34 = ema34[i]
         current_atr = atr[i]
         current_close = close[i]
         current_volume = volume[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r3) or np.isnan(s3) or np.isnan(current_ema34) or np.isnan(current_atr)):
+        if (np.isnan(weekly_trend) or np.isnan(r3) or np.isnan(s3) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 2.0x 20-period 12h average volume ===
+        # === Volume condition: current volume > 1.5x 20-period 12h average volume ===
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            vol_condition = current_volume > 2.0 * vol_ma
+            vol_condition = current_volume > 1.5 * vol_ma
         else:
             vol_condition = False
         
         if position == 0:
-            # Long conditions: break above R3 with volume AND above EMA34 (uptrend)
-            if current_close > r3 and vol_condition and current_close > current_ema34:
+            # Long conditions: break above R3 with volume AND above weekly EMA50 (uptrend)
+            if current_close > r3 and vol_condition and current_close > weekly_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short conditions: break below S3 with volume AND below EMA34 (downtrend)
-            elif current_close < s3 and vol_condition and current_close < current_ema34:
+            # Short conditions: break below S3 with volume AND below weekly EMA50 (downtrend)
+            elif current_close < s3 and vol_condition and current_close < weekly_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
