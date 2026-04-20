@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 1d_1w_KAMA_Trend_Filtered_Breakout
-# Hypothesis: On 1d timeframe, trade breakouts from weekly KAMA-based channels with volume confirmation.
-# Uses weekly KAMA to define trend direction and volatility bands. Targets 15-25 trades per year.
-# Works in bull/bear via trend-aligned breakouts and volatility filtering.
+# 6h_1d_RSI_Divergence_With_Volume
+# Hypothesis: On 6h timeframe, enter long on bullish RSI divergence (price makes lower low, RSI makes higher low) with volume confirmation and price above 6h EMA50.
+# Enter short on bearish RSI divergence (price makes higher high, RSI makes lower high) with volume confirmation and price below 6h EMA50.
+# Uses 1-day EMA50 as higher timeframe trend filter: only take longs when price > 1d EMA50, shorts when price < 1d EMA50.
+# RSI divergence helps catch reversals in both bull and bear markets, while volume and EMA filters reduce false signals.
+# Target: 15-30 trades per year.
 
-name = "1d_1w_KAMA_Trend_Filtered_Breakout"
-timeframe = "1d"
+name = "6h_1d_RSI_Divergence_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,44 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly KAMA ( Kaufman Adaptive Moving Average )
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 6h RSI (14-period)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Efficiency ratio
-    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    volatility = np.abs(np.diff(close_1w))
-    er = np.zeros_like(close_1w)
-    er[1:] = change[1:] / (np.abs(volatility).rolling(window=10, min_periods=1).sum() + 1e-10)
+    # Calculate 6h EMA50 for trend
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close_1w)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
-    
-    # Weekly ATR for volatility bands
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Upper and lower bands (KAMA ± 1.5 * ATR)
-    upper_band = kama + 1.5 * atr_1w
-    lower_band = kama - 1.5 * atr_1w
-    
-    # Align weekly levels to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # Calculate 1-day EMA50 for higher timeframe trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,40 +53,58 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 100  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(kama_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(close[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
             signals[i] = 0.0
             continue
         
+        # Detect bullish RSI divergence: price makes lower low, RSI makes higher low
+        bullish_div = False
+        if i >= 2:
+            # Look for lower low in price and higher low in RSI over last 3 periods
+            if (low[i] < low[i-1] < low[i-2] and 
+                rsi[i] > rsi[i-1] > rsi[i-2]):
+                bullish_div = True
+        
+        # Detect bearish RSI divergence: price makes higher high, RSI makes lower high
+        bearish_div = False
+        if i >= 2:
+            # Look for higher high in price and lower high in RSI over last 3 periods
+            if (high[i] > high[i-1] > high[i-2] and 
+                rsi[i] < rsi[i-1] < rsi[i-2]):
+                bearish_div = True
+        
         if position == 0:
-            # Long: price above upper band, volume surge, and price above KAMA (uptrend)
-            if (close[i] > upper_aligned[i] and 
-                volume[i] > 1.8 * volume_ma[i] and
-                close[i] > kama_aligned[i]):
+            # Long: bullish divergence, volume spike, price above 6h EMA50, and price above 1d EMA50 (uptrend)
+            if (bullish_div and 
+                volume[i] > 1.5 * volume_ma[i] and
+                close[i] > ema_50[i] and
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below lower band, volume surge, and price below KAMA (downtrend)
-            elif (close[i] < lower_aligned[i] and 
-                  volume[i] > 1.8 * volume_ma[i] and
-                  close[i] < kama_aligned[i]):
+            # Short: bearish divergence, volume spike, price below 6h EMA50, and price below 1d EMA50 (downtrend)
+            elif (bearish_div and 
+                  volume[i] > 1.5 * volume_ma[i] and
+                  close[i] < ema_50[i] and
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below KAMA or touches lower band
-            if close[i] < kama_aligned[i] or close[i] < lower_aligned[i]:
+            # Long exit: price below 6h EMA50 or bearish divergence
+            if close[i] < ema_50[i] or bearish_div:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above KAMA or touches upper band
-            if close[i] > kama_aligned[i] or close[i] > upper_aligned[i]:
+            # Short exit: price above 6h EMA50 or bullish divergence
+            if close[i] > ema_50[i] or bullish_div:
                 signals[i] = 0.0
                 position = 0
             else:
