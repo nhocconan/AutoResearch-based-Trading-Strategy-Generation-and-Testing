@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Camarilla_R1S1_Breakout_Volume_ADXFilter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_ADXFilter_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,25 +12,25 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1w Camarilla Pivot Points (previous week) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Camarilla Pivot Points (previous day) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous week's values for pivot calculation
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
     # Set first values to avoid look-ahead
-    prev_high[0] = high_1w[0]
-    prev_low[0] = low_1w[0]
-    prev_close[0] = close_1w[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
     # Classic pivot (same for Camarilla)
     pivot = (prev_high + prev_low + prev_close) / 3
@@ -40,17 +40,17 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === Volume Confirmation (12h) ===
+    # === Volume Confirmation (4h) ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === ADX Filter (12h) ===
+    # === ADX Filter (4h) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -106,7 +106,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Long exit: stop loss or return to S1
-            if close_val <= entry_price - 1.5 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Tighter stop
+            if close_val <= entry_price - 2.0 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Wider stop to reduce whipsaw
                 # Stop loss hit
                 signals[i] = 0.0
                 position = 0
@@ -119,7 +119,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: stop loss or return to S1
-            if close_val >= entry_price + 1.5 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Tighter stop
+            if close_val >= entry_price + 2.0 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Wider stop to reduce whipsaw
                 # Stop loss hit
                 signals[i] = 0.0
                 position = 0
