@@ -3,47 +3,39 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Donchian20_Breakout_WeeklyTrend"
-timeframe = "6h"
+name = "12h_1w_Camarilla_R1S1_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 500:
-        return np.zeros(n)
-    
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if n < 200:
         return np.zeros(n)
     
     # Get weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === Daily Donchian(20) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Donchian channels from previous day's data
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Align to 6h timeframe (use previous day's levels)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    
-    # === Weekly Trend Filter ===
+    # === Weekly Camarilla Pivot Levels (based on previous week) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # === 6h: Price and volume ===
+    # Calculate pivot and ranges from previous week's data
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    
+    # Camarilla levels
+    R1 = close_1w + (range_1w * 1.1 / 12)
+    S1 = close_1w - (range_1w * 1.1 / 12)
+    
+    # Align to 12h timeframe (use previous week's levels)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    
+    # === 12h: Price and volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -52,47 +44,50 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
+    # === 12h: EMA 34 for trend filter ===
+    close_series = pd.Series(close)
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Get values
         close_val = close[i]
+        ema34_val = ema34[i]
         vol_ratio_val = vol_ratio[i]
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        ema50_1w_val = ema50_1w_aligned[i]
+        R1_val = R1_aligned[i]
+        S1_val = S1_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or 
-            np.isnan(upper_val) or np.isnan(lower_val) or 
-            np.isnan(ema50_1w_val)):
+        if (np.isnan(ema34_val) or np.isnan(vol_ratio_val) or 
+            np.isnan(R1_val) or np.isnan(S1_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above upper Donchian with volume confirmation and weekly uptrend
-            if close_val > upper_val and vol_ratio_val > 2.0 and close_val > ema50_1w_val:
+            # Long: Price breaks above R1 with volume confirmation and uptrend
+            if close_val > R1_val and vol_ratio_val > 1.8 and close_val > ema34_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian with volume confirmation and weekly downtrend
-            elif close_val < lower_val and vol_ratio_val > 2.0 and close_val < ema50_1w_val:
+            # Short: Price breaks below S1 with volume confirmation and downtrend
+            elif close_val < S1_val and vol_ratio_val > 1.8 and close_val < ema34_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price falls below lower Donchian or weekly trend turns down
-            if close_val < lower_val or close_val < ema50_1w_val:
+            # Long exit: Price falls below S1 or trend turns down
+            if close_val < S1_val or close_val < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises above upper Donchian or weekly trend turns up
-            if close_val > upper_val or close_val > ema50_1w_val:
+            # Short exit: Price rises above R1 or trend turns up
+            if close_val > R1_val or close_val > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
