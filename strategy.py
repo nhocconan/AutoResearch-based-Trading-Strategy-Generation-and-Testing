@@ -5,54 +5,42 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for support/resistance and volume
+    # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot points from prior week's OHLC (using Monday's data)
-    # For each day, we use the previous week's Friday close, high, low
-    # Simplified: use rolling 5-day window to approximate weekly OHLC
-    # We'll calculate pivot points on the Friday of each week
-    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values  # approx weekly close
+    # Calculate daily EMA21 for trend
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
-    # Calculate pivot points and resistance/support levels
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
+    # Calculate daily ATR for volatility filter
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_low[0] = high_1d[0] - low_1d[0]
+    high_close[0] = np.abs(high_1d[0] - close_1d[0])
+    low_close[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume confirmation: 10-period average
-    vol_ma_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_ma_10_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_10)
+    # Calculate daily volume average for confirmation
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma_10_aligned[i]) or np.isnan(close_1d[i])):
+        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,26 +50,30 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long entry: price breaks above R2 with volume confirmation
-            if (price > r2_aligned[i] and vol > 1.5 * vol_ma_10_aligned[i]):
+            # Long: price above EMA21 with volume > 1.5x average and sufficient volatility
+            if (price > ema_21_1d_aligned[i] and 
+                vol > 1.5 * vol_ma_1d_aligned[i] and 
+                atr_1d_aligned[i] > 0.01 * price):  # Ensure meaningful volatility
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S2 with volume confirmation
-            elif (price < s2_aligned[i] and vol > 1.5 * vol_ma_10_aligned[i]):
+            # Short: price below EMA21 with volume > 1.5x average and sufficient volatility
+            elif (price < ema_21_1d_aligned[i] and 
+                  vol > 1.5 * vol_ma_1d_aligned[i] and 
+                  atr_1d_aligned[i] > 0.01 * price):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below R1 or volume drops significantly
-            if price < r1_aligned[i] or vol < 0.7 * vol_ma_10_aligned[i]:
+            # Long exit: price crosses below EMA21 or volume drops significantly
+            if price < ema_21_1d_aligned[i] or vol < 0.7 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above S1 or volume drops significantly
-            if price > s1_aligned[i] or vol < 0.7 * vol_ma_10_aligned[i]:
+            # Short exit: price crosses above EMA21 or volume drops significantly
+            if price > ema_21_1d_aligned[i] or vol < 0.7 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R2S2_Breakout_Volume"
-timeframe = "6h"
+name = "1d_EMA21_VolumeSurge"
+timeframe = "1d"
 leverage = 1.0
