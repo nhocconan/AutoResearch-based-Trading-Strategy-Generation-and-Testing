@@ -128,7 +128,7 @@ def generate_signals(prices):
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 4h timeframe with ~20-30 trades/year
+# Designed for 4h timeframe with ~25-40 trades/year
 name = "4h_ADX_Donchian_Breakout_Volume_Session_v1"
 timeframe = "4h"
 leverage = 1.0
