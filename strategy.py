@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX with 1d trend filter and volume confirmation.
-# TRIX (12-period) filters noise and identifies momentum changes. 
-# Long when TRIX crosses above signal line and price above 1d EMA200.
-# Short when TRIX crosses below signal line and price below 1d EMA200.
-# Volume confirmation ensures institutional participation.
-# Designed to work in both bull and bear markets by following higher timeframe trend.
-# Target: 20-30 trades per year to minimize fee drag.
+# Hypothesis: 12h Donchian channel breakout with 1w trend filter and volume confirmation.
+# Uses weekly EMA200 to capture long-term trend direction, 12h Donchian(20) breakout for entry,
+# and volume > 1.5x 20-period average for confirmation. Targets 15-25 trades/year to minimize fee drag.
+# Works in bull/bear by following higher timeframe trend and avoiding counter-trend trades.
 
-name = "4h_TRIX_1dEMA200_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_1wEMA200_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,72 +17,72 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for EMA200 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data ONCE before loop for EMA200 trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 1d EMA200 for trend direction ===
-    close_1d = df_1d['close'].values
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    # === 1w EMA200 for trend direction ===
+    close_1w = df_1w['close'].values
+    ema_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
-    # === TRIX (12-period) ===
-    close = prices['close'].values
-    # Triple EMA: EMA(EMA(EMA(close, 12), 12), 12)
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    # TRIX = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
-    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
-    trix = trix_raw.fillna(0).values
-    # Signal line: 9-period EMA of TRIX
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # === 12h Donchian channel (20-period) ===
+    high = prices['high'].values
+    low = prices['low'].values
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Volume confirmation ===
+    # === 12h Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Get values
-        trix_val = trix[i]
-        trix_signal_val = trix_signal[i]
+        close_val = prices['close'].iloc[i]
         ema_val = ema_200_aligned[i]
+        upper = high_roll[i]
+        lower = low_roll[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(trix_val) or np.isnan(trix_signal_val) or 
-            np.isnan(ema_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(ema_val) or np.isnan(upper) or np.isnan(lower) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above signal line and price above 1d EMA200
-            if trix_val > trix_signal_val and trix[i-1] <= trix_signal[i-1] and close[i] > ema_val and vol_ratio_val > 1.5:
+            # Long: price breaks above upper Donchian band with weekly uptrend and volume
+            if close_val > upper and ema_val > 0 and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below signal line and price below 1d EMA200
-            elif trix_val < trix_signal_val and trix[i-1] >= trix_signal[i-1] and close[i] < ema_val and vol_ratio_val > 1.5:
+                entry_price = close_val
+            # Short: price breaks below lower Donchian band with weekly downtrend and volume
+            elif close_val < lower and ema_val < 0 and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         
         elif position == 1:
-            # Long exit: TRIX crosses below signal line
-            if trix_val < trix_signal_val and trix[i-1] >= trix_signal[i-1]:
+            # Long exit: price closes below midpoint of Donchian channel
+            midpoint = (upper + lower) / 2
+            if close_val < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TRIX crosses above signal line
-            if trix_val > trix_signal_val and trix[i-1] <= trix_signal[i-1]:
+            # Short exit: price closes above midpoint of Donchian channel
+            midpoint = (upper + lower) / 2
+            if close_val > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
