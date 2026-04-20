@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Slow"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,57 +35,65 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # === 12h Volume Confirmation ===
+    # === 4h Volume Confirmation (moderate threshold) ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
+    # === 4h Trend Filter: EMA50 > EMA200 for long, EMA50 < EMA200 for short ===
+    close_series = pd.Series(prices['close'].values)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         pivot_val = pivot_aligned[i]
+        ema50_val = ema50[i]
+        ema200_val = ema200[i]
         
         # Skip if any value is NaN
         if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(pivot_val)):
+            np.isnan(s1_val) or np.isnan(pivot_val) or
+            np.isnan(ema50_val) or np.isnan(ema200_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with strong volume confirmation
-            if close_val > r1_val and vol_ratio_val > 2.5:
+            # Long: Break above R1 with volume confirmation AND uptrend (EMA50 > EMA200)
+            if close_val > r1_val and vol_ratio_val > 2.0 and ema50_val > ema200_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with strong volume confirmation
-            elif close_val < s1_val and vol_ratio_val > 2.5:
+            # Short: Break below S1 with volume confirmation AND downtrend (EMA50 < EMA200)
+            elif close_val < s1_val and vol_ratio_val > 2.0 and ema50_val < ema200_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot
-            if close_val < pivot_val:
+            # Long exit: Price returns below pivot OR trend reversal
+            if close_val < pivot_val or ema50_val < ema200_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot
-            if close_val > pivot_val:
+            # Short exit: Price returns above pivot OR trend reversal
+            if close_val > pivot_val or ema50_val > ema200_val:
                 signals[i] = 0.0
                 position = 0
             else:
