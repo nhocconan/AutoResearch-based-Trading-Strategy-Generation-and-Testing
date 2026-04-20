@@ -3,14 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1-week Donchian breakout (break above/below weekly high/low),
-# volume confirmation (current volume > 2x 20-period average), and trend filter (12h EMA50 > EMA200 for long, < for short).
-# Uses weekly structure to capture longer-term moves, reducing whipsaw in ranging markets.
-# Designed to work in both bull and bear markets by using breakouts with volume confirmation and trend alignment.
-# Target: 12-37 trades/year (50-150 over 4 years) to avoid fee drag.
-
-name = "12h_1w_Donchian20_WeeklyTrend_VolumeFilter_v1"
-timeframe = "12h"
+name = "6h_1d_PowerTrend_V1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,22 +12,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Weekly Donchian Channels (20-period) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === Elder Ray: Bull/Bear Power from Daily ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate rolling high/low for previous 20 weekly bars (excluding current)
-    high_roll = pd.Series(high_1w).rolling(window=20, min_periods=20).max().shift(1).values
-    low_roll = pd.Series(low_1w).rolling(window=20, min_periods=20).min().shift(1).values
+    # EMA13 of daily close for power calculation
+    close_series_1d = pd.Series(close_1d)
+    ema13_1d = close_series_1d.ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Align to 12h timeframe
-    high_roll_aligned = align_htf_to_ltf(prices, df_1w, high_roll)
-    low_roll_aligned = align_htf_to_ltf(prices, df_1w, low_roll)
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
+    
+    # Align to 6h timeframe (no extra delay needed for Elder Ray)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # === 6h EMA Trend Filter ===
+    close_series = pd.Series(prices['close'].values)
+    ema34 = close_series.ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema89 = close_series.ewm(span=89, min_periods=89, adjust=False).mean().values
     
     # === Volume Filter ===
     volume = prices['volume'].values
@@ -41,52 +45,50 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Trend Filter: 12h EMA50 > EMA200 for long, < for short ===
-    close_series = pd.Series(prices['close'].values)
-    ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Get values
         close_val = prices['close'].iloc[i]
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
+        ema34_val = ema34[i]
+        ema89_val = ema89[i]
         vol_ratio_val = vol_ratio[i]
-        high_val = high_roll_aligned[i]
-        low_val = low_roll_aligned[i]
-        ema50_val = ema50[i]
-        ema200_val = ema200[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(high_val) or 
-            np.isnan(low_val) or np.isnan(ema50_val) or np.isnan(ema200_val)):
+        if (np.isnan(bull_val) or np.isnan(bear_val) or 
+            np.isnan(ema34_val) or np.isnan(ema89_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above weekly high with volume confirmation and uptrend
-            if close_val > high_val and vol_ratio_val > 2.0 and ema50_val > ema200_val:
+            # Long: Bull Power > 0 AND Bear Power < 0 (both bulls and bears agree on strength)
+            #         with uptrend (EMA34 > EMA89) and volume confirmation
+            if bull_val > 0 and bear_val < 0 and ema34_val > ema89_val and vol_ratio_val > 1.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below weekly low with volume confirmation and downtrend
-            elif close_val < low_val and vol_ratio_val > 2.0 and ema50_val < ema200_val:
+            # Short: Bear Power > 0 AND Bull Power < 0 (both agree on weakness)
+            #        with downtrend (EMA34 < EMA89) and volume confirmation
+            elif bear_val > 0 and bull_val < 0 and ema34_val < ema89_val and vol_ratio_val > 1.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below weekly low OR trend breaks down
-            if close_val < low_val or ema50_val < ema200_val:
+            # Long exit: Power divergence or trend breakdown
+            if bull_val <= 0 or bear_val >= 0 or ema34_val < ema89_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above weekly high OR trend breaks up
-            if close_val > high_val or ema50_val > ema200_val:
+            # Short exit: Power divergence or trend reversal
+            if bear_val <= 0 or bull_val >= 0 or ema34_val > ema89_val:
                 signals[i] = 0.0
                 position = 0
             else:
