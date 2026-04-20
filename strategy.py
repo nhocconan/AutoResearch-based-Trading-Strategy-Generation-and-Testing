@@ -1,10 +1,10 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_KAMA_Trend_Volume_Spike_v1"
-timeframe = "4h"
+name = "1h_4h_1d_Pullback_Momentum_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,35 +12,31 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for trend
-    df_12h = get_htf_data(prices, '12h')
-    # Get 1d data ONCE before loop for volume average
+    # Get 4h data ONCE before loop for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data ONCE before loop for momentum confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 2 or len(df_1d) < 2:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h KAMA for trend direction
-    close_12h = df_12h['close'].values
-    # Calculate Efficiency Ratio for KAMA
-    change = np.abs(np.diff(close_12h, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_12h, n=1)), axis=0)  # 10-period volatility
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
-    # Initialize KAMA
-    kama = np.full_like(close_12h, np.nan)
-    kama[9] = close_12h[9]  # start after 10 periods
-    for i in range(10, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    # 4h EMA50 for trend direction
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # 1d average volume (20-period) for volume confirmation
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # 1d RSI(14) for momentum confirmation
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # 4h ATR for exit (14-period)
+    # 1h ATR(14) for dynamic exit
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -55,58 +51,65 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
+    # Pre-compute hour filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Get aligned values
-        kama_trend = kama_12h_aligned[i]
-        vol_avg = vol_avg_1d_aligned[i]
-        current_atr = atr[i]
-        current_close = prices['close'].iloc[i]
-        current_volume = prices['volume'].iloc[i]
-        
-        # Skip if any value is NaN
-        if np.isnan(kama_trend) or np.isnan(vol_avg) or np.isnan(current_atr):
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.5x daily average volume
-        vol_spike = current_volume > 1.5 * vol_avg
+        # Get aligned values
+        ema_trend = ema_50_4h_aligned[i]
+        rsi_momentum = rsi_1d_aligned[i]
+        current_atr = atr[i]
+        current_close = prices['close'].iloc[i]
+        
+        # Skip if any value is NaN
+        if np.isnan(ema_trend) or np.isnan(rsi_momentum) or np.isnan(current_atr):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Long: price above 12h KAMA with volume spike
-            if current_close > kama_trend and vol_spike:
-                signals[i] = 0.25
+            # Long: price near 4h EMA50 pullback in uptrend with bullish momentum
+            if current_close > ema_trend and rsi_momentum > 50 and current_close < ema_trend * 1.02:
+                signals[i] = 0.20
                 position = 1
                 entry_price = current_close
-            # Short: price below 12h KAMA with volume spike
-            elif current_close < kama_trend and vol_spike:
-                signals[i] = -0.25
+            # Short: price near 4h EMA50 pullback in downtrend with bearish momentum
+            elif current_close < ema_trend and rsi_momentum < 50 and current_close > ema_trend * 0.98:
+                signals[i] = -0.20
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price below 12h KAMA or ATR stop loss
-            if current_close < kama_trend:
+            # Long exit: trend break or ATR stop
+            if current_close < ema_trend * 0.995:
                 signals[i] = 0.0
                 position = 0
             elif current_close < entry_price - 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price above 12h KAMA or ATR stop loss
-            if current_close > kama_trend:
+            # Short exit: trend break or ATR stop
+            if current_close > ema_trend * 1.005:
                 signals[i] = 0.0
                 position = 0
             elif current_close > entry_price + 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
