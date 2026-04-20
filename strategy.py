@@ -5,38 +5,19 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d data for pivot levels and trend filter
+    # Load daily data for 200-day EMA
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Daily ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate daily pivot points (standard formula)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
-    r4_1d = r3_1d + (high_1d - low_1d)
-    s4_1d = s3_1d - (high_1d - low_1d)
-    
-    # Align pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Calculate 1d ATR for volatility filter
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
@@ -47,7 +28,7 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1d volume moving average
+    # Daily volume for confirmation
     volume_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
@@ -55,13 +36,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if NaN in critical values
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(s2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
-            np.isnan(s4_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -72,30 +49,30 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long breakout at R4 with volume confirmation
-            if (price > r4_1d_aligned[i] and 
+            # Long: price above 200-day EMA with volume confirmation and sufficient volatility
+            if (price > ema_200_1d_aligned[i] and 
                 vol > 1.5 * vol_ma_1d_aligned[i] and 
                 atr_1d_aligned[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown at S4 with volume confirmation
-            elif (price < s4_1d_aligned[i] and 
+            # Short: price below 200-day EMA with volume confirmation and sufficient volatility
+            elif (price < ema_200_1d_aligned[i] and 
                   vol > 1.5 * vol_ma_1d_aligned[i] and 
                   atr_1d_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below R3 or volatility drops
-            if price < r3_1d_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
+            # Long exit: price crosses below 200-day EMA or volatility drops significantly
+            if price < ema_200_1d_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above S3 or volatility drops
-            if price > s3_1d_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
+            # Short exit: price crosses above 200-day EMA or volatility drops significantly
+            if price > ema_200_1d_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4S4_Breakout_VolumeFilter"
-timeframe = "6h"
+name = "1d_200EMA_VolumeFilter_V1"
+timeframe = "1d"
 leverage = 1.0
