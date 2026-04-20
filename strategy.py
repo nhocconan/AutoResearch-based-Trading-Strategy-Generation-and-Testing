@@ -3,43 +3,53 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Fibonacci_Pullback_Trend_v1"
-timeframe = "6h"
+# Hypothesis: 12h mean reversion at weekly pivot levels with volume confirmation
+# In ranging markets (common in BTC/ETH 2025), price tends to revert to weekly pivot points
+# Volume spikes confirm institutional interest at these key levels
+# Using 12h timeframe keeps trade frequency low (target: 20-40 trades/year) to minimize fee drag
+# Works in both bull/bear markets as mean reversion occurs in all regimes
+
+name = "12h_WeeklyPivot_MeanReversion_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 30:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 1d: EMA50 for trend direction ===
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === Weekly Pivot Points (standard calculation) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 1d: 20-period high/low for Fibonacci levels ===
-    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Pivot = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    # R2 = P + (H - L), S2 = P - (H - L)
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
     
-    # Fibonacci retracement levels (0.382, 0.618)
-    fib_range = high_20 - low_20
-    fib_0382 = low_20 + 0.382 * fib_range
-    fib_0618 = low_20 + 0.618 * fib_range
+    # Align weekly pivot levels to 12h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    # Align 1d indicators
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    fib_0382_aligned = align_htf_to_ltf(prices, df_1d, fib_0382)
-    fib_0618_aligned = align_htf_to_ltf(prices, df_1d, fib_0618)
-    
-    # === 6h: ATR(14) for volatility ===
+    # === 12h: ATR(14) for volatility and stop loss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -50,65 +60,78 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # === 12h: 20-period EMA for trend filter (avoid trading against strong trends) ===
+    close_12h = close  # Already 12h data
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 100  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Get aligned values
-        ema_trend = ema_50_1d_aligned[i]
-        high_val = high_20_aligned[i]
-        low_val = low_20_aligned[i]
-        fib_0382_val = fib_0382_aligned[i]
-        fib_0618_val = fib_0618_aligned[i]
+        pivot = pivot_1w_aligned[i]
+        r1 = r1_1w_aligned[i]
+        s1 = s1_1w_aligned[i]
+        r2 = r2_1w_aligned[i]
+        s2 = s2_1w_aligned[i]
+        r3 = r3_1w_aligned[i]
+        s3 = s3_1w_aligned[i]
+        ema_trend = ema_20_12h[i]
         current_atr = atr[i]
         current_close = prices['close'].iloc[i]
-        current_low = prices['low'].iloc[i]
-        current_high = prices['high'].iloc[i]
+        current_volume = prices['volume'].iloc[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_trend) or np.isnan(high_val) or np.isnan(low_val) or
-            np.isnan(fib_0382_val) or np.isnan(fib_0618_val) or np.isnan(current_atr)):
+        if (np.isnan(pivot) or np.isnan(r1) or np.isnan(s1) or np.isnan(r2) or np.isnan(s2) or
+            np.isnan(r3) or np.isnan(s3) or np.isnan(ema_trend) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # === Volume condition: current volume > 1.5x 20-period 12h average volume ===
+        if i >= 20:
+            vol_ma = np.mean(prices['volume'].iloc[i-20:i].values)
+            vol_condition = current_volume > 1.5 * vol_ma
+        else:
+            vol_condition = False
+        
         if position == 0:
             # Long conditions:
-            # 1. Price above 1d EMA50 (uptrend)
-            # 2. Price pulls back to 0.618 Fib level and shows rejection (low touches/below level)
-            # 3. Current close rebounds above 0.382 Fib level (confirmation)
-            if (current_close > ema_trend and
-                current_low <= fib_0618_val and  # Pullback to/deep 0.618
-                current_close > fib_0382_val):   # Confirmation above 0.382
+            # 1. Price touches or goes below S1 with volume (support test)
+            # 2. Not in strong downtrend (price above EMA20 or at least not far below)
+            # 3. Not at extreme oversold (above S2 to avoid catching falling knives)
+            if (current_close <= s1 and
+                vol_condition and
+                current_close > ema_trend * 0.98 and  # Allow small tolerance below EMA
+                current_close > s2):
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
             # Short conditions:
-            # 1. Price below 1d EMA50 (downtrend)
-            # 2. Price pulls back to 0.382 Fib level and shows rejection (high touches/above level)
-            # 3. Current close drops below 0.618 Fib level (confirmation)
-            elif (current_close < ema_trend and
-                  current_high >= fib_0382_val and  # Pullback to/deep 0.382
-                  current_close < fib_0618_val):    # Confirmation below 0.618
+            # 1. Price touches or goes above R1 with volume (resistance test)
+            # 2. Not in strong uptrend (price below EMA20 or at least not far above)
+            # 3. Not at extreme overbought (below R2 to avoid buying tops)
+            elif (current_close >= r1 and
+                  vol_condition and
+                  current_close < ema_trend * 1.02 and  # Allow small tolerance above EMA
+                  current_close < r2):
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
             # Long exit conditions:
-            # 1. Price falls below 1d EMA50 (trend change)
-            # 2. ATR-based stop loss
-            # 3. Take profit at 2x risk
-            if (current_close < ema_trend or
-                current_close < entry_price - 2.0 * current_atr):
-                signals[i] = 0.0
-                position = 0
-            elif current_close >= entry_price + 4.0 * current_atr:  # 2:1 reward/risk
+            # 1. Price reaches pivot (mean reversion target)
+            # 2. Price breaks below S2 (failed support, go short instead)
+            # 3. ATR-based stop loss
+            if (current_close >= pivot or
+                current_close < s2 or
+                current_close < entry_price - 2.5 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,14 +139,12 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit conditions:
-            # 1. Price rises above 1d EMA50 (trend change)
-            # 2. ATR-based stop loss
-            # 3. Take profit at 2x risk
-            if (current_close > ema_trend or
-                current_close > entry_price + 2.0 * current_atr):
-                signals[i] = 0.0
-                position = 0
-            elif current_close <= entry_price - 4.0 * current_atr:  # 2:1 reward/risk
+            # 1. Price reaches pivot (mean reversion target)
+            # 2. Price breaks above R2 (failed resistance, go long instead)
+            # 3. ATR-based stop loss
+            if (current_close <= pivot or
+                current_close > r2 or
+                current_close > entry_price + 2.5 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
