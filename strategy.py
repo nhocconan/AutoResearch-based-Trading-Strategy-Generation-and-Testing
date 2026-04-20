@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_1d_WeeklyPivot_RangeBreakout_V1
-# Hypothesis: Combines weekly pivot points with 1d volatility regime to capture breakouts from weekly ranges.
-# In low volatility (ATR < 20-day MA), wait for breakout of weekly R1/S1 with volume confirmation.
-# In high volatility, fade extremes (R2/S2) as mean reversion.
-# Weekly context prevents whipsaws in 6h chart; volatility regime adapts to market conditions.
-# Targets 20-40 trades/year by requiring weekly level + volatility regime + volume confluence.
+# 12h_1d_Pivot_R3S3_Fade_Reverse_v1
+# Hypothesis: On 12h timeframe, trade reversals at 1d Camarilla R3/S3 levels with volume confirmation.
+# In ranging markets (ADX < 25), price tends to reverse at R3/S3; in trending markets (ADX > 25), 
+# price breaks through R4/S4. Uses 1d ADX to filter ranging (ADX < 25) for reversals and trending (ADX > 25) for breakouts.
+# Targets 15-35 trades/year by requiring confluence of level, volume, and regime filter.
 
-name = "6h_1d_WeeklyPivot_RangeBreakout_V1"
-timeframe = "6h"
+name = "12h_1d_Pivot_R3S3_Fade_Reverse_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,64 +23,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 10:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get daily data for volatility regime
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 30:
-        return np.zeros(n)
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    # Shift by 1 to use prior week's data (no look-ahead)
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Typical price for pivot calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Prior week's typical price and range
-    typical_price_w = (high_w + low_w + close_w) / 3
-    range_w = high_w - low_w
+    # Pivot point and ranges
+    pivot_1d = typical_price_1d
+    range_1d = high_1d - low_1d
     
-    # Weekly pivot and support/resistance levels
-    pw = typical_price_w  # weekly pivot
-    r1_w = pw + range_w * 0.382  # Weekly R1 (38.2% extension)
-    s1_w = pw - range_w * 0.382  # Weekly S1 (38.2% retracement)
-    r2_w = pw + range_w * 0.618  # Weekly R2 (61.8% extension)
-    s2_w = pw - range_w * 0.618  # Weekly S2 (61.8% retracement)
+    # Camarilla levels: R3, S3, R4, S4
+    r3_1d = close_1d + (range_1d * 1.1 / 6)
+    s3_1d = close_1d - (range_1d * 1.1 / 6)
+    r4_1d = close_1d + (range_1d * 1.1 / 4)
+    s4_1d = close_1d - (range_1d * 1.1 / 4)
     
-    # Align weekly levels to 6h timeframe
-    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
-    r2_w_aligned = align_htf_to_ltf(prices, df_w, r2_w)
-    s2_w_aligned = align_htf_to_ltf(prices, df_w, s2_w)
+    # Align 1d levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Calculate 1d ATR for volatility regime (14-period)
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
-    close_d = df_d['close'].values
-    
+    # Calculate 1d ADX for trend/ranging filter (14-period)
     # True Range
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Wilder smoothing for ATR
-    def wilder_smooth(arr, period):
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed TR and DM
+    def smooth_wilder(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
             return result
-        result[period-1] = np.nanmean(arr[1:period])
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period])
+        # Subsequent values: Wilder smoothing
         for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
     
-    atr_d = wilder_smooth(tr, 14)
-    atr_ma_d = pd.Series(atr_d).rolling(window=20, min_periods=20).mean().values
-    atr_d_aligned = align_htf_to_ltf(prices, df_d, atr_d)
-    atr_ma_d_aligned = align_htf_to_ltf(prices, df_d, atr_ma_d)
+    atr = smooth_wilder(tr, 14)
+    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
+    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth_wilder(dx, 14)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -93,76 +98,56 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or 
-            np.isnan(r2_w_aligned[i]) or np.isnan(s2_w_aligned[i]) or
-            np.isnan(atr_d_aligned[i]) or np.isnan(atr_ma_d_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime: low vol if ATR < 20-day MA
-        low_volatility = atr_d_aligned[i] < atr_ma_d_aligned[i]
-        
         if position == 0:
-            if low_volatility:
-                # Low volatility: wait for breakout of weekly R1/S1 with volume
-                # Long breakout above R1
-                if (close[i] > r1_w_aligned[i] * 1.002 and 
-                    volume[i] > 1.8 * volume_ma[i]):
+            # Ranging market (ADX < 25): fade at R3/S3
+            if adx_aligned[i] < 25:
+                # Long near S3 with volume confirmation
+                if (close[i] <= s3_aligned[i] * 1.005 and 
+                    close[i] >= s3_aligned[i] * 0.995 and
+                    volume[i] > 1.5 * volume_ma[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short breakdown below S1
-                elif (close[i] < s1_w_aligned[i] * 0.998 and 
-                      volume[i] > 1.8 * volume_ma[i]):
+                # Short near R3 with volume confirmation
+                elif (close[i] >= r3_aligned[i] * 0.995 and 
+                      close[i] <= r3_aligned[i] * 1.005 and
+                      volume[i] > 1.5 * volume_ma[i]):
                     signals[i] = -0.25
                     position = -1
-            else:
-                # High volatility: fade at weekly R2/S2 (mean reversion)
-                # Long near S2
-                if (close[i] <= s2_w_aligned[i] * 1.005 and 
-                    close[i] >= s2_w_aligned[i] * 0.995):
+            # Trending market (ADX > 25): breakout at R4/S4
+            elif adx_aligned[i] > 25:
+                # Long breakout above R4 with volume
+                if (close[i] > r4_aligned[i] * 1.005 and 
+                    volume[i] > 2.0 * volume_ma[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short near R2
-                elif (close[i] >= r2_w_aligned[i] * 0.995 and 
-                      close[i] <= r2_w_aligned[i] * 1.005):
+                # Short breakdown below S4 with volume
+                elif (close[i] < s4_aligned[i] * 0.995 and 
+                      volume[i] > 2.0 * volume_ma[i]):
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: reverse at opposite level or volatility shift
-            if low_volatility:
-                # In low vol, exit if price returns inside weekly R1/S1
-                if s1_w_aligned[i] <= close[i] <= r1_w_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: reverse at opposite level or ADX shifts to ranging
+            if (adx_aligned[i] < 25 and close[i] >= r3_aligned[i] * 0.995) or \
+               (adx_aligned[i] > 25 and close[i] < s4_aligned[i]):
+                signals[i] = 0.0
+                position = 0
             else:
-                # In high vol, exit if price reaches opposite S2/R2 or volatility drops
-                if (close[i] >= r2_w_aligned[i] * 0.995 or 
-                    atr_d_aligned[i] < atr_ma_d_aligned[i] * 0.9):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: reverse at opposite level or volatility shift
-            if low_volatility:
-                # In low vol, exit if price returns inside weekly R1/S1
-                if s1_w_aligned[i] <= close[i] <= r1_w_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: reverse at opposite level or ADX shifts to ranging
+            if (adx_aligned[i] < 25 and close[i] <= s3_aligned[i] * 1.005) or \
+               (adx_aligned[i] > 25 and close[i] > r4_aligned[i]):
+                signals[i] = 0.0
+                position = 0
             else:
-                # In high vol, exit if price reaches opposite S2/R2 or volatility drops
-                if (close[i] <= s2_w_aligned[i] * 1.005 or 
-                    atr_d_aligned[i] < atr_ma_d_aligned[i] * 0.9):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
