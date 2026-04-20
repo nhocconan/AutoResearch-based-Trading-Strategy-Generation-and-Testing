@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_Breakout_VolumeFilter_v1"
-timeframe = "4h"
+name = "1d_WeeklyTrend_Confluence_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,34 +12,18 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 1d: Calculate pivot points (standard) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Weekly: 20-period EMA for trend direction ===
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    # R2 = P + (H - L), S2 = P - (H - L)
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    
-    # Align all pivot levels
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # === 4h: ATR(14) for volatility and stop loss ===
+    # === Daily: ATR(14) for volatility and stop loss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -54,61 +38,58 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 30  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Get aligned values
-        pivot = pivot_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
-        current_atr = atr[i]
+        ema_trend = ema_20_1w_aligned[i]
         current_close = prices['close'].iloc[i]
         current_volume = prices['volume'].iloc[i]
+        current_atr = atr[i]
         
         # Skip if any value is NaN
-        if (np.isnan(pivot) or np.isnan(r1) or np.isnan(s1) or
-            np.isnan(r2) or np.isnan(s2) or np.isnan(current_atr)):
+        if np.isnan(ema_trend) or np.isnan(current_atr):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.5x 20-period 4h average volume ===
-        if i >= 20:
-            vol_ma = np.mean(prices['volume'].iloc[i-20:i].values)
+        # === Volume condition: current volume > 1.5x 10-day average volume ===
+        if i >= 10:
+            vol_ma = np.mean(prices['volume'].iloc[i-10:i].values)
             vol_condition = current_volume > 1.5 * vol_ma
         else:
             vol_condition = False
         
         if position == 0:
             # Long conditions:
-            # 1. Price breaks above R1 with volume
-            # 2. Price is below R2 (not overextended)
-            if (current_close > r1 and
+            # 1. Price above weekly EMA20 (uptrend)
+            # 2. Volume confirmation
+            # 3. Price above daily open (bullish bias)
+            if (current_close > ema_trend and
                 vol_condition and
-                current_close < r2):
+                current_close > prices['open'].iloc[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
             # Short conditions:
-            # 1. Price breaks below S1 with volume
-            # 2. Price is above S2 (not overextended)
-            elif (current_close < s1 and
+            # 1. Price below weekly EMA20 (downtrend)
+            # 2. Volume confirmation
+            # 3. Price below daily open (bearish bias)
+            elif (current_close < ema_trend and
                   vol_condition and
-                  current_close > s2):
+                  current_close < prices['open'].iloc[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
             # Long exit conditions:
-            # 1. Price falls below pivot (support - take profit)
+            # 1. Price falls below weekly EMA20 (trend change)
             # 2. ATR-based stop loss
-            if (current_close <= pivot or
-                current_close < entry_price - 2.5 * current_atr):
+            if (current_close < ema_trend or
+                current_close < entry_price - 2.0 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,10 +97,10 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit conditions:
-            # 1. Price rises above pivot (resistance - take profit)
+            # 1. Price rises above weekly EMA20 (trend change)
             # 2. ATR-based stop loss
-            if (current_close >= pivot or
-                current_close > entry_price + 2.5 * current_atr):
+            if (current_close > ema_trend or
+                current_close > entry_price + 2.0 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
