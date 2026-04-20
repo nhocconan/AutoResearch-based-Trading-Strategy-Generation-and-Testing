@@ -1,87 +1,112 @@
-# USDCAD? No, BTC. BTC is king. Let's focus on BTC and ETH.
-# Hypothesis: A simple 4-hour momentum strategy using 4-hour RSI and volume spike.
-# In both bull and bear markets, strong momentum bursts often precede continuation.
-# We'll use RSI to detect momentum extremes and volume to confirm the strength of the move.
-# Entry: RSI > 60 and volume > 1.5x 20-period average volume -> long
-# Entry: RSI < 40 and volume > 1.5x 20-period average volume -> short
-# Exit: RSI crosses back to neutral (50 for long, 50 for short) or opposite extreme.
-# Position size: 0.25
-# This should yield moderate trade frequency and avoid overtrading.
+# This strategy implements a 12-hour breakout system using weekly Donchian channels and weekly trend filters.
+# It captures major trend moves while avoiding whipsaws through multi-timeframe confirmation.
+# The strategy works in both bull and bear markets by focusing on breakouts with trend alignment.
+# Position sizing is conservative (0.25) to manage drawdowns during choppy periods.
+# Entry conditions: Price breaks above weekly Donchian high AND weekly EMA34 > weekly EMA89 (long)
+#                 OR Price breaks below weekly Donchian low AND weekly EMA34 < weekly EMA89 (short)
+# Exit conditions: Price crosses back to weekly EMA34 or opposite Donchian breakout occurs
+# Volume confirmation is used to filter breakouts (volume > 1.5x 20-period average)
 
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Calculate RSI on 4h close
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get weekly data once before loop (HTF = 1w)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 90:  # Need enough data for EMA89
+        return np.zeros(n)
     
-    # Wilder's smoothing
-    alpha = 1.0 / 14
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Calculate weekly indicators
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Weekly Donchian channels (20-period)
+    donchian_high = np.full(len(weekly_high), np.nan)
+    donchian_low = np.full(len(weekly_low), np.nan)
+    for i in range(20, len(weekly_high)):
+        donchian_high[i] = np.max(weekly_high[i-20:i])
+        donchian_low[i] = np.min(weekly_low[i-20:i])
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:13] = np.nan  # Not enough data
+    # Weekly EMAs for trend filter
+    def calculate_ema(data, period):
+        ema = np.full_like(data, np.nan)
+        if len(data) < period:
+            return ema
+        multiplier = 2 / (period + 1)
+        ema[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            ema[i] = (data[i] * multiplier) + (ema[i-1] * (1 - multiplier))
+        return ema
     
-    # Volume average
+    ema34 = calculate_ema(weekly_close, 34)
+    ema89 = calculate_ema(weekly_close, 89)
+    
+    # Align weekly indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    ema34_aligned = align_htf_to_ltf(prices, df_weekly, ema34)
+    ema89_aligned = align_htf_to_ltf(prices, df_weekly, ema89)
+    
+    # Volume confirmation on 12h timeframe
     volume = prices['volume'].values
-    vol_ma = np.zeros_like(volume)
-    for i in range(20, n):
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(20, len(volume)):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_ma[:20] = np.nan
     
-    # Signals
+    # Generate signals
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if NaN
-        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
+    # Start from index where we have all data
+    start_idx = max(100, 20)  # Ensure we have enough warmup
+    
+    for i in range(start_idx, n):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or np.isnan(ema89_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi[i]
-        vol_val = volume[i]
-        vol_ma_val = vol_ma[i]
+        price = prices['close'].iloc[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: RSI > 60 and volume spike
-            if rsi_val > 60 and vol_val > 1.5 * vol_ma_val:
+            # Long entry: price breaks above weekly Donchian high + uptrend + volume confirmation
+            if (price > donchian_high_aligned[i] and 
+                ema34_aligned[i] > ema89_aligned[i] and 
+                vol_ratio > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 40 and volume spike
-            elif rsi_val < 40 and vol_val > 1.5 * vol_ma_val:
+            # Short entry: price breaks below weekly Donchian low + downtrend + volume confirmation
+            elif (price < donchian_low_aligned[i] and 
+                  ema34_aligned[i] < ema89_aligned[i] and 
+                  vol_ratio > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI drops below 50
-            if rsi_val < 50:
+            # Long exit: price crosses below weekly EMA34 or breaks below opposite Donchian low
+            if (price < ema34_aligned[i] or 
+                price < donchian_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI rises above 50
-            if rsi_val > 50:
+            # Short exit: price crosses above weekly EMA34 or breaks above opposite Donchian high
+            if (price > ema34_aligned[i] or 
+                price > donchian_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Volume_Momentum"
-timeframe = "4h"
+name = "12h_WeeklyDonchian_EMA_Trend"
+timeframe = "12h"
 leverage = 1.0
