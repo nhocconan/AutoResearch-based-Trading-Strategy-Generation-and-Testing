@@ -10,10 +10,10 @@ def generate_signals(prices):
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily 14-period ADX for trend strength
+    # Calculate 14-period ADX for trend strength
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -23,7 +23,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     
     # Directional Movement
     dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
@@ -33,7 +33,7 @@ def generate_signals(prices):
     dm_plus[0] = 0
     dm_minus[0] = 0
     
-    # Wilder's smoothing function
+    # Wilder's smoothing
     def wilder_smooth(data, period):
         result = np.zeros_like(data)
         alpha = 1.0 / period
@@ -52,7 +52,7 @@ def generate_signals(prices):
     adx_1d = wilder_smooth(dx, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 20-period daily Donchian channels
+    # Calculate 20-period Donchian channels
     donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
@@ -63,8 +63,8 @@ def generate_signals(prices):
     vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
-    # Session filter: 8-20 UTC (pre-compute)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour  # pre-compute before loop
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -122,13 +122,13 @@ def generate_signals(prices):
     
     return signals
 
-# 4h_ADX_Donchian_Breakout_Volume_Session_v2
+# 4h_ADX_Donchian_Breakout_Volume_Session_v1
 # Uses daily ADX for trend strength filter (ADX > 25)
 # Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 4h timeframe with ~20-40 trades/year
-name = "4h_ADX_Donchian_Breakout_Volume_Session_v2"
+# Designed for 4h timeframe with ~20-50 trades/year
+name = "4h_ADX_Donchian_Breakout_Volume_Session_v1"
 timeframe = "4h"
 leverage = 1.0
