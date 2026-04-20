@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v2"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Control_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,11 +36,11 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 12h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # === 12h: Volume ratio (current vs 20-period average) ===
     close = prices['close'].values
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,13 +66,13 @@ def generate_signals(prices):
         if position == 0:
             # Long: Price breaks above R1 with volume confirmation
             if (close_val > r1_level and   # Break above R1
-                vol_ratio_val > 2.0):      # Strong volume confirmation
-                signals[i] = 0.25
+                vol_ratio_val > 2.5):      # Strong volume confirmation (increased threshold)
+                signals[i] = 0.30
                 position = 1
             # Short: Price breaks below S1 with volume confirmation
             elif (close_val < s1_level and   # Break below S1
-                  vol_ratio_val > 2.0):      # Strong volume confirmation
-                signals[i] = -0.25
+                  vol_ratio_val > 2.5):      # Strong volume confirmation (increased threshold)
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -81,7 +81,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Short exit: Price rises back above S1 (reversion to mean)
@@ -89,6 +89,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
