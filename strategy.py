@@ -3,65 +3,61 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter with 12h Williams Alligator trend
-# Choppiness Index > 61.8 = ranging market (mean reversion), < 38.2 = trending (trend follow)
-# Williams Alligator (Jaw/Teeth/Lips) provides trend direction in trending regimes
-# In ranging markets: fade extreme RSI moves (overbought/oversold)
-# In trending markets: trade Alligator crossovers with trend filter
-# Designed to reduce whipsaw in ranging markets and capture trends when present
+# Hypothesis: 12h Camarilla Pivot S1/S2 breakout with 1d volume confirmation and ATR stoploss
+# Camarilla pivots identify intraday support/resistance levels; S1/S2 breakouts capture trend continuation
+# 1d volume > 1.8x 20-period average confirms institutional participation on higher timeframe
+# ATR-based stop loss manages risk; designed for 12h timeframe with selective entries to avoid overtrading
+# Target: 15-35 trades per year per symbol (60-140 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Load 1d data for Camarilla pivots and volume filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Williams Alligator on 12h: Jaw (13), Teeth (8), Lips (5) SMAs
-    jaw_12h = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().values
-    teeth_12h = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().values
-    lips_12h = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().values
+    # Calculate Camarilla pivot levels for S1, S2, R1, R2
+    # Camarilla formulas: 
+    # R4 = close + ((high - low) * 1.5000)
+    # R3 = close + ((high - low) * 1.2500)
+    # R2 = close + ((high - low) * 1.1666)
+    # R1 = close + ((high - low) * 1.0833)
+    # S1 = close - ((high - low) * 1.0833)
+    # S2 = close - ((high - low) * 1.1666)
+    # S3 = close - ((high - low) * 1.2500)
+    # S4 = close - ((high - low) * 1.5000)
+    hl_range = high_1d - low_1d
+    r1 = close_1d + (hl_range * 1.0833)
+    r2 = close_1d + (hl_range * 1.1666)
+    s1 = close_1d - (hl_range * 1.0833)
+    s2 = close_1d - (hl_range * 1.1666)
     
-    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
-    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Calculate 14-period Choppiness Index
+    # Volume filter: 1d volume > 1.8x 20-period average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_filter_1d = volume_1d > (vol_ma_1d * 1.8)
+    vol_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_filter_1d)
+    
+    # Calculate ATR for stop loss (using 12h data)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Sum of True Range over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chi = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
-    
-    # RSI for mean reversion signals in ranging markets
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend NaN for first element
-    rsi = np.concatenate([[np.nan], rsi])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,38 +65,23 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(chi[i]) or np.isnan(rsi[i]) or \
-           np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or np.isnan(lips_12h_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or \
+           np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or \
+           np.isnan(atr[i]) or np.isnan(vol_filter_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime detection
-        is_ranging = chi[i] > 61.8
-        is_trending = chi[i] < 38.2
-        
-        # Williams Alligator signals
-        # Bullish: Lips > Teeth > Jaw (all aligned up)
-        bullish_aligned = lips_12h_aligned[i] > teeth_12h_aligned[i] > jaw_12h_aligned[i]
-        # Bearish: Lips < Teeth < Jaw (all aligned down)
-        bearish_aligned = lips_12h_aligned[i] < teeth_12h_aligned[i] < jaw_12h_aligned[i]
-        
+        has_volume = vol_filter_1d_aligned[i]
         price = close[i]
         
         if position == 0:
-            if is_ranging:
-                # In ranging markets: mean reversion at RSI extremes
-                long_signal = rsi[i] < 30  # Oversold
-                short_signal = rsi[i] > 70  # Overbought
-            elif is_trending:
-                # In trending markets: follow Alligator alignment
-                long_signal = bullish_aligned
-                short_signal = bearish_aligned
-            else:
-                # Transition zone: no clear signal
-                long_signal = False
-                short_signal = False
+            # Long entry: price breaks above R1 + volume confirmation
+            long_signal = (price > r1_aligned[i]) and has_volume
+            
+            # Short entry: price breaks below S1 + volume confirmation
+            short_signal = (price < s1_aligned[i]) and has_volume
             
             if long_signal:
                 signals[i] = 0.25
@@ -112,22 +93,22 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Long exit: opposite Alligator signal or RSI overbought in ranging
-            if is_ranging and rsi[i] > 70:
-                signals[i] = 0.0
-                position = 0
-            elif not is_ranging and not bullish_aligned:
+            # Long exit: stop loss or S2 break (mean reversion)
+            stop_loss = entry_price - 2.0 * atr[i]
+            s2_break = price < s2_aligned[i]
+            
+            if stop_loss <= 0 or price <= stop_loss or s2_break:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: opposite Alligator signal or RSI oversold in ranging
-            if is_ranging and rsi[i] < 30:
-                signals[i] = 0.0
-                position = 0
-            elif not is_ranging and not bearish_aligned:
+            # Short exit: stop loss or R2 break (mean reversion)
+            stop_loss = entry_price + 2.0 * atr[i]
+            r2_break = price > r2_aligned[i]
+            
+            if stop_loss <= 0 or price >= stop_loss or r2_break:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ChopRegime_Alligator_RSI"
-timeframe = "4h"
+name = "12h_Camarilla_S1S2_Breakout_Volume_ATR"
+timeframe = "12h"
 leverage = 1.0
