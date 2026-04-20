@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_Pivot_R1S1_Breakout_Volume_Control"
-timeframe = "6h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Control"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,42 +12,41 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 12h: Calculate daily pivots from previous day ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === Daily: Calculate pivots from previous day ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous day's pivot calculation (shifted by 1)
-    prev_high = np.roll(high_12h, 1)
-    prev_low = np.roll(low_12h, 1)
-    prev_close = np.roll(close_12h, 1)
+    # Previous day's OHLC (shifted by 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     prev_high[0] = prev_low[0] = prev_close[0] = np.nan
     
-    # Pivot point
+    # Pivot point and support/resistance levels
     pp = (prev_high + prev_low + prev_close) / 3.0
-    # R1 and S1
     r1 = 2 * pp - prev_low
     s1 = 2 * pp - prev_high
     
-    # Align pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    # Align pivot levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 6h: Price and volume ===
+    # === 4h: Price and volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Volume ratio (current vs 24-period average)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_ratio = volume / np.where(vol_ma24 > 0, vol_ma24, np.nan)
+    # Volume ratio (current vs 20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     # ATR for volatility filter
     tr1 = high - low
@@ -78,7 +77,10 @@ def generate_signals(prices):
             continue
         
         # Volatility filter: only trade when ATR is above its 50-period median
-        atr_median = np.nanmedian(atr[max(0, i-49):i+1]) if i >= 1 else np.nan
+        if i >= 50:
+            atr_median = np.nanmedian(atr[i-49:i+1])
+        else:
+            atr_median = np.nanmedian(atr[:i+1]) if i >= 0 else np.nan
         vol_filter = atr_val > atr_median if not np.isnan(atr_median) else False
         
         if position == 0:
