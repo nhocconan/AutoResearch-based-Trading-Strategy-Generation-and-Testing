@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_1dVolume_Conservative_v1
-Concept: 4h Donchian(20) breakout with 1d volume confirmation and EMA200 trend filter.
-- Long: Close > 20-period high AND volume > 1d average volume AND price > EMA200
-- Short: Close < 20-period low AND volume > 1d average volume AND price < EMA200
-- Exit: Opposite Donchian breakout or price crosses EMA200
+4h_GoldenCross_DeathCross_RSIFilter_v1
+Concept: 4h EMA(50) crossing EMA(200) with RSI(14) filter to avoid false signals.
+- Long: EMA50 crosses above EMA200 AND RSI < 70 (not overbought)
+- Short: EMA50 crosses below EMA200 AND RSI > 30 (not oversold)
+- Exit: Opposite cross OR RSI reaches extreme (80/20)
 - Position sizing: 0.25
 - Target: 20-40 trades/year (80-160 total over 4 years)
-- Works in bull/bear: EMA200 defines trend, Donchian captures breakouts, volume filters weak moves
+- Works in bull/bear: EMA crossover defines trend, RSI filter prevents entries during exhaustion
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_1dVolume_Conservative_v1"
+name = "4h_GoldenCross_DeathCross_RSIFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,25 +23,20 @@ def generate_signals(prices):
     if n < 210:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for volume average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # === 4h: EMA200 trend filter ===
     close = prices['close'].values
+    
+    # === 4h: EMA50 and EMA200 ===
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # === 4h: Donchian(20) channels ===
-    high = prices['high'].values
-    low = prices['low'].values
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === Daily: Average volume (20-period) ===
-    vol_1d = df_1d['volume'].values
-    avg_vol_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
+    # === 4h: RSI(14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,41 +45,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Get values
-        ema200_val = ema200[i]
-        dh = donchian_high[i]
-        dl = donchian_low[i]
-        vol_avg = avg_vol_20_aligned[i]
-        vol_cur = prices['volume'].iloc[i]
+        ema50_now = ema50[i]
+        ema50_prev = ema50[i-1]
+        ema200_now = ema200[i]
+        ema200_prev = ema200[i-1]
+        rsi_now = rsi[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema200_val) or np.isnan(dh) or np.isnan(dl) or 
-            np.isnan(vol_avg)):
+        if (np.isnan(ema50_now) or np.isnan(ema50_prev) or np.isnan(ema200_now) or 
+            np.isnan(ema200_prev) or np.isnan(rsi_now)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above Donchian high + volume confirmation + above EMA200
-            if close[i] > dh and vol_cur > vol_avg and close[i] > ema200_val:
+            # Golden Cross: EMA50 crosses above EMA200 AND RSI not overbought
+            if ema50_now > ema200_now and ema50_prev <= ema200_prev and rsi_now < 70:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low + volume confirmation + below EMA200
-            elif close[i] < dl and vol_cur > vol_avg and close[i] < ema200_val:
+            # Death Cross: EMA50 crosses below EMA200 AND RSI not oversold
+            elif ema50_now < ema200_now and ema50_prev >= ema200_prev and rsi_now > 30:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Break below Donchian low OR price crosses below EMA200
-            if close[i] < dl or close[i] < ema200_val:
+            # Long exit: Death Cross OR RSI overbought
+            if (ema50_now < ema200_now and ema50_prev >= ema200_prev) or rsi_now >= 80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Break above Donchian high OR price crosses above EMA200
-            if close[i] > dh or close[i] > ema200_val:
+            # Short exit: Golden Cross OR RSI oversold
+            if (ema50_now > ema200_now and ema50_prev <= ema200_prev) or rsi_now <= 20:
                 signals[i] = 0.0
                 position = 0
             else:
