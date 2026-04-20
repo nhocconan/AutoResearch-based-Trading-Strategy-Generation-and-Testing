@@ -8,62 +8,40 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 30-period ADX for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Weekly EMA 34
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Daily RSI(14)
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d)
+    delta = np.insert(delta, 0, 0)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Wilder's smoothing
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        alpha = 1.0 / period
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_1d = wilder_smooth(tr, 30)
-    di_plus_1d = wilder_smooth(dm_plus, 30)
-    di_minus_1d = wilder_smooth(dm_minus, 30)
-    
-    # Avoid division by zero
-    di_sum = di_plus_1d + di_minus_1d
-    dx = np.where(di_sum != 0, 100 * np.abs(di_plus_1d - di_minus_1d) / di_sum, 0)
-    adx_1d = wilder_smooth(dx, 30)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 10-period Donchian channels (more sensitive)
-    donch_high_1d = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    
-    # Calculate 10-period average volume
+    # Daily average volume (20-period)
     volume_1d = df_1d['volume'].values
-    vol_avg_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_avg_10_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_10)
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
-    # Session filter: 8-20 UTC (active trading hours)
+    # Session filter: 8-20 UTC
     hours = prices.index.hour  # Pre-compute before loop
     
     signals = np.zeros(n)
@@ -80,41 +58,40 @@ def generate_signals(prices):
         
         # Get values
         close_val = prices['close'].iloc[i]
-        adx_val = adx_1d_aligned[i]
-        donch_high_val = donch_high_1d_aligned[i]
-        donch_low_val = donch_low_1d_aligned[i]
+        ema_val = ema_34_1w_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
         vol_val = prices['volume'].iloc[i]
-        vol_avg_val = vol_avg_10_aligned[i]
+        vol_avg_val = vol_avg_20_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(adx_val) or np.isnan(donch_high_val) or 
-            np.isnan(donch_low_val) or np.isnan(vol_avg_val)):
+        if (np.isnan(ema_val) or np.isnan(rsi_val) or 
+            np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Strong trend (ADX > 30), price breaks above Donchian high, volume above average
-            if adx_val > 30 and close_val > donch_high_val and vol_val > vol_avg_val:
+            # Long: price above weekly EMA34, RSI < 30 (oversold), volume above average
+            if close_val > ema_val and rsi_val < 30 and vol_val > vol_avg_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Strong trend (ADX > 30), price breaks below Donchian low, volume above average
-            elif adx_val > 30 and close_val < donch_low_val and vol_val > vol_avg_val:
+            # Short: price below weekly EMA34, RSI > 70 (overbought), volume above average
+            elif close_val < ema_val and rsi_val > 70 and vol_val > vol_avg_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or trend weakens (ADX < 25)
-            if close_val < donch_low_val or adx_val < 25:
+            # Long exit: price crosses below weekly EMA34 or RSI > 70 (overbought)
+            if close_val < ema_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or trend weakens (ADX < 25)
-            if close_val > donch_high_val or adx_val < 25:
+            # Short exit: price crosses above weekly EMA34 or RSI < 30 (oversold)
+            if close_val > ema_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,13 +99,13 @@ def generate_signals(prices):
     
     return signals
 
-# 4h_ADX_Donchian_Breakout_Volume_Session
-# Uses daily ADX for trend strength filter (ADX > 30 for entry, < 25 for exit)
-# Uses daily Donchian(10) breakouts for entry (more responsive than 20-period)
-# Requires volume confirmation above 10-period average
+# 1d_1wEMA34_RSI14_Volume
+# Uses weekly EMA34 for trend filter
+# Uses daily RSI(14) for overbought/oversold signals
+# Requires volume confirmation above 20-day average
 # Session filter: 8-20 UTC to avoid low-volume periods
-# Exits when price breaks opposite Donchian level or trend weakens (ADX < 25)
-# Designed for 4h timeframe with ~25-40 trades/year (100-160 total over 4 years)
-name = "4h_ADX_Donchian_Breakout_Volume_Session"
-timeframe = "4h"
+# Exits when price crosses weekly EMA or RSI reverses
+# Designed for 1d timeframe with ~10-25 trades/year
+name = "1d_1wEMA34_RSI14_Volume"
+timeframe = "1d"
 leverage = 1.0
