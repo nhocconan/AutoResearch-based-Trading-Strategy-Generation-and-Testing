@@ -3,98 +3,76 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and chop filter
-# - Long when price breaks above Donchian(20) high + 1d volume > 1.5x 20-period average + chop > 61.8 (range)
-# - Short when price breaks below Donchian(20) low + 1d volume > 1.5x 20-period average + chop > 61.8 (range)
-# - Uses 12h timeframe for lower frequency trading to reduce fee drag
-# - Volume confirmation ensures breakouts have conviction
-# - Chop filter (range > 61.8) avoids whipsaws in strong trends
-# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
+# Hypothesis: 1d Williams %R with 1-week trend filter
+# - Williams %R(14) on 1d: oversold < -80 for long, overbought > -20 for short
+# - 1-week EMA(50) as trend filter: only long when price > weekly EMA, short when price < weekly EMA
+# - Williams %R provides mean-reversion signals in ranging markets
+# - Weekly EMA filter ensures alignment with higher timeframe trend to avoid counter-trend trades
+# - Designed for 1d timeframe with selective entries to avoid overtrading
+# - Target: 7-25 trades per year per symbol (30-100 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for volume and chop calculation
+    # Load 1d and 1w data
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate Williams %R on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h Donchian channels
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA(50) on 1w
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d average volume (20-period)
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate Chopiness Index on 1d
-    # ATR(14) calculation
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum.reduce([tr1, tr2, tr3])])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Max/min high-low over 14 periods
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum(ATR14) / (max_high - min_low)) / log10(14)
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    range_14 = max_high_14 - min_low_14
-    chop = 100 * np.log10(sum_atr_14 / range_14) / np.log10(14)
-    
-    # Align 1d indicators to 12h
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align indicators to 1d timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(avg_volume_1d_aligned[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current 1d volume > 1.5x average
-        volume_condition = volume_1d[i] > 1.5 * avg_volume_1d_aligned[i]
-        
-        # Chop condition: range-bound market (chop > 61.8)
-        chop_condition = chop_aligned[i] > 61.8
+        price = close_1d[i]
+        williams_r_val = williams_r_aligned[i]
+        ema_50_val = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long entry: break above Donchian high + volume + chop
-            if close_12h[i] > donchian_high[i] and volume_condition and chop_condition:
+            # Long entry: Williams %R oversold (< -80) and price above weekly EMA
+            if williams_r_val < -80 and price > ema_50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below Donchian low + volume + chop
-            elif close_12h[i] < donchian_low[i] and volume_condition and chop_condition:
+            # Short entry: Williams %R overbought (> -20) and price below weekly EMA
+            elif williams_r_val > -20 and price < ema_50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: break below Donchian low or conditions fail
-            if close_12h[i] < donchian_low[i] or not (volume_condition and chop_condition):
+            # Long exit: Williams %R rises above -50 or price falls below weekly EMA
+            if williams_r_val > -50 or price < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above Donchian high or conditions fail
-            if close_12h[i] > donchian_high[i] or not (volume_condition and chop_condition):
+            # Short exit: Williams %R falls below -50 or price rises above weekly EMA
+            if williams_r_val < -50 or price > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dVolumeChop"
-timeframe = "12h"
+name = "1d_WilliamsR_1wEMA50Filter"
+timeframe = "1d"
 leverage = 1.0
