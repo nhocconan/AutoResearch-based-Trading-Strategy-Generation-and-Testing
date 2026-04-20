@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_Aggressive_Confluence_v1"
-timeframe = "6h"
+# Hypothesis: 12h timeframe with daily Choppiness Index filter + Donchian breakout
+# Uses only 2 conditions: price breaks Donchian(20) + low volatility regime (Choppiness > 61.8)
+# Designed for low trade frequency (<30/year) to avoid fee drag, works in trending and ranging markets
+name = "12h_1d_Donchian20_ChopFilter_V1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -17,86 +20,84 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # === Weekly Trend Filter: EMA21 > EMA50 ===
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    weekly_up = ema21_1w > ema50_1w
-    weekly_down = ema21_1w < ema50_1w
-    weekly_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_up)
-    weekly_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_down)
-    
-    # === Daily ATR(14) for volatility filter ===
+    # === Daily Choppiness Index (30-period) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Handle first value
+    tr[0] = high_1d[0] - low_1d[0]
     
-    # === 6h Price Action: Price > 6h EMA20 for long, < for short ===
-    close_series = pd.Series(prices['close'].values)
-    ema20_6h = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    # ATR(30)
+    atr = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
     
-    # === 6h Volume Spike: > 2.0x 20-period average ===
-    volume = prices['volume'].values
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    # Sum of TR over 30 periods
+    tr_sum = pd.Series(tr).rolling(window=30, min_periods=30).sum().values
+    
+    # Highest high and lowest low over 30 periods
+    hh = pd.Series(high_1d).rolling(window=30, min_periods=30).max().values
+    ll = pd.Series(low_1d).rolling(window=30, min_periods=30).min().values
+    
+    # Choppiness Index
+    chop = np.where(
+        (tr_sum > 0) & (hh - ll > 0),
+        100 * np.log10(tr_sum / (atr * 30)) / np.log10(30),
+        50.0  # neutral when undefined
+    )
+    chop = pd.Series(chop).fillna(50.0).values
+    
+    # Align Choppiness to 12h timeframe (need 2-bar delay for daily close confirmation)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=2)
+    
+    # === 12h Donchian Channel (20-period) ===
+    high = prices['high'].values
+    low = prices['low'].values
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        ema20_val = ema20_6h[i]
-        vol_ratio_val = vol_ratio[i]
-        atr_val = atr_1d_aligned[i]
-        weekly_up_val = weekly_up_aligned[i]
-        weekly_down_val = weekly_down_aligned[i]
+        dh = donchian_high[i]
+        dl = donchian_low[i]
+        chop_val = chop_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema20_val) or np.isnan(vol_ratio_val) or 
-            np.isnan(atr_val) or np.isnan(weekly_up_val) or 
-            np.isnan(weekly_down_val)):
+        if np.isnan(dh) or np.isnan(dl) or np.isnan(chop_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Weekly uptrend + price above EMA20 + volume spike
-            if weekly_up_val and close_val > ema20_val and vol_ratio_val > 2.0:
+            # Long: Break above Donchian high in low volatility regime (chop > 61.8 = ranging)
+            if close_val > dh and chop_val > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly downtrend + price below EMA20 + volume spike
-            elif weekly_down_val and close_val < ema20_val and vol_ratio_val > 2.0:
+            # Short: Break below Donchian low in low volatility regime
+            elif close_val < dl and chop_val > 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Weekly trend turns down OR price breaks below EMA20
-            if not weekly_up_val or close_val < ema20_val:
+            # Long exit: Price returns below Donchian low OR chop drops (trending begins)
+            if close_val < dl or chop_val < 40.0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Weekly trend turns up OR price breaks above EMA20
-            if not weekly_down_val or close_val > ema20_val:
+            # Short exit: Price returns above Donchian high OR chop drops
+            if close_val > dh or chop_val < 40.0:
                 signals[i] = 0.0
                 position = 0
             else:
