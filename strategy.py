@@ -1,11 +1,10 @@
-# [Experiment 65707] 6h_1d_RSI_Trend_Bounce
-# Hypothesis: On 6h timeframe, use 1d RSI(14) to detect mean reversion opportunities.
-# Long when 1d RSI < 30 and price above 6h EMA(20); short when 1d RSI > 70 and price below 6h EMA(20).
-# Uses daily RSI to avoid overtrading and capture swings in both bull and bear markets.
-# Target: 15-30 trades/year per symbol with strict entry conditions.
+# 12h_1w_Camarilla_R1S1_Breakout_TrendFollow_Volume
+# Hypothesis: Weekly Camarilla R1/S1 breakouts on 12h timeframe with 1w EMA trend filter and volume confirmation.
+# Uses weekly trend filter to capture major moves and volume to avoid false breakouts.
+# Target: 15-30 trades/year per symbol for low frequency and high quality signals.
 
-name = "6h_1d_RSI_Trend_Bounce"
-timeframe = "6h"
+name = "12h_1w_Camarilla_R1S1_Breakout_TrendFollow_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,62 +21,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 15:
         return np.zeros(n)
     
-    # Calculate 1d RSI(14)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate weekly pivot points
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 6h EMA(20) for trend filter
-    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = pivot_1w + (high_1w - low_1w) * 1.1 / 12
+    s1_1w = pivot_1w - (high_1w - low_1w) * 1.1 / 12
     
-    # Align 1d RSI to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate weekly EMA10 for trend filter
+    ema10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Calculate volume average for spike detection
+    vol_ma_1w = pd.Series(volume).rolling(window=2, min_periods=2).mean().values  # 2*12h = 1 day
+    
+    # Align weekly indicators to 12h timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 30  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(rsi_1d_aligned[i]) or np.isnan(ema20_6h[i]):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(ema10_1w_aligned[i]) or np.isnan(vol_ma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume spike condition: current volume > 2.0 * weekly average volume
+        volume_spike = volume[i] > 2.0 * vol_ma_1w_aligned[i]
+        
         if position == 0:
-            # Long: 1d RSI oversold (<30) and price above 6h EMA20
-            if rsi_1d_aligned[i] < 30 and close[i] > ema20_6h[i]:
-                signals[i] = 0.25
+            # Long: price > weekly EMA10 (uptrend) and breaks above R1 with volume
+            if close[i] > ema10_1w_aligned[i] and close[i] > r1_1w_aligned[i] and volume_spike:
+                signals[i] = 0.30
                 position = 1
-            # Short: 1d RSI overbought (>70) and price below 6h EMA20
-            elif rsi_1d_aligned[i] > 70 and close[i] < ema20_6h[i]:
-                signals[i] = -0.25
+            # Short: price < weekly EMA10 (downtrend) and breaks below S1 with volume
+            elif close[i] < ema10_1w_aligned[i] and close[i] < s1_1w_aligned[i] and volume_spike:
+                signals[i] = -0.30
                 position = -1
                 
         elif position == 1:
-            # Long: exit if RSI returns to neutral (>50) or price breaks below EMA20
-            if rsi_1d_aligned[i] > 50 or close[i] < ema20_6h[i]:
+            # Long: exit if price breaks below S1 (reversal) or trend changes
+            if close[i] < s1_1w_aligned[i] or close[i] < ema10_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:
-            # Short: exit if RSI returns to neutral (<50) or price breaks above EMA20
-            if rsi_1d_aligned[i] < 50 or close[i] > ema20_6h[i]:
+            # Short: exit if price breaks above R1 (reversal) or trend changes
+            if close[i] > r1_1w_aligned[i] or close[i] > ema10_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
