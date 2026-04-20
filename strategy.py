@@ -1,4 +1,11 @@
-#!/usr/bin/env python3
+# #!/usr/bin/env python3
+# Strategy: 4h_1d_Camarilla_S1R1_VolumeSpike
+# Hypothesis: Price retests of daily Camarilla S1/R1 levels with volume spikes
+# indicate institutional interest and potential reversals. Works in bull/bear
+# markets because it captures mean-reversion at key levels with momentum
+# confirmation. Uses volume filter to avoid false breakouts and ATR stop
+# for risk control. Targets 20-40 trades/year by requiring both price
+# level touch AND 2x volume spike.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,15 +20,18 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Williams %R on 1d data (14-period)
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * ((highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14))
-    williams_r[highest_high_14 == lowest_low_14] = -50  # avoid division by zero
+    # Calculate Camarilla pivot levels on 1d data
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    R1 = pivot_1d + (range_1d * 1.1 / 12)
+    S1 = pivot_1d - (range_1d * 1.1 / 12)
     
     # Align to 4h timeframe with proper delay
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # 4h data for entry timing and volume
     df_4h = get_htf_data(prices, '4h')
@@ -51,7 +61,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
             np.isnan(atr_14_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,20 +73,20 @@ def generate_signals(prices):
         vol = volume_4h[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with volume confirmation
-            if (williams_r_aligned[i] < -80 and 
+            # Long: price touches or crosses above S1 with volume confirmation
+            if (price >= S1_aligned[i] and 
                 vol > 2.0 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) with volume confirmation
-            elif (williams_r_aligned[i] > -20 and 
+            # Short: price touches or crosses below R1 with volume confirmation
+            elif (price <= R1_aligned[i] and 
                   vol > 2.0 * vol_ma_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R returns to neutral (> -50) or ATR-based stop
-            if (williams_r_aligned[i] > -50 or 
+            # Long exit: price crosses below pivot or ATR-based stop
+            if (price < pivot_1d_aligned[i] or 
                 price < low_4h[i] - 1.5 * atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
@@ -83,8 +94,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R returns to neutral (< -50) or ATR-based stop
-            if (williams_r_aligned[i] < -50 or 
+            # Short exit: price crosses above pivot or ATR-based stop
+            if (price > pivot_1d_aligned[i] or 
                 price > high_4h[i] + 1.5 * atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
@@ -93,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_WilliamsR_VolumeSpike"
+name = "4h_1d_Camarilla_S1R1_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
