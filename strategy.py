@@ -3,36 +3,44 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with weekly pivot levels (R1/S1) and volume confirmation.
-# Long when price breaks above weekly R1 with volume expansion (bullish continuation).
-# Short when price breaks below weekly S1 with volume expansion (bearish continuation).
-# Uses weekly timeframe for structure, 6h for execution, volume filter to avoid false breakouts.
-# Designed to work in both bull and bear markets by trading breakouts in direction of higher timeframe momentum.
-# Target: 50-150 total trades over 4 years (12-37/year).
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for pivot levels
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 5:
+    # Load 1d HTF data once for pivot levels and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate weekly pivot levels (standard formula)
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Calculate daily pivot levels (standard formula)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
+    # Calculate daily ATR for volatility filter
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align all 1d indicators to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Main timeframe data
     close = prices['close'].values
@@ -40,16 +48,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 2.0x 20-period average to avoid false breakouts
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20) > 2.0
+    # Volume filter: current volume > 1.5x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_filter = volume / np.where(vol_ma_30 == 0, 1, vol_ma_30) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
             np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,31 +68,38 @@ def generate_signals(prices):
         price = close[i]
         high_i = high[i]
         low_i = low[i]
-        r1_val = r1_w_aligned[i]
-        s1_val = s1_w_aligned[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        atr_val = atr_1d_aligned[i]
         vol_ok = vol_filter[i]
         
+        # Volatility filter: only trade when ATR > 0
+        vol_filter_ok = atr_val > 0
+        
         if position == 0:
-            # Long: price breaks above weekly R1 with volume expansion
-            if high_i > r1_val and vol_ok:
+            # Long: price breaks above S1 with volume and volatility (mean reversion bounce)
+            if high_i > s1_val and vol_ok and vol_filter_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 with volume expansion
-            elif low_i < s1_val and vol_ok:
+            # Short: price breaks below R1 with volume and volatility (mean reversion fade)
+            elif low_i < r1_val and vol_ok and vol_filter_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below weekly pivot
-            if low_i < pivot_w_aligned[i]:
+            # Long exit: price breaks below pivot OR volatility drops
+            if low_i < pivot_val or not vol_filter_ok:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above weekly pivot
-            if high_i > pivot_w_aligned[i]:
+            # Short exit: price breaks above pivot OR volatility drops
+            if high_i > pivot_val or not vol_filter_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_PivotBreakout_VolumeFilter_v1"
-timeframe = "6h"
+name = "4h_1d_PivotMeanReversion_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
