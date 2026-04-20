@@ -5,17 +5,21 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1-day data for pivot levels and volatility
+    # Load daily data for trend and volatility (once before loop)
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1-day ATR for volatility filter and position sizing
+    # Daily 200 EMA for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Daily ATR for volatility filter and stop
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
@@ -27,57 +31,62 @@ def generate_signals(prices):
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Daily volume average for confirmation
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate 1-day pivot points (R1, S1)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # 4h high/low for breakout levels (using 4h data)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # 4-period high/low for breakout
+    high_4_4h = pd.Series(high_4h).rolling(window=4, min_periods=4).max().values
+    low_4_4h = pd.Series(low_4h).rolling(window=4, min_periods=4).min().values
+    high_4_4h_aligned = align_htf_to_ltf(prices, df_4h, high_4_4h)
+    low_4_4h_aligned = align_htf_to_ltf(prices, df_4h, low_4_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(close_1d[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(high_4_4h_aligned[i]) or 
+            np.isnan(low_4_4h_aligned[i]) or np.isnan(close_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1d[i]
-        vol = volume_1d[i]
+        price = close_4h[i]
+        vol = volume_1d[i]  # Use daily volume for confirmation
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation
-            if (price > r1_1d_aligned[i] and 
+            # Long: price breaks above 4-period high with volume confirmation and above daily EMA200
+            if (price > high_4_4h_aligned[i] and 
                 vol > 1.5 * vol_ma_1d_aligned[i] and 
-                atr_1d_aligned[i] > 0):
+                price > ema_200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation
-            elif (price < s1_1d_aligned[i] and 
+            # Short: price breaks below 4-period low with volume confirmation and below daily EMA200
+            elif (price < low_4_4h_aligned[i] and 
                   vol > 1.5 * vol_ma_1d_aligned[i] and 
-                  atr_1d_aligned[i] > 0):
+                  price < ema_200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below S1 or volume drops significantly
-            if price < s1_1d_aligned[i] or vol < 0.7 * vol_ma_1d_aligned[i]:
+            # Long exit: price breaks below 4-period low or volume drops significantly
+            if price < low_4_4h_aligned[i] or vol < 0.8 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 or volume drops significantly
-            if price > r1_1d_aligned[i] or vol < 0.7 * vol_ma_1d_aligned[i]:
+            # Short exit: price breaks above 4-period high or volume drops significantly
+            if price > high_4_4h_aligned[i] or vol < 0.8 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Breakout4_Volume_EMA200Filter"
+timeframe = "4h"
 leverage = 1.0
