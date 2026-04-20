@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -6,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE (1d)
@@ -27,12 +26,12 @@ def generate_signals(prices):
     ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align HTF indicators to 12h (wait for daily bar close)
+    # Align HTF indicators to 4h (wait for daily bar close)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 12h price array
+    # Calculate 4h price array
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -40,7 +39,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if NaN
         if np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]):
             if position != 0:
@@ -81,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA50_EMA200_VolatilityFilter"
-timeframe = "12h"
+name = "4h_EMA50_EMA200_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
