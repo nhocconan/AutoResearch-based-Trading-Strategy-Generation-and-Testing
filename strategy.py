@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Strategy: 12h_1d_Donchian20_Breakout_Volume_Spike_TrendFilter_v1
+# Hypothesis: Breakout above 20-period high or below 20-period low on 12h timeframe,
+#             filtered by 1d EMA50 trend and volume > 2x 20-period MA. Designed for
+#             20-40 trades/year to minimize fee drag and work in bull/bear markets.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -8,94 +12,82 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for HTF analysis (trend, pivot levels)
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Daily Camarilla pivot levels
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    R1 = pivot_1d + (range_1d * 1.1 / 12)
-    S1 = pivot_1d - (range_1d * 1.1 / 12)
+    # Load 12h data for Donchian, volume, ATR
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Align 1d indicators to 6h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Donchian channels (20-period on 12h)
+    high_max_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Load 6h data for entry timing, volume, ATR
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    # Volume spike detection (20-period on 12h)
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
-    # Volume spike detection (20-period on 6h)
-    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20)
-    
-    # ATR for volatility filter (14-period on 6h)
-    high_low = high_6h - low_6h
-    high_close = np.abs(high_6h - np.roll(close_6h, 1))
-    low_close = np.abs(low_6h - np.roll(close_6h, 1))
-    high_low[0] = high_6h[0] - low_6h[0]
-    high_close[0] = np.abs(high_6h[0] - close_6h[0])
-    low_close[0] = np.abs(low_6h[0] - close_6h[0])
+    # ATR for volatility filter (14-period on 12h)
+    high_low = high_12h - low_12h
+    high_close = np.abs(high_12h - np.roll(close_12h, 1))
+    low_close = np.abs(low_12h - np.roll(close_12h, 1))
+    high_low[0] = high_12h[0] - low_12h[0]
+    high_close[0] = np.abs(high_12h[0] - close_12h[0])
+    low_close[0] = np.abs(low_12h[0] - close_12h[0])
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     tr[0] = high_low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_6h, atr_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(atr_14_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_max_20[i]) or 
+            np.isnan(low_min_20[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(atr_14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
-        vol = volume_6h[i]
+        price = close_12h[i]
+        vol = volume_12h[i]
         
         if position == 0:
-            # Long: price breaks above R1, above 1d EMA34 (uptrend), with volume confirmation
-            if (price > R1_aligned[i] and 
-                price > ema34_1d_aligned[i] and 
-                vol > 2.0 * vol_ma_20_aligned[i]):
+            # Long: price breaks above 20-period high, above 1d EMA50 (uptrend), with volume confirmation
+            if (price > high_max_20[i] and 
+                price > ema50_1d_aligned[i] and 
+                vol > 2.0 * vol_ma_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below 1d EMA34 (downtrend), with volume confirmation
-            elif (price < S1_aligned[i] and 
-                  price < ema34_1d_aligned[i] and 
-                  vol > 2.0 * vol_ma_20_aligned[i]):
+            # Short: price breaks below 20-period low, below 1d EMA50 (downtrend), with volume confirmation
+            elif (price < low_min_20[i] and 
+                  price < ema50_1d_aligned[i] and 
+                  vol > 2.0 * vol_ma_20[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or ATR-based stop
-            if (price < S1_aligned[i] or 
-                price < low_6h[i] - 1.5 * atr_14_aligned[i]):
+            # Long exit: price breaks below 20-period low or ATR-based stop
+            if (price < low_min_20[i] or 
+                price < high_12h[i] - 2.0 * atr_14[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or ATR-based stop
-            if (price > R1_aligned[i] or 
-                price > high_6h[i] + 1.5 * atr_14_aligned[i]):
+            # Short exit: price breaks above 20-period high or ATR-based stop
+            if (price > high_max_20[i] or 
+                price > low_12h[i] + 2.0 * atr_14[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter_v1"
-timeframe = "6h"
+name = "12h_1d_Donchian20_Breakout_Volume_Spike_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
