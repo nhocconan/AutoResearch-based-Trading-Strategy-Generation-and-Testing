@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_Volume
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe provide institutional support/resistance.
-# Breakouts above R1 or below S1 with volume confirmation capture momentum in trending markets.
-# Works in both bull and bear markets as it follows institutional order flow at key levels.
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+# 1h_1d_Momentum_Filter_Strategy
+# Hypothesis: In 1h timeframe, use 1d momentum (price above/below 200 EMA) for directional bias,
+# and 4h volatility contraction/expansion (BB width percentile) for entry timing.
+# This avoids overtrading by requiring both trend alignment and volatility breakout.
+# Works in bull/bear: long when price>200EMA + BB breakout up, short when price<200EMA + BB breakout down.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume"
-timeframe = "4h"
+name = "1h_1d_Momentum_Filter_Strategy"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,76 +18,101 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
+    # Extract price arrays
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get 1d data for 200 EMA (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Calculate 200 EMA on 1d close
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema_200_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 200:
+        ema_200_1d[199] = np.mean(close_1d[:200])
+        for i in range(200, len(close_1d)):
+            ema_200_1d[i] = (close_1d[i] * 2/201) + (ema_200_1d[i-1] * (1 - 2/201))
     
-    camarilla_r1 = np.full_like(close_1d, np.nan)
-    camarilla_s1 = np.full_like(close_1d, np.nan)
+    # Align 200 EMA to 1h
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    for i in range(1, len(close_1d)):
-        prev_close = close_1d[i-1]
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        camarilla_r1[i] = prev_close + (prev_high - prev_low) * 1.1 / 12
-        camarilla_s1[i] = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Get 4h data for Bollinger Bands (volatility filter)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate Bollinger Bands (20, 2) on 4h close
+    close_4h = df_4h['close'].values
+    sma_20_4h = np.full_like(close_4h, np.nan)
+    std_20_4h = np.full_like(close_4h, np.nan)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma20 * 1.5)
+    for i in range(len(close_4h)):
+        if i >= 19:
+            sma_20_4h[i] = np.mean(close_4h[i-19:i+1])
+            std_20_4h[i] = np.std(close_4h[i-19:i+1])
+    
+    upper_bb_4h = sma_20_4h + (2 * std_20_4h)
+    lower_bb_4h = sma_20_4h - (2 * std_20_4h)
+    bb_width_4h = upper_bb_4h - lower_bb_4h
+    
+    # Calculate BB width percentile (lookback 50 periods) to detect expansion
+    bb_width_percentile = np.full_like(bb_width_4h, np.nan)
+    for i in range(len(bb_width_4h)):
+        if i >= 49:
+            window = bb_width_4h[i-49:i+1]
+            valid = ~np.isnan(window)
+            if np.sum(valid) >= 10:  # minimum valid samples
+                rank = np.sum(window[valid] <= bb_width_4h[i]) / np.sum(valid)
+                bb_width_percentile[i] = rank * 100
+    
+    # Align BB width percentile to 1h
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_4h, bb_width_percentile)
+    
+    # Session filter: 8-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure volume MA is calculated
+    # Start after all indicators are valid
+    start_idx = max(200, 50)  # 200 for EMA, 50 for BB percentile
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(bb_width_percentile_aligned[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        if position == 0:
-            # Long: price breaks above R1 with volume confirmation
-            if close[i] > camarilla_r1_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+        # Long conditions: price above 1d 200 EMA AND BB width expanding (breakout up)
+        if close[i] > ema_200_1d_aligned[i] and bb_width_percentile_aligned[i] > 80:
+            if position != 1:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 with volume confirmation
-            elif close[i] < camarilla_s1_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            else:
+                signals[i] = 0.20
+        # Short conditions: price below 1d 200 EMA AND BB width expanding (breakout down)
+        elif close[i] < ema_200_1d_aligned[i] and bb_width_percentile_aligned[i] > 80:
+            if position != -1:
+                signals[i] = -0.20
                 position = -1
-                
-        elif position == 1:
-            # Long: exit if price breaks below S1 (reversal signal)
-            if close[i] < camarilla_s1_aligned[i]:
+            else:
+                signals[i] = -0.20
+        # Exit conditions: BB contraction (low volatility) or opposite momentum
+        elif bb_width_percentile_aligned[i] < 20:  # volatility contraction
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-                
-        elif position == -1:
-            # Short: exit if price breaks above R1 (reversal signal)
-            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Hold current position
+        else:
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
