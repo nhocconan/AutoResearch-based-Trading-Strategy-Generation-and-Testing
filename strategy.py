@@ -1,100 +1,96 @@
 #!/usr/bin/env python3
-# Strategy: 12h_1d_Donchian20_Breakout_Volume_Spike_TrendFilter_v1
-# Hypothesis: Breakout above 20-period high or below 20-period low on 12h timeframe,
-#             filtered by 1d EMA50 trend and volume > 2x 20-period MA. Designed for
-#             20-40 trades/year to minimize fee drag and work in bull/bear markets.
+# Strategy: 1d_1w_WT_LongOnly_Pullback
+# Hypothesis: In a strong weekly trend (price above weekly 200 EMA), enter long on daily WT (Williams %R) pullbacks from overbought, with volume confirmation and ATR-based stop.
+# Works in bull markets via trend-following pullbacks; avoids bear markets by requiring weekly uptrend filter.
+# Target: 15-25 trades/year to minimize fee drag.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d data for trend filter
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA200 for trend filter (bull market only)
+    close_1w_series = pd.Series(close_1w)
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Load daily data for entries and indicators
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Williams %R (14-period) on daily
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    rr = highest_high - lowest_low
+    rr[rr == 0] = 1e-10
+    willr = -100 * ((highest_high - close_1d) / rr)
+    willr_aligned = align_htf_to_ltf(prices, df_1d, willr)
     
-    # Load 12h data for Donchian, volume, ATR
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Volume confirmation: 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Donchian channels (20-period on 12h)
-    high_max_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike detection (20-period on 12h)
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter (14-period on 12h)
-    high_low = high_12h - low_12h
-    high_close = np.abs(high_12h - np.roll(close_12h, 1))
-    low_close = np.abs(low_12h - np.roll(close_12h, 1))
-    high_low[0] = high_12h[0] - low_12h[0]
-    high_close[0] = np.abs(high_12h[0] - close_12h[0])
-    low_close[0] = np.abs(low_12h[0] - close_12h[0])
+    # ATR for stoploss (14-period)
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_low[0] = high_1d[0] - low_1d[0]
+    high_close[0] = np.abs(high_1d[0] - close_1d[0])
+    low_close[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     tr[0] = high_low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(200, n):  # Start after weekly EMA200 warmup
         # Skip if NaN in critical values
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_max_20[i]) or 
-            np.isnan(low_min_20[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr_14[i])):
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(willr_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_14_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_12h[i]
-        vol = volume_12h[i]
+        price = close_1d[i]
+        vol = volume_1d[i]
         
         if position == 0:
-            # Long: price breaks above 20-period high, above 1d EMA50 (uptrend), with volume confirmation
-            if (price > high_max_20[i] and 
-                price > ema50_1d_aligned[i] and 
-                vol > 2.0 * vol_ma_20[i]):
+            # Long: weekly uptrend (price above weekly EMA200), Williams %R pulls back from oversold (< -80), volume confirmation
+            if (price > ema200_1w_aligned[i] and 
+                willr_aligned[i] < -80 and  # Oversold condition
+                vol > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low, below 1d EMA50 (downtrend), with volume confirmation
-            elif (price < low_min_20[i] and 
-                  price < ema50_1d_aligned[i] and 
-                  vol > 2.0 * vol_ma_20[i]):
-                signals[i] = -0.25
-                position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: price breaks below 20-period low or ATR-based stop
-            if (price < low_min_20[i] or 
-                price < high_12h[i] - 2.0 * atr_14[i]):
+            # Exit: Williams %R returns to overbought (> -20) or ATR-based stop
+            if (willr_aligned[i] > -20 or 
+                price < entry_price - 2.0 * atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: price breaks above 20-period high or ATR-based stop
-            if (price > high_max_20[i] or 
-                price > low_12h[i] + 2.0 * atr_14[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "12h_1d_Donchian20_Breakout_Volume_Spike_TrendFilter_v1"
-timeframe = "12h"
+name = "1d_1w_WT_LongOnly_Pullback"
+timeframe = "1d"
 leverage = 1.0
