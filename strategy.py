@@ -3,39 +3,34 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Chaikin Money Flow (CMF) with 1-day trend filter
-# CMF(20) measures money flow volume to detect accumulation/distribution
-# In bull market (price > 1-day EMA50): buy when CMF > 0.1, sell when CMF < -0.1
-# In bear market (price < 1-day EMA50): sell when CMF > 0.1, buy when CMF < -0.1
-# Requires volume confirmation: volume > 1.5x 20-period average
-# Designed to capture institutional money flow shifts with trend alignment
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 1d Donchian(20) breakout with weekly trend filter + volume confirmation
+# Donchian(20) breakout provides clear entry/exit signals
+# Weekly trend filter: only trade in direction of weekly trend (bullish if price > weekly EMA20, bearish if price < weekly EMA20)
+# Volume confirmation: require volume > 1.5x 20-period average
+# Designed to capture trend continuation while avoiding counter-trend trades
+# Target: 20-60 total trades over 4 years (5-15/year)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 50-period EMA on daily timeframe for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 20-period EMA on weekly timeframe for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Load 12h data for CMF and volume
+    # Calculate Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Chaikin Money Flow
-    mf_multiplier = ((close - low) - (high - close)) / (high - low + 1e-10)
-    mf_volume = mf_multiplier * volume
-    mf_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = mf_sum / (vol_sum + 1e-10)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,17 +39,17 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if NaN in indicators
-        if np.isnan(cmf[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market trend
-        is_bull = close[i] > ema50_1d_aligned[i]
-        is_bear = close[i] < ema50_1d_aligned[i]
+        # Determine weekly trend
+        is_bullish_trend = close[i] > ema20_1w_aligned[i]
+        is_bearish_trend = close[i] < ema20_1w_aligned[i]
         
         # Volume confirmation
         has_volume = vol_filter[i]
@@ -62,17 +57,15 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long conditions: bullish money flow in bull OR bear market
+            # Enter long: price breaks above upper Donchian band in bullish trend with volume
             long_signal = False
-            if has_volume:
-                if cmf[i] > 0.1:  # Bullish money flow
-                    long_signal = True
+            if has_volume and is_bullish_trend and price > highest_high[i]:
+                long_signal = True
             
-            # Enter short conditions: bearish money flow in bull OR bear market
+            # Enter short: price breaks below lower Donchian band in bearish trend with volume
             short_signal = False
-            if has_volume:
-                if cmf[i] < -0.1:  # Bearish money flow
-                    short_signal = True
+            if has_volume and is_bearish_trend and price < lowest_low[i]:
+                short_signal = True
             
             if long_signal:
                 signals[i] = 0.25
@@ -82,9 +75,9 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish money flow
+            # Exit long: price breaks below lower Donchian band
             exit_signal = False
-            if has_volume and cmf[i] < -0.1:  # Bearish money flow
+            if price < lowest_low[i]:
                 exit_signal = True
             
             if exit_signal:
@@ -94,9 +87,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish money flow
+            # Exit short: price breaks above upper Donchian band
             exit_signal = False
-            if has_volume and cmf[i] > 0.1:  # Bullish money flow
+            if price > highest_high[i]:
                 exit_signal = True
             
             if exit_signal:
@@ -107,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_CMF_TrendFilter_Volume"
-timeframe = "12h"
+name = "1d_Donchian20_WeeklyTrendFilter_Volume"
+timeframe = "1d"
 leverage = 1.0
