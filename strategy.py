@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# 4h_12h_Pivot_R3S3_Volume_Confirmation
-# Hypothesis: Fade at 12h Pivot R3/S3 levels with volume confirmation on 4h timeframe.
-# Uses 12h trend filter to avoid counter-trend trades. Target: 100-180 trades over 4 years (25-45/year).
-# Works in bull/bear via 12h trend filter - only trade with the 12h trend.
+# 1h_4h_1d_TrendFollowing_VolumeBreakout
+# Hypothesis: 1h breakout with 4h trend filter and 1d volume confirmation. 
+# Long when price breaks above 4h high with rising volume and 1d uptrend.
+# Short when price breaks below 4h low with rising volume and 1d downtrend.
+# Session filter (08-20 UTC) reduces noise. Target: 15-37 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Pivot_R3S3_Volume_Confirmation"
-timeframe = "4h"
+name = "1h_4h_1d_TrendFollowing_VolumeBreakout"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,80 +18,95 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data ONCE before loop for trend and breakout levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # === Calculate 12h pivot levels (R3, S3) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data ONCE before loop for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Pivot point and range
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # === 4h: Highest high and lowest low of last 20 periods ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: R3 = close + (range * 1.1/4), S3 = close - (range * 1.1/4)
-    r3_12h = close_12h + (range_12h * 1.1 / 4)
-    s3_12h = close_12h - (range_12h * 1.1 / 4)
+    # === 4h: Trend filter using EMA34 ===
+    close_4h = df_4h['close'].values
+    ema_34 = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
-    volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    # === 1d: Volume ratio (current vs 20-period average) ===
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / np.where(vol_ma20_1d > 0, vol_ma20_1d, np.nan)
     
-    # Align all 12h levels to 4h
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    # === Align all HTF data to 1h timeframe ===
+    high_20_aligned = align_htf_to_ltf(prices, df_4h, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_4h, low_20)
+    ema_34_aligned = align_htf_to_ltf(prices, df_4h, ema_34)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    
+    # Precompute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after volume MA warmup
+    for i in range(34, n):  # Start after EMA warmup
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
         close_val = prices['close'].iloc[i]
-        r3_12h_val = r3_12h_aligned[i]
-        s3_12h_val = s3_12h_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        high_20_val = high_20_aligned[i]
+        low_20_val = low_20_aligned[i]
+        ema_34_val = ema_34_aligned[i]
+        vol_ratio_val = vol_ratio_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r3_12h_val) or np.isnan(s3_12h_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(high_20_val) or np.isnan(low_20_val) or 
+            np.isnan(ema_34_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price rejects S3 (bounces off support) with volume confirmation
-            if (close_val < s3_12h_val and  # Price touched or went below S3
-                prices['low'].iloc[i] <= s3_12h_val and  # Confirmed touch of S3
-                close_val > s3_12h_val and  # Now bouncing back above S3
-                vol_ratio_val > 2.0):  # Volume confirmation
-                signals[i] = 0.25
+            # Long: Break above 4h high with volume confirmation and 1d uptrend
+            if (close_val > high_20_val and  # Break above 20-period high
+                vol_ratio_val > 1.5 and      # Volume confirmation
+                close_val > ema_34_val):     # Above 4h EMA34 (uptrend)
+                signals[i] = 0.20
                 position = 1
-            # Short: Price rejects R3 (bounces off resistance) with volume confirmation
-            elif (close_val > r3_12h_val and  # Price touched or went above R3
-                  prices['high'].iloc[i] >= r3_12h_val and  # Confirmed touch of R3
-                  close_val < r3_12h_val and  # Now falling back below R3
-                  vol_ratio_val > 2.0):  # Volume confirmation
-                signals[i] = -0.25
+            # Short: Break below 4h low with volume confirmation and 1d downtrend
+            elif (close_val < low_20_val and   # Break below 20-period low
+                  vol_ratio_val > 1.5 and      # Volume confirmation
+                  close_val < ema_34_val):     # Below 4h EMA34 (downtrend)
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: Price reaches R3 or shows weakness
-            if close_val >= r3_12h_val:
+            # Long exit: Break below 4h low or loss of momentum
+            if close_val < low_20_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Price reaches S3 or shows weakness
-            if close_val <= s3_12h_val:
+            # Short exit: Break above 4h high or loss of momentum
+            if close_val > high_20_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
