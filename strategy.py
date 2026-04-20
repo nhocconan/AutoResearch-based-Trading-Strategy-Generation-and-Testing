@@ -5,12 +5,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Load weekly data once for trend filter
     df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
     # Weekly trend: EMA34 of close
@@ -20,7 +20,7 @@ def generate_signals(prices):
     
     # Daily data for ATR and volume
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
     high_daily = df_daily['high'].values
@@ -43,7 +43,7 @@ def generate_signals(prices):
     vol_ma_daily = pd.Series(volume_daily).rolling(window=20, min_periods=20).mean().values
     vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
     
-    # Main timeframe data (12h)
+    # 4h timeframe data (main timeframe)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -52,7 +52,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
         if (np.isnan(ema34_weekly_aligned[i]) or np.isnan(atr_daily_aligned[i]) or 
             np.isnan(vol_ma_daily_aligned[i])):
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_weekly_EMA34_Trend_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_1d_weekly_EMA34_Trend_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
