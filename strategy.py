@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian20_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "12h_1d_RangeBreakout_Volume_V1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,37 +12,51 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Daily Donchian Channel (20-day) ===
+    # Calculate daily range (high-low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 20-period high and low
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Previous day's range for breakout level
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_volume = np.roll(volume_1d, 1)
     
-    # Align to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Range breakout levels (using previous day's high/low)
+    range_high = prev_high
+    range_low = prev_low
     
-    # === 4h Indicators ===
+    # Align daily levels to 12h timeframe
+    range_high_aligned = align_htf_to_ltf(prices, df_1d, range_high)
+    range_low_aligned = align_htf_to_ltf(prices, df_1d, range_low)
+    prev_volume_aligned = align_htf_to_ltf(prices, df_1d, prev_volume)
+    
+    # 12h indicators
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # 50-period EMA for trend filter
+    # Volume spike detection (current volume vs previous day's volume)
+    volume_spike = volume / np.where(prev_volume_aligned > 0, prev_volume_aligned, np.nan)
+    
+    # 12h ATR for volatility filter (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 12h EMA for trend filter (20-period)
     close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume ratio (20-period average)
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,44 +64,47 @@ def generate_signals(prices):
     for i in range(50, n):
         # Get values
         close_val = close[i]
-        vol_ratio_val = vol_ratio[i]
-        ema50_val = ema50[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
+        high_val = high[i]
+        low_val = low[i]
+        vol_spike_val = volume_spike[i]
+        atr_val = atr[i]
+        ema20_val = ema20[i]
+        range_high_val = range_high_aligned[i]
+        range_low_val = range_low_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(ema50_val) or 
-            np.isnan(upper) or np.isnan(lower)):
+        if (np.isnan(vol_spike_val) or np.isnan(atr_val) or np.isnan(ema20_val) or 
+            np.isnan(range_high_val) or np.isnan(range_low_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above upper Donchian with volume and trend
-            if (close_val > upper and 
-                vol_ratio_val > 1.8 and
-                close_val > ema50_val):
+            # Long: Break above previous day's high with volume spike and above EMA
+            if (high_val > range_high_val and 
+                vol_spike_val > 2.0 and
+                close_val > ema20_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower Donchian with volume and counter-trend
-            elif (close_val < lower and 
-                  vol_ratio_val > 1.8 and
-                  close_val < ema50_val):
+            # Short: Break below previous day's low with volume spike and below EMA
+            elif (low_val < range_low_val and 
+                  vol_spike_val > 2.0 and
+                  close_val < ema20_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below lower Donchian or trend breaks
-            if close_val < lower or close_val < ema50_val:
+            # Long exit: Price returns below previous day's low or volatility drops
+            if low_val < range_low_val or vol_spike_val < 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above upper Donchian or trend breaks
-            if close_val > upper or close_val > ema50_val:
+            # Short exit: Price returns above previous day's high or volatility drops
+            if high_val > range_high_val or vol_spike_val < 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
