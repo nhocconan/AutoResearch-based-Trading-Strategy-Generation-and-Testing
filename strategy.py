@@ -8,23 +8,21 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE for 1d indicators
+    # Load weekly and daily data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 15-day Donchian channels (breakout levels)
-    highest_15d = pd.Series(high_1d).rolling(window=15, min_periods=15).max().values
-    lowest_15d = pd.Series(low_1d).rolling(window=15, min_periods=15).min().values
+    # Calculate 20-week Donchian channels (long-term breakout levels)
+    highest_20w = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
+    lowest_20w = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 30-day EMA of daily close (long-term trend filter)
-    ema_30d_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    # Calculate 50-day EMA of daily close (intermediate trend filter)
+    ema_50d_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all 1d indicators to 4h timeframe
-    highest_15d_aligned = align_htf_to_ltf(prices, df_1d, highest_15d)
-    lowest_15d_aligned = align_htf_to_ltf(prices, df_1d, lowest_15d)
-    ema_30d_aligned = align_htf_to_ltf(prices, df_1d, ema_30d_1d)
+    # Align weekly and daily indicators to 4h timeframe
+    highest_20w_aligned = align_htf_to_ltf(prices, df_1w, highest_20w)
+    lowest_20w_aligned = align_htf_to_ltf(prices, df_1w, lowest_20w)
+    ema_50d_aligned = align_htf_to_ltf(prices, df_1d, ema_50d_1d)
     
     # Calculate 4h ATR for volatility filter and stop sizing
     high = prices['high'].values
@@ -35,7 +33,7 @@ def generate_signals(prices):
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr).rolling(window=15, min_periods=15).mean().values
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Precompute hour of day for session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -50,7 +48,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if NaN in indicators
-        if np.isnan(highest_15d_aligned[i]) or np.isnan(lowest_15d_aligned[i]) or np.isnan(ema_30d_aligned[i]) or np.isnan(atr_4h[i]):
+        if np.isnan(highest_20w_aligned[i]) or np.isnan(lowest_20w_aligned[i]) or np.isnan(ema_50d_aligned[i]) or np.isnan(atr_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,34 +67,34 @@ def generate_signals(prices):
         vol_filter = volume[i] > volume_ma_20[i]
         
         # Price levels
-        resistance = highest_15d_aligned[i]
-        support = lowest_15d_aligned[i]
-        trend_filter = ema_30d_aligned[i]
+        resistance = highest_20w_aligned[i]
+        support = lowest_20w_aligned[i]
+        trend_filter = ema_50d_aligned[i]
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above 15-day resistance, above 30-day EMA, with volume
+            # Long: price breaks above 20-week resistance, above 50-day EMA, with volume
             if price > resistance and price > trend_filter and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below 15-day support, below 30-day EMA, with volume
+            # Short: price breaks below 20-week support, below 50-day EMA, with volume
             elif price < support and price < trend_filter and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: stop loss (2.5x ATR below entry) or price breaks below 15-day support
-            if price <= entry_price - 2.5 * atr_4h[i] or price < support:
+            # Long exit: stop loss (2x ATR below entry) or price breaks below 20-week support
+            if price <= entry_price - 2.0 * atr_4h[i] or price < support:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: stop loss (2.5x ATR above entry) or price breaks above 15-day resistance
-            if price >= entry_price + 2.5 * atr_4h[i] or price > resistance:
+            # Short exit: stop loss (2x ATR above entry) or price breaks above 20-week resistance
+            if price >= entry_price + 2.0 * atr_4h[i] or price > resistance:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_15D_Donchian_EMA30_Trend_VolumeFilter"
+name = "4h_20W_Donchian_EMA50_Trend_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
