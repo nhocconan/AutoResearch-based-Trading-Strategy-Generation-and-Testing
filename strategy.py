@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_P1P2_Breakout_Volume_TrendFilter
-# Hypothesis: Breakouts of 12h Camarilla P1 (inner resistance) and P2 (inner support) levels with volume confirmation and 12h EMA trend filter.
-# Uses daily pivots to filter false breakouts (only trade when price is outside daily P1/P2 range).
-# Target: 20-40 trades per year per symbol to avoid fee drag, works in bull/bear via trend filter.
+# 6h_1w_WeeklyPivot_Breakout_VolumeTrend
+# Hypothesis: Breakouts of weekly pivot levels (R1/S1) with volume confirmation and 1d EMA trend filter.
+# Weekly pivots capture longer-term structure; volume confirms institutional interest; EMA filter avoids counter-trend trades.
+# Works in bull/bear via trend filter. Target: 15-35 trades per year per symbol.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_P1P2_Breakout_Volume_TrendFilter"
-timeframe = "4h"
+name = "6h_1w_WeeklyPivot_Breakout_VolumeTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,99 +17,84 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for pivots and EMA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data ONCE before loop for pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === Calculate 12h Camarilla P1, P2 levels ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly pivot points (standard formula)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pivot point and range
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
-    # Camarilla inner levels: P1 = close + (range * 1.1/12), P2 = close - (range * 1.1/12)
-    p1_12h = close_12h + (range_12h * 1.1 / 12)
-    p2_12h = close_12h - (range_12h * 1.1 / 12)
+    # Weekly R1 and S1 (commonly used levels)
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # === 12h EMA34 for trend filter ===
-    close_12h_series = pd.Series(close_12h)
-    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # === Daily data for false breakout filter ===
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily Camarilla P1, P2 levels
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    p1_1d = close_1d + (range_1d * 1.1 / 12)
-    p2_1d = close_1d - (range_1d * 1.1 / 12)
+    # Align all weekly and daily levels to 6h
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align all 12h and daily levels to 4h
-    p1_12h_aligned = align_htf_to_ltf(prices, df_12h, p1_12h)
-    p2_12h_aligned = align_htf_to_ltf(prices, df_12h, p2_12h)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    p1_1d_aligned = align_htf_to_ltf(prices, df_1d, p1_1d)
-    p2_1d_aligned = align_htf_to_ltf(prices, df_1d, p2_1d)
-    
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # 6h: Volume ratio (current vs 24-period average)
     volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_ratio = volume / np.where(vol_ma24 > 0, vol_ma24, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after EMA and volume MA warmup
+    for i in range(50, n):  # Start after EMA and volume MA warmup
         # Get values
         close_val = prices['close'].iloc[i]
-        p1_12h_val = p1_12h_aligned[i]
-        p2_12h_val = p2_12h_aligned[i]
-        ema34_12h_val = ema34_12h_aligned[i]
-        p1_1d_val = p1_1d_aligned[i]
-        p2_1d_val = p2_1d_aligned[i]
+        r1_1w_val = r1_1w_aligned[i]
+        s1_1w_val = s1_1w_aligned[i]
+        ema50_1d_val = ema50_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(p1_12h_val) or np.isnan(p2_12h_val) or np.isnan(ema34_12h_val) or 
-            np.isnan(p1_1d_val) or np.isnan(p2_1d_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(r1_1w_val) or np.isnan(s1_1w_val) or np.isnan(ema50_1d_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above 12h P1 with volume confirmation, above 12h EMA34, and outside daily P1/P2 (above daily P1)
-            if (close_val > p1_12h_val and vol_ratio_val > 2.5 and 
-                close_val > ema34_12h_val and close_val > p1_1d_val):
+            # Long: Price breaks above weekly R1 with volume confirmation and above daily EMA50
+            if (close_val > r1_1w_val and vol_ratio_val > 2.0 and 
+                close_val > ema50_1d_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 12h P2 with volume confirmation, below 12h EMA34, and outside daily P1/P2 (below daily P2)
-            elif (close_val < p2_12h_val and vol_ratio_val > 2.5 and 
-                  close_val < ema34_12h_val and close_val < p2_1d_val):
+            # Short: Price breaks below weekly S1 with volume confirmation and below daily EMA50
+            elif (close_val < s1_1w_val and vol_ratio_val > 2.0 and 
+                  close_val < ema50_1d_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below 12h P2
-            if close_val <= p2_12h_val:
+            # Long exit: Price returns to or below weekly S1 (opposite level)
+            if close_val <= s1_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above 12h P1
-            if close_val >= p1_12h_val:
+            # Short exit: Price returns to or above weekly R1 (opposite level)
+            if close_val >= r1_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
