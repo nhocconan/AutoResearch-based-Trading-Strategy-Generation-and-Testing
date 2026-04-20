@@ -3,135 +3,162 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h with 1d pivot levels (R1/S1) for mean reversion, confirmed by 1w trend.
-# In ranging markets, price reverts to pivot; in trending markets, breaks through R1/S1 with volume.
-# Works in bull/bear by adapting to regime via 1w trend filter.
-# Target: 15-25 trades/year per symbol.
+# Hypothesis: 12h chart with 1d Donchian(20) breakout + volume confirmation + ADX(14) trend filter.
+# Breakouts above upper Donchian with volume and strong trend (ADX>25) go long.
+# Breakouts below lower Donchian with volume and strong trend go short.
+# In weak trends (ADX<20), fade the breakouts for mean reversion.
+# Uses 1w EMA(40) to filter trades in direction of weekly trend only.
+# Target: 20-40 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for pivot calculation
+    # Load 1d data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily pivot points (standard formula)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot = (H + L + C)/3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # Donchian channels (20-period)
+    upper_dc = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_dc = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Donchian channels to 12h timeframe
+    upper_dc_aligned = align_htf_to_ltf(prices, df_1d, upper_dc)
+    lower_dc_aligned = align_htf_to_ltf(prices, df_1d, lower_dc)
     
-    # Load 1w data for trend filter
+    # Load 1w data for trend filter (EMA40)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Weekly EMA(20) for trend
     close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
     
-    # 6h data
+    # Load 1d data for ADX calculation (using daily data for stability)
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate ADX(14) on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus14 / np.where(tr14 == 0, 1, tr14)
+    di_minus = 100 * dm_minus14 / np.where(tr14 == 0, 1, tr14)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 12h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h ATR(14) for volatility and stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 6h volume ratio (current / 20-period average)
+    # 12h volume ratio (current / 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_dc_aligned[i]) or np.isnan(lower_dc_aligned[i]) or
+            np.isnan(ema_40_1w_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_trend = ema_20_1w_aligned[i]
-        atr = atr_14[i]
-        vol_ratio_6h = vol_ratio[i]
+        upper_dc_val = upper_dc_aligned[i]
+        lower_dc_val = lower_dc_aligned[i]
+        ema_trend = ema_40_1w_aligned[i]
+        adx_val = adx_aligned[i]
+        vol_ratio_12h = vol_ratio[i]
         
-        # Determine market regime from weekly trend
-        uptrend = price > ema_trend
-        downtrend = price < ema_trend
+        # Determine market regime from ADX
+        strong_trend = adx_val > 25
+        weak_trend = adx_val < 20
         
-        # Volatility filter: avoid extreme volatility
-        atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values[i]
-        vol_filter = (atr < 3.0 * atr_ma_20)
+        # Weekly trend filter
+        above_weekly_ema = price > ema_trend
+        below_weekly_ema = price < ema_trend
         
         # Volume filter: require above-average volume
-        vol_filter = vol_filter and (vol_ratio_6h > 1.2)
+        vol_filter = vol_ratio_12h > 1.5
         
         if position == 0:
-            # In uptrend: look for long near S1 (support)
-            if uptrend and vol_filter:
-                if price <= s1_val * 1.002:  # Near S1 with small buffer
-                    signals[i] = 0.25
+            # Strong trend: breakout continuation
+            if strong_trend and vol_filter:
+                if price > upper_dc_val and above_weekly_ema:
+                    signals[i] = 0.30
                     position = 1
-            # In downtrend: look for short near R1 (resistance)
-            elif downtrend and vol_filter:
-                if price >= r1_val * 0.998:  # Near R1 with small buffer
-                    signals[i] = -0.25
+                elif price < lower_dc_val and below_weekly_ema:
+                    signals[i] = -0.30
                     position = -1
-            # In ranging (no clear trend): fade extremes
-            else:
-                if price <= s1_val * 1.002 and vol_filter:  # Near S1
-                    signals[i] = 0.25
+            # Weak trend: mean reversion at Donchian levels
+            elif weak_trend and vol_filter:
+                if price < lower_dc_val and price > ema_trend:  # Oversold in uptrend
+                    signals[i] = 0.30
                     position = 1
-                elif price >= r1_val * 0.998 and vol_filter:  # Near R1
-                    signals[i] = -0.25
+                elif price > upper_dc_val and price < ema_trend:  # Overbought in downtrend
+                    signals[i] = -0.30
                     position = -1
         
         elif position == 1:
-            # Long exit: price reaches pivot or stops reversed
-            if price >= pivot_val or (not vol_filter):
+            # Long exit: price reaches opposite Donchian or trend weakens
+            if price < lower_dc_val or adx_val < 20 or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price reaches pivot or stops reversed
-            if price <= pivot_val or (not vol_filter):
+            # Short exit: price reaches opposite Donchian or trend weakens
+            if price > upper_dc_val or adx_val < 20 or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_1d_Pivot_R1S1_MeanReversion_TrendFilter_v1"
-timeframe = "6h"
+name = "12h_1d_Donchian20_Breakout_ADXTrend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
