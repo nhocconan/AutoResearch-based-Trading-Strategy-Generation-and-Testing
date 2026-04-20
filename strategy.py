@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_Trend_Filter
-Hypothesis: Trade 4h Camarilla R1/S1 level breakouts with volume confirmation and 1d trend filter.
+12h_Pivot_R1S1_Breakout_Volume_Trend_Filter
+Hypothesis: Trade 12h Camarilla R1/S1 level breakouts with volume confirmation and 1d trend filter.
 Long when price breaks above R1 with volume spike and 1d uptrend; short when breaks below S1 with volume spike and 1d downtrend.
 Camarilla levels provide institutional support/resistance, volume filter reduces false breakouts, and 1d trend filter avoids counter-trend trades.
-Target: 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+Designed for low trade frequency (<30/year) to minimize fee drag while capturing significant breakouts.
 Works in bull/bear: 1d trend filter avoids counter-trend trades, volume filter reduces false breakouts.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_Breakout_Volume_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -41,7 +41,7 @@ def generate_signals(prices):
             ema50_1d[i] = multiplier * close_1d[i] + (1 - multiplier) * ema50_1d[i-1]
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 4h Camarilla levels (R1, S1)
+    # Calculate 12h Camarilla levels (R1, S1)
     camarilla_R1 = np.full_like(high, np.nan)
     camarilla_S1 = np.full_like(low, np.nan)
     for i in range(1, n):
