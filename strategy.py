@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_1d_Pivot_R2S2_MomentumBreakout
-# Hypothesis: Trade momentum breakouts from 1d R2/S2 levels on 6h timeframe with volume confirmation.
-# R2/S2 levels provide balanced breakout points that capture momentum while filtering noise.
-# Uses volume spike confirmation to ensure institutional participation.
-# Works in both bull and bear markets by trading breakouts in direction of momentum.
-# Targets 20-40 trades per year by requiring strong momentum breaks with volume confirmation.
+# 12h_1w_1d_Triple_Timeframe_Confluence
+# Hypothesis: Trade breakouts of weekly pivot R1/S1 levels on 12h timeframe with daily trend filter and volume confirmation.
+# Weekly pivots provide strong institutional levels; daily trend ensures alignment with higher timeframe momentum.
+# Volume spike confirms institutional participation. Works in bull/bear by trading breakouts in direction of daily trend.
+# Targets 15-30 trades per year by requiring confluence of weekly level, daily trend, and volume spike.
 
-name = "6h_1d_Pivot_R2S2_MomentumBreakout"
-timeframe = "6h"
+name = "12h_1w_1d_Triple_Timeframe_Confluence"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,27 +23,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d R2 and S2 levels using previous day's data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly R1 and S1 levels using previous week's data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot point and range
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    
+    # Weekly R1 and S1 levels
+    s1_1w = pivot_1w - range_1w * 1.0
+    r1_1w = pivot_1w + range_1w * 1.0
+    
+    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Pivot point and range
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: R2 and S2 (momentum breakout levels)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
-    
-    # Align 1d levels to 6h timeframe
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    # Align weekly levels and daily EMA to 12h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,34 +65,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(close[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above R2 with volume spike
-            if (close[i] > r2_aligned[i] * 1.002 and 
-                volume[i] > 1.8 * volume_ma[i]):
+            # Long: price above weekly R1, daily uptrend, volume spike
+            if (close[i] > r1_aligned[i] * 1.002 and 
+                close[i] > ema_34_aligned[i] and
+                volume[i] > 2.0 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below S2 with volume spike
-            elif (close[i] < s2_aligned[i] * 0.998 and 
-                  volume[i] > 1.8 * volume_ma[i]):
+            # Short: price below weekly S1, daily downtrend, volume spike
+            elif (close[i] < s1_aligned[i] * 0.998 and 
+                  close[i] < ema_34_aligned[i] and
+                  volume[i] > 2.0 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below S2 or momentum loss
-            if close[i] < s2_aligned[i] * 0.998:
+            # Long exit: price below weekly S1 or trend reversal
+            if close[i] < s1_aligned[i] * 0.998 or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above R2 or momentum loss
-            if close[i] > r2_aligned[i] * 1.002:
+            # Short exit: price above weekly R1 or trend reversal
+            if close[i] > r1_aligned[i] * 1.002 or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
