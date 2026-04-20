@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Donchian20_Volume_Spike_Trend_v1"
-timeframe = "4h"
+name = "1h_4d_1d_Camarilla_R1S1_Breakout_Volume_Trend_v2"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,85 +12,138 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 12h Donchian Channel (20-period) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === Daily Close for Trend Filter ===
+    close_1d = df_1d['close'].values
+    sma200_1d = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
+    sma200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d)
     
-    # Calculate Donchian upper/lower bands
-    high_series = pd.Series(high_12h)
-    low_series = pd.Series(low_12h)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # === Daily 4h for Camarilla Pivot Calculation ===
+    # Note: We use 4h data to calculate daily pivots (more granular than daily-only)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
     
-    # Align to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # === 4h: Volume Spike and Trend Filter ===
+    # Group 4h bars into days (6 bars per day)
+    # Calculate daily OHLC from 4h data
+    n_4h = len(high_4h)
+    days = n_4h // 6
+    if days < 2:
+        return np.zeros(n)
+    
+    # Reshape to get daily OHLC from 4h
+    high_daily = np.max(high_4h[:days*6].reshape(days, 6), axis=1)
+    low_daily = np.min(low_4h[:days*6].reshape(days, 6), axis=1)
+    close_daily = close_4h[:days*6].reshape(days, 6)[:, -1]  # Last 4h bar of each day
+    
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_daily, 1)
+    prev_low = np.roll(low_daily, 1)
+    prev_close = np.roll(close_daily, 1)
+    
+    # Pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
+    
+    # Expand to 4h resolution (each day's levels apply to its 6 bars)
+    r1_4h = np.repeat(r1, 6)
+    s1_4h = np.repeat(s1, 6)
+    pivot_4h = np.repeat(pivot, 6)
+    
+    # Align 4h data to 1h
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    pivot_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
+    
+    # === 1h Data: Price, Volume, and Trend ===
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Volume spike detection: volume > 2.0 * 20-period average
+    # Volume ratio with proper initialization
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma20)
+    vol_ratio = np.where(vol_ma20 > 0, volume / vol_ma20, 0)
     
-    # 4h EMA50 trend filter
+    # 1h SMA50 trend filter
     close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    sma50 = close_series.rolling(window=50, min_periods=50).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
+        # Skip outside session
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
         close_val = close[i]
-        vol_spike_val = vol_spike[i]
-        ema50_val = ema50[i]
-        upper_val = donchian_upper_aligned[i]
-        lower_val = donchian_lower_aligned[i]
+        vol_ratio_val = vol_ratio[i]
+        sma50_val = sma50[i]
+        sma200_1d_val = sma200_1d_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        pivot_val = pivot_aligned[i]
         
-        # Skip if any value is NaN
-        if (np.isnan(vol_spike_val) or np.isnan(ema50_val) or 
-            np.isnan(upper_val) or np.isnan(lower_val)):
+        # Skip if any value is invalid
+        if (np.isnan(vol_ratio_val) or np.isnan(sma50_val) or np.isnan(sma200_1d_val) or 
+            np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian upper with volume spike and uptrend
-            if (close_val > upper_val and 
-                vol_spike_val and 
-                close_val > ema50_val):
-                signals[i] = 0.25
+            # Long: Price breaks above R1 with volume confirmation and uptrend (1h & daily)
+            if (close_val > r1_val and 
+                vol_ratio_val > 2.0 and 
+                close_val > sma50_val and
+                close_val > sma200_1d_val):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below Donchian lower with volume spike and downtrend
-            elif (close_val < lower_val and 
-                  vol_spike_val and 
-                  close_val < ema50_val):
-                signals[i] = -0.25
+            # Short: Price breaks below S1 with volume confirmation and downtrend (1h & daily)
+            elif (close_val < s1_val and 
+                  vol_ratio_val > 2.0 and 
+                  close_val < sma50_val and
+                  close_val < sma200_1d_val):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below Donchian lower or volume drops
-            if close_val < lower_val or not vol_spike_val:
+            # Long exit: Price returns below pivot or volume dries up
+            if close_val < pivot_val or vol_ratio_val < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Price returns above Donchian upper or volume drops
-            if close_val > upper_val or not vol_spike_val:
+            # Short exit: Price returns above pivot or volume dries up
+            if close_val > pivot_val or vol_ratio_val < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
