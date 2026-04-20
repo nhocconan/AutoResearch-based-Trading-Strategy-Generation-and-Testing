@@ -3,81 +3,78 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout + Volume Spike + Choppiness Regime
-# - Long: Price breaks above Donchian(20) high + volume > 1.5x average + chop > 61.8 (range)
-# - Short: Price breaks below Donchian(20) low + volume > 1.5x average + chop > 61.8
-# - Exit: Opposite Donchian break or volume drops below average
-# - Choppiness filter ensures we only trade in ranging markets where breakouts are meaningful
-# - Volume spike confirms breakout strength
-# - Designed for 4h timeframe with selective entries to avoid overtrading
-# - Target: 20-50 trades per year per symbol (80-200 total over 4 years)
+# Hypothesis: 12h Donchian Breakout with Daily Trend Filter
+# - Long when price breaks above 20-period Donchian high + price above 1d EMA50
+# - Short when price breaks below 20-period Donchian low + price below 1d EMA50
+# - Volume confirmation: current volume > 1.5x 20-period average volume
+# - Designed for 12h timeframe to capture medium-term trends with high-probability entries
+# - Donchian provides clear breakout levels, EMA50 ensures trend alignment
+# - Volume filter ensures breakouts have conviction
+# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Calculate indicators on 4h data
+    # Load 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate EMA50 on 1d timeframe
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align EMA50 to 12h timeframe
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate 12h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Average volume (20-period)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Choppiness Index (14-period)
-    atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((atr * 14) / (highest_high - lowest_low)) / np.log10(14)
+    # Volume average for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(avg_volume[i]) or np.isnan(chop[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema50_12h[i]) or np.isnan(vol_avg[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike condition (1.5x average)
-        volume_spike = volume[i] > 1.5 * avg_volume[i]
-        
-        # Choppiness regime (range market)
-        chop_range = chop[i] > 61.8
-        
-        # Donchian breakout conditions
-        breakout_up = close[i] > high_20[i-1]  # Using previous bar's high
-        breakout_down = close[i] < low_20[i-1]  # Using previous bar's low
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirm = volume[i] > 1.5 * vol_avg[i]
         
         if position == 0:
-            # Long entry: Donchian breakout up + volume spike + chop range
-            if breakout_up and volume_spike and chop_range:
+            # Long entry: price breaks above Donchian high + above 1d EMA50 + volume
+            if close[i] > donchian_high[i] and close[i] > ema50_12h[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Donchian breakout down + volume spike + chop range
-            elif breakout_down and volume_spike and chop_range:
+            # Short entry: price breaks below Donchian low + below 1d EMA50 + volume
+            elif close[i] < donchian_low[i] and close[i] < ema50_12h[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Donchian breakout down or no volume spike
-            if breakout_down or not volume_spike:
+            # Long exit: price breaks below Donchian low or falls below 1d EMA50
+            if close[i] < donchian_low[i] or close[i] < ema50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Donchian breakout up or no volume spike
-            if breakout_up or not volume_spike:
+            # Short exit: price breaks above Donchian high or rises above 1d EMA50
+            if close[i] > donchian_high[i] or close[i] > ema50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Chop"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
