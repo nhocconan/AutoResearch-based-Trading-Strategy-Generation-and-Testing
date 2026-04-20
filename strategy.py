@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_2w_Fibonacci_Retracement_Trend
-# Hypothesis: In trending markets (ADX > 25), price respects 1-week Fibonacci retracement levels (38.2%, 61.8%) from the prior 2-week swing.
-# We buy at the 61.8% retracement of an uptrend and sell at the 38.2% retracement of a downtrend using 12-hour closes.
-# Volume confirmation filters weak moves. Targets 15-30 trades/year by requiring confluence of Fib level, volume surge, and trend.
-# Works in both bull and bear markets due to trend filtering.
+# 6h_1d_Ichimoku_Cloud_Breakout
+# Hypothesis: On 6h timeframe, trade breakouts above/below 1d Ichimoku Cloud (Senkou Span A/B)
+# with confirmation from TK Cross (Tenkan/Kijun) aligned with trend. Uses cloud as dynamic
+# support/resistance and TK cross for momentum. Works in both bull/bear markets as cloud
+# adapts to volatility and TK cross filters false breakouts. Targets 20-40 trades/year
+# by requiring price to be outside cloud + TK cross alignment + volume surge.
 
-name = "12h_2w_Fibonacci_Retracement_Trend"
-timeframe = "12h"
+name = "6h_1d_Ichimoku_Cloud_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,66 +24,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate 2-week swing high/low for Fibonacci
-    # Use rolling 2-week window (10 trading days approx) for swing points
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 2-week rolling max/min for swing points
-    lookback = 10  # ~2 weeks of 5 trading days each
-    swing_high = pd.Series(high_1w).rolling(window=lookback, min_periods=lookback).max().values
-    swing_low = pd.Series(low_1w).rolling(window=lookback, min_periods=lookback).min().values
+    # Ichimoku parameters (standard: 9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_tenkan + min_low_tenkan) / 2
     
-    # Calculate Fibonacci levels: 38.2% and 61.8% retracements
-    diff = swing_high - swing_low
-    fib_382 = swing_high - (diff * 0.382)  # 38.2% retracement from high
-    fib_618 = swing_high - (diff * 0.618)  # 61.8% retracement from high
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_kijun + min_low_kijun) / 2
     
-    # Align weekly Fib levels to 12h timeframe
-    fib_382_aligned = align_htf_to_ltf(prices, df_1w, fib_382)
-    fib_618_aligned = align_htf_to_ltf(prices, df_1w, fib_618)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2, plotted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Calculate 1w ADX for trend filter (14-period)
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Senkou Span B (Leading Span B): (52-period high + low)/2, plotted 26 periods ahead
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2
     
-    # Directional Movement
-    up_move = high_1w[1:] - high_1w[:-1]
-    down_move = low_1w[:-1] - low_1w[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    # Not used for signals as it requires future data
     
-    # Smoothed TR and DM using Wilder smoothing
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])
-        # Subsequent values: Wilder smoothing
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Shift Senkou Span A and B forward by 26 periods (for plotting)
+    # But for signal generation, we need current cloud (already shifted in data)
+    # Actually, Senkou A/B are already plotted ahead, so we use them as is for current cloud
     
-    atr = smooth_wilder(tr, 14)
-    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
-    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth_wilder(dx, 14)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # TK Cross: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
+    tk_cross = tenkan_aligned - kijun_aligned
+    
+    # Cloud boundaries: top = max(Senkou A, Senkou B), bottom = min(Senkou A, Senkou B)
+    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
     
     # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -94,36 +85,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(fib_382_aligned[i]) or np.isnan(fib_618_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Only trade in trending markets (ADX > 25)
-            if adx_aligned[i] > 25:
-                # Long at 61.8% retracement (support in uptrend) with volume confirmation
-                if (close[i] > fib_618_aligned[i] * 0.995 and 
-                    volume[i] > 2.0 * volume_ma[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # Short at 38.2% retracement (resistance in downtrend) with volume
-                elif (close[i] < fib_382_aligned[i] * 1.005 and 
-                      volume[i] > 2.0 * volume_ma[i]):
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price above cloud + TK bullish cross + volume surge
+            if (close[i] > cloud_top[i] * 1.002 and 
+                tk_cross[i] > 0 and 
+                volume[i] > 1.5 * volume_ma[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: price below cloud + TK bearish cross + volume surge
+            elif (close[i] < cloud_bottom[i] * 0.998 and 
+                  tk_cross[i] < 0 and 
+                  volume[i] > 1.5 * volume_ma[i]):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: break below 38.2% level or trend weakening
-            if (close[i] < fib_382_aligned[i] * 0.995) or (adx_aligned[i] < 20):
+            # Long exit: price drops below cloud OR TK turns bearish
+            if (close[i] < cloud_bottom[i] * 0.998) or (tk_cross[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above 61.8% level or trend weakening
-            if (close[i] > fib_618_aligned[i] * 1.005) or (adx_aligned[i] < 20):
+            # Short exit: price rises above cloud OR TK turns bullish
+            if (close[i] > cloud_top[i] * 1.002) or (tk_cross[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
