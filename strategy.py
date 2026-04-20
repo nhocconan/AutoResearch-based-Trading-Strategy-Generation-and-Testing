@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 6h_KAMA_Trend_Filter_PriceAction
-# Hypothesis: KAMA adapts to market noise, providing a dynamic trend filter that reduces whipsaws in choppy markets.
-# Combined with price action (higher highs/lows) and volume confirmation, it captures sustained trends while avoiding false signals.
-# Designed for 6h timeframe to balance responsiveness and noise reduction, working in both bull and bear markets.
+# 4h_Donchian_Breakout_VolumeTrend_Filter
+# Hypothesis: Donchian channel breakouts capture sustained momentum in BTC/ETH.
+# Volume confirmation ensures institutional participation, while EMA trend filter
+# avoids counter-trend trades. Designed for 4h timeframe to limit trades (target: 20-50/year)
+# and reduce fee drag. Works in bull markets via breakouts and bear markets via
+# short breakdowns with trend alignment.
 
-name = "6h_KAMA_Trend_Filter_PriceAction"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_VolumeTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,77 +24,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    def kama(close, er_length=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.abs(np.diff(close)).cumsum()
-        volatility = np.diff(volatility, prepend=volatility[0])
-        er = change / (volatility + 1e-10)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
-    
-    # Calculate price action: higher highs and higher lows for uptrend, lower highs and lower lows for downtrend
-    def price_action_trend(high, low, lookback=5):
-        hh = np.zeros_like(high, dtype=bool)
-        ll = np.zeros_like(low, dtype=bool)
-        for i in range(lookback, len(high)):
-            hh[i] = high[i] > np.max(high[i-lookback:i])
-            ll[i] = low[i] < np.min(low[i-lookback:i])
-        return hh, ll
-    
-    # Get 1d data for higher timeframe trend filter
+    # Get daily data ONCE before loop for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on 1d close
-    kama_1d = kama(df_1d['close'].values)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate 50-period EMA on daily close for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Price action on 6h
-    hh, ll = price_action_trend(high, low, lookback=3)
+    # Donchian channel (20-period) - using rolling window
+    # Upper band: highest high of last 20 periods
+    # Lower band: lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma20 * 1.3)
+    volume_filter = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure indicators are ready
+    start_idx = 50  # Ensure EMA and Donchian are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(volume_filter[i]) or
-            np.isnan(hh[i]) or np.isnan(ll[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above KAMA(1d) + higher high + volume confirmation
-            if close[i] > kama_1d_aligned[i] and hh[i] and volume_filter[i]:
+            # Long: price breaks above Donchian upper + volume confirmation + price above daily EMA50
+            if close[i] > donchian_upper[i] and volume_filter[i] and close[i] > ema_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA(1d) + lower low + volume confirmation
-            elif close[i] < kama_1d_aligned[i] and ll[i] and volume_filter[i]:
+            # Short: price breaks below Donchian lower + volume confirmation + price below daily EMA50
+            elif close[i] < donchian_lower[i] and volume_filter[i] and close[i] < ema_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below KAMA(1d) or lower low forms
-            if close[i] < kama_1d_aligned[i] or ll[i]:
+            # Long: exit if price breaks below Donchian lower (trend reversal)
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above KAMA(1d) or higher high forms
-            if close[i] > kama_1d_aligned[i] or hh[i]:
+            # Short: exit if price breaks above Donchian upper (trend reversal)
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
