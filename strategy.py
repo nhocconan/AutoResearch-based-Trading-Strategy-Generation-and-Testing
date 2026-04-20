@@ -3,11 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily ADX for trend strength (ADX > 25) and daily Donchian(20) breakouts for entry.
-# Uses volume confirmation above 20-period average and session filter (8-20 UTC) to avoid low-volume periods.
-# Exits when price breaks opposite Donchian level or trend weakens (ADX < 20).
-# Designed for 4h timeframe with ~20-50 trades/year to minimize fee drag and work in both bull and bear markets.
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -102,11 +97,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
             if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
             elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -115,7 +110,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Short exit: price breaks above Donchian high or ADX < 20 (trend weakening)
@@ -123,7 +118,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
@@ -133,7 +128,7 @@ def generate_signals(prices):
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 4h timeframe with ~20-50 trades/year
+# Designed for 4h timeframe with ~15-30 trades/year
 name = "4h_ADX_Donchian_Breakout_Volume_Session_v1"
 timeframe = "4h"
 leverage = 1.0
