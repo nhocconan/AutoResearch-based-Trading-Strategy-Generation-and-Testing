@@ -5,10 +5,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE
+    # Load 4h and 1d data for trend and regime filters
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
@@ -63,7 +63,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if NaN in critical values
         if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or 
@@ -98,11 +98,11 @@ def generate_signals(prices):
         if position == 0:
             # Enter long in strong uptrend with volume and regime filter
             if trend_up and vol_filter and regime_filter:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Enter short in strong downtrend with volume and regime filter
             elif trend_down and vol_filter and regime_filter:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -111,7 +111,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: trend breakdown, volatility spike, or regime collapse
@@ -119,10 +119,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_1d_EMA_Trend_Volume_Regime_v2"
+name = "4h_1d_EMA_Trend_Volume_Regime_v1"
 timeframe = "4h"
 leverage = 1.0
