@@ -5,17 +5,23 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for indicators
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Load daily data
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily ATR for volatility
+    # Daily ATR for volatility filter
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
@@ -26,35 +32,24 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Daily volume average
+    # Daily volume for confirmation
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate Williams %R (14-period)
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * ((highest_high - close_1d) / (highest_high - lowest_low))
-    williams_r[np.isnan(highest_high) | np.isnan(lowest_low) | (highest_high == lowest_low)] = -50
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Calculate RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Daily high/low for breakout detection
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(williams_r_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(close_1d[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,30 +57,32 @@ def generate_signals(prices):
         
         price = close_1d[i]
         vol = volume_1d[i]
-        wr = williams_r_aligned[i]
-        rsi_val = rsi_aligned[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + RSI < 50 + volume confirmation
-            if (wr < -80 and rsi_val < 50 and vol > 1.3 * vol_ma_1d_aligned[i]):
+            # Long: price breaks above 20-day high with volume confirmation and bullish weekly trend
+            if (price > high_20_aligned[i] and 
+                vol > 1.5 * vol_ma_1d_aligned[i] and 
+                price > ema_20_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) + RSI > 50 + volume confirmation
-            elif (wr > -20 and rsi_val > 50 and vol > 1.3 * vol_ma_1d_aligned[i]):
+            # Short: price breaks below 20-day low with volume confirmation and bearish weekly trend
+            elif (price < low_20_aligned[i] and 
+                  vol > 1.5 * vol_ma_1d_aligned[i] and 
+                  price < ema_20_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R crosses above -50 or RSI > 70
-            if wr > -50 or rsi_val > 70:
+            # Long exit: price falls below 20-day low or weekly trend turns bearish
+            if price < low_20_aligned[i] or price < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses below -50 or RSI < 30
-            if wr < -50 or rsi_val < 30:
+            # Short exit: price rises above 20-day high or weekly trend turns bullish
+            if price > high_20_aligned[i] or price > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_RSI_VolumeFilter"
-timeframe = "1d"
+name = "12h_DailyBreakout_WeeklyTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
