@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
-"""
-6h_1d_AngleOfAttack_Breakout
-Hypothesis: Use 1-day price action to define a dynamic breakout zone (Angle of Attack - AoA).
-Long when price breaks above AoA resistance with volume confirmation; short when breaks below AoA support.
-AoA adapts to volatility and trend, providing robust support/resistance that works in bull/bear markets.
-Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
-"""
+# 12h_1d_Triple_Pullback_Strategy
+# 12h timeframe with 1d HTF
+# Strategy: Enter on pullbacks to EMA(34) in trending markets (ADX > 25) with volume confirmation
+# Exit when price closes opposite EMA or trend weakens
+# Works in bull/bear: trend following with pullback entries captures momentum while avoiding whipsaws
+# Target: 60-120 total trades over 4 years (15-30/year) with position size 0.25
 
-name = "6h_1d_AngleOfAttack_Breakout"
-timeframe = "6h"
+name = "12h_1d_Triple_Pullback_Strategy"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,80 +14,129 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for AoA calculation
+    # Get 1d data ONCE before loop for trend and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day range and midpoint for Angle of Attack
+    # Calculate 1d EMA(34) for trend direction
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d ADX(14) for trend strength
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Angle of Attack levels: based on 1-day range
-    range_1d = high_1d - low_1d
-    # Avoid division by zero
-    range_1d = np.where(range_1d == 0, 1e-10, range_1d)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d_arr[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d_arr[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Calculate AoA resistance (upper) and support (lower)
-    # Based on close position within the day's range
-    position_in_range = (close_1d - low_1d) / range_1d  # 0 to 1
-    # When price closes in upper half, resistance is higher; lower half, support is lower
-    aoa_resistance = high_1d + (range_1d * 0.15 * position_in_range)
-    aoa_support = low_1d - (range_1d * 0.15 * (1 - position_in_range))
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align to 6h timeframe
-    aoa_resistance_aligned = align_htf_to_ltf(prices, df_1d, aoa_resistance)
-    aoa_support_aligned = align_htf_to_ltf(prices, df_1d, aoa_support)
+    # Smoothed values
+    def smoothed_avg(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) >= period:
+            result[period-1] = np.nansum(x[:period])
+            for i in range(period, len(x)):
+                result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
     
-    # Calculate 6-day volume average for spike detection (on 6h data)
-    vol_6h = prices['volume'].values
-    vol_avg_6h = np.full(len(vol_6h), np.nan)
-    for i in range(len(vol_6h)):
-        if i >= 5:  # 6-period average
-            vol_avg_6h[i] = np.mean(vol_6h[i-5:i+1])
+    atr = smoothed_avg(tr, 14)
+    dm_plus_smooth = smoothed_avg(dm_plus, 14)
+    dm_minus_smooth = smoothed_avg(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smoothed_avg(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 12h EMA(34) for entry timing
+    close_12h = prices['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate 12h volume average for spike detection
+    volume_12h = prices['volume'].values
+    vol_avg_12h = np.full_like(volume_12h, np.nan)
+    for i in range(len(volume_12h)):
+        if i >= 19:  # 20-period average
+            vol_avg_12h[i] = np.mean(volume_12h[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 6  # Need enough data for 6-period volume average
+    start_idx = 50  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(aoa_resistance_aligned[i]) or np.isnan(aoa_support_aligned[i]):
+        # Get aligned values
+        ema_trend = ema_34_1d_aligned[i]
+        adx_val = adx_aligned[i]
+        ema_fast = ema_34_12h[i]
+        vol_avg = vol_avg_12h[i]
+        
+        # Skip if any values are NaN
+        if np.isnan(ema_trend) or np.isnan(adx_val) or np.isnan(ema_fast) or np.isnan(vol_avg):
             continue
             
         current_close = prices['close'].iloc[i]
         current_volume = prices['volume'].iloc[i]
-        vol_avg = vol_avg_6h[i]
         
-        # Volume spike: current volume > 1.3x 6-period average
-        vol_spike = (not np.isnan(vol_avg) and current_volume > 1.3 * vol_avg)
+        # Volume confirmation: current volume > 1.3x average
+        vol_confirm = current_volume > 1.3 * vol_avg
+        
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Long: price breaks above AoA resistance with volume spike
-            if current_close > aoa_resistance_aligned[i] and vol_spike:
+            # Long: price pulls back to EMA in uptrend with volume
+            if (strong_trend and 
+                current_close > ema_trend and  # Above 1d EMA (uptrend)
+                current_close <= ema_fast * 1.02 and  # Near 12h EMA (pullback)
+                current_close >= ema_fast * 0.98 and
+                vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below AoA support with volume spike
-            elif current_close < aoa_support_aligned[i] and vol_spike:
+            # Short: price pulls back to EMA in downtrend with volume
+            elif (strong_trend and 
+                  current_close < ema_trend and  # Below 1d EMA (downtrend)
+                  current_close >= ema_fast * 0.98 and  # Near 12h EMA (pullback)
+                  current_close <= ema_fast * 1.02 and
+                  vol_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below AoA support or volume dries up
-            if current_close < aoa_support_aligned[i] or (not np.isnan(vol_avg) and current_volume < 0.6 * vol_avg):
+            # Long exit: trend weakens or price crosses below EMA
+            if (adx_val < 20 or  # Trend weakening
+                current_close < ema_trend):  # Below 1d EMA
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above AoA resistance or volume dries up
-            if current_close > aoa_resistance_aligned[i] or (not np.isnan(vol_avg) and current_volume < 0.6 * vol_avg):
+            # Short exit: trend weakens or price crosses above EMA
+            if (adx_val < 20 or  # Trend weakening
+                current_close > ema_trend):  # Above 1d EMA
                 signals[i] = 0.0
                 position = 0
             else:
