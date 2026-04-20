@@ -8,106 +8,113 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data once for trend and ATR
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    # Load 4h data for trend and ATR (primary trend filter)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Daily ATR (14)
-    tr1 = np.abs(high_daily - low_daily)
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr1[0] = high_daily[0] - low_daily[0]
-    tr2[0] = np.abs(high_daily[0] - close_daily[0])
-    tr3[0] = np.abs(low_daily[0] - close_daily[0])
+    # 4h ATR (14)
+    tr1 = np.abs(high_4h - low_4h)
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1[0] = high_4h[0] - low_4h[0]
+    tr2[0] = np.abs(high_4h[0] - close_4h[0])
+    tr3[0] = np.abs(low_4h[0] - close_4h[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
-    # Daily EMA(34) for trend filter
-    ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    # 4h EMA(34) for trend filter
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # Load weekly data for regime filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Load 1d data for regime filter (daily trend)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
-    # Weekly EMA(20) for regime
-    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
+    close_1d = df_1d['close'].values
+    # 1d EMA(50) for regime filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Main timeframe data (4h)
+    # 1h data for entry timing
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema34_daily_aligned[i]) or np.isnan(atr_daily_aligned[i]) or 
-            np.isnan(ema20_weekly_aligned[i])):
+        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema34_daily = ema34_daily_aligned[i]
-        atr_daily = atr_daily_aligned[i]
-        ema20_weekly = ema20_weekly_aligned[i]
+        ema34_4h_val = ema34_4h_aligned[i]
+        atr_4h_val = atr_4h_aligned[i]
+        ema50_1d_val = ema50_1d_aligned[i]
         vol_current = volume[i]
         
-        # Trend filter: only long in daily uptrend, only short in daily downtrend
-        daily_uptrend = price > ema34_daily
-        daily_downtrend = price < ema34_daily
+        # Trend filter: 4h EMA34 direction
+        trend_up = price > ema34_4h_val
+        trend_down = price < ema34_4h_val
         
-        # Regime filter: avoid ranging markets (price near weekly EMA)
-        # Trending regime: price away from weekly EMA
-        dist_from_weekly = abs(price - ema20_weekly) / ema20_weekly
-        trending_regime = dist_from_weekly > 0.02  # 2% away from weekly EMA
+        # Regime filter: 1d EMA50 for trend strength (avoid weak trends)
+        regime_strong = abs(price - ema50_1d_val) > (0.5 * atr_4h_val)
         
-        # Volume filter: current volume > 1.3x 20-period average (approximated)
-        # Using current bar vs recent average
+        # Volume filter: current volume > 1.5x 20-period average
         vol_ma_recent = np.mean(volume[max(0, i-20):i]) if i >= 20 else volume[i]
-        vol_ok = vol_current > 1.3 * vol_ma_recent
+        vol_ok = vol_current > 1.5 * vol_ma_recent
         
         if position == 0:
-            # Long: price above daily EMA34, trending regime, volume confirmation
-            if daily_uptrend and trending_regime and vol_ok:
-                signals[i] = 0.25
+            # Long: 4h uptrend, strong regime, volume confirmation
+            if trend_up and regime_strong and vol_ok:
+                signals[i] = 0.20
                 position = 1
-            # Short: price below daily EMA34, trending regime, volume confirmation
-            elif daily_downtrend and trending_regime and vol_ok:
-                signals[i] = -0.25
+            # Short: 4h downtrend, strong regime, volume confirmation
+            elif trend_down and regime_strong and vol_ok:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below daily EMA34 OR regime turns ranging
-            if not daily_uptrend or not trending_regime:
+            # Long exit: 4h downtrend OR weak regime
+            if not trend_up or not regime_strong:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price crosses above daily EMA34 OR regime turns ranging
-            if not daily_downtrend or not trending_regime:
+            # Short exit: 4h uptrend OR weak regime
+            if not trend_down or not regime_strong:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_1d_1w_EMA34_Trend_Regime_VolumeFilter_v1"
-timeframe = "4h"
+name = "1h_4h_1d_EMA34_Trend_Regime_VolumeFilter_v1"
+timeframe = "1h"
 leverage = 1.0
