@@ -8,94 +8,74 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for OHLC and volume
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Load 4h data for primary analysis
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Load 12h data for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # EMA 34 on 12h close
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Daily ATR for volatility filter (14-period)
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    high_low[0] = high_1d[0] - low_1d[0]
-    high_close[0] = np.abs(high_1d[0] - close_1d[0])
-    low_close[0] = np.abs(low_1d[0] - close_1d[0])
+    # ATR for volatility filter (14-period on 4h)
+    high_low = high_4h - low_4h
+    high_close = np.abs(high_4h - np.roll(close_4h, 1))
+    low_close = np.abs(low_4h - np.roll(close_4h, 1))
+    high_low[0] = high_4h[0] - low_4h[0]
+    high_close[0] = np.abs(high_4h[0] - close_4h[0])
+    low_close[0] = np.abs(low_4h[0] - close_4h[0])
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     tr[0] = high_low[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
     
-    # Daily volume for confirmation (20-period MA)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # ADX calculation for trend strength (14-period)
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Avoid division by zero
-    plus_di_14 = np.zeros_like(tr_14)
-    minus_di_14 = np.zeros_like(tr_14)
-    mask = tr_14 != 0
-    plus_di_14[mask] = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values[mask] / tr_14[mask]
-    minus_di_14[mask] = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values[mask] / tr_14[mask]
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Volume MA for confirmation (20-period on 4h)
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1d[i]
-        vol = volume_1d[i]
+        price = close_4h[i]
+        vol = volume_4h[i]
         
         if position == 0:
-            # Long: price above weekly EMA20, strong trend (ADX > 25), volume confirmation
-            if (price > ema_20_1w_aligned[i] and 
-                adx_aligned[i] > 25 and 
-                vol > 1.5 * vol_ma_1d_aligned[i]):
+            # Long: price above 12h EMA34, volume confirmation
+            if (price > ema_34_12h_aligned[i] and 
+                vol > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly EMA20, strong trend (ADX > 25), volume confirmation
-            elif (price < ema_20_1w_aligned[i] and 
-                  adx_aligned[i] > 25 and 
-                  vol > 1.5 * vol_ma_1d_aligned[i]):
+            # Short: price below 12h EMA34, volume confirmation
+            elif (price < ema_34_12h_aligned[i] and 
+                  vol > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly EMA20 or trend weakens (ADX < 20)
-            if price < ema_20_1w_aligned[i] or adx_aligned[i] < 20:
+            # Long exit: price crosses below 12h EMA34
+            if price < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly EMA20 or trend weakens (ADX < 20)
-            if price > ema_20_1w_aligned[i] or adx_aligned[i] < 20:
+            # Short exit: price crosses above 12h EMA34
+            if price > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA20_ADX25_VolumeFilter"
-timeframe = "1d"
+name = "4h_12hEMA34_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
