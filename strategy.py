@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Trend_With_Volume_Confirmation_v1"
-timeframe = "4h"
+name = "6h_1d_Fibonacci_Pullback_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,36 +12,34 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Daily: KAMA for trend direction ===
+    # === 1d: EMA50 for trend direction ===
     close_1d = df_1d['close'].values
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, 10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # sum of |diff| over 10 periods
-    # Pad volatility to match length
-    volatility = np.concatenate([np.full(9, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # Start after 10 periods
-    for i in range(10, len(close_1d)):
-        if np.isnan(kama[i-1]):
-            kama[i] = close_1d[i]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # === 1d: 20-period high/low for Fibonacci levels ===
+    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # === 4h: ATR(20) for volatility ===
+    # Fibonacci retracement levels (0.382, 0.618)
+    fib_range = high_20 - low_20
+    fib_0382 = low_20 + 0.382 * fib_range
+    fib_0618 = low_20 + 0.618 * fib_range
+    
+    # Align 1d indicators
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    fib_0382_aligned = align_htf_to_ltf(prices, df_1d, fib_0382)
+    fib_0618_aligned = align_htf_to_ltf(prices, df_1d, fib_0618)
+    
+    # === 6h: ATR(14) for volatility ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -50,60 +48,82 @@ def generate_signals(prices):
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
-    # === Volume: 4h volume > 1.5x 20-period average ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 60  # Need enough data for all indicators
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Get values
-        kama_val = kama_aligned[i]
-        current_close = close[i]
+        # Get aligned values
+        ema_trend = ema_50_1d_aligned[i]
+        high_val = high_20_aligned[i]
+        low_val = low_20_aligned[i]
+        fib_0382_val = fib_0382_aligned[i]
+        fib_0618_val = fib_0618_aligned[i]
         current_atr = atr[i]
-        current_volume = volume[i]
-        current_vol_ma = vol_ma[i]
+        current_close = prices['close'].iloc[i]
+        current_low = prices['low'].iloc[i]
+        current_high = prices['high'].iloc[i]
         
         # Skip if any value is NaN
-        if (np.isnan(kama_val) or np.isnan(current_atr) or 
-            np.isnan(current_volume) or np.isnan(current_vol_ma)):
+        if (np.isnan(ema_trend) or np.isnan(high_val) or np.isnan(low_val) or
+            np.isnan(fib_0382_val) or np.isnan(fib_0618_val) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition
-        vol_condition = current_volume > 1.5 * current_vol_ma
-        
         if position == 0:
-            # Long: price above KAMA (uptrend) + volume
-            if current_close > kama_val and vol_condition:
+            # Long conditions:
+            # 1. Price above 1d EMA50 (uptrend)
+            # 2. Price pulls back to 0.618 Fib level and shows rejection (low touches/below level)
+            # 3. Current close rebounds above 0.382 Fib level (confirmation)
+            if (current_close > ema_trend and
+                current_low <= fib_0618_val and  # Pullback to/deep 0.618
+                current_close > fib_0382_val):   # Confirmation above 0.382
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
-            # Short: price below KAMA (downtrend) + volume
-            elif current_close < kama_val and vol_condition:
+            
+            # Short conditions:
+            # 1. Price below 1d EMA50 (downtrend)
+            # 2. Price pulls back to 0.382 Fib level and shows rejection (high touches/above level)
+            # 3. Current close drops below 0.618 Fib level (confirmation)
+            elif (current_close < ema_trend and
+                  current_high >= fib_0382_val and  # Pullback to/deep 0.382
+                  current_close < fib_0618_val):    # Confirmation below 0.618
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price crosses below KAMA OR stop loss
-            if current_close < kama_val or current_close < entry_price - 2.5 * current_atr:
+            # Long exit conditions:
+            # 1. Price falls below 1d EMA50 (trend change)
+            # 2. ATR-based stop loss
+            # 3. Take profit at 2x risk
+            if (current_close < ema_trend or
+                current_close < entry_price - 2.0 * current_atr):
+                signals[i] = 0.0
+                position = 0
+            elif current_close >= entry_price + 4.0 * current_atr:  # 2:1 reward/risk
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above KAMA OR stop loss
-            if current_close > kama_val or current_close > entry_price + 2.5 * current_atr:
+            # Short exit conditions:
+            # 1. Price rises above 1d EMA50 (trend change)
+            # 2. ATR-based stop loss
+            # 3. Take profit at 2x risk
+            if (current_close > ema_trend or
+                current_close > entry_price + 2.0 * current_atr):
+                signals[i] = 0.0
+                position = 0
+            elif current_close <= entry_price - 4.0 * current_atr:  # 2:1 reward/risk
                 signals[i] = 0.0
                 position = 0
             else:
