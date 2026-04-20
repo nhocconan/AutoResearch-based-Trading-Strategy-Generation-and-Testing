@@ -8,7 +8,13 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for 12h signals
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Load daily data
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -35,8 +41,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(close_1d[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -46,37 +52,37 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price above previous day's high with volume confirmation
-            if (price > high_1d[i-1] and 
+            # Long: price above weekly EMA50 with volume confirmation and sufficient volatility
+            if (price > ema_50_1w_aligned[i] and 
                 vol > 1.5 * vol_ma_1d_aligned[i] and 
                 atr_1d_aligned[i] > 0):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: price below previous day's low with volume confirmation
-            elif (price < low_1d[i-1] and 
+            # Short: price below weekly EMA50 with volume confirmation and sufficient volatility
+            elif (price < ema_50_1w_aligned[i] and 
                   vol > 1.5 * vol_ma_1d_aligned[i] and 
                   atr_1d_aligned[i] > 0):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Long exit: price drops below previous day's low or volatility drops
-            if price < low_1d[i-1] or vol < 0.5 * vol_ma_1d_aligned[i]:
+            # Long exit: price crosses below weekly EMA50 or volatility drops significantly
+            if price < ema_50_1w_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price rises above previous day's high or volatility drops
-            if price > high_1d[i-1] or vol < 0.5 * vol_ma_1d_aligned[i]:
+            # Short exit: price crosses above weekly EMA50 or volatility drops significantly
+            if price > ema_50_1w_aligned[i] or vol < 0.5 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Breakout_DailyHL_VolumeFilter"
-timeframe = "12h"
+name = "1d_WeeklyEMA50_VolumeFilter_V2"
+timeframe = "1d"
 leverage = 1.0
