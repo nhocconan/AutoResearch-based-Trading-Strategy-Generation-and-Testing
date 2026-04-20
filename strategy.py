@@ -1,138 +1,130 @@
 #!/usr/bin/env python3
-# 4h_12h_Donchian_Breakout_Volume_Trend_v1
-# Hypothesis: On 4h timeframe, trade breakouts of 12h Donchian channels with volume confirmation and 12h EMA trend filter.
-# In trending markets (price above/below 12h EMA50), breakouts of 12h Donchian(20) capture momentum.
-# Volume confirmation ensures breakout strength. Uses 12h ADX to filter ranging markets.
-# Targets 20-40 trades/year by requiring confluence of trend, breakout, and volume.
-# Works in bull markets via upward breakouts and bear markets via downward breakdowns.
+# 1d_1w_RSI_Divergence_TrendFilter_v1
+# Hypothesis: On 1d timeframe, trade weekly RSI divergence signals with trend filter.
+# Weekly RSI divergence identifies potential reversals, while daily trend filter (EMA50) 
+# ensures we trade with the intermediate trend. This combination works in both bull and bear markets
+# by capturing mean reversion within the trend context. Targets 15-25 trades/year with strict entry conditions.
 
-name = "4h_12h_Donchian_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "1d_1w_RSI_Divergence_TrendFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_rsi(close_prices, period=14):
+    """Calculate RSI with proper Wilder smoothing"""
+    if len(close_prices) < period + 1:
+        return np.full_like(close_prices, np.nan)
+    
+    delta = np.diff(close_prices)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    # First average gain/loss
+    avg_gain = np.zeros_like(close_prices)
+    avg_loss = np.zeros_like(close_prices)
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    # Wilder smoothing
+    for i in range(period + 1, len(close_prices)):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly RSI (14-period)
+    close_1w = df_1w['close'].values
+    rsi_1w = calculate_rsi(close_1w, 14)
     
-    # Donchian upper and lower bands
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.max(arr[i-window+1:i+1])
-        return res
+    # Align weekly RSI to daily timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.min(arr[i-window+1:i+1])
-        return res
+    # Calculate daily EMA50 for trend filter
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
     
-    donchian_high = rolling_max(high_12h, 20)
-    donchian_low = rolling_min(low_12h, 20)
-    
-    # Calculate 12h EMA50 for trend filter
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).values
-    
-    # Calculate 12h ADX for trend/ranging filter (14-period)
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    up_move = high_12h[1:] - high_12h[:-1]
-    down_move = low_12h[:-1] - low_12h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed TR and DM using Wilder smoothing
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])
-        # Subsequent values: Wilder smoothing
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    atr = smooth_wilder(tr, 14)
-    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
-    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth_wilder(dx, 14)
-    
-    # Align 12h indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # Volume average for spike detection (20-period)
+    # Calculate volume average for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 60  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(adx_aligned[i]) or
+        if (np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(ema50[i]) or 
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Only trade in trending markets (ADX > 25)
-            if adx_aligned[i] > 25:
-                # Long breakout above Donchian high with volume confirmation
-                if (close[i] > donchian_high_aligned[i] * 1.001 and 
-                    volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # Short breakdown below Donchian low with volume confirmation
-                elif (close[i] < donchian_low_aligned[i] * 0.999 and 
-                      volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = -0.25
-                    position = -1
+            # Look for RSI divergence signals
+            bullish_divergence = False
+            bearish_divergence = False
+            
+            # Check for bullish divergence: price making lower low, RSI making higher low
+            if i >= 20:  # Need sufficient lookback for divergence
+                # Find recent swing lows in price and RSI
+                price_low_idx = i - np.argmin(low[i-20:i+1])  # index of lowest price in last 20 periods
+                rsi_low_idx = i - np.argmin(rsi_1w_aligned[i-20:i+1])  # index of lowest RSI in last 20 periods
+                
+                # Bullish divergence: price lower low, RSI higher low
+                if (price_low_idx != rsi_low_idx and 
+                    low[i] < low[price_low_idx] and  # price made lower low
+                    rsi_1w_aligned[i] > rsi_1w_aligned[rsi_low_idx]):  # RSI made higher low
+                    bullish_divergence = True
+                
+                # Bearish divergence: price higher high, RSI lower high
+                price_high_idx = i - np.argmax(high[i-20:i+1])  # index of highest price in last 20 periods
+                rsi_high_idx = i - np.argmax(rsi_1w_aligned[i-20:i+1])  # index of highest RSI in last 20 periods
+                
+                if (price_high_idx != rsi_high_idx and 
+                    high[i] > high[price_high_idx] and  # price made higher high
+                    rsi_1w_aligned[i] < rsi_1w_aligned[rsi_high_idx]):  # RSI made lower high
+                    bearish_divergence = True
+            
+            # Enter long on bullish divergence with trend filter and volume confirmation
+            if bullish_divergence and close[i] > ema50[i] and volume[i] > 1.5 * volume_ma[i]:
+                signals[i] = 0.25
+                position = 1
+            # Enter short on bearish divergence with trend filter and volume confirmation
+            elif bearish_divergence and close[i] < ema50[i] and volume[i] > 1.5 * volume_ma[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price crosses below EMA50 or breakdown below Donchian low
-            if close[i] < ema_50_aligned[i] or close[i] < donchian_low_aligned[i]:
+            # Exit long: RSI overbought or trend change
+            if rsi_1w_aligned[i] > 70 or close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA50 or breakout above Donchian high
-            if close[i] > ema_50_aligned[i] or close[i] > donchian_high_aligned[i]:
+            # Exit short: RSI oversold or trend change
+            if rsi_1w_aligned[i] < 30 or close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
