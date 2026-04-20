@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_R1S1_MomentumBreakout_v2"
-timeframe = "6h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 100:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -35,43 +35,38 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 6h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # === 6h Momentum and Volume ===
+    # === 4h Trend and Volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 60-period EMA for trend filter (5 days)
+    # 34-period EMA for trend filter (approx 1 day)
     close_series = pd.Series(close)
-    ema60 = close_series.ewm(span=60, adjust=False, min_periods=60).mean().values
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume ratio (20-period average)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # Momentum: 5-period ROC
-    roc5 = np.zeros_like(close)
-    roc5[5:] = (close[5:] - close[:-5]) / close[:-5] * 100
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(80, n):
+    for i in range(40, n):
         # Get values
         close_val = close[i]
-        roc_val = roc5[i]
         vol_ratio_val = vol_ratio[i]
-        ema60_val = ema60[i]
+        ema34_val = ema34[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(roc_val) or np.isnan(vol_ratio_val) or np.isnan(ema60_val) or 
+        if (np.isnan(vol_ratio_val) or np.isnan(ema34_val) or 
             np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -79,32 +74,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R1 with positive momentum and volume
+            # Long: Break above R1 with volume and trend
             if (close_val > r1_val and 
-                roc_val > 0.5 and 
-                vol_ratio_val > 1.5 and
-                close_val > ema60_val):
+                vol_ratio_val > 1.8 and
+                close_val > ema34_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with negative momentum and volume
+            # Short: Break below S1 with volume and trend
             elif (close_val < s1_val and 
-                  roc_val < -0.5 and 
-                  vol_ratio_val > 1.5 and
-                  close_val < ema60_val):
+                  vol_ratio_val > 1.8 and
+                  close_val < ema34_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot or momentum turns negative
-            if close_val < pivot_val or roc_val < -0.3:
+            # Long exit: Price returns below pivot or volume dries up
+            if close_val < pivot_val or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot or momentum turns positive
-            if close_val > pivot_val or roc_val > 0.3:
+            # Short exit: Price returns above pivot or volume dries up
+            if close_val > pivot_val or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
