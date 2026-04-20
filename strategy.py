@@ -3,129 +3,125 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_KAMA_RSI_Chop_v1"
-timeframe = "4h"
+# Hypothesis: 12h Chande Kroll Stop with daily volume spike and weekly trend filter
+# Works in bull/bear: uses adaptive stops (CKS) to cut losses in downtrends and ride trends in uptrends
+# Volume spike confirms breakout strength, weekly trend avoids counter-trend trades
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag
+name = "12h_1w_ChandeKrollStop_VolumeTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Get weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === Daily KAMA for direction ===
+    # === Daily Chande Kroll Stop (dynamic stop levels) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    direction = np.abs(np.diff(close_1d, k=10, prepend=close_1d[:10]))
-    er = np.where(change != 0, direction / change, 0)
-    sc = (er * (0.6 - 0.06) + 0.06) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
     
-    # Daily RSI for overbought/oversold
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # True range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
     
-    # Weekly Chop for regime (high chop = range, low chop = trend)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Average True Range (ATR) - 10 period
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Average True Range of price change - 10 period
+    price_change = np.abs(close_1d - np.roll(close_1d, 1))
+    price_change[0] = 0
+    atr_pc = pd.Series(price_change).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Chande Kroll Stop: long stop = highest high - ATR*X, short stop = lowest low + ATR*X
+    # X = ATR of price change / ATR (adaptive multiplier)
+    x = np.where(atr > 0, atr_pc / atr, 1.0)
+    x = np.clip(x, 1.0, 3.0)  # reasonable bounds
+    
+    highest_high = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
+    
+    long_stop = highest_high - atr * x
+    short_stop = lowest_low + atr * x
+    
+    # Align CKS stops to 12h timeframe
+    long_stop_aligned = align_htf_to_ltf(prices, df_1d, long_stop)
+    short_stop_aligned = align_htf_to_ltf(prices, df_1d, short_stop)
+    
+    # === Weekly Trend Filter: EMA20 > EMA50 for uptrend, < for downtrend ===
     close_1w = df_1w['close'].values
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    chop_1w = 100 * np.log10((highest_high - lowest_low) / np.sum(tr[-13:], axis=0)) / np.log10(14)
-    chop_1w = np.where((highest_high - lowest_low) > 0, chop_1w, 50)
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_uptrend = ema20_1w > ema50_1w
+    weekly_downtrend = ema20_1w < ema50_1w
     
-    # Align to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_1w, additional_delay_bars=0)
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
     
-    # === 4h indicators for entry timing ===
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # 4h ATR for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 4h volume spike filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
+    # === Daily Volume Spike: volume > 2.0 * 20-period average ===
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (2.0 * vol_ma20_1d)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Get values
-        close_val = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = chop_aligned[i]
-        atr_val = atr[i]
-        vol_ratio_val = vol_ratio[i]
+        close_val = prices['close'].iloc[i]
+        long_stop_val = long_stop_aligned[i]
+        short_stop_val = short_stop_aligned[i]
+        vol_spike = volume_spike_aligned[i]
+        wk_up = weekly_uptrend_aligned[i]
+        wk_down = weekly_downtrend_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(kama_val) or np.isnan(rsi_val) or 
-            np.isnan(chop_val) or np.isnan(atr_val) or 
-            np.isnan(vol_ratio_val)):
+        if (np.isnan(close_val) or np.isnan(long_stop_val) or 
+            np.isnan(short_stop_val) or np.isnan(vol_spike) or
+            np.isnan(wk_up) or np.isnan(wk_down)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price > KAMA, RSI < 30 (oversold), Chop > 50 (range) with volume spike
-            if close_val > kama_val and rsi_val < 30 and chop_val > 50 and vol_ratio_val > 1.5:
+            # Long: Price above long stop (not stopped out) + volume spike + weekly uptrend
+            if close_val > long_stop_val and vol_spike and wk_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < KAMA, RSI > 70 (overbought), Chop > 50 (range) with volume spike
-            elif close_val < kama_val and rsi_val > 70 and chop_val > 50 and vol_ratio_val > 1.5:
+            # Short: Price below short stop (not stopped out) + volume spike + weekly downtrend
+            elif close_val < short_stop_val and vol_spike and wk_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price < KAMA OR RSI > 70
-            if close_val < kama_val or rsi_val > 70:
+            # Long: Continue if above long stop, else exit
+            if close_val > long_stop_val:
+                signals[i] = 0.25
+            else:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price > KAMA OR RSI < 30
-            if close_val > kama_val or rsi_val < 30:
+            # Short: Continue if below short stop, else exit
+            if close_val < short_stop_val:
+                signals[i] = -0.25
+            else:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
