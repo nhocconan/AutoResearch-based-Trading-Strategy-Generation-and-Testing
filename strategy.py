@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -63,23 +63,13 @@ def generate_signals(prices):
     vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 50-period EMA on weekly close
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
     # Session filter: 8-20 UTC
     hours = pd.DatetimeIndex(prices["open_time"]).hour  # pre-compute before loop
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Session filter: only trade 8-20 UTC
         hour = hours[i]
         if hour < 8 or hour > 20:
@@ -95,23 +85,22 @@ def generate_signals(prices):
         donch_low_val = donch_low_1d_aligned[i]
         vol_val = prices['volume'].iloc[i]
         vol_avg_val = vol_avg_20_aligned[i]
-        ema_50_val = ema_50_1w_aligned[i]
         
         # Skip if any value is NaN
         if (np.isnan(adx_val) or np.isnan(donch_high_val) or 
-            np.isnan(donch_low_val) or np.isnan(vol_avg_val) or np.isnan(ema_50_val)):
+            np.isnan(donch_low_val) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average, price above weekly EMA50
-            if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val and close_val > ema_50_val:
+            # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
+            if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average, price below weekly EMA50
-            elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val and close_val < ema_50_val:
+            # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
+            elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
                 signals[i] = -0.25
                 position = -1
         
@@ -133,14 +122,13 @@ def generate_signals(prices):
     
     return signals
 
-# 1d_ADX_Donchian_Breakout_WeeklyEMAFilter_Volume_Session_v1
+# 6h_ADX_Donchian_Breakout_Volume_Session_v1
 # Uses daily ADX for trend strength filter (ADX > 25)
 # Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
-# Weekly EMA50 filter: only trade in direction of weekly trend
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 1d timeframe with ~10-25 trades/year
-name = "1d_ADX_Donchian_Breakout_WeeklyEMAFilter_Volume_Session_v1"
-timeframe = "1d"
+# Designed for 6h timeframe with ~15-30 trades/year
+name = "6h_ADX_Donchian_Breakout_Volume_Session_v1"
+timeframe = "6h"
 leverage = 1.0
