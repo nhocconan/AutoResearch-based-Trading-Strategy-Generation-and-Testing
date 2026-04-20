@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Camarilla_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R2S2_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,43 +12,38 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Weekly High/Low for Range Calculation ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # === Daily Close for Pivot Calculation ===
+    # === Daily Camarilla Pivot Points (previous day) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly range
-    weekly_high = np.max(high_1w)
-    weekly_low = np.min(low_1w)
-    weekly_range = weekly_high - weekly_low
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Calculate daily pivot (previous day's close)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # avoid look-ahead
+    # Set first values to avoid look-ahead
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Classic pivot point
-    pivot = (weekly_high + weekly_low + prev_close_1d) / 3
+    # Classic pivot (same for Camarilla)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Camarilla R1 and S1 levels (more sensitive breakout levels)
-    r1 = pivot + (weekly_range * 1.1 / 12)
-    s1 = pivot - (weekly_range * 1.1 / 12)
+    # Camarilla R2 and S2 levels (stronger breakout levels)
+    r2 = pivot + (range_val * 1.1 / 6)
+    s2 = pivot - (range_val * 1.1 / 6)
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    # Align to 4h timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # === Volume Confirmation ===
     volume = prices['volume'].values
@@ -63,26 +58,26 @@ def generate_signals(prices):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
         pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(pivot_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or 
+            np.isnan(s2_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with volume confirmation
-            if close_val > r1_val and vol_ratio_val > 1.8:
-                signals[i] = 0.25
+            # Long: Break above R2 with volume confirmation
+            if close_val > r2_val and vol_ratio_val > 1.8:
+                signals[i] = 0.30
                 position = 1
-            # Short: Break below S1 with volume confirmation
-            elif close_val < s1_val and vol_ratio_val > 1.8:
-                signals[i] = -0.25
+            # Short: Break below S2 with volume confirmation
+            elif close_val < s2_val and vol_ratio_val > 1.8:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -91,7 +86,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Short exit: Price returns above pivot
@@ -99,6 +94,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
