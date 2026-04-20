@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_WithTrendFilter_v1"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:  # Need sufficient data
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
@@ -40,11 +40,6 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 1d: Calculate 200-period EMA for trend filter ===
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
     # === 4h: Volume ratio (current vs 20-period average) ===
     close = prices['close'].values
     volume = prices['volume'].values
@@ -54,32 +49,29 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Get values
         close_val = close[i]
         r1_level = camarilla_r1_aligned[i]
         s1_level = camarilla_s1_aligned[i]
-        ema200_val = ema200_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(ema200_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation AND price above 1d EMA200 (uptrend)
+            # Long: Price breaks above R1 with volume confirmation
             if (close_val > r1_level and   # Break above R1
-                vol_ratio_val > 2.0 and    # Strong volume confirmation
-                close_val > ema200_val):   # Price above 1d EMA200 (uptrend filter)
+                vol_ratio_val > 2.0):      # Strong volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation AND price below 1d EMA200 (downtrend)
+            # Short: Price breaks below S1 with volume confirmation
             elif (close_val < s1_level and   # Break below S1
-                  vol_ratio_val > 2.0 and    # Strong volume confirmation
-                  close_val < ema200_val):   # Price below 1d EMA200 (downtrend filter)
+                  vol_ratio_val > 2.0):      # Strong volume confirmation
                 signals[i] = -0.25
                 position = -1
         
