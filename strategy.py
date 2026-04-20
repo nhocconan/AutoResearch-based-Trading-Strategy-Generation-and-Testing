@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_1w_RSI_Divergence_TrendFilter_v1
-# Hypothesis: On 1d timeframe, trade RSI divergence with 1w trend filter.
-# Bullish divergence (price makes lower low, RSI makes higher low) in uptrend (price > 1w EMA200) -> long.
-# Bearish divergence (price makes higher high, RSI makes lower high) in downtrend (price < 1w EMA200) -> short.
-# Uses volume confirmation to avoid false signals. Targets 10-25 trades/year by requiring confluence of
-# divergence, trend, and volume. Designed to work in both bull and bear markets by following higher timeframe trend.
+# 6h_1d_LiquidityVoid_Reversal_Scalp
+# Hypothesis: Trade mean-reversion at 1d liquidity voids (unfilled gaps) on 6h timeframe.
+# Liquidity voids occur when price gaps overnight and leaves unfilled volume.
+# Price tends to return to fill these voids, creating mean-reversion opportunities.
+# Uses volume confirmation and volatility filter to avoid whipsaws.
+# Targets 15-35 trades/year by requiring void identification and volume confirmation.
 
-name = "1d_1w_RSI_Divergence_TrendFilter_v1"
-timeframe = "1d"
+name = "6h_1d_LiquidityVoid_Reversal_Scalp"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,80 +16,113 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate 1d liquidity voids (unfilled gaps)
+    open_1d = df_1d['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI(14) on 1d
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Identify gaps: overnight gap from previous close to current open
+    gap_up = open_1d[1:] - close_1d[:-1]  # positive = gap up
+    gap_down = close_1d[:-1] - open_1d[1:]  # positive = gap down
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Create arrays aligned with 1d index (same length as close_1d)
+    gap_up_full = np.concatenate([[0], gap_up])
+    gap_down_full = np.concatenate([[0], gap_down])
     
-    # Calculate volume average for spike detection
+    # Define liquidity void areas (unfilled gaps)
+    # For gap up: void is between previous close and current open
+    # For gap down: void is between current open and previous close
+    void_high = np.maximum(open_1d, close_1d)  # higher of open/close
+    void_low = np.minimum(open_1d, close_1d)   # lower of open/close
+    
+    # Only consider significant gaps (>0.1% of price)
+    min_gap = 0.001 * void_high
+    significant_gap = (void_high - void_low) > min_gap
+    
+    # Align void levels to 6h timeframe
+    void_high_aligned = align_htf_to_ltf(prices, df_1d, void_high)
+    void_low_aligned = align_htf_to_ltf(prices, df_1d, void_low)
+    significant_gap_aligned = align_htf_to_ltf(prices, df_1d, significant_gap.astype(float))
+    
+    # Calculate 1d ATR for volatility filter (14-period)
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i-2]) or np.isnan(rsi[i-1]) or np.isnan(rsi[i]) or
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(void_high_aligned[i]) or np.isnan(void_low_aligned[i]) or 
+            np.isnan(significant_gap_aligned[i]) or np.isnan(atr_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Skip if not a significant gap
+        if significant_gap_aligned[i] < 0.5:
+            if position != 0:
+                signals[i] = 0.25 if position == 1 else -0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Bullish divergence: price makes lower low, RSI makes higher low
-            if (low[i] < low[i-1] and low[i-1] < low[i-2] and  # Lower low in price
-                rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2] and  # Higher low in RSI
-                close[i] > ema200_1w_aligned[i] and           # Uptrend filter (price > 1w EMA200)
-                volume[i] > 1.5 * volume_ma[i]):              # Volume confirmation
+            # Look for mean reversion to fill the void
+            # Long when price approaches void low from below (filling gap down)
+            if (close[i] <= void_low_aligned[i] * 1.002 and  # within 0.2% of void low
+                close[i] >= void_low_aligned[i] * 0.998 and
+                volume[i] > 1.5 * volume_ma[i]):  # volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            elif (high[i] > high[i-1] and high[i-1] > high[i-2] and  # Higher high in price
-                  rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2] and      # Lower high in RSI
-                  close[i] < ema200_1w_aligned[i] and                # Downtrend filter (price < 1w EMA200)
-                  volume[i] > 1.5 * volume_ma[i]):                   # Volume confirmation
+            # Short when price approaches void high from above (filling gap up)
+            elif (close[i] >= void_high_aligned[i] * 0.998 and  # within 0.2% of void high
+                  close[i] <= void_high_aligned[i] * 1.002 and
+                  volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
+            else:
+                signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: bearish divergence or price crosses below 1w EMA200
-            if ((high[i] > high[i-1] and high[i-1] > high[i-2] and
-                 rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2]) or    # Bearish divergence
-                close[i] < ema200_1w_aligned[i]):                 # Trend change
+            # Long exit: price reaches void high (gap filled) or reverses
+            if (close[i] >= void_high_aligned[i] * 0.998 or  # reached void high
+                (close[i] <= void_low_aligned[i] * 1.005 and  # reversed back down
+                 volume[i] > volume_ma[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish divergence or price crosses above 1w EMA200
-            if ((low[i] < low[i-1] and low[i-1] < low[i-2] and
-                 rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2]) or    # Bullish divergence
-                close[i] > ema200_1w_aligned[i]):                 # Trend change
+            # Short exit: price reaches void low (gap filled) or reverses
+            if (close[i] <= void_low_aligned[i] * 1.002 or  # reached void low
+                (close[i] >= void_high_aligned[i] * 0.995 and  # reversed back up
+                 volume[i] > volume_ma[i])):
                 signals[i] = 0.0
                 position = 0
             else:
