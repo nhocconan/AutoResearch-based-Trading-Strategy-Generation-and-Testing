@@ -1,120 +1,100 @@
 #!/usr/bin/env python3
 """
-6h_RSI_Stochastic_Combo_With_Volume_Filter
-Hypothesis: Combine RSI (oversold/overbought) with Stochastic (momentum) and volume confirmation on 6h timeframe. 
-Long when RSI<30, Stochastic K<20, and volume>1.5x average; short when RSI>70, Stochastic K>80, and volume>1.5x average.
-Exit when RSI crosses 50 or volume drops below average. Uses volume filter to avoid false signals in low-volume periods.
-Works in bull/bear: momentum extremes with volume confirmation capture reversals; volume filter reduces whipsaw.
-Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+4h_4H_12H_Swing_Signal_Combo
+Hypothesis: Combine 4h swing high/low with 12h momentum. Enter long when price breaks above 4h swing high AND 12h price > SMA50; short when price breaks below 4h swing low AND 12h price < SMA50. Exit on opposite swing break or 12h momentum reversal. Uses swing points for structure and higher timeframe for trend filter. Target: 80-150 trades over 4 years (20-38/year) with position size 0.25. Works in bull/bear: 12h SMA50 filter avoids counter-trend trades, swing breaks capture momentum shifts.
 """
 
-name = "6h_RSI_Stochastic_Combo_With_Volume_Filter"
-timeframe = "6h"
+name = "4h_4H_12H_Swing_Signal_Combo"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Calculate RSI (14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    rsi = np.zeros(n)
+    close_12h = df_12h['close'].values
+    sma50_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 50:
+        sma50_12h[49] = np.mean(close_12h[:50])
+        for i in range(50, len(close_12h)):
+            sma50_12h[i] = (sma50_12h[i-1] * 49 + close_12h[i]) / 50
+    sma50_12h_aligned = align_htf_to_ltf(prices, df_12h, sma50_12h)
     
-    # Wilder's smoothing
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Calculate 4h swing points (fractals)
+    # Swing high: high > previous 2 highs AND next 2 highs
+    # Swing low: low < previous 2 lows AND next 2 lows
+    swing_high = np.zeros(n, dtype=bool)
+    swing_low = np.zeros(n, dtype=bool)
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi[i] = 100
+    for i in range(2, n-2):
+        if (high[i] > high[i-1] and high[i] > high[i-2] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            swing_high[i] = True
+        if (low[i] < low[i-1] and low[i] < low[i-2] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            swing_low[i] = True
     
-    # Calculate Stochastic Oscillator (14,3,3)
-    lowest_low = np.zeros(n)
-    highest_high = np.zeros(n)
+    # Get swing levels (last swing high/low)
+    swing_high_level = np.full(n, np.nan)
+    swing_low_level = np.full(n, np.nan)
+    last_high = np.nan
+    last_low = np.nan
     
     for i in range(n):
-        if i < 13:
-            lowest_low[i] = np.nan
-            highest_high[i] = np.nan
-        else:
-            lowest_low[i] = np.min(low[i-13:i+1])
-            highest_high[i] = np.max(high[i-13:i+1])
-    
-    stoch_k = np.zeros(n)
-    for i in range(n):
-        if highest_high[i] == lowest_low[i] or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
-            stoch_k[i] = 50
-        else:
-            stoch_k[i] = 100 * (close[i] - lowest_low[i]) / (highest_high[i] - lowest_low[i])
-    
-    # Smooth %K to get %D (3-period SMA of %K)
-    stoch_d = np.zeros(n)
-    for i in range(n):
-        if i < 2:
-            stoch_d[i] = np.nan
-        else:
-            stoch_d[i] = np.mean(stoch_k[i-2:i+1])
-    
-    # Volume average (20-period)
-    vol_ma = np.zeros(n)
-    for i in range(n):
-        if i < 19:
-            vol_ma[i] = np.nan
-        else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
+        if swing_high[i]:
+            last_high = high[i]
+        if swing_low[i]:
+            last_low = low[i]
+        swing_high_level[i] = last_high
+        swing_low_level[i] = last_low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure indicators are ready
+    start_idx = 10  # Ensure some lookback
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(stoch_k[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(swing_high_level[i]) or np.isnan(swing_low_level[i]) or 
+            np.isnan(sma50_12h_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI<30, Stochastic K<20, volume>1.5x average
-            if rsi[i] < 30 and stoch_k[i] < 20 and volume[i] > 1.5 * vol_ma[i]:
+            # Long: price breaks above swing high AND 12h price > SMA50
+            if close[i] > swing_high_level[i] and close[i] > sma50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI>70, Stochastic K>80, volume>1.5x average
-            elif rsi[i] > 70 and stoch_k[i] > 80 and volume[i] > 1.5 * vol_ma[i]:
+            # Short: price breaks below swing low AND 12h price < SMA50
+            elif close[i] < swing_low_level[i] and close[i] < sma50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI crosses above 50 OR volume drops below average
-            if rsi[i] > 50 or volume[i] < vol_ma[i]:
+            # Long exit: price breaks below swing low OR 12h price < SMA50
+            if close[i] < swing_low_level[i] or close[i] < sma50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI crosses below 50 OR volume drops below average
-            if rsi[i] < 50 or volume[i] < vol_ma[i]:
+            # Short exit: price breaks above swing high OR 12h price > SMA50
+            if close[i] > swing_high_level[i] or close[i] > sma50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
