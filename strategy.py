@@ -3,53 +3,53 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R2S2_Breakout_Volume_v2"
-timeframe = "1d"
+name = "4h_1d_Camarilla_R3S3_R4S4_MeanReversionBreakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 200:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === Weekly Candles for Pivot Calculation ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Camarilla Pivot Points (previous day) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous week's values for pivot calculation (no look-ahead)
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Set first values to current week to avoid look-ahead
-    prev_high[0] = high_1w[0]
-    prev_low[0] = low_1w[0]
-    prev_close[0] = close_1w[0]
+    # Set first values to avoid look-ahead
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Weekly Pivot Point (classic formula)
+    # Classic pivot (same for Camarilla)
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Camarilla levels - R2/S2 for entry, R3/S3 for exit
-    r2 = pivot + (range_val * 1.1 / 6)
-    s2 = pivot - (range_val * 1.1 / 6)
-    r3 = pivot + (range_val * 1.1 / 4)
-    s3 = pivot - (range_val * 1.1 / 4)
+    # Camarilla levels
+    r3 = pivot + (range_val * 1.1 / 4)  # Strong resistance
+    s3 = pivot - (range_val * 1.1 / 4)  # Strong support
+    r4 = pivot + (range_val * 1.1 / 2)  # Breakout level
+    s4 = pivot - (range_val * 1.1 / 2)  # Breakdown level
     
-    # Align to daily timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # === Volume Confirmation (Daily) ===
+    # === Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -58,33 +58,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(150, n):
+    for i in range(200, n):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
+        r4_val = r4_aligned[i]
+        s4_val = s4_aligned[i]
         pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or 
-            np.isnan(s2_val) or np.isnan(r3_val) or 
-            np.isnan(s3_val) or np.isnan(pivot_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r3_val) or 
+            np.isnan(s3_val) or np.isnan(r4_val) or 
+            np.isnan(s4_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Breakout at R2/S2 with volume confirmation
-            if close_val > r2_val and vol_ratio_val > 1.8:
-                # Strong break above R2
+            # Fade at R3/S3: mean reversion with volume confirmation
+            if close_val < r3_val and close_val > r3_val * 0.995 and vol_ratio_val > 1.8:
+                # Near R3, short with volume
+                signals[i] = -0.25
+                position = -1
+            elif close_val > s3_val and close_val < s3_val * 1.005 and vol_ratio_val > 1.8:
+                # Near S3, long with volume
                 signals[i] = 0.25
                 position = 1
-            elif close_val < s2_val and vol_ratio_val > 1.8:
-                # Strong break below S2
+            # Breakout at R4/S4: trend continuation
+            elif close_val > r4_val and vol_ratio_val > 2.5:
+                # Strong break above R4
+                signals[i] = 0.25
+                position = 1
+            elif close_val < s4_val and vol_ratio_val > 2.5:
+                # Strong break below S4
                 signals[i] = -0.25
                 position = -1
         
