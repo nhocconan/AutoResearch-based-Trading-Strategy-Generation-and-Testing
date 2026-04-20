@@ -1,10 +1,7 @@
-# 4h_Pivot_Band_Scalper
-# Hypothesis: Trade mean-reversion within daily pivot bands using 4h candles.
-# In both bull and bear markets, price tends to respect daily pivot levels (R1/S1) with mean-reversion.
-# Entry: Price touches R1 or S1 and shows rejection (wick) with volume confirmation.
-# Exit: Return to pivot (PP) or opposite band.
-# Uses tight stops and limited risk per trade to survive volatile markets.
-# Target: 20-40 trades/year per symbol with ~55% win rate.
+# NOTE: This strategy attempts to use 1-day EMA50/EMA200 on 4h data for trend, with volatility filtering on 4h ATR.
+# However, the previous version failed due to being applied on 4h timeframe while the prompt requires 1h.
+# Adjusting to 1h timeframe with 4h/1d HTF for direction, and adding session filter (08-20 UTC) to reduce noise.
+# Target: 15-37 trades/year (60-150 over 4 years). Position size: 0.20.
 
 #!/usr/bin/env python3
 import numpy as np
@@ -16,85 +13,91 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE for pivot calculation
+    # Pre-compute hour for session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
+    # Load HTF data ONCE (1d)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # Calculate 14-period ATR on 1d
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align pivot levels to 4h
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate 1d EMA50
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 4h price action
+    # Calculate 1d EMA200
+    ema_200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align HTF indicators to 1h
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Calculate 1h price array
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Volume filter: 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after volume MA warmup
-        # Skip if NaN in pivot levels
-        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(vol_ma[i]):
+    for i in range(50, n):
+        # Skip if NaN
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        vol_avg = vol_ma[i]
+        # Session filter: only trade between 08:00 and 20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_ok = vol > 1.5 * vol_avg
+        ema_50_val = ema_50_1d_aligned[i]
+        ema_200_val = ema_200_1d_aligned[i]
+        atr_val = atr_14_1d_aligned[i]
+        price = close[i]
         
         if position == 0:
-            # Long setup: price at S1 with rejection (long lower wick) and volume
-            at_s1 = abs(price - s1_4h[i]) < 0.001 * s1_4h[i]  # Within 0.1% of S1
-            lower_wick = (close[i] - low[i]) > 0.6 * (high[i] - low[i])  # Long lower wick
-            if at_s1 and lower_wick and vol_ok:
-                signals[i] = 0.25
+            # Long: price > EMA200 + low volatility (ATR < 40th percentile)
+            if price > ema_200_val and atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 40):
+                signals[i] = 0.20
                 position = 1
-            
-            # Short setup: price at R1 with rejection (long upper wick) and volume
-            at_r1 = abs(price - r1_4h[i]) < 0.001 * r1_4h[i]  # Within 0.1% of R1
-            upper_wick = (high[i] - close[i]) > 0.6 * (high[i] - low[i])  # Long upper wick
-            if at_r1 and upper_wick and vol_ok:
-                signals[i] = -0.25
+            # Short: price < EMA50 + low volatility (ATR < 40th percentile)
+            elif price < ema_50_val and atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 40):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: return to pivot or stop at S1 breach
-            if price >= pivot_4h[i] or price <= s1_4h[i]:
+            # Long exit: price < EMA50 or volatility spike (ATR > 60th percentile)
+            if price < ema_50_val or atr_val > np.nanpercentile(atr_14_1d_aligned[:i+1], 60):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: return to pivot or stop at R1 breach
-            if price <= pivot_4h[i] or price >= r1_4h[i]:
+            # Short exit: price > EMA200 or volatility spike (ATR > 60th percentile)
+            if price > ema_200_val or atr_val > np.nanpercentile(atr_14_1d_aligned[:i+1], 60):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Pivot_Band_Scalper"
-timeframe = "4h"
+name = "1h_EMA50_EMA200_VolatilityFilter_Session"
+timeframe = "1h"
 leverage = 1.0
