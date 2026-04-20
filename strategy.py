@@ -3,8 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Choppiness_Donchian_Breakout_Volume"
-timeframe = "4h"
+# Hypothesis: 6h timeframe with 1d Williams %R extremes (overbought/oversold) 
+# combined with volume confirmation and trend filter from 1d EMA50.
+# Williams %R identifies reversal points in ranging markets, while EMA50 filter
+# avoids counter-trend trades in strong trends. Volume confirms institutional interest.
+# Designed for both ranging (mean reversion) and trending (breakout continuation) markets.
+
+name = "6h_1d_WilliamsR_Volume_EMA50"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,129 +18,103 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for choppiness regime filter
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 14-period Choppiness Index on daily data
+    # Calculate Williams %R (14-period) on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range for chop calculation
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = np.full_like(close_1d, np.nan)
+    for i in range(13, len(close_1d)):
+        highest_high = np.max(high_1d[i-13:i+1])
+        lowest_low = np.min(low_1d[i-13:i+1])
+        if highest_high > lowest_low:
+            williams_r[i] = ((highest_high - close_1d[i]) / (highest_high - lowest_low)) * -100
+        else:
+            williams_r[i] = -50  # neutral when range is zero
     
-    # Sum of TR over 14 periods
-    tr_sum = np.full_like(tr, np.nan)
-    for i in range(13, len(tr)):
-        tr_sum[i] = np.nansum(tr[i-13:i+1])
+    # Calculate EMA50 on daily close for trend filter
+    close_series = pd.Series(close_1d)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Highest high and lowest low over 14 periods
-    hh = np.full_like(high_1d, np.nan)
-    ll = np.full_like(low_1d, np.nan)
-    for i in range(13, len(high_1d)):
-        hh[i] = np.nanmax(high_1d[i-13:i+1])
-        ll[i] = np.nanmin(low_1d[i-13:i+1])
+    # Calculate daily average volume (20-period) for volume spike detection
+    vol_1d = df_1d['volume'].values
+    vol_series = pd.Series(vol_1d)
+    vol_avg = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index: 100 * log10(sum(tr) / (hh - ll)) / log10(14)
-    chop = np.full_like(tr, np.nan)
-    for i in range(13, len(tr)):
-        if tr_sum[i] > 0 and hh[i] > ll[i]:
-            chop[i] = 100 * np.log10(tr_sum[i] / (hh[i] - ll[i])) / np.log10(14)
+    # Align all daily indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
     
-    # Align chop to 4h timeframe (chop > 61.8 = ranging market)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Calculate ATR for stop loss and Donchian channels (20-period on 4h)
+    # Calculate 6-day average true range for volatility filter (optional)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # True Range
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    
-    # ATR (20-period)
-    atr = np.full_like(tr, np.nan)
-    for i in range(19, len(tr)):
-        atr[i] = np.nanmean(tr[i-19:i+1])
-    
-    # Donchian Channels (20-period)
-    donch_high = np.full_like(high, np.nan)
-    donch_low = np.full_like(low, np.nan)
-    for i in range(19, len(high)):
-        donch_high[i] = np.nanmax(high[i-19:i+1])
-        donch_low[i] = np.nanmin(low[i-19:i+1])
-    
-    # Volume average (20-period)
-    vol = prices['volume'].values
-    vol_avg = np.full_like(vol, np.nan)
-    for i in range(19, len(vol)):
-        vol_avg[i] = np.nanmean(vol[i-19:i+1])
+    atr = pd.Series(tr).rolling(window=6, min_periods=6).mean().values  # 6-period ATR for 6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = 20  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Only trade in ranging markets (chop > 61.8)
-        if np.isnan(chop_aligned[i]) or chop_aligned[i] <= 61.8:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        current_close = close[i]
-        current_volume = vol[i]
+        current_close = prices['close'].iloc[i]
+        current_volume = prices['volume'].iloc[i]
         current_atr = atr[i]
         
+        # Get aligned daily values
+        wr = williams_r_aligned[i]
+        ema = ema50_aligned[i]
+        vol_avg_val = vol_avg_aligned[i]
+        
+        # Skip if any data is not available
+        if np.isnan(wr) or np.isnan(ema) or np.isnan(vol_avg_val):
+            continue
+        
+        # Volume spike: current volume > 1.8x daily average volume
+        vol_spike = current_volume > 1.8 * vol_avg_val
+        
+        # Williams %R levels: oversold < -80, overbought > -20
+        wr_oversold = wr < -80
+        wr_overbought = wr > -20
+        
+        # Trend filter: price above EMA50 = uptrend, below = downtrend
+        price_above_ema = current_close > ema
+        price_below_ema = current_close < ema
+        
         if position == 0:
-            # Long: price breaks above Donchian high with volume confirmation
-            if (not np.isnan(donch_high[i]) and 
-                current_close > donch_high[i] and 
-                not np.isnan(vol_avg[i]) and 
-                current_volume > 1.5 * vol_avg[i]):
+            # Long setup: Williams %R oversold + volume spike + price above EMA (buy dip in uptrend)
+            if wr_oversold and vol_spike and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-                entry_price = current_close
-            # Short: price breaks below Donchian low with volume confirmation
-            elif (not np.isnan(donch_low[i]) and 
-                  current_close < donch_low[i] and 
-                  not np.isnan(vol_avg[i]) and 
-                  current_volume > 1.5 * vol_avg[i]):
+            # Short setup: Williams %R overbought + volume spike + price below EMA (sell rally in downtrend)
+            elif wr_overbought and vol_spike and price_below_ema:
                 signals[i] = -0.25
                 position = -1
-                entry_price = current_close
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or ATR stop loss
-            if (not np.isnan(donch_low[i]) and 
-                current_close < donch_low[i]):
-                signals[i] = 0.0
-                position = 0
-            elif current_atr > 0 and current_close < entry_price - 2.0 * current_atr:
+            # Long exit: Williams %R overbought (overbought condition) or trend change
+            if wr_overbought or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or ATR stop loss
-            if (not np.isnan(donch_high[i]) and 
-                current_close > donch_high[i]):
-                signals[i] = 0.0
-                position = 0
-            elif current_atr > 0 and current_close > entry_price + 2.0 * current_atr:
+            # Short exit: Williams %R oversold (oversold condition) or trend change
+            if wr_oversold or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
