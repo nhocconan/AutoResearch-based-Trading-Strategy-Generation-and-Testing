@@ -3,91 +3,87 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h VWAP trend filter + volume confirmation
-# - Long when price breaks above Donchian high (20) AND price > 12h VWAP AND volume > 1.5x average
-# - Short when price breaks below Donchian low (20) AND price < 12h VWAP AND volume > 1.5x average
-# - Exit when price crosses back through the Donchian midpoint or volume dries up
-# - Donchian provides clear breakout levels, VWAP filters for institutional trend, volume confirms conviction
-# - Designed for 4h timeframe with selective entries to avoid overtrading
-# - Target: 15-40 trades per year per symbol (60-160 total over 4 years)
+# Hypothesis: 6h Williams %R + Weekly Volatility Filter
+# - Williams %R (14) on 6h identifies overbought/oversold conditions
+# - Weekly ATR ratio filters for volatility regime: high volatility = mean reversion, low volatility = trend
+# - Long when Williams %R < -80 (oversold) AND weekly ATR ratio > 1.2 (high volatility)
+# - Short when Williams %R > -20 (overbought) AND weekly ATR ratio > 1.2 (high volatility)
+# - Exit when Williams %R returns to -50 (neutral) OR volatility drops (ATR ratio < 0.8)
+# - Designed to capture mean reversion in volatile regimes while avoiding choppy low-volatility periods
+# - Weekly volatility filter adapts to changing market conditions (bull/bear/range)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Load 12h data for VWAP calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Load weekly data for ATR calculation
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate VWAP on 12h timeframe
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3
-    vwap_num = (typical_price_12h * volume_12h).cumsum()
-    vwap_den = volume_12h.cumsum()
-    vwap_12h = vwap_num / vwap_den
-    # Handle division by zero at start
-    vwap_12h = np.where(vwap_den != 0, vwap_12h, typical_price_12h)
+    # Calculate Weekly ATR(14)
+    tr1 = high_weekly[1:] - low_weekly[1:]
+    tr2 = np.abs(high_weekly[1:] - close_weekly[:-1])
+    tr3 = np.abs(low_weekly[1:] - close_weekly[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    atr_weekly = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align 12h VWAP to 4h timeframe
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    # Calculate Weekly ATR Ratio (current ATR / 20-period average ATR)
+    atr_ma_weekly = pd.Series(atr_weekly).rolling(window=20, min_periods=20).mean().values
+    atr_ratio_weekly = atr_weekly / atr_ma_weekly
     
-    # Calculate Donchian channels (20-period) on 4h
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    volume_4h = prices['volume'].values
+    # Align weekly ATR ratio to 6h timeframe
+    atr_ratio_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr_ratio_weekly)
     
-    highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high_20 + lowest_low_20) / 2
+    # Calculate Williams %R (14) on 6h timeframe
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
     
-    # Calculate average volume for confirmation
-    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    highest_high_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_6h) / (highest_high_14 - lowest_low_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(30, n):  # Start after warmup period
         # Skip if NaN in indicators
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
-            np.isnan(vwap_12h_aligned[i]) or np.isnan(avg_volume_20[i])):
+        if np.isnan(williams_r[i]) or np.isnan(atr_ratio_weekly_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
-        vwap = vwap_12h_aligned[i]
-        volume = volume_4h[i]
-        avg_vol = avg_volume_20[i]
-        upper_channel = highest_high_20[i]
-        lower_channel = lowest_low_20[i]
-        mid_channel = donchian_mid[i]
+        wr = williams_r[i]
+        vol_ratio = atr_ratio_weekly_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above upper Donchian AND price > VWAP AND volume > 1.5x average
-            if price > upper_channel and price > vwap and volume > 1.5 * avg_vol:
-                signals[i] = 0.25
-                position = 1
-            # Short entry: price breaks below lower Donchian AND price < VWAP AND volume > 1.5x average
-            elif price < lower_channel and price < vwap and volume > 1.5 * avg_vol:
-                signals[i] = -0.25
-                position = -1
+            # Enter only in high volatility regimes (avoid choppy low-vol periods)
+            if vol_ratio > 1.2:
+                # Long: oversold + high volatility
+                if wr < -80:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: overbought + high volatility
+                elif wr > -20:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: price crosses below Donchian midpoint OR volume drops below average
-            if price < mid_channel or volume < avg_vol:
+            # Long exit: return to neutral OR volatility drops
+            if wr > -50 or vol_ratio < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Donchian midpoint OR volume drops below average
-            if price > mid_channel or volume < avg_vol:
+            # Short exit: return to neutral OR volatility drops
+            if wr < -50 or vol_ratio < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_VWAP_VolumeFilter"
-timeframe = "4h"
+name = "6h_WilliamsR_WeeklyVolatilityFilter"
+timeframe = "6h"
 leverage = 1.0
