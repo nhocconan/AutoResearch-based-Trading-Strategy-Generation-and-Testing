@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d Pivot Points (previous day) ===
+    # === 1d Camarilla Pivot Points (previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -32,15 +32,15 @@ def generate_signals(prices):
     prev_low[0] = low_1d[0]
     prev_close[0] = close_1d[0]
     
-    # Classic pivot point
+    # Classic pivot (same for Camarilla)
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Support and Resistance levels
+    # Camarilla levels - Focus on R1/S1 for breakouts
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -50,7 +50,7 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === ATR Stop Loss (6h) ===
+    # === ATR Stop Loss (12h) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
