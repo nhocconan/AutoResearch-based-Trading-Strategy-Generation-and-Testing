@@ -43,7 +43,7 @@ def generate_signals(prices):
     vol_ma_daily = pd.Series(volume_daily).rolling(window=20, min_periods=20).mean().values
     vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
     
-    # Main timeframe data (1d)
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_EMA34_Trend_VolumeFilter_v1"
-timeframe = "1d"
+name = "12h_1d_weekly_EMA34_Trend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
