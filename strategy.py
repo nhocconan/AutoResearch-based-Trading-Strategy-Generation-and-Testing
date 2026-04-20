@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1w_TRIX_Momentum_VolumeFilter
-# Hypothesis: Weekly TRIX momentum (3-period ROC of triple-smoothed EMA) with volume filter 
-# captures strong momentum moves while avoiding whipsaws. TRIX is effective in both bull and bear 
-# markets as it filters out insignificant cycles. Volume ensures institutional participation.
-# Target: 15-25 trades/year to minimize fee drag.
+# 1d_1w_Camarilla_R1_S1_Breakout_VolumeFilter
+# Hypothesis: Daily Camarilla R1/S1 breakouts confirmed by weekly trend and volume capture institutional moves.
+# Weekly trend filter (price above/below weekly EMA20) avoids counter-trend trades in strong trends.
+# Volume surge requirement ensures institutional participation, reducing false breakouts.
+# Target: 10-25 trades/year to minimize fee drag on daily timeframe.
 
-name = "4h_1w_TRIX_Momentum_VolumeFilter"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,23 +25,33 @@ def generate_signals(prices):
     
     # Get weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate weekly TRIX: 3-period ROC of triple-smoothed EMA (15-period)
+    # Calculate weekly EMA20 for trend filter
     close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Triple EMA smoothing
-    ema1 = pd.Series(close_1w).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # Get daily data for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # TRIX = 3-period ROC of triple-smoothed EMA
-    trix = np.zeros_like(ema3)
-    trix[15:] = (ema3[15:] - ema3[:-15]) / ema3[:-15] * 100
+    # Calculate daily pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly TRIX to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1w, trix)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = pivot + (high_1d - low_1d) * 1.1 / 12
+    s1 = pivot - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align daily Camarilla levels to daily timeframe (no alignment needed as both daily)
+    # But we still use the helper for consistency and proper handling
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume filter: volume > 2.0x 20-period EMA (stringent to reduce trades)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -50,35 +60,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure TRIX calculation is ready
+    start_idx = 20  # Ensure EMA and volume EMA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(trix_aligned[i]) or np.isnan(volume_filter[i]):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero line + volume confirmation
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and volume_filter[i]:
+            # Long: price breaks above R1 + weekly uptrend + volume surge
+            if close[i] > r1_aligned[i] and close[i] > ema20_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero line + volume confirmation
-            elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and volume_filter[i]:
+            # Short: price breaks below S1 + weekly downtrend + volume surge
+            elif close[i] < s1_aligned[i] and close[i] < ema20_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if TRIX crosses below zero line
-            if trix_aligned[i] < 0 and trix_aligned[i-1] >= 0:
+            # Long: exit if price breaks below S1 (mean reversion to S1) or weekly trend turns down
+            if close[i] < s1_aligned[i] or close[i] < ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if TRIX crosses above zero line
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0:
+            # Short: exit if price breaks above R1 (mean reversion to R1) or weekly trend turns up
+            if close[i] > r1_aligned[i] or close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
