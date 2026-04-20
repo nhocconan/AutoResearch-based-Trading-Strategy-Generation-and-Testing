@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_Camarilla_R1S1_Breakout_Volume_Conservative_v1
-Concept: 12h Camarilla pivot breakout with 1w trend filter and 1d volume confirmation.
-- Long: Close > R1 AND 1w close > 1w open AND 1d volume > 1.5x 20-period average
-- Short: Close < S1 AND 1w close < 1w open AND 1d volume > 1.5x 20-period average
-- Exit: Price crosses Camarilla pivot (midpoint of H/L)
-- Position sizing: 0.25
-- Target: 15-35 trades/year (60-140 total over 4 years)
-- Works in bull/bear: 1w trend filter avoids counter-trend trades, volume confirms breakout strength
+6h_1d_Volume_Weighted_Trend_Acceleration_v1
+Concept: 6h acceleration of volume-weighted trend with 1d volatility filter.
+- Long: 6h VWAP trending up + 6h price acceleration + 1d volatility low (avoid whipsaw)
+- Short: 6h VWAP trending down + 6h price deceleration + 1d volatility low
+- Exit: VWAP trend reversal or volatility spike
+- Uses volume-weighted price to reduce noise, acceleration for momentum, volatility filter for regime
+- Works in bull/bear: volatility filter adapts to market conditions, VWAP trend captures institutional flow
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_R1S1_Breakout_Volume_Conservative_v1"
-timeframe = "12h"
+name = "6h_1d_Volume_Weighted_Trend_Acceleration_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,85 +22,101 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Get daily data ONCE before loop for volume confirmation
+    # Get daily data ONCE before loop for volatility filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Weekly: Trend filter (bullish if close > open) ===
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
-    weekly_bullish = close_1w > open_1w  # True for bullish week
-    weekly_bearish = close_1w < open_1w  # True for bearish week
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # === 6h: Volume Weighted Average Price (VWAP) ===
+    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3.0
+    vwap_numerator = (typical_price * prices['volume']).cumsum()
+    vwap_denominator = prices['volume'].cumsum()
+    vwap = vwap_numerator / vwap_denominator
+    vwap = vwap.values  # Convert to numpy array
     
-    # === Daily: Volume confirmation (volume > 1.5x 20-period average) ===
-    volume_1d = df_1d['volume'].values
-    vol_ma20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume_1d > (1.5 * vol_ma20)
-    # Handle first 20 values
-    volume_confirmed[:20] = False
-    volume_confirmed_aligned = align_htf_to_ltf(prices, df_1d, volume_confirmed.astype(float))
-    
-    # === 12h: Calculate Camarilla pivot levels for each 12h bar ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 6h: Price acceleration (2nd derivative of price) ===
     close = prices['close'].values
+    # First derivative (velocity): price change over 3 periods
+    velocity = np.zeros(n)
+    velocity[3:] = close[3:] - close[:-3]
+    # Second derivative (acceleration): change in velocity
+    acceleration = np.zeros(n)
+    acceleration[6:] = velocity[6:] - velocity[:-6]
     
-    # Camarilla levels based on previous bar's range
-    R1 = close + 1.1 * (high - low) / 12
-    S1 = close - 1.1 * (high - low) / 12
-    pivot = (high + low + close) / 3
+    # === Daily: Volatility filter (low volatility = better for trend following) ===
+    # Use ATR-based volatility normalized by price
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index
+    
+    # ATR(10)
+    atr_10 = np.zeros(len(tr))
+    for i in range(10, len(tr)):
+        atr_10[i] = np.nanmean(tr[i-9:i+1])
+    
+    # Volatility ratio: ATR(10) / price
+    vol_ratio = atr_10 / close_1d
+    vol_ratio = np.where(close_1d == 0, np.nan, vol_ratio)
+    
+    # Volatility percentile (low volatility = good)
+    vol_percentile = np.zeros_like(vol_ratio)
+    for i in range(len(vol_ratio)):
+        if i < 20:
+            vol_percentile[i] = np.nan
+        else:
+            vol_percentile[i] = np.nanpercentile(vol_ratio[max(0, i-19):i+1], 50)
+    
+    # Align volatility percentile to 6h timeframe
+    vol_percentile_aligned = align_htf_to_ltf(prices, df_1d, vol_percentile)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need previous bar for Camarilla calculation
+    start_idx = 20  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Get values (use previous bar's levels for current bar's breakout)
-        r1 = R1[i-1]
-        s1 = S1[i-1]
-        pivot_level = pivot[i-1]
-        weekly_bull = weekly_bullish_aligned[i]
-        weekly_bear = weekly_bearish_aligned[i]
-        vol_conf = volume_confirmed_aligned[i]
+        # Get values
+        vwap_val = vwap[i]
+        price = close[i]
+        accel = acceleration[i]
+        vol_percentile_val = vol_percentile_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1) or np.isnan(s1) or np.isnan(pivot_level) or 
-            np.isnan(weekly_bull) or np.isnan(weekly_bear) or np.isnan(vol_conf)):
+        if (np.isnan(vwap_val) or np.isnan(price) or np.isnan(accel) or 
+            np.isnan(vol_percentile_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close > R1 AND weekly bullish AND volume confirmed
-            if close[i] > r1 and weekly_bull > 0.5 and vol_conf > 0.5:
+            # Long: Price above VWAP AND positive acceleration AND low volatility
+            if price > vwap_val and accel > 0 and vol_percentile_val < 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < S1 AND weekly bearish AND volume confirmed
-            elif close[i] < s1 and weekly_bear > 0.5 and vol_conf > 0.5:
+            # Short: Price below VWAP AND negative acceleration AND low volatility
+            elif price < vwap_val and accel < 0 and vol_percentile_val < 0.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close crosses below pivot
-            if close[i] < pivot_level:
+            # Long exit: Price crosses below VWAP OR volatility spikes
+            if price < vwap_val or vol_percentile_val > 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close crosses above pivot
-            if close[i] > pivot_level:
+            # Short exit: Price crosses above VWAP OR volatility spikes
+            if price > vwap_val or vol_percentile_val > 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
