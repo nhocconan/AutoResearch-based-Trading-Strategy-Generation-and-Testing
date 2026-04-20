@@ -3,97 +3,126 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Williams %R reversal with 4h EMA trend filter and volume confirmation
-# - Williams %R(14) on 1h: long when < -80 (oversold), short when > -20 (overbought)
-# - Filter: only trade in direction of 4h EMA(34) trend
-# - Volume filter: require volume > 1.3x 20-period average
-# - Exit: opposite Williams %R signal or trailing stop via signal reduction
-# - Session filter: 08-20 UTC to avoid low-volume periods
-# - Target: 20-40 trades per year per symbol (80-160 total over 4 years)
+# Hypothesis: 12h KAMA trend with RSI momentum and chop filter
+# - Calculate KAMA on 1d to determine trend direction
+# - Use 12h RSI for momentum confirmation (long when RSI > 50, short when RSI < 50)
+# - Use 1d Choppiness Index to filter ranging markets (only trade when CHOP < 38.2)
+# - Exit when trend reverses or momentum fades
+# - Designed for low-frequency trading to minimize fee drag
+# - Target: 12-25 trades per year per symbol (48-100 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Load 1d data for KAMA and Choppiness Index
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 4h EMA(34)
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1d
+    # ER = |Change| / Volatility, where Change = |close - close[10]|, Volatility = sum|close[i] - close[i-1]| for i=1..10
+    change = np.abs(close_1d - np.roll(close_1d, 10))
+    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0]))[:10])  # Simplified for first value
+    # Proper volatility calculation over 10 periods
+    volatility_full = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        volatility_full[i] = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
+    # Avoid division by zero
+    er = np.where(volatility_full != 0, change / volatility_full, 0)
+    # Smoothing constants: fast = 2/(2+1), slow = 2/(30+1)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # Initialize KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # Start after 10 periods
+    for i in range(10, len(close_1d)):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # 1h data
-    high = prices['high'].values
-    low = prices['low'].values
+    # Calculate Choppiness Index on 1d
+    # CHOP = 100 * log10(sum(TR over n) / (max(high) - min(low))) / log10(n)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = np.zeros_like(close_1d)
+    for i in range(14, len(close_1d)):
+        atr_sum[i] = np.sum(tr[i-13:i+1])
+    max_high = np.zeros_like(close_1d)
+    min_low = np.zeros_like(close_1d)
+    for i in range(14, len(close_1d)):
+        max_high[i] = np.max(high_1d[i-13:i+1])
+        min_low[i] = np.min(low_1d[i-13:i+1])
+    chop = np.full_like(close_1d, np.nan)
+    for i in range(14, len(close_1d)):
+        if max_high[i] != min_low[i] and atr_sum[i] > 0:
+            chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
+        else:
+            chop[i] = 50  # Neutral value when undefined
+    
+    # Align 1d indicators to 12h timeframe
+    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # 12h price and RSI data
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Williams %R(14) on 1h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Calculate RSI on 12h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(williams_r[i]) or np.isnan(ema_34_4h_aligned[i]) or \
-           np.isnan(vol_ma[i]):
+        if np.isnan(kama_12h[i]) or np.isnan(chop_12h[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         price = close[i]
-        vol = volume[i]
-        ema_trend = ema_34_4h_aligned[i]
         
-        if position == 0 and in_session:
-            # Long entry: Williams %R oversold (< -80) + above 4h EMA + volume surge
-            if williams_r[i] < -80 and price > ema_trend and vol > 1.3 * vol_ma[i]:
-                signals[i] = 0.20
+        if position == 0:
+            # Long entry: price above KAMA (uptrend) + RSI > 50 + choppy market filter (CHOP < 38.2)
+            if price > kama_12h[i] and rsi[i] > 50 and chop_12h[i] < 38.2:
+                signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short entry: Williams %R overbought (> -20) + below 4h EMA + volume surge
-            elif williams_r[i] > -20 and price < ema_trend and vol > 1.3 * vol_ma[i]:
-                signals[i] = -0.20
+            # Short entry: price below KAMA (downtrend) + RSI < 50 + choppy market filter (CHOP < 38.2)
+            elif price < kama_12h[i] and rsi[i] < 50 and chop_12h[i] < 38.2:
+                signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: Williams %R overbought OR price drops below 4h EMA
-            if williams_r[i] > -20 or price < ema_trend:
+            # Long exit: price crosses below KAMA OR RSI < 40 (momentum fade)
+            if price < kama_12h[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R oversold OR price rises above 4h EMA
-            if williams_r[i] < -80 or price > ema_trend:
+            # Short exit: price crosses above KAMA OR RSI > 60 (momentum fade)
+            if price > kama_12h[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_WilliamsR_4hEMAFilter_Volume_Session"
-timeframe = "1h"
+name = "12h_KAMA_RSI_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
