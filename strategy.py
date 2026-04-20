@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Pivot_Breakout_VolumeATRFilter_TripleFilter
-# Hypothesis: Combines daily pivot point (S1/R1) breakouts with volume confirmation and ATR volatility filter.
-# Uses triple confirmation: price must break S1/R1, volume must exceed 2x 20-period average, and ATR must be above its 50-period mean.
-# Designed for 12h timeframe to reduce trade frequency and avoid fee drag. Works in both bull/bear markets by capturing breakouts
-# from key levels with institutional volume validation and volatility filtering.
+# 1d_KAMA_Trend_RSI20_80_VolumeFilter
+# Hypothesis: KAMA identifies adaptive trend direction while avoiding whipsaw in choppy markets.
+# RSI < 20 or > 80 captures extreme momentum exhaustion points for mean reversion entries.
+# Volume confirmation filters low-liquidity false signals. Designed for 1d to reduce trade frequency
+# and avoid fee drag, with robustness across bull/bear regimes via trend alignment and volatility filter.
 
-name = "12h_Pivot_Breakout_VolumeATRFilter_TripleFilter"
-timeframe = "12h"
+name = "1d_KAMA_Trend_RSI20_80_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,72 +23,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate pivot and S1/R1 from previous day
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
+    # Calculate weekly KAMA for trend filter
+    close_1w = df_1w['close'].values
+    # Efficiency ratio
+    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    volatility = np.sum(np.abs(np.diff(close_1w)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # KAMA calculation
+    kama = np.zeros_like(close_1w)
+    kama[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    kama_1w = kama
     
-    # Standard pivot point calculation
-    p = (ph + pl + pc) / 3
-    # S1 and R1 using standard formulas
-    s1 = 2 * p - ph
-    r1 = 2 * p - pl
+    # Align weekly KAMA to daily
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Align S1 and R1 to 12h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    # Daily RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume filter: volume > 2x 20-period average (stricter)
+    # Volume filter: volume > 1.5x 20-day average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma20 * 2.0)
-    
-    # ATR filter: only trade when volatility is above average
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr > atr_ma50  # Only trade when ATR > its 50-period MA
+    volume_filter = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure all indicators are ready
+    start_idx = max(30, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(volatility_filter[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + volume confirmation + sufficient volatility
-            if close[i] > r1_aligned[i] and volume_filter[i] and volatility_filter[i]:
+            # Long: price above weekly KAMA (uptrend) + RSI < 20 (oversold) + volume confirmation
+            if close[i] > kama_aligned[i] and rsi[i] < 20 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume confirmation + sufficient volatility
-            elif close[i] < s1_aligned[i] and volume_filter[i] and volatility_filter[i]:
+            # Short: price below weekly KAMA (downtrend) + RSI > 80 (overbought) + volume confirmation
+            elif close[i] < kama_aligned[i] and rsi[i] > 80 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 (reversal signal)
-            if close[i] < s1_aligned[i]:
+            # Long: exit if RSI > 70 (overbought) or price breaks below weekly KAMA
+            if rsi[i] > 70 or close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 (reversal signal)
-            if close[i] > r1_aligned[i]:
+            # Short: exit if RSI < 30 (oversold) or price breaks above weekly KAMA
+            if rsi[i] < 30 or close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
