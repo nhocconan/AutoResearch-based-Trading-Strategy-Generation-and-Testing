@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume
-Hypothesis: Use daily Camarilla pivot levels (R1, S1) as support/resistance. 
-Break above R1 with volume confirmation = long; break below S1 with volume confirmation = short.
-Filter trades using 12h ADX > 25 to ensure trending markets (avoid whipsaw in ranging markets).
-Position size 0.25 to balance risk and reward. Target: 15-35 trades/year per symbol.
-Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
+4h_Donchian20_Breakout_Volume_Trend
+Hypothesis: Price breakout above Donchian(20) upper/lower channel with volume confirmation and 4h ADX trend filter.
+Long when price breaks above upper band with volume surge and strong 4h trend; short when breaks below lower band.
+Uses 4h timeframe for all calculations to match the proven winning patterns in the DB.
+Target: 20-50 trades per year per symbol with position size 0.25 to manage drawdown and reduce fee drag.
+Works in both bull and bear markets by requiring trend alignment (ADX > 25) and volume confirmation.
 """
 
-name = "12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,7 +26,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
+    # Calculate Donchian Channel (20-period)
+    def calculate_donchian(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
+    
+    upper_band, lower_band = calculate_donchian(high, low, 20)
+    
+    # Calculate volume moving average (20-period) for confirmation
+    def calculate_sma(data, period):
+        sma = np.full_like(data, np.nan)
+        for i in range(period-1, len(data)):
+            sma[i] = np.mean(data[i-period+1:i+1])
+        return sma
+    
+    volume_sma = calculate_sma(volume, 20)
+    
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -35,20 +55,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla pivot levels (R1, S1)
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # Align to 12h timeframe (wait for daily close)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Calculate 12h ADX(14) for trend filter
+    # Calculate 1d ADX(14)
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high - low
@@ -66,70 +73,73 @@ def generate_signals(prices):
         # Wilder's smoothing
         def wilder_smoothing(data, period):
             result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
             alpha = 1.0 / period
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+            if len(data) >= period:
+                result[period-1] = np.nansum(data[:period]) / period
+                for i in range(period, len(data)):
+                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
             return result
         
         atr = wilder_smoothing(tr, period)
-        # Avoid division by zero
-        atr_safe = np.where(atr == 0, 1e-10, atr)
-        plus_di = 100 * wilder_smoothing(plus_dm, period) / atr_safe
-        minus_di = 100 * wilder_smoothing(minus_dm, period) / atr_safe
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        plus_di = 100 * wilder_smoothing(plus_dm, period) / atr
+        minus_di = 100 * wilder_smoothing(minus_dm, period) / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
         adx = wilder_smoothing(dx, period)
         return adx
     
-    adx_12h = calculate_adx(high, low, close, 14)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = np.zeros_like(volume)
-    vol_ma[:] = np.nan
-    for i in range(20, len(volume)):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (vol_ma * 1.5)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure indicators are ready
+    start_idx = 40  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(adx_12h[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(close[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(volume_sma[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
+        # Apply session filter
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume > 1.5 x 20-period average
+        volume_surge = volume[i] > 1.5 * volume_sma[i]
+        
         if position == 0:
-            # Long: price breaks above R1 with volume and ADX > 25
-            if (close[i] > r1_1d_aligned[i] and 
-                vol_filter[i] and 
-                adx_12h[i] > 25):
+            # Long: price breaks above upper band + volume surge + strong 1d trend (ADX > 25)
+            if close[i] > upper_band[i] and volume_surge and adx_1d_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and ADX > 25
-            elif (close[i] < s1_1d_aligned[i] and 
-                  vol_filter[i] and 
-                  adx_12h[i] > 25):
+            # Short: price breaks below lower band + volume surge + strong 1d trend (ADX > 25)
+            elif close[i] < lower_band[i] and volume_surge and adx_1d_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below pivot OR ADX weak (< 20)
-            if close[i] < pivot_1d_aligned[i] or adx_12h[i] < 20:
+            # Long exit: price breaks below lower band OR ADX weak (< 20)
+            if close[i] < lower_band[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above pivot OR ADX weak (< 20)
-            if close[i] > pivot_1d_aligned[i] or adx_12h[i] < 20:
+            # Short exit: price breaks above upper band OR ADX weak (< 20)
+            if close[i] > upper_band[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
