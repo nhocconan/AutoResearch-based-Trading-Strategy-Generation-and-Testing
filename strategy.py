@@ -1,122 +1,98 @@
-# 12h_KAMA_CCI_Trend_V1
-# KAMA (Kaufman Adaptive Moving Average) with CCI (Commodity Channel Index) filter
-# Long: Price > KAMA + CCI > 100 (strong uptrend)
-# Short: Price < KAMA + CCI < -100 (strong downtrend)
-# Exit: Price crosses KAMA in opposite direction
-# Uses 12h timeframe with 1d CCI for trend confirmation
-# Designed for ~20-40 trades/year to minimize fee drag
-# Works in both bull (trend following) and bear (counter-trend reversals via KAMA adaptation)
+# 1h_4h1d_DonchianBreakout_TrendFilter_V1
+# 1h timeframe strategy using 4h Donchian breakouts with 1d trend filter
+# Enters long when 1h price breaks above 4h upper Donchian band and 1d trend is up
+# Enters short when 1h price breaks below 4h lower Donchian band and 1d trend is down
+# Uses 1d trend (EMA50) to filter direction and avoid counter-trend trades
+# Session filter (08-20 UTC) to reduce noise
+# Fixed size 0.20 to manage risk
+# Target: 15-37 trades/year (60-150 total over 4 years)
 
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for CCI calculation (trend filter)
+    # Get 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_4h) < 20 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on 12h price (primary timeframe)
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # Calculate 4h Donchian channels (20) for breakout signals
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
     
-    # KAMA parameters
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate efficiency ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if False else None  # placeholder
-    
-    # Proper ER calculation
-    er = np.zeros(n)
-    for i in range(10, n):
-        if i >= 10:
-            price_change = np.abs(close[i] - close[i-10])
-            sum_abs_change = np.sum(np.abs(np.diff(close[i-10:i+1])))
-            if sum_abs_change > 0:
-                er[i] = price_change / sum_abs_change
-            else:
-                er[i] = 0
-    
-    # Smooth ER
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Calculate CCI on 1d data
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    tp_mean = typical_price.rolling(window=20, min_periods=20).mean()
-    tp_dev = typical_price.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci = (typical_price - tp_mean) / (0.015 * tp_dev)
-    cci_values = cci.values
-    
-    # Align CCI to 12h timeframe
-    cci_aligned = align_htf_to_ltf(prices, df_1d, cci_values)
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after KAMA warmup
+    for i in range(100, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
-        close_val = close[i]
-        kama_val = kama[i]
-        cci_val = cci_aligned[i]
+        close_val = prices['close'].iloc[i]
+        upper_val = donchian_upper_aligned[i]
+        lower_val = donchian_lower_aligned[i]
+        trend_val = ema_50_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(close_val) or np.isnan(kama_val) or 
-            np.isnan(cci_val)):
+        if (np.isnan(upper_val) or np.isnan(lower_val) or 
+            np.isnan(trend_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above KAMA and CCI > 100 (strong uptrend)
-            if close_val > kama_val and cci_val > 100:
-                signals[i] = 0.25
+            # Long: price breaks above 4h upper Donchian band with up 1d trend
+            if close_val > upper_val and close_val > trend_val:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price below KAMA and CCI < -100 (strong downtrend)
-            elif close_val < kama_val and cci_val < -100:
-                signals[i] = -0.25
+            # Short: price breaks below 4h lower Donchian band with down 1d trend
+            elif close_val < lower_val and close_val < trend_val:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses below KAMA
-            if close_val < kama_val:
+            # Long exit: price breaks below 4h lower Donchian band
+            if close_val < lower_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Price crosses above KAMA
-            if close_val > kama_val:
+            # Short exit: price breaks above 4h upper Donchian band
+            if close_val > upper_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# 12h_KAMA_CCI_Trend_V1
-# KAMA adapts to market noise - fast in trends, slow in ranges
-# CCI filter ensures we only trade strong trends (>100 or <-100)
-# Low frequency: ~20-40 trades/year ideal for 12h timeframe
-# Works in bull markets (trend following) and bear markets (KAMA adapts to volatility)
-name = "12h_KAMA_CCI_Trend_V1"
-timeframe = "12h"
+name = "1h_4h1d_DonchianBreakout_TrendFilter_V1"
+timeframe = "1h"
 leverage = 1.0
