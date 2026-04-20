@@ -1,47 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_ThreeSignal_Confluence
-# Hypothesis: Confluence of 1) 1d Trend (Hull MA), 2) 1d Momentum (RSI extremes), and 3) 4h Breakout (Donchian) filters noise and captures strong moves.
-# Works in bull/bear: Hull MA adapts to trend, RSI avoids overextension, Donchian ensures breakout confirmation.
-# Target: 20-40 trades/year (80-160 total) for low fee drag.
+# 4h_KAMA_Trend_With_Volume_Confirmation
+# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise - in trending markets it follows price closely,
+# in ranging markets it stays flat. Combined with volume confirmation (>1.5x 20-period average) and ADX>25 for trend strength,
+# this captures strong trending moves while avoiding whipsaws in ranging markets. Works in both bull and bear markets
+# by following the dominant trend. Position size 0.25 to manage risk. Target: 20-40 trades/year (80-160 total over 4 years).
 
-name = "4h_1d_ThreeSignal_Confluence"
+name = "4h_KAMA_Trend_With_Volume_Confirmation"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def hull_moving_average(arr, period):
-    """Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))"""
-    n = len(arr)
-    if n < period:
-        return np.full(n, np.nan)
-    half = period // 2
-    sqrt = int(np.sqrt(period))
-    
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / (window * (window + 1) / 2)
-    
-    wma_half = np.full(n, np.nan)
-    wma_full = np.full(n, np.nan)
-    
-    for i in range(half - 1, n):
-        wma_half[i] = wma(arr[i - half + 1:i + 1], half)
-    for i in range(period - 1, n):
-        wma_full[i] = wma(arr[i - period + 1:i + 1], period)
-    
-    raw = 2 * wma_half - wma_full
-    hma = np.full(n, np.nan)
-    
-    for i in range(sqrt - 1, n):
-        if not np.isnan(raw[i]):
-            start_idx = i - sqrt + 1
-            end_idx = i + 1
-            hma[i] = wma(raw[start_idx:end_idx], sqrt)
-    
-    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -53,99 +23,136 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1h data for faster trend confirmation
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 30:
         return np.zeros(n)
     
-    # 1d Hull MA (55-period) for trend
-    close_1d = df_1d['close'].values
-    hull_ma = hull_moving_average(close_1d, 55)
-    hull_ma_aligned = align_htf_to_ltf(prices, df_1d, hull_ma)
+    # Calculate KAMA (2-period efficiency, 30-period fast, 30-period slow)
+    # ER = Efficiency Ratio = abs(close - close[30]) / sum(abs(close - close[1])) over 30 periods
+    change = np.abs(np.diff(close, n=30))  # abs(close[i] - close[i-30])
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=1)  # sum of abs changes over window
     
-    # 1d RSI (14-period) for momentum/overextension
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Pad arrays for alignment
+    change_padded = np.full(n, np.nan)
+    volatility_padded = np.full(n, np.nan)
+    change_padded[30:] = change
+    volatility_padded[30:] = volatility
     
-    # Wilder's smoothing
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    for i in range(len(gain)):
-        if i == 0:
-            avg_gain[i] = gain[i]
-            avg_loss[i] = loss[i]
-        elif i < 14:
-            avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i
-            avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i
+    # Calculate ER with proper handling
+    er = np.full(n, np.nan)
+    valid_vol = volatility_padded > 0
+    er[valid_vol] = change_padded[valid_vol] / volatility_padded[valid_vol]
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # for 2-period EMA
+    slow_sc = 2 / (30 + 1)  # for 30-period EMA
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            kama[i] = kama[i-1]
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Get 1h data for confirmation
+    close_1h = df_1h['close'].values
+    # Calculate 21-period EMA on 1h
+    ema_21_1h = pd.Series(close_1h).ewm(span=21, adjust=False).mean().values
+    ema_21_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_21_1h)
     
-    # 4h Donchian channels (20-period) for breakout
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma20 * 1.5)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # ADX filter for trend strength (using 1h data for responsiveness)
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
     
-    donchian_high = np.full_like(high_4h, np.nan)
-    donchian_low = np.full_like(low_4h, np.nan)
+    # True Range
+    tr1 = high_1h[1:] - low_1h[1:]
+    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
+    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    for i in range(len(high_4h)):
-        if i >= 19:
-            donchian_high[i] = np.max(high_4h[i-19:i+1])
-            donchian_low[i] = np.min(low_4h[i-19:i+1])
+    # Directional Movement
+    dm_plus = np.where((high_1h[1:] - high_1h[:-1]) > (low_1h[:-1] - low_1h[1:]), 
+                       np.maximum(high_1h[1:] - high_1h[:-1], 0), 0)
+    dm_minus = np.where((low_1h[:-1] - low_1h[1:]) > (high_1h[1:] - high_1h[:-1]), 
+                        np.maximum(low_1h[:-1] - low_1h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Smooth TR and DM (14-period)
+    tr_sum = np.full_like(high_1h, np.nan)
+    dm_plus_sum = np.full_like(high_1h, np.nan)
+    dm_minus_sum = np.full_like(high_1h, np.nan)
+    
+    for i in range(len(high_1h)):
+        if i >= 13:  # 14-period
+            tr_sum[i] = np.nansum(tr[i-13:i+1])
+            dm_plus_sum[i] = np.nansum(dm_plus[i-13:i+1])
+            dm_minus_sum[i] = np.nansum(dm_minus[i-13:i+1])
+    
+    # Directional Indicators
+    di_plus = np.full_like(high_1h, np.nan)
+    di_minus = np.full_like(high_1h, np.nan)
+    dx = np.full_like(high_1h, np.nan)
+    
+    valid = ~np.isnan(tr_sum) & (tr_sum != 0)
+    di_plus[valid] = 100 * dm_plus_sum[valid] / tr_sum[valid]
+    di_minus[valid] = 100 * dm_minus_sum[valid] / tr_sum[valid]
+    dx[valid] = 100 * np.abs(di_plus[valid] - di_minus[valid]) / (di_plus[valid] + di_minus[valid])
+    
+    # ADX (smoothed DX)
+    adx_1h = np.full_like(high_1h, np.nan)
+    for i in range(len(high_1h)):
+        if i >= 27:  # 14 + 13 for ADX
+            valid_dx = dx[i-13:i+1]
+            if not np.all(np.isnan(valid_dx)):
+                adx_1h[i] = np.nanmean(valid_dx)
+    
+    adx_1h_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(55, 20)  # Ensure all indicators are ready
+    start_idx = max(30, 21)  # Ensure KAMA and 1h indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(hull_ma_aligned[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_21_1h_aligned[i]) or 
+            np.isnan(adx_1h_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above Hull MA (uptrend) + RSI not overbought (<70) + breakout above Donchian high
-            if (close[i] > hull_ma_aligned[i] and 
-                rsi_aligned[i] < 70 and 
-                close[i] > donchian_high_aligned[i]):
+            # Long: price above KAMA AND price above 1h EMA21 AND ADX > 25 AND volume confirmation
+            if (close[i] > kama[i] and close[i] > ema_21_1h_aligned[i] and 
+                adx_1h_aligned[i] > 25 and volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below Hull MA (downtrend) + RSI not oversold (>30) + breakdown below Donchian low
-            elif (close[i] < hull_ma_aligned[i] and 
-                  rsi_aligned[i] > 30 and 
-                  close[i] < donchian_low_aligned[i]):
+            # Short: price below KAMA AND price below 1h EMA21 AND ADX > 25 AND volume confirmation
+            elif (close[i] < kama[i] and close[i] < ema_21_1h_aligned[i] and 
+                  adx_1h_aligned[i] > 25 and volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long exit: price below Hull MA (trend change) OR RSI overbought (>80) OR breakdown below Donchian low
-            if (close[i] < hull_ma_aligned[i] or 
-                rsi_aligned[i] > 80 or 
-                close[i] < donchian_low_aligned[i]):
+            # Long: exit if price crosses below KAMA or ADX weakens significantly
+            if close[i] < kama[i] or adx_1h_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short exit: price above Hull MA (trend change) OR RSI oversold (<20) OR breakout above Donchian high
-            if (close[i] > hull_ma_aligned[i] or 
-                rsi_aligned[i] < 20 or 
-                close[i] > donchian_high_aligned[i]):
+            # Short: exit if price crosses above KAMA or ADX weakens significantly
+            if close[i] > kama[i] or adx_1h_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
