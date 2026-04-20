@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume_Trend_Filter
-Hypothesis: Trade 12h price breakouts above/below 12h pivot resistance/support levels with volume confirmation and 1d trend filter.
-Long when price breaks above 12h R1 with volume spike and 1d uptrend; short when breaks below 12h S1 with volume spike and 1d downtrend.
-Uses 12h pivot levels (calculated from prior 12h bar) and volume > 1.5x 20-period average for confirmation.
-Designed for 12h timeframe to capture medium-term moves while reducing noise and trades.
-Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
-Works in bull/bear: 1d trend filter avoids counter-trend trades, volume filter reduces false breakouts.
+4h_KAMA_RSI_With_Chop_Filter
+Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) to identify trend direction and RSI for momentum, filtered by Choppiness Index to avoid whipsaws in sideways markets. Long when KAMA turns up and RSI > 50 in trending markets; short when KAMA turns down and RSI < 50 in trending markets. Uses 12h timeframe for trend context to reduce noise and improve reliability. Designed to work in both bull and bear markets by avoiding trades in choppy conditions (Chop > 61.8) and only trading when clear trends exist (Chop < 38.2). Target: 20-40 trades/year with position size 0.25.
 """
 
-name = "12h_Pivot_R1S1_Breakout_Volume_Trend_Filter"
-timeframe = "12h"
+name = "4h_KAMA_RSI_With_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,86 +22,132 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop
+    # Calculate KAMA (Kaufman Adaptive Moving Average) - trend identifier
+    def kama(close, period=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.zeros_like(close)
+        er[period:] = change[period-1:] / volatility[period-1:]
+        # Smoothing Constant
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # KAMA
+        kama_vals = np.zeros_like(close)
+        kama_vals[:] = np.nan
+        kama_vals[period] = close[period]
+        for i in range(period+1, len(close)):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        return kama_vals
+    
+    # Calculate RSI (Relative Strength Index) - momentum
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
+    
+    # Calculate Choppiness Index - regime filter
+    def choppiness_index(high, low, close, period=14):
+        # True Range
+        tr1 = np.abs(high - low)
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
+        
+        # Sum of True Range over period
+        atr_sum = np.zeros_like(close)
+        for i in range(period, len(close)):
+            atr_sum[i] = np.sum(tr[i-period+1:i+1])
+        
+        # Highest high and lowest low over period
+        hh = np.zeros_like(close)
+        ll = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            hh[i] = np.max(high[i-period+1:i+1])
+            ll[i] = np.min(low[i-period+1:i+1])
+        
+        # Choppiness Index
+        chop = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            if hh[i] != ll[i]:
+                chop[i] = 100 * np.log10(atr_sum[i] / (hh[i] - ll[i])) / np.log10(period)
+            else:
+                chop[i] = 50  # Avoid division by zero
+        return chop
+    
+    # Get 12h data for trend context
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 12h pivot points (using prior 12h bar's high, low, close)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Pivot point calculation: PP = (H + L + C) / 3
-    # R1 = 2*PP - L, S1 = 2*PP - H
-    pp_12h = (high_12h + low_12h + close_12h) / 3.0
-    r1_12h = 2 * pp_12h - low_12h
-    s1_12h = 2 * pp_12h - high_12h
+    # Calculate 12h KAMA for trend context
+    kama_12h = kama(close_12h, period=10, fast=2, slow=30)
+    kama_12h_slope = np.diff(kama_12h, prepend=kama_12h[0])
+    kama_12h_slope = np.append(kama_12h_slope, kama_12h_slope[-1])  # Same length
     
-    # Align 12h pivot levels to 12h timeframe (already delayed by one bar via align_htf_to_ltf)
-    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Align 12h KAMA slope to 4h timeframe
+    kama_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, kama_12h_slope)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA20 for trend filter
-    def ema(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            multiplier = 2.0 / (period + 1)
-            result[period-1] = np.mean(values[:period])
-            for i in range(period, len(values)):
-                result[i] = multiplier * values[i] + (1 - multiplier) * result[i-1]
-        return result
-    
-    ema20_1d = ema(close_1d, 20)
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # Calculate volume filter (volume > 1.5x 20-period average)
-    vol_ma20 = np.full_like(volume, np.nan)
-    for i in range(20, len(volume)):
-        vol_ma20[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (1.5 * vol_ma20)
+    # Calculate indicators on 4h data
+    kama_4h = kama(close, period=10, fast=2, slow=30)
+    rsi_4h = rsi(close, period=14)
+    chop_4h = choppiness_index(high, low, close, period=14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure indicators are ready (20 for EMA + buffer)
+    start_idx = 30  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or
-            np.isnan(ema20_1d_aligned[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(kama_4h[i]) or np.isnan(rsi_4h[i]) or np.isnan(chop_4h[i]) or
+            np.isnan(kama_12h_slope_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade in trending markets (Chop < 38.2)
+        if chop_4h[i] >= 38.2:
+            # In choppy or trending markets, stay flat
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Long: price breaks above 12h R1 with volume filter AND 1d uptrend (close > EMA20)
-            if close[i] > r1_12h_aligned[i] and volume_filter[i] and close[i] > ema20_1d_aligned[i]:
+            # Long: KAMA turning up (positive slope) AND RSI > 50 AND 12h KAMA trending up
+            if kama_4h[i] > kama_4h[i-1] and rsi_4h[i] > 50 and kama_12h_slope_aligned[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 12h S1 with volume filter AND 1d downtrend (close < EMA20)
-            elif close[i] < s1_12h_aligned[i] and volume_filter[i] and close[i] < ema20_1d_aligned[i]:
+            # Short: KAMA turning down (negative slope) AND RSI < 50 AND 12h KAMA trending down
+            elif kama_4h[i] < kama_4h[i-1] and rsi_4h[i] < 50 and kama_12h_slope_aligned[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below 12h pivot point OR 1d trend turns down
-            if close[i] < pp_12h_aligned[i] or close[i] < ema20_1d_aligned[i]:
+            # Long exit: KAMA turning down OR RSI < 50
+            if kama_4h[i] < kama_4h[i-1] or rsi_4h[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 12h pivot point OR 1d trend turns up
-            if close[i] > pp_12h_aligned[i] or close[i] > ema20_1d_aligned[i]:
+            # Short exit: KAMA turning up OR RSI > 50
+            if kama_4h[i] > kama_4h[i-1] or rsi_4h[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
