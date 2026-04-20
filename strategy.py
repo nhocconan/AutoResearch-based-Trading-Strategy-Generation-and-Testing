@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_KAMA_Trend_VolumeBreakout_v1"
-timeframe = "1d"
+name = "4h_1d_ElderRay_Power_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,44 +12,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1w: KAMA for trend filter ===
-    close_1w = df_1w['close'].values
-    # Calculate KAMA(30, 2, 30) - ER period=10, fast=2, slow=30
-    kama_period = 30
-    fast_sc = 2/(2+1)
-    slow_sc = 2/(30+1)
+    # === 1d: Elder Ray Power Index ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1w, k=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1w)), axis=0)  # will fix in loop
+    # EMA13 of close for 1d
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate ER and KAMA properly
-    er = np.full_like(close_1w, np.nan)
-    kama = np.full_like(close_1w, np.nan)
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    for i in range(10, len(close_1w)):
-        if i >= 10:
-            change_val = np.abs(close_1w[i] - close_1w[i-10])
-            volatility_sum = np.sum(np.abs(np.diff(close_1w[i-9:i+1])))
-            if volatility_sum > 0:
-                er[i] = change_val / volatility_sum
-            else:
-                er[i] = 0
-            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-            if np.isnan(kama[i-1]):
-                kama[i] = close_1w[i]
-            else:
-                kama[i] = kama[i-1] + sc * (close_1w[i] - kama[i-1])
+    # Smooth the power values with EMA13
+    bull_power_smooth = pd.Series(bull_power_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bear_power_smooth = pd.Series(bear_power_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align KAMA to 1d
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # Align to 4h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_smooth)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_smooth)
     
-    # === 1d: Indicators ===
+    # === 4h: Indicators ===
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -70,50 +58,51 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(30, 20)  # Ensure enough data for indicators
+    start_idx = max(40, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Get values
-        kama_val = kama_1w_aligned[i]
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
         current_vol_ma = vol_ma[i]
         current_volume = volume[i]
         current_close = close[i]
         current_atr = atr[i]
         
         # Skip if any value is NaN
-        if (np.isnan(kama_val) or np.isnan(current_vol_ma) or 
-            np.isnan(current_atr)):
+        if (np.isnan(bull_val) or np.isnan(bear_val) or 
+            np.isnan(current_vol_ma) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.5x 20-period average
-        vol_condition = current_volume > 1.5 * current_vol_ma
+        # Volume condition: current volume > 1.8x 20-period average
+        vol_condition = current_volume > 1.8 * current_vol_ma
         
         if position == 0:
-            # Long: close > 1w KAMA (uptrend) + volume breakout
-            if current_close > kama_val and vol_condition:
+            # Long: Bull Power > 0 AND Bear Power < 0 (strong bullish momentum) + volume
+            if bull_val > 0 and bear_val < 0 and vol_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
-            # Short: close < 1w KAMA (downtrend) + volume breakout
-            elif current_close < kama_val and vol_condition:
+            # Short: Bull Power < 0 AND Bear Power > 0 (strong bearish momentum) + volume
+            elif bull_val < 0 and bear_val > 0 and vol_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: close < 1w KAMA OR stop loss
-            if current_close < kama_val or current_close < entry_price - 2.5 * current_atr:
+            # Long exit: Bull Power <= 0 OR Bear Power >= 0 OR stop loss
+            if bull_val <= 0 or bear_val >= 0 or current_close < entry_price - 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close > 1w KAMA OR stop loss
-            if current_close > kama_val or current_close > entry_price + 2.5 * current_atr:
+            # Short exit: Bull Power >= 0 OR Bear Power <= 0 OR stop loss
+            if bull_val >= 0 or bear_val <= 0 or current_close > entry_price + 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
