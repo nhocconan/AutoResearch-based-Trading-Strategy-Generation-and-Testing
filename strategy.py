@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_1d_LiquidityVoid_Reversal_Scalp
-# Hypothesis: Trade mean-reversion at 1d liquidity voids (unfilled gaps) on 6h timeframe.
-# Liquidity voids occur when price gaps overnight and leaves unfilled volume.
-# Price tends to return to fill these voids, creating mean-reversion opportunities.
-# Uses volume confirmation and volatility filter to avoid whipsaws.
-# Targets 15-35 trades/year by requiring void identification and volume confirmation.
+# 4h_12h_Donchian_Breakout_Volume_Trend_v1
+# Hypothesis: On 4h timeframe, trade Donchian(20) breakouts with volume confirmation and 12h EMA21 trend filter.
+# In trending markets (price above/below EMA21), breakouts continue the trend; in ranging markets, avoid false breakouts.
+# Targets 20-50 trades/year by requiring confluence of breakout, volume spike, and trend filter.
+# Works in both bull and bear markets by filtering breakouts with trend direction.
 
-name = "6h_1d_LiquidityVoid_Reversal_Scalp"
-timeframe = "6h"
+name = "4h_12h_Donchian_Breakout_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,110 +18,65 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 1d liquidity voids (unfilled gaps)
-    open_1d = df_1d['open'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h EMA21 for trend filter
+    close_12h = df_12h['close'].values
+    ema_21 = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_aligned = align_htf_to_ltf(prices, df_12h, ema_21)
     
-    # Identify gaps: overnight gap from previous close to current open
-    gap_up = open_1d[1:] - close_1d[:-1]  # positive = gap up
-    gap_down = close_1d[:-1] - open_1d[1:]  # positive = gap down
+    # Calculate Donchian channels (20-period) on 4h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Create arrays aligned with 1d index (same length as close_1d)
-    gap_up_full = np.concatenate([[0], gap_up])
-    gap_down_full = np.concatenate([[0], gap_down])
-    
-    # Define liquidity void areas (unfilled gaps)
-    # For gap up: void is between previous close and current open
-    # For gap down: void is between current open and previous close
-    void_high = np.maximum(open_1d, close_1d)  # higher of open/close
-    void_low = np.minimum(open_1d, close_1d)   # lower of open/close
-    
-    # Only consider significant gaps (>0.1% of price)
-    min_gap = 0.001 * void_high
-    significant_gap = (void_high - void_low) > min_gap
-    
-    # Align void levels to 6h timeframe
-    void_high_aligned = align_htf_to_ltf(prices, df_1d, void_high)
-    void_low_aligned = align_htf_to_ltf(prices, df_1d, void_low)
-    significant_gap_aligned = align_htf_to_ltf(prices, df_1d, significant_gap.astype(float))
-    
-    # Calculate 1d ATR for volatility filter (14-period)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    
-    # Volume average for spike detection
+    # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 40  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(void_high_aligned[i]) or np.isnan(void_low_aligned[i]) or 
-            np.isnan(significant_gap_aligned[i]) or np.isnan(atr_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_21_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Skip if not a significant gap
-        if significant_gap_aligned[i] < 0.5:
-            if position != 0:
-                signals[i] = 0.25 if position == 1 else -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Look for mean reversion to fill the void
-            # Long when price approaches void low from below (filling gap down)
-            if (close[i] <= void_low_aligned[i] * 1.002 and  # within 0.2% of void low
-                close[i] >= void_low_aligned[i] * 0.998 and
-                volume[i] > 1.5 * volume_ma[i]):  # volume confirmation
+            # Long breakout: price > Donchian high + volume spike + above EMA21
+            if (close[i] > highest_high[i] and 
+                volume[i] > 2.0 * volume_ma[i] and
+                close[i] > ema_21_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short when price approaches void high from above (filling gap up)
-            elif (close[i] >= void_high_aligned[i] * 0.998 and  # within 0.2% of void high
-                  close[i] <= void_high_aligned[i] * 1.002 and
-                  volume[i] > 1.5 * volume_ma[i]):
+            # Short breakdown: price < Donchian low + volume spike + below EMA21
+            elif (close[i] < lowest_low[i] and 
+                  volume[i] > 2.0 * volume_ma[i] and
+                  close[i] < ema_21_aligned[i]):
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price reaches void high (gap filled) or reverses
-            if (close[i] >= void_high_aligned[i] * 0.998 or  # reached void high
-                (close[i] <= void_low_aligned[i] * 1.005 and  # reversed back down
-                 volume[i] > volume_ma[i])):
+            # Long exit: price < Donchian low or trend flip
+            if close[i] < lowest_low[i] or close[i] < ema_21_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches void low (gap filled) or reverses
-            if (close[i] <= void_low_aligned[i] * 1.002 or  # reached void low
-                (close[i] >= void_high_aligned[i] * 0.995 and  # reversed back up
-                 volume[i] > volume_ma[i])):
+            # Short exit: price > Donchian high or trend flip
+            if close[i] > highest_high[i] or close[i] > ema_21_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
