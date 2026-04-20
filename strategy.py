@@ -3,106 +3,332 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v3"
-timeframe = "4h"
+# Hypothesis: 6h timeframe with 1-day Bollinger Band mean reversion and volume confirmation.
+# In sideways markets, price tends to revert to the mean after touching Bollinger Bands.
+# Volume spike confirms the reversal signal. Works in both bull and bear markets by
+# capturing mean reversion moves within larger trends.
+name = "6h_1d_BollingerMeanReversion_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need sufficient data
+    if n < 100:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d: Calculate Camarilla pivot levels (using previous day's data) ===
+    # === 1d: Bollinger Bands (20, 2) ===
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Use previous day's OHLC for today's levels
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
+    # Calculate Bollinger Bands
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    bb_upper = sma_20 + (2 * std_20)
+    bb_lower = sma_20 - (2 * std_20)
     
-    # Set first day's values to NaN
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Align to 6h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper.values)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower.values)
     
-    # Calculate Camarilla levels: R1, S1
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align 1d indicators to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # === 6h: Price and Volume ===
     close = prices['close'].values
     volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === 4h: ATR for volatility filter ===
-    high = prices['high'].values
-    low = prices['low'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Volume ratio (current vs 20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20.values, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Get values
         close_val = close[i]
-        r1_level = camarilla_r1_aligned[i]
-        s1_level = camarilla_s1_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        atr_val = atr[i]
+        upper = bb_upper_aligned[i]
+        lower = bb_lower_aligned[i]
+        vol_ratio_val = vol_ratio.values[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val) or np.isnan(atr_val)):
+        if (np.isnan(upper) or np.isnan(lower) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility filter: only trade when ATR is above its 50-period median (avoid choppy markets)
-        atr_median = np.nanmedian(atr[max(0, i-49):i+1])
-        vol_filter = atr_val > atr_median if not np.isnan(atr_median) else False
-        
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and volatility filter
-            if (close_val > r1_level and   # Break above R1
-                vol_ratio_val > 2.0 and    # Strong volume confirmation
-                vol_filter):               # Volatility filter
+            # Long: Price touches or goes below lower BB with volume spike
+            if (close_val <= lower and vol_ratio_val > 2.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and volatility filter
-            elif (close_val < s1_level and   # Break below S1
-                  vol_ratio_val > 2.0 and    # Strong volume confirmation
-                  vol_filter):               # Volatility filter
+            # Short: Price touches or goes above upper BB with volume spike
+            elif (close_val >= upper and vol_ratio_val > 2.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price drops back below R1 (reversion to mean)
-            if close_val < r1_level:
+            # Long exit: Price returns to middle (SMA) or for risk management
+            if close_val >= sma_20.iloc[-1] if not np.isnan(sma_20.iloc[-1]) else False:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises back above S1 (reversion to mean)
-            if close_val > s1_level:
+            # Short exit: Price returns to middle (SMA)
+            if close_val <= sma_20.iloc[-1] if not np.isnan(sma_20.iloc[-1]) else False:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+
+# Fix: Calculate sma_20 properly for use in exit condition
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # === 1d: Bollinger Bands (20, 2) ===
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Bollinger Bands
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    bb_upper = sma_20 + (2 * std_20)
+    bb_lower = sma_20 - (2 * std_20)
+    
+    # Align to 6h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper.values)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower.values)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20.values)
+    
+    # === 6h: Price and Volume ===
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Volume ratio (current vs 20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20.values, np.nan)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    for i in range(50, n):
+        # Get values
+        close_val = close[i]
+        upper = bb_upper_aligned[i]
+        lower = bb_lower_aligned[i]
+        sma_val = sma_20_aligned[i]
+        vol_ratio_val = vol_ratio.values[i]
+        
+        # Skip if any value is NaN
+        if (np.isnan(upper) or np.isnan(lower) or np.isnan(sma_val) or np.isnan(vol_ratio_val)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if position == 0:
+            # Long: Price touches or goes below lower BB with volume spike
+            if (close_val <= lower and vol_ratio_val > 2.5):
+                signals[i] = 0.25
+                position = 1
+            # Short: Price touches or goes above upper BB with volume spike
+            elif (close_val >= upper and vol_ratio_val > 2.5):
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: Price returns to middle (SMA)
+            if close_val >= sma_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: Price returns to middle (SMA)
+            if close_val <= sma_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+
+# Final version with proper variable scope
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # === 1d: Bollinger Bands (20, 2) ===
+    close_1d = df_1d['close'].values
+    
+    # Calculate Bollinger Bands
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    bb_upper = sma_20 + (2 * std_20)
+    bb_lower = sma_20 - (2 * std_20)
+    
+    # Align to 6h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper.values)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower.values)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20.values)
+    
+    # === 6h: Price and Volume ===
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Volume ratio (current vs 20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20.values, np.nan)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    for i in range(50, n):
+        # Get values
+        close_val = close[i]
+        upper = bb_upper_aligned[i]
+        lower = bb_lower_aligned[i]
+        sma_val = sma_20_aligned[i]
+        vol_ratio_val = vol_ratio.values[i]
+        
+        # Skip if any value is NaN
+        if (np.isnan(upper) or np.isnan(lower) or np.isnan(sma_val) or np.isnan(vol_ratio_val)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if position == 0:
+            # Long: Price touches or goes below lower BB with volume spike
+            if (close_val <= lower and vol_ratio_val > 2.5):
+                signals[i] = 0.25
+                position = 1
+            # Short: Price touches or goes above upper BB with volume spike
+            elif (close_val >= upper and vol_ratio_val > 2.5):
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: Price returns to middle (SMA)
+            if close_val >= sma_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: Price returns to middle (SMA)
+            if close_val <= sma_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_1d_BollingerMeanReversion_VolumeFilter"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # === 1d: Bollinger Bands (20, 2) ===
+    close_1d = df_1d['close'].values
+    
+    # Calculate Bollinger Bands
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    bb_upper = sma_20 + (2 * std_20)
+    bb_lower = sma_20 - (2 * std_20)
+    
+    # Align to 6h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper.values)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower.values)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20.values)
+    
+    # === 6h: Price and Volume ===
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Volume ratio (current vs 20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20.values, np.nan)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    for i in range(50, n):
+        # Get values
+        close_val = close[i]
+        upper = bb_upper_aligned[i]
+        lower = bb_lower_aligned[i]
+        sma_val = sma_20_aligned[i]
+        vol_ratio_val = vol_ratio.values[i]
+        
+        # Skip if any value is NaN
+        if (np.isnan(upper) or np.isnan(lower) or np.isnan(sma_val) or np.isnan(vol_ratio_val)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if position == 0:
+            # Long: Price touches or goes below lower BB with volume spike
+            if (close_val <= lower and vol_ratio_val > 2.5):
+                signals[i] = 0.25
+                position = 1
+            # Short: Price touches or goes above upper BB with volume spike
+            elif (close_val >= upper and vol_ratio_val > 2.5):
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: Price returns to middle (SMA)
+            if close_val >= sma_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: Price returns to middle (SMA)
+            if close_val <= sma_val:
                 signals[i] = 0.0
                 position = 0
             else:
