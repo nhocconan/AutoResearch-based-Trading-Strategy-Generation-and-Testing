@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_R1S1_Breakout_VolumeRegime_V1
-# Hypothesis: On 4h timeframe, trade breakouts from 1d Camarilla R1/S1 levels with volume confirmation and ADX regime filter.
-# In ranging markets (ADX < 25), trade reversals at R1/S1; in trending markets (ADX > 25), trade breakouts beyond R1/S1.
-# Targets 20-40 trades/year by requiring confluence of level, volume, and regime filter.
-# Works in both bull and bear markets due to adaptive regime filtering and volatility-adjusted position sizing.
+# 4h_12h_1D_Donchian_Breakout_VolumeTrend_Regime
+# Hypothesis: On 4h timeframe, trade Donchian channel breakouts with volume confirmation and 12h trend filter.
+# In trending markets (12h ADX > 25), trade breakout direction; in ranging markets (ADX < 25), trade breakouts with volume surge.
+# Uses 1-day volume for confirmation to reduce noise. Targets 20-40 trades/year by requiring confluence.
+# Works in bull markets via trend-following breakouts and in bear markets via mean-reversion at channel extremes.
 
-name = "4h_1d_Camarilla_R1S1_Breakout_VolumeRegime_V1"
+name = "4h_12h_1D_Donchian_Breakout_VolumeTrend_Regime"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,45 +23,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h ADX for trend filter (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Typical price for pivot calculation
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    
-    # Pivot point and ranges
-    pivot_1d = typical_price_1d
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: S1, R1, S2, R2
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
-    
-    # Align 1d levels to 4h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    
-    # Calculate 1d ADX for trend/ranging filter (14-period)
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     plus_dm = np.concatenate([[np.nan], plus_dm])
@@ -79,75 +64,77 @@ def generate_signals(prices):
             result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
     
-    atr = smooth_wilder(tr, 14)
-    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
-    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
+    atr_12h = smooth_wilder(tr, 14)
+    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr_12h
+    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr_12h
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth_wilder(dx, 14)
+    adx_12h = smooth_wilder(dx, 14)
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 12h ADX to 4h timeframe
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # Volume average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d average volume for spike detection
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    
+    # Calculate 4h Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 40  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(volume_ma_1d_aligned[i]) or
+            np.isnan(high_max[i]) or np.isnan(low_min[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Ranging market (ADX < 25): reverse at S1/R1
-            if adx_aligned[i] < 25:
-                # Long near S1 with volume confirmation
-                if (close[i] <= s1_aligned[i] * 1.005 and 
-                    close[i] >= s1_aligned[i] * 0.995 and
-                    volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = 0.25
+            # Trending market (ADX > 25): trade breakout in direction of trend
+            if adx_12h_aligned[i] > 25:
+                # Long breakout above upper channel
+                if high[i] > high_max[i-1]:
+                    signals[i] = 0.30
                     position = 1
-                # Short near R1 with volume confirmation
-                elif (close[i] >= r1_aligned[i] * 0.995 and 
-                      close[i] <= r1_aligned[i] * 1.005 and
-                      volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = -0.25
+                # Short breakdown below lower channel
+                elif low[i] < low_min[i-1]:
+                    signals[i] = -0.30
                     position = -1
-            # Trending market (ADX > 25): breakout beyond S1/R1
-            elif adx_aligned[i] > 25:
-                # Long breakout above R1 with volume
-                if (close[i] > r1_aligned[i] * 1.005 and 
-                    volume[i] > 2.0 * volume_ma[i]):
-                    signals[i] = 0.25
+            # Ranging market (ADX < 25): trade breakouts with volume surge
+            elif adx_12h_aligned[i] < 25:
+                # Volume surge condition
+                volume_surge = volume[i] > 2.0 * volume_ma_1d_aligned[i]
+                # Long breakout with volume surge
+                if high[i] > high_max[i-1] and volume_surge:
+                    signals[i] = 0.30
                     position = 1
-                # Short breakdown below S1 with volume
-                elif (close[i] < s1_aligned[i] * 0.995 and 
-                      volume[i] > 2.0 * volume_ma[i]):
-                    signals[i] = -0.25
+                # Short breakdown with volume surge
+                elif low[i] < low_min[i-1] and volume_surge:
+                    signals[i] = -0.30
                     position = -1
         
         elif position == 1:
-            # Long exit: reverse at opposite level or ADX shifts to ranging
-            if (adx_aligned[i] < 25 and close[i] >= r1_aligned[i] * 0.995) or \
-               (adx_aligned[i] > 25 and close[i] < s2_aligned[i]):
+            # Long exit: price returns to middle of channel or trend reverses
+            middle = (high_max[i-1] + low_min[i-1]) / 2
+            if low[i] < middle or adx_12h_aligned[i] < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: reverse at opposite level or ADX shifts to ranging
-            if (adx_aligned[i] < 25 and close[i] <= s1_aligned[i] * 1.005) or \
-               (adx_aligned[i] > 25 and close[i] > r2_aligned[i]):
+            # Short exit: price returns to middle of channel or trend reverses
+            middle = (high_max[i-1] + low_min[i-1]) / 2
+            if high[i] > middle or adx_12h_aligned[i] < 20:  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
