@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_VolumeBreakout_Camilla24h_Filter
-Hypothesis: Trade 4h Donchian(20) breakouts with volume confirmation and 24h CAMARILLA R3/S3 filter.
-Long when price breaks above Donchian upper band with volume > 1.8x 20-period average and close > 24h CAMARILLA R3.
-Short when breaks below Donchian lower band with volume spike and close < 24h CAMARILLA S3.
-Exit when price reverts to Donchian middle band (mean of upper/lower) or volume dries up.
-Designed to capture strong momentum bursts in both bull and bear markets while avoiding false breakouts in chop.
-Target: 80-160 total trades over 4 years (20-40/year) with position size 0.25.
-Uses volume spike to filter weak breakouts and CAMARILLA levels to ensure breakout occurs beyond key intraday resistance/support.
-Works in bull/bear: volume filter adapts to volatility regime, CAMARILLA levels provide dynamic support/resistance.
+12h_Pivot_R1S1_Breakout_Volume_Trend_Filter
+Hypothesis: Trade 12h price breakouts above/below 12h pivot resistance/support levels with volume confirmation and 1d trend filter.
+Long when price breaks above 12h R1 with volume spike and 1d uptrend; short when breaks below 12h S1 with volume spike and 1d downtrend.
+Uses 12h pivot levels (calculated from prior 12h bar) and volume > 1.5x 20-period average for confirmation.
+Designed for 12h timeframe to capture medium-term moves while reducing noise and trades.
+Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Works in bull/bear: 1d trend filter avoids counter-trend trades, volume filter reduces false breakouts.
 """
 
-name = "4h_Donchian20_VolumeBreakout_Camilla24h_Filter"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_Breakout_Volume_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,77 +27,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 24h data ONCE before loop for CAMARILLA levels
-    df_24h = get_htf_data(prices, '24h')
-    if len(df_24h) < 2:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate 24h CAMARILLA levels (using prior 24h bar's high, low, close)
-    high_24h = df_24h['high'].values
-    low_24h = df_24h['low'].values
-    close_24h = df_24h['close'].values
+    # Calculate 12h pivot points (using prior 12h bar's high, low, close)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # CAMARILLA formula: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
-    # We only need R3 and S3
-    range_24h = high_24h - low_24h
-    r3_24h = close_24h + range_24h * 1.1 / 4
-    s3_24h = close_24h - range_24h * 1.1 / 4
+    # Pivot point calculation: PP = (H + L + C) / 3
+    # R1 = 2*PP - L, S1 = 2*PP - H
+    pp_12h = (high_12h + low_12h + close_12h) / 3.0
+    r1_12h = 2 * pp_12h - low_12h
+    s1_12h = 2 * pp_12h - high_12h
     
-    # Align 24h CAMARILLA levels to 4h timeframe
-    r3_24h_aligned = align_htf_to_ltf(prices, df_24h, r3_24h)
-    s3_24h_aligned = align_htf_to_ltf(prices, df_24h, s3_24h)
+    # Align 12h pivot levels to 12h timeframe (already delayed by one bar via align_htf_to_ltf)
+    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
-    # Calculate Donchian(20) channels
-    lookback = 20
-    upper = np.full_like(high, np.nan)
-    lower = np.full_like(low, np.nan)
-    middle = np.full_like(close, np.nan)
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    for i in range(lookback, n):
-        upper[i] = np.max(high[i-lookback:i])
-        lower[i] = np.min(low[i-lookback:i])
-        middle[i] = (upper[i] + lower[i]) / 2.0
+    close_1d = df_1d['close'].values
     
-    # Calculate volume filter (volume > 1.8x 20-period average)
+    # Calculate 1d EMA20 for trend filter
+    def ema(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) >= period:
+            multiplier = 2.0 / (period + 1)
+            result[period-1] = np.mean(values[:period])
+            for i in range(period, len(values)):
+                result[i] = multiplier * values[i] + (1 - multiplier) * result[i-1]
+        return result
+    
+    ema20_1d = ema(close_1d, 20)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    
+    # Calculate volume filter (volume > 1.5x 20-period average)
     vol_ma20 = np.full_like(volume, np.nan)
-    for i in range(20, n):
+    for i in range(20, len(volume)):
         vol_ma20[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (1.8 * vol_ma20)
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure indicators are ready (20 for Donchian + buffer)
+    start_idx = 40  # Ensure indicators are ready (20 for EMA + buffer)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or
-            np.isnan(r3_24h_aligned[i]) or np.isnan(s3_24h_aligned[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(pp_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper band with volume filter AND close > 24h R3
-            if close[i] > upper[i] and volume_filter[i] and close[i] > r3_24h_aligned[i]:
+            # Long: price breaks above 12h R1 with volume filter AND 1d uptrend (close > EMA20)
+            if close[i] > r1_12h_aligned[i] and volume_filter[i] and close[i] > ema20_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band with volume filter AND close < 24h S3
-            elif close[i] < lower[i] and volume_filter[i] and close[i] < s3_24h_aligned[i]:
+            # Short: price breaks below 12h S1 with volume filter AND 1d downtrend (close < EMA20)
+            elif close[i] < s1_12h_aligned[i] and volume_filter[i] and close[i] < ema20_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to Donchian middle band OR volume dries up
-            if close[i] < middle[i] or not volume_filter[i]:
+            # Long exit: price breaks below 12h pivot point OR 1d trend turns down
+            if close[i] < pp_12h_aligned[i] or close[i] < ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to Donchian middle band OR volume dries up
-            if close[i] > middle[i] or not volume_filter[i]:
+            # Short exit: price breaks above 12h pivot point OR 1d trend turns up
+            if close[i] > pp_12h_aligned[i] or close[i] > ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
