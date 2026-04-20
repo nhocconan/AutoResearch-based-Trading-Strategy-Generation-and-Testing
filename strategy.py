@@ -1,53 +1,62 @@
 #!/usr/bin/env python3
+"""
+6h_Camarilla_R1S1_Breakout_Volume
+- Breakout at R1/S1 with volume confirmation
+- Uses 1-day Camarilla for 6h timeframe
+- Works in both bull/bear: breakout continuation in trend
+- Target: 50-150 trades over 4 years (12-37/year)
+- Size: 0.25
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R2S2_Breakout_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R1S1_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === Weekly Camarilla Pivot Points (previous week) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Previous Day's High/Low/Close for Camarilla ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous week's values for pivot calculation
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
+    # Previous day's values (shift by 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Set first values to avoid look-ahead
-    prev_high[0] = high_1w[0]
-    prev_low[0] = low_1w[0]
-    prev_close[0] = close_1w[0]
+    # Set first values to avoid look-ahead (use current day's values)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Classic pivot (same for Camarilla)
+    # Classic pivot point (same for Camarilla)
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Camarilla levels (R2/S2 for entry, R3/S3 for stop)
-    r2 = pivot + (range_val * 1.1 / 6)
-    s2 = pivot - (range_val * 1.1 / 6)
-    r3 = pivot + (range_val * 1.1 / 4)
-    s3 = pivot - (range_val * 1.1 / 4)
+    # Camarilla levels: R1, S1, R4, S4
+    r1 = pivot + (range_val * 1.1 / 12)  # ~9.16% of range
+    s1 = pivot - (range_val * 1.1 / 12)
+    r4 = pivot + (range_val * 1.1 / 2)   # Breakout level
+    s4 = pivot - (range_val * 1.1 / 2)
     
-    # Align to daily timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    # Align to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # === Volume Confirmation ===
     volume = prices['volume'].values
@@ -58,46 +67,56 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r4_val = r4_aligned[i]
+        s4_val = s4_aligned[i]
         pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or 
-            np.isnan(s2_val) or np.isnan(r3_val) or 
-            np.isnan(s3_val) or np.isnan(pivot_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(r4_val) or 
+            np.isnan(s4_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price crosses above R2 with volume
-            if close_val > r2_val and vol_ratio_val > 1.5:
+            # Breakout at R1/S1 with volume confirmation
+            if close_val > r1_val and vol_ratio_val > 1.8:
+                # Break above R1
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price crosses below S2 with volume
-            elif close_val < s2_val and vol_ratio_val > 1.5:
+            elif close_val < s1_val and vol_ratio_val > 1.8:
+                # Break below S1
                 signals[i] = -0.25
                 position = -1
+            # Optional: Fade at extremes (R4/S4) in ranging markets
+            elif close_val > r4_val and vol_ratio_val < 0.8:
+                # Fade at R4 in low volume
+                signals[i] = -0.25
+                position = -1
+            elif close_val < s4_val and vol_ratio_val < 0.8:
+                # Fade at S4 in low volume
+                signals[i] = 0.25
+                position = 1
         
         elif position == 1:
-            # Long exit: return to pivot or stop at S3
-            if close_val < pivot_val or close_val < s3_val:
+            # Long exit: return to pivot or stop at S1
+            if close_val < pivot_val or close_val < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: return to pivot or stop at R3
-            if close_val > pivot_val or close_val > r3_val:
+            # Short exit: return to pivot or stop at R1
+            if close_val > pivot_val or close_val > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
