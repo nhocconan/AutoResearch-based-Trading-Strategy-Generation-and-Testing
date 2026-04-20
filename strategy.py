@@ -5,10 +5,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for pivot points and ATR
+    # Load daily data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align to 4h (previous day's levels available at 4h open)
+    # Align to 1h (previous day's levels available at next hour)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -34,22 +34,32 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 4h price and volume
+    # 1h price and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: 4-period average (1 day of 4h bars)
+    # Volume confirmation: 4-period average (4 hours)
     vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    for i in range(50, n):
         # Skip if NaN in critical values
         if np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        if hours[i] < 8 or hours[i] > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PivotPoint_R1S1_Breakout_Volume_ATRFilter_Tight"
-timeframe = "4h"
+name = "1h_PivotPoint_R1S1_Breakout_Volume_ATRFilter_Session"
+timeframe = "1h"
 leverage = 1.0
