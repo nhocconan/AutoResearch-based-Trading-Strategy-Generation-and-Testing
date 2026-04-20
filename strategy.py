@@ -3,83 +3,78 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R + 1w Trend Filter
-# - Williams %R (14) on 1d for mean reversion signals
-# - Long when %R < -80 (oversold) and 1w EMA21 > 1w EMA50 (bullish trend)
-# - Short when %R > -20 (overbought) and 1w EMA21 < 1w EMA50 (bearish trend)
-# - Uses weekly EMA crossover for trend filter to avoid counter-trend trades
-# - Target: 15-25 trades per year per symbol (60-100 total over 4 years)
+# Hypothesis: 4h Williams %R + 1d EMA Trend Filter
+# - Williams %R(14) on 4h for overbought/oversold signals
+# - Long when %R < -80 (oversold) and 1d EMA(50) > 1d EMA(200) (bullish trend)
+# - Short when %R > -20 (overbought) and 1d EMA(50) < 1d EMA(200) (bearish trend)
+# - Uses EMA crossover on daily timeframe to filter for intermediate trend direction
+# - Designed for 4h timeframe with selective entries to avoid overtrading
+# - Target: 20-50 trades per year per symbol (80-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Williams %R calculation
+    # Load 1d data for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R(14) on 1d timeframe
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    williams_r_1d = williams_r.values
+    # Calculate EMA(50) and EMA(200) on 1d timeframe
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align 1d Williams %R to 1d timeframe (no conversion needed)
-    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    # Determine trend: 1 = bullish (EMA50 > EMA200), -1 = bearish (EMA50 < EMA200)
+    trend_1d = np.where(ema_50_1d > ema_200_1d, 1, -1)
     
-    # Load 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Align 1d trend to 4h timeframe
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Calculate EMA21 and EMA50 on 1w timeframe
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Williams %R (14) on 4h timeframe
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
-    # Align 1w EMA values to 1d timeframe
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_4h) / (highest_high_14 - lowest_low_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA50 warmup
+    for i in range(30, n):  # Start after Williams %R warmup
         # Skip if NaN in indicators
-        if (np.isnan(williams_r_1d_aligned[i]) or 
-            np.isnan(ema21_1w_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if np.isnan(williams_r[i]) or np.isnan(trend_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        williams_r = williams_r_1d_aligned[i]
-        ema21 = ema21_1w_aligned[i]
-        ema50 = ema50_1w_aligned[i]
+        price = close_4h[i]
+        wr = williams_r[i]
+        trend = trend_1d_aligned[i]
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) + bullish trend (EMA21 > EMA50)
-            if williams_r < -80 and ema21 > ema50:
+            # Long entry: Williams %R oversold (< -80) + bullish 1d trend
+            if wr < -80 and trend == 1:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R overbought (> -20) + bearish trend (EMA21 < EMA50)
-            elif williams_r > -20 and ema21 < ema50:
+            # Short entry: Williams %R overbought (> -20) + bearish 1d trend
+            elif wr > -20 and trend == -1:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R returns above -50 or trend turns bearish
-            if williams_r > -50 or ema21 < ema50:
+            # Long exit: Williams %R rises above -50 or trend turns bearish
+            if wr > -50 or trend == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R returns below -50 or trend turns bullish
-            if williams_r < -50 or ema21 > ema50:
+            # Short exit: Williams %R falls below -50 or trend turns bullish
+            if wr < -50 or trend == 1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_1wEMA_TrendFilter"
-timeframe = "1d"
+name = "4h_WilliamsR_1dEMA_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
