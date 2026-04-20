@@ -3,44 +3,63 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
-# - Williams %R(14) identifies overbought/oversold conditions
-# - 1d EMA(50) determines trend direction (only trade in trend direction)
-# - Volume > 1.3x 20-period average confirms momentum
-# - Williams %R extremes: < -80 for long, > -20 for short
-# - Exit when Williams %R crosses -50 (mean reversion midpoint)
-# - Designed to work in both bull and bear markets by following higher timeframe trend
-# - Target: 20-35 trades per year per symbol (80-140 total over 4 years)
+# Hypothesis: 12h Pivot Point (Standard) breakout with volume confirmation and ATR stop
+# - Calculate daily Pivot Point (PP) from prior day: PP = (H+L+C)/3
+# - Calculate support/resistance: R1 = 2*PP - L, S1 = 2*PP - H, R2 = PP + (H-L), S2 = PP - (H-L)
+# - Long when price closes above R1 with volume > 1.5x 20-period average
+# - Short when price closes below S1 with volume > 1.5x 20-period average
+# - Exit when price closes back through PP or ATR-based stop hit (2*ATR)
+# - Uses 1d for pivot levels (stable) and 12h for execution
+# - Target: 15-25 trades per year per symbol (60-100 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Load 1d data for trend filter
+    # Load 1d data for Pivot Point calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate ATR for stop loss (using 1d data)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate Williams %R(14) on 4h data
+    # Calculate Pivot Point and levels from prior day
+    # PP = (H+L+C)/3
+    # R1 = 2*PP - L, S1 = 2*PP - H
+    # R2 = PP + (H-L), S2 = PP - (H-L)
+    shift_high = np.roll(high_1d, 1)
+    shift_low = np.roll(low_1d, 1)
+    shift_close = np.roll(close_1d, 1)
+    
+    pp = (shift_high + shift_low + shift_close) / 3.0
+    hl = shift_high - shift_low
+    
+    r1 = 2 * pp - shift_low
+    s1 = 2 * pp - shift_high
+    r2 = pp + hl
+    s2 = pp - hl
+    
+    # Align pivot levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    pp_12h = align_htf_to_ltf(prices, df_1d, pp)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # 12h price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # 4h price and volume data
     volume = prices['volume'].values
     
     # Volume confirmation: 20-period average
@@ -48,11 +67,12 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or \
-           np.isnan(vol_ma[i]):
+        if np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(pp_12h[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(atr_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,30 +80,30 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        ema_50 = ema_50_1d_aligned[i]
-        wr = williams_r[i]
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) + price above EMA50 (uptrend) + volume surge
-            if wr < -80 and price > ema_50 and vol > 1.3 * vol_ma[i]:
+            # Long entry: price closes above R1 + volume surge
+            if price > r1_12h[i] and vol > 1.5 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R overbought (> -20) + price below EMA50 (downtrend) + volume surge
-            elif wr > -20 and price < ema_50 and vol > 1.3 * vol_ma[i]:
+                entry_price = price
+            # Short entry: price closes below S1 + volume surge
+            elif price < s1_12h[i] and vol > 1.5 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: Williams %R crosses above -50 (mean reversion)
-            if wr > -50:
+            # Long exit: price closes below PP OR ATR stop hit (2*ATR)
+            if price < pp_12h[i] or price < entry_price - 2.0 * atr_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses below -50 (mean reversion)
-            if wr < -50:
+            # Short exit: price closes above PP OR ATR stop hit (2*ATR)
+            if price > pp_12h[i] or price > entry_price + 2.0 * atr_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_EMA50_Volume"
-timeframe = "4h"
+name = "12h_Pivot_Point_R1S1_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
