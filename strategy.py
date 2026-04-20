@@ -1,94 +1,94 @@
 #!/usr/bin/env python3
 """
-6h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Conservative
-Concept: 6h breakout above/below 1d Camarilla R1/S1 with volume confirmation.
-- Long: Close > R1 AND volume > 1.5x 20-period volume average
-- Short: Close < S1 AND volume > 1.5x 20-period volume average
-- Exit: Close crosses back below R1 (long) or above S1 (short)
+4h_DonchianBreakout_VolumeTrend_v2
+Concept: 4h Donchian(20) breakout with volume confirmation and 1d trend filter.
+- Long: Close > Donchian high(20) AND Volume > 1.5x 20-period volume avg AND Close > 1d EMA50
+- Short: Close < Donchian low(20) AND Volume > 1.5x 20-period volume avg AND Close < 1d EMA50
+- Exit: Close crosses Donchian midpoint (mean of high/low over 20 periods)
 - Position sizing: 0.25
-- Target: 15-30 trades/year (60-120 total over 4 years)
-- Works in bull/bear: Camarilla levels adapt to volatility, volume confirms genuine breakouts
+- Target: 20-50 trades/year (80-200 total over 4 years)
+- Works in bull/bear: Donchian captures breakouts, volume confirms strength, 1d EMA50 filters counter-trend noise
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Conservative"
-timeframe = "6h"
+name = "4h_DonchianBreakout_VolumeTrend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for Camarilla levels
+    # Get daily data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 6h: Volume average for confirmation ===
+    # === 4h: Donchian channels (20-period high/low) ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === Daily: Camarilla pivot levels ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Donchian high and low
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Volume confirmation: 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === Daily: EMA50 trend filter ===
     close_1d = df_1d['close'].values
-    
-    # Calculate pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_hl = high_1d - low_1d
-    
-    # Camarilla levels
-    r1 = close_1d + (range_hl * 1.1 / 12)
-    s1 = close_1d - (range_hl * 1.1 / 12)
-    
-    # Align to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume MA
+    start_idx = 20  # Ensure enough data for Donchian
     
     for i in range(start_idx, n):
         # Get values
-        close_price = prices['close'].iloc[i]
-        vol_ma_val = vol_ma[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        dc_high = donchian_high[i]
+        dc_low = donchian_low[i]
+        dc_mid = donchian_mid[i]
+        vol_ma = vol_ma20[i]
+        ema50 = ema50_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ma_val) or np.isnan(r1_val) or np.isnan(s1_val)):
+        if (np.isnan(dc_high) or np.isnan(dc_low) or np.isnan(dc_mid) or 
+            np.isnan(vol_ma) or np.isnan(ema50)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close above R1 with volume confirmation
-            if close_price > r1_val and volume[i] > 1.5 * vol_ma_val:
+            # Long: Break above Donchian high with volume and 1d uptrend
+            if close[i] > dc_high and volume[i] > 1.5 * vol_ma and close[i] > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 with volume confirmation
-            elif close_price < s1_val and volume[i] > 1.5 * vol_ma_val:
+            # Short: Break below Donchian low with volume and 1d downtrend
+            elif close[i] < dc_low and volume[i] > 1.5 * vol_ma and close[i] < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close crosses below R1
-            if close_price < r1_val:
+            # Long exit: Price crosses below Donchian midpoint
+            if close[i] < dc_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close crosses above S1
-            if close_price > s1_val:
+            # Short exit: Price crosses above Donchian midpoint
+            if close[i] > dc_mid:
                 signals[i] = 0.0
                 position = 0
             else:
