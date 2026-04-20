@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1d_Pivot_R4S4_Breakout_VolumeTrend_v2
-# Hypothesis: On 12h timeframe, trade breakouts from 1d-derived R4/S4 levels with volume spike confirmation and 1d EMA trend filter.
-# R4/S4 represent stronger breakout levels than R3/S3, reducing false signals. Uses 1d EMA34 to filter trades in trending markets.
-# Targets 15-30 trades per year by requiring strong breakouts with volume confirmation.
-# Works in both bull and bear markets by aligning with 1d trend direction.
-# Added volume threshold reduction and relaxed entry conditions to increase trade frequency while maintaining edge.
+# 4h_1d_Camarilla_R1S1_Breakout_VolumeTrend
+# Hypothesis: Trade breakouts from 1d Camarilla R1/S1 levels on 4h timeframe with volume confirmation and 1d EMA34 trend filter.
+# R1/S1 provide reliable breakout levels with lower false signals than R4/S4. Uses 1d EMA34 to align with daily trend.
+# Targets 20-50 trades per year by requiring strong breakouts with volume confirmation.
+# Works in bull markets (buy R1 breakouts in uptrend) and bear markets (sell S1 breakdowns in downtrend).
 
-name = "12h_1d_Pivot_R4S4_Breakout_VolumeTrend_v2"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -29,7 +28,7 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d R4 and S4 levels using previous day's data
+    # Calculate 1d R1 and S1 levels using previous day's data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -38,17 +37,17 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: R4 and S4 (stronger breakout levels)
-    s4_1d = close_1d - (range_1d * 1.1 / 2)
-    r4_1d = close_1d + (range_1d * 1.1 / 2)
+    # Camarilla levels: R1 and S1 (reliable breakout levels)
+    s1_1d = close_1d - (range_1d * 1.1 / 6)
+    r1_1d = close_1d + (range_1d * 1.1 / 6)
     
     # 1d EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d levels to 12h timeframe
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    # Align 1d levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume average for spike detection (20-period)
@@ -61,36 +60,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s4_aligned[i]) or np.isnan(r4_aligned[i]) or 
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(volume_ma[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above R4, volume spike, and price above 1d EMA34 (uptrend)
-            if (close[i] > r4_aligned[i] * 1.002 and 
-                volume[i] > 1.5 * volume_ma[i] and
+            # Long: price above R1, volume spike, and price above 1d EMA34 (uptrend)
+            if (close[i] > r1_aligned[i] * 1.002 and 
+                volume[i] > 1.8 * volume_ma[i] and
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below S4, volume spike, and price below 1d EMA34 (downtrend)
-            elif (close[i] < s4_aligned[i] * 0.998 and 
-                  volume[i] > 1.5 * volume_ma[i] and
+            # Short: price below S1, volume spike, and price below 1d EMA34 (downtrend)
+            elif (close[i] < s1_aligned[i] * 0.998 and 
+                  volume[i] > 1.8 * volume_ma[i] and
                   close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below S4 or trend reversal (below EMA34)
-            if close[i] < s4_aligned[i] * 0.998 or close[i] < ema_34_aligned[i]:
+            # Long exit: price below S1 or trend reversal (below EMA34)
+            if close[i] < s1_aligned[i] * 0.998 or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above R4 or trend reversal (above EMA34)
-            if close[i] > r4_aligned[i] * 1.002 or close[i] > ema_34_aligned[i]:
+            # Short exit: price above R1 or trend reversal (above EMA34)
+            if close[i] > r1_aligned[i] * 1.002 or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
