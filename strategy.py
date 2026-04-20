@@ -1,108 +1,134 @@
 #!/usr/bin/env python3
 """
-4h_1d_Pivot_R1S1_Breakout_Volume_EMA200_Filter_v3
-Concept: 4h timeframe with daily R1/S1 breakout, volume confirmation, and EMA200 trend filter.
-- Long when price breaks above R1 with volume > 2x average and above daily EMA200
-- Short when price breaks below S1 with volume > 2x average and below daily EMA200
-- Exit when price returns to previous day's close
-- Conservative sizing (0.25) to manage drawdown
-- Designed to work in both bull and bear markets via trend filter
+6h_1d_WilliamsAlligator_ElderRay_Breakout_v1
+Concept: Combine Williams Alligator (trend filter) from 1d with Elder Ray (momentum) from 1d for 6h breakouts.
+- Long when 1d Alligator is bullish (jaw < teeth < lips) AND Elder Ray bull power > 0 AND price breaks 6h high of 20 bars
+- Short when 1d Alligator is bearish (jaw > teeth > lips) AND Elder Ray bear power < 0 AND price breaks 6h low of 20 bars
+- Exit when Alligator alignment reverses or Elder Ray changes sign
+- Williams Alligator: jaw=SMMA(13,8), teeth=SMMA(8,5), lips=SMMA(5,3)
+- Elder Ray: bull power = high - EMA13, bear power = low - EMA13
+- Designed to work in both bull (trend following) and bear (counter-trend via Alligator reversals)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_EMA200_Filter_v3"
-timeframe = "4h"
+name = "6h_1d_WilliamsAlligator_ElderRay_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def smma(src, length, offset):
+    """Smoothed Moving Average (SMMA) used in Williams Alligator"""
+    if length <= 0:
+        return src.copy()
+    result = np.full_like(src, np.nan, dtype=float)
+    # First value is simple SMA
+    if len(src) >= length:
+        result[length-1] = np.nansum(src[:length]) / length
+    # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CURRENT) / length
+    for i in range(length, len(src)):
+        if not np.isnan(result[i-1]):
+            result[i] = (result[i-1] * (length-1) + src[i]) / length
+        else:
+            result[i] = src[i]
+    # Apply offset (shift left by offset bars)
+    if offset > 0:
+        result = np.roll(result, -offset)
+        result[-offset:] = np.nan
+    return result
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for pivots and EMA200
+    # Get daily data ONCE before loop for Alligator and Elder Ray
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Calculate daily Camarilla pivots ===
+    # === Calculate 1d Williams Alligator ===
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Pivot point and range
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # SMMA calculations
+    jaw_1d = smma(close_1d, 13, 8)   # SMMA(13,8)
+    teeth_1d = smma(close_1d, 8, 5)  # SMMA(8,5)
+    lips_1d = smma(close_1d, 5, 3)   # SMMA(5,3)
     
-    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    # Previous day's close for exit
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = np.nan
+    # === Calculate 1d Elder Ray (using EMA13) ===
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema13_1d   # Bull Power = High - EMA13
+    bear_power_1d = low_1d - ema13_1d    # Bear Power = Low - EMA13
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
+    # Align Alligator components to 6h
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # === Daily EMA200 trend filter ===
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # === 6s: Calculate 20-period high/low for breakout ===
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
-    volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    # Rolling max/min for 20-period breakout levels
+    high_max20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    low_min20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Ensure enough data for EMA200
+    start_idx = 40  # Ensure enough data for all indicators (20+13+offsets)
     
     for i in range(start_idx, n):
         # Get values
-        ema200_val = ema200_aligned[i]
-        close_val = prices['close'].iloc[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        close_barrier_val = prev_close_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
+        high_max20_val = high_max20[i]
+        low_min20_val = low_min20[i]
+        close_val = close_6h[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema200_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
-            np.isnan(close_barrier_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or 
+            np.isnan(bull_power_val) or np.isnan(bear_power_val) or
+            np.isnan(high_max20_val) or np.isnan(low_min20_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Alligator alignment checks
+        alligator_bullish = jaw_val < teeth_val < lips_val   # Jaw < Teeth < Lips
+        alligator_bearish = jaw_val > teeth_val > lips_val   # Jaw > Teeth > Lips
+        
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and above EMA200
-            breakout_long = close_val > r1_val
-            vol_confirm = vol_ratio_val > 2.0
-            
-            if breakout_long and vol_confirm and close_val > ema200_val:
+            # Long: Bullish Alligator + positive Bull Power + breakout above 20-period high
+            if alligator_bullish and bull_power_val > 0 and close_val > high_max20_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and below EMA200
-            elif close_val < s1_val and vol_confirm and close_val < ema200_val:
+            # Short: Bearish Alligator + negative Bear Power + breakdown below 20-period low
+            elif alligator_bearish and bear_power_val < 0 and close_val < low_min20_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below previous day's close
-            if close_val <= close_barrier_val:
+            # Long exit: Alligator turns bearish OR Bull Power becomes negative
+            if not alligator_bullish or bull_power_val <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above previous day's close
-            if close_val >= close_barrier_val:
+            # Short exit: Alligator turns bullish OR Bear Power becomes positive
+            if not alligator_bearish or bear_power_val >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
