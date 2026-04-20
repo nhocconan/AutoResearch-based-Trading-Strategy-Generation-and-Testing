@@ -1,15 +1,10 @@
-# State your hypothesis in a comment at the top (strategy type, timeframe, why it should work in BOTH bull AND bear)
-# Hypothesis: 12h timeframe with 1D Donchian breakout and volume confirmation reduces false signals and improves trend capture. 
-# In bull markets, breakouts capture momentum; in bear markets, breakdowns avoid false reversals. Volume filter ensures 
-# only significant moves are traded, reducing whipsaws and overtrading.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Donchian_Breakout_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,27 +17,36 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1d: Calculate Donchian channels (20-period high/low) ===
+    # === 1d: Calculate Camarilla pivot levels (using previous day's data) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Use rolling window for Donchian bands
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Use previous day's OHLC for today's levels
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
     
-    # Align 1d indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Set first day's values to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # === 12h: Volume ratio (current vs 20-period average) ===
+    # Calculate Camarilla levels: R1, S1
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align 1d indicators to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # === 4h: Volume ratio (current vs 20-period average) ===
     close = prices['close'].values
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === 12h: ATR for volatility filter ===
+    # === 4h: ATR for volatility filter ===
     high = prices['high'].values
     low = prices['low'].values
     tr1 = high - low
@@ -52,20 +56,25 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # === 4h: Trend filter using EMA 34 ===
+    close_series = pd.Series(close)
+    ema_34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Get values
         close_val = close[i]
-        upper_band = donchian_high_aligned[i]
-        lower_band = donchian_low_aligned[i]
+        r1_level = camarilla_r1_aligned[i]
+        s1_level = camarilla_s1_aligned[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr[i]
+        ema_val = ema_34[i]
         
         # Skip if any value is NaN
-        if (np.isnan(upper_band) or np.isnan(lower_band) or np.isnan(vol_ratio_val) or 
-            np.isnan(atr_val)):
+        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val) or 
+            np.isnan(atr_val) or np.isnan(ema_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,31 +84,37 @@ def generate_signals(prices):
         atr_median = np.nanmedian(atr[max(0, i-49):i+1]) if i >= 1 else np.nan
         vol_filter = atr_val > atr_median if not np.isnan(atr_median) else False
         
+        # Trend filter: only long when price > EMA34, short when price < EMA34
+        trend_filter_long = close_val > ema_val
+        trend_filter_short = close_val < ema_val
+        
         if position == 0:
-            # Long: Price breaks above upper Donchian band with volume confirmation and volatility filter
-            if (close_val > upper_band and   # Break above upper band
+            # Long: Price breaks above R1 with volume confirmation, volatility filter, and trend filter
+            if (close_val > r1_level and   # Break above R1
                 vol_ratio_val > 2.0 and    # Strong volume confirmation
-                vol_filter):               # Volatility filter
+                vol_filter and             # Volatility filter
+                trend_filter_long):        # Trend filter (bullish)
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian band with volume confirmation and volatility filter
-            elif (close_val < lower_band and   # Break below lower band
+            # Short: Price breaks below S1 with volume confirmation, volatility filter, and trend filter
+            elif (close_val < s1_level and   # Break below S1
                   vol_ratio_val > 2.0 and    # Strong volume confirmation
-                  vol_filter):               # Volatility filter
+                  vol_filter and             # Volatility filter
+                  trend_filter_short):       # Trend filter (bearish)
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price drops back below lower Donchian band (mean reversion)
-            if close_val < lower_band:
+            # Long exit: Price drops back below R1 (reversion to mean)
+            if close_val < r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises back above upper Donchian band (mean reversion)
-            if close_val > upper_band:
+            # Short exit: Price rises back above S1 (reversion to mean)
+            if close_val > s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
