@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 6h_KAMA_Trend_With_1D_VolumeSpike_and_ChopFilter
-# Hypothesis: 6h KAMA trend direction, filtered by 1d volume spike (vol > 1.5x MA20) and chop regime (CHOP(14) < 38.2 = trending).
-# In choppy markets (CHOP > 61.8) we avoid trades to reduce whipsaw.
-# Volume spike confirms institutional interest in breakout direction.
-# KAMA adapts to market noise - faster in trends, slower in ranges.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# 4h_Camarilla_Pivot_R1S1_Breakout_Volume_Confirmation
+# Hypothesis: Price breaking above/below Camarilla R1/S1 levels from 1d, confirmed by volume spike and ADX trend filter.
+# Works in bull/bear: Uses Camarilla for reversal/breakout signals, volume to confirm strength, ADX to avoid chop.
+# Target: 20-40 trades/year (80-160 total over 4 years) to avoid fee drag.
 
-name = "6h_KAMA_Trend_With_1D_VolumeSpike_and_ChopFilter"
-timeframe = "6h"
+name = "4h_Camarilla_Pivot_R1S1_Breakout_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,140 +22,113 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume spike and chop filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d volume spike filter (volume > 1.5x 20-period MA)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = vol_1d > (vol_ma_20 * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    
-    # Calculate 1d Chopiness Index (CHOP)
+    # Calculate Camarilla levels for each 1d bar: R1, S1
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Camarilla: R1 = close + 1.1/12 * (high - low), S1 = close - 1.1/12 * (high - low)
+    camarilla_R1 = close_1d + (1.1/12) * (high_1d - low_1d)
+    camarilla_S1 = close_1d - (1.1/12) * (high_1d - low_1d)
+    
+    # Align to 4h timeframe (wait for 1d bar to close)
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    
+    # Calculate volume spike: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # Calculate ADX(14) for trend filter
+    period = 14
+    
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14)
-    atr_period = 14
-    atr = np.full_like(high_1d, np.nan)
-    if len(high_1d) >= atr_period:
-        atr[atr_period] = np.nanmean(tr[1:atr_period+1])
-        for i in range(atr_period + 1, len(high_1d)):
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Sum of TR over atr_period
-    tr_sum = np.full_like(high_1d, np.nan)
-    if len(high_1d) >= atr_period:
-        tr_sum[atr_period-1] = np.nansum(tr[1:atr_period+1])
-        for i in range(atr_period, len(high_1d)):
-            tr_sum[i] = tr_sum[i-1] + tr[i] - tr[i-atr_period+1]
+    # Smoothed values using Wilder's smoothing (alpha = 1/period)
+    atr = np.full_like(high, np.nan)
+    dm_plus_smooth = np.full_like(high, np.nan)
+    dm_minus_smooth = np.full_like(high, np.nan)
     
-    # Chop calculation: 100 * log10(sum(TR) / (max(HH) - min(LL))) / log10(atr_period)
-    chop = np.full_like(high_1d, 50.0)  # default neutral
-    if len(high_1d) >= atr_period:
-        # Highest high and lowest low over atr_period
-        hh = np.full_like(high_1d, np.nan)
-        ll = np.full_like(high_1d, np.nan)
+    # Initial values (simple average of first 'period' values)
+    if len(high) >= period:
+        atr[period] = np.nanmean(tr[1:period+1])
+        dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
+        dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
         
-        for i in range(atr_period-1, len(high_1d)):
-            hh[i] = np.max(high_1d[i-atr_period+1:i+1])
-            ll[i] = np.min(low_1d[i-atr_period+1:i+1])
-        
-        # Avoid division by zero
-        range_hl = hh - ll
-        valid = (range_hl > 0) & ~np.isnan(tr_sum) & ~np.isnan(hh) & ~np.isnan(ll)
-        chop[valid] = 100 * np.log10(tr_sum[valid] / range_hl[valid]) / np.log10(atr_period)
+        # Wilder's smoothing for subsequent values
+        for i in range(period + 1, len(high)):
+            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
     
-    # Chop filter: trending when CHOP < 38.2
-    chop_trending = chop < 38.2
-    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_trending.astype(float))
+    # DI and DX
+    di_plus = np.full_like(high, np.nan)
+    di_minus = np.full_like(high, np.nan)
+    dx = np.full_like(high, np.nan)
     
-    # Calculate KAMA on 6h data
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.concatenate([[np.nan], np.diff(close[:-1])]))  # |close[i] - close[i-1]|
-    for i in range(1, len(change)):
-        change[i] = np.abs(close[i] - close[i-1])
+    valid = ~np.isnan(atr) & (atr != 0)
+    di_plus[valid] = (dm_plus_smooth[valid] / atr[valid]) * 100
+    di_minus[valid] = (dm_minus_smooth[valid] / atr[valid]) * 100
     
-    # Sum of absolute changes over 10 periods
-    abs_change_sum = np.full_like(close, np.nan)
-    er_period = 10
-    if len(close) >= er_period:
-        abs_change_sum[er_period-1] = np.nansum(np.abs(np.diff(close[max(0, er_period-1):er_period]))) if er_period > 0 else 0
-        for i in range(er_period, len(close)):
-            abs_change_sum[i] = abs_change_sum[i-1] + np.abs(close[i] - close[i-1]) - np.abs(close[i-er_period] - close[i-er_period-1]) if i-er_period-1 >= 0 else abs_change_sum[i-1] + np.abs(close[i] - close[i-1])
+    dx_valid = valid & ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
+    dx[dx_valid] = (np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])) * 100
     
-    # Efficiency Ratio
-    er = np.full_like(close, 0.0)
-    price_change = np.abs(np.concatenate([[np.nan], np.diff(close[:-1])]))
-    for i in range(1, len(price_change)):
-        price_change[i] = np.abs(close[i] - close[i-1])
-    
-    valid_er = (~np.isnan(price_change)) & (~np.isnan(abs_change_sum)) & (abs_change_sum != 0)
-    er[valid_er] = price_change[valid_er] / abs_change_sum[valid_er]
-    
-    # Smoothing constants
-    fastest_sc = 2 / (2 + 1)  # EMA(2)
-    slowest_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fastest_sc - slowest_sc) + slowest_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    if len(close) > 0:
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            if not np.isnan(sc[i]):
-                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-            else:
-                kama[i] = kama[i-1]
+    # ADX (smoothed DX)
+    adx = np.full_like(high, np.nan)
+    if len(high) >= 2 * period:
+        adx[2*period] = np.nanmean(dx[period+1:2*period+1])
+        for i in range(2*period + 1, len(high)):
+            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(er_period, 20)  # Ensure we have enough data
+    start_idx = max(2*period + 1, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(chop_filter_aligned[i])):
+        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(di_plus[i]) or np.isnan(di_minus[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: KAMA trend + volume spike + chop filter (trending market)
         if position == 0:
-            kama_up = close[i] > kama[i]
-            kama_down = close[i] < kama[i]
-            vol_spike_now = vol_spike_aligned[i] > 0.5  # boolean as float
-            chop_filter_now = chop_filter_aligned[i] > 0.5  # trending market
-            
-            # Long: price above KAMA + volume spike + trending market
-            if kama_up and vol_spike_now and chop_filter_now:
+            # Long: price breaks above R1 + volume spike + ADX > 20 (trending)
+            if close[i] > camarilla_R1_aligned[i] and volume_spike[i] and adx[i] > 20:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + volume spike + trending market
-            elif kama_down and vol_spike_now and chop_filter_now:
+            # Short: price breaks below S1 + volume spike + ADX > 20 (trending)
+            elif close[i] < camarilla_S1_aligned[i] and volume_spike[i] and adx[i] > 20:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses below KAMA or conditions fail
-            if close[i] <= kama[i] or vol_spike_aligned[i] <= 0.5 or chop_filter_aligned[i] <= 0.5:
+            # Long: exit if price breaks below S1 (reversal) or ADX weakens
+            if close[i] < camarilla_S1_aligned[i] or adx[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses above KAMA or conditions fail
-            if close[i] >= kama[i] or vol_spike_aligned[i] <= 0.5 or chop_filter_aligned[i] <= 0.5:
+            # Short: exit if price breaks above R1 (reversal) or ADX weakens
+            if close[i] > camarilla_R1_aligned[i] or adx[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
