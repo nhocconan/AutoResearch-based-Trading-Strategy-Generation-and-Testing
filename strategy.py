@@ -1,101 +1,106 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume_Confirm
-Concept: 12h Camarilla pivot R1/S1 breakout with volume confirmation and 1d trend filter.
-- Long: Close > R1 AND volume > 1.5x avg volume AND 1d close > 1d open (bullish bias)
-- Short: Close < S1 AND volume > 1.5x avg volume AND 1d close < 1d open (bearish bias)
-- Exit: Price crosses back below R1 (long) or above S1 (short)
+4h_ADX_Direction_Trend_v1
+Concept: Use ADX(14) to measure trend strength and direction via +DI/-DI crossover.
+- Long: ADX > 25 AND +DI crosses above -DI (trending up)
+- Short: ADX > 25 AND -DI crosses above +DI (trending down)
+- Exit: ADX falls below 20 (trend weakening) OR opposite DI crossover
 - Position sizing: 0.25
-- Target: 15-35 trades/year (60-140 total over 4 years)
-- Works in bull/bear: Pivot levels define support/resistance, volume confirms breakout strength, 1d trend filters counter-trend noise
+- Works in bull/bear: ADX filters range markets, DI crossover captures momentum
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Pivot_R1S1_Breakout_Volume_Confirm"
-timeframe = "12h"
+name = "4h_ADX_Direction_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for pivot calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # === Calculate Camarilla pivot levels from previous day ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0  # First period has no previous close
     
-    # Pivot point and support/resistance levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    R1 = pivot + (range_1d * 1.0 / 12.0)  # R1 level
-    S1 = pivot - (range_1d * 1.0 / 12.0)  # S1 level
+    # Calculate +DM and -DM
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align pivot levels to 12h timeframe (use previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Smooth using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value is simple average
+        if len(data) >= period:
+            result[period-1] = np.mean(data[:period])
+            # Subsequent values: Wilder smoothing
+            for i in range(period, len(data)):
+                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+        return result
     
-    # === 12h: Volume confirmation ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)  # Avoid division by zero
+    period = 14
+    tr_smoothed = wilder_smooth(tr, period)
+    plus_dm_smoothed = wilder_smooth(plus_dm, period)
+    minus_dm_smoothed = wilder_smooth(minus_dm, period)
     
-    # === 1d: Trend filter (bullish if close > open) ===
-    trend_bullish = close_1d > df_1d['open'].values
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish.astype(float))
+    # Calculate DI+
+    plus_di = 100 * plus_dm_smoothed / tr_smoothed
+    minus_di = 100 * minus_dm_smoothed / tr_smoothed
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, period)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume MA
+    start_idx = period * 2  # Need enough data for smoothing
     
     for i in range(start_idx, n):
-        # Get values
-        close_price = prices['close'].iloc[i]
-        r1_level = R1_aligned[i]
-        s1_level = S1_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        trend_val = trend_bullish_aligned[i]
-        
         # Skip if any value is NaN
-        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val) or 
-            np.isnan(trend_val)):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(tr_smoothed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close above R1 AND volume confirmation AND bullish 1d trend
-            if close_price > r1_level and vol_ratio_val > 1.5 and trend_val > 0.5:
+            # Long: Strong uptrend (ADX > 25) and +DI crosses above -DI
+            if adx[i] > 25 and plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 AND volume confirmation AND bearish 1d trend
-            elif close_price < s1_level and vol_ratio_val > 1.5 and trend_val < 0.5:
+            # Short: Strong downtrend (ADX > 25) and -DI crosses above +DI
+            elif adx[i] > 25 and minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long position: hold until price crosses back below R1
-            signals[i] = 0.25
-            if close_price < r1_level:
+            # Long exit: Trend weakening (ADX < 20) or -DI crosses above +DI
+            if adx[i] < 20 or (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1]):
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short position: hold until price crosses back above S1
-            signals[i] = -0.25
-            if close_price > s1_level:
+            # Short exit: Trend weakening (ADX < 20) or +DI crosses above -DI
+            if adx[i] < 20 or (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1]):
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
