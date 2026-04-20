@@ -3,63 +3,56 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation
-# - Long when price breaks above Donchian high(20) with 12h EMA(20) rising and volume > 1.5x average
-# - Short when price breaks below Donchian low(20) with 12h EMA(20) falling and volume > 1.5x average
-# - Exit when price crosses back through Donchian midpoint or ATR-based stop hit
-# - Uses 12h for trend (reduces false signals in chop) and 6h for execution
-# - Target: 15-30 trades per year per symbol (60-120 total over 4 years)
+# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
+# - Williams %R(14) identifies overbought/oversold conditions
+# - 1d EMA(50) determines trend direction (only trade in trend direction)
+# - Volume > 1.3x 20-period average confirms momentum
+# - Williams %R extremes: < -80 for long, > -20 for short
+# - Exit when Williams %R crosses -50 (mean reversion midpoint)
+# - Designed to work in both bull and bear markets by following higher timeframe trend
+# - Target: 20-35 trades per year per symbol (80-140 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA(20) for trend filter
-    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_12h_slope = ema_12h - np.roll(ema_12h, 1)
-    ema_12h_slope[0] = 0
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    ema_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_slope)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR for stop loss (using 12h data)
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    
-    # 6h price and volume data
+    # Calculate Williams %R(14) on 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # 4h price and volume data
+    volume = prices['volume'].values
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_12h_aligned[i]) or \
-           np.isnan(ema_12h_slope_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_12h_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or \
+           np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,30 +60,30 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
+        ema_50 = ema_50_1d_aligned[i]
+        wr = williams_r[i]
         
         if position == 0:
-            # Long entry: price breaks above Donchian high + 12h EMA rising + volume surge
-            if price > donch_high[i] and ema_12h_slope_aligned[i] > 0 and vol > 1.5 * vol_ma[i]:
+            # Long entry: Williams %R oversold (< -80) + price above EMA50 (uptrend) + volume surge
+            if wr < -80 and price > ema_50 and vol > 1.3 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short entry: price breaks below Donchian low + 12h EMA falling + volume surge
-            elif price < donch_low[i] and ema_12h_slope_aligned[i] < 0 and vol > 1.5 * vol_ma[i]:
+            # Short entry: Williams %R overbought (> -20) + price below EMA50 (downtrend) + volume surge
+            elif wr > -20 and price < ema_50 and vol > 1.3 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: price crosses below Donchian midpoint OR ATR stop hit (2*ATR)
-            if price < donch_mid[i] or price < entry_price - 2.0 * atr_12h_aligned[i]:
+            # Long exit: Williams %R crosses above -50 (mean reversion)
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Donchian midpoint OR ATR stop hit (2*ATR)
-            if price > donch_mid[i] or price > entry_price + 2.0 * atr_12h_aligned[i]:
+            # Short exit: Williams %R crosses below -50 (mean reversion)
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_12hEMAFilter_Volume_ATRStop"
-timeframe = "6h"
+name = "4h_WilliamsR_EMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
