@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_1d_Donchian_Breakout_Volume_Trend_Filter
-# Hypothesis: Breakout above Donchian upper/lower band on 4h timeframe with daily EMA34 trend filter.
-# In uptrends (price > daily EMA34), long Donchian upper breakouts; in downtrends (price < daily EMA34), short Donchian lower breakouts.
-# Added volume confirmation (current volume > 1.5x 20-period average) to filter false breakouts.
-# Exit on opposite Donchian band break or trend reversal.
-# Target: 20-40 trades/year to stay under 400 total trades over 4 years.
+# 6h_1d_WeeklyPivot_R3S3_Reversal_With_VolumeFilter
+# Hypothesis: Fade extreme weekly pivot levels (R3/S3) with volume confirmation on 6h timeframe.
+# Weekly R3/S3 act as strong support/resistance; price often reverses from these levels.
+# Volume filter ensures institutional participation. Works in ranging markets by exploiting
+# mean reversion at extremes, and in trends by catching overextended moves.
+# Target: 20-40 trades/year (~80-160 total over 4 years).
 
-name = "4h_1d_Donchian_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "6h_1d_WeeklyPivot_R3S3_Reversal_With_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,64 +24,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Get weekly data ONCE before loop
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 10:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly pivot points (using prior week's data)
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Align daily EMA34 to 4h timeframe
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly pivot: (H + L + C) / 3
+    pivot_w = (high_w + low_w + close_w) / 3.0
+    # Weekly range
+    range_w = high_w - low_w
+    # Weekly R3 and S3 levels
+    r3_w = pivot_w + range_w * 1.1
+    s3_w = pivot_w - range_w * 1.1
     
-    # Calculate 20-period average volume for confirmation
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Align weekly levels to 6h timeframe
+    r3_w_aligned = align_htf_to_ltf(prices, df_w, r3_w)
+    s3_w_aligned = align_htf_to_ltf(prices, df_w, s3_w)
     
-    # Calculate Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Volume filter: 6h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure sufficient warmup for all indicators
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r3_w_aligned[i]) or np.isnan(s3_w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume[i] > 1.5 * vol_ma20[i]
+        # Volume must be above average for signal
+        if not volume_filter[i]:
+            # Hold current position but don't add new signals on low volume
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Long: uptrend + volume confirmation + break above Donchian high
-            if close[i] > ema34_aligned[i] and volume_confirm and close[i] > donchian_high[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: downtrend + volume confirmation + break below Donchian low
-            elif close[i] < ema34_aligned[i] and volume_confirm and close[i] < donchian_low[i]:
-                signals[i] = -0.25
-                position = -1
-                
+            # Long: price touches or goes below S3 (strong support) and shows rejection
+            if close[i] <= s3_w_aligned[i] * 1.005:  # Within 0.5% of S3
+                # Additional confirmation: close above open (bullish candle)
+                if close[i] > prices['open'].iloc[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: price touches or goes above R3 (strong resistance) and shows rejection
+            elif close[i] >= r3_w_aligned[i] * 0.995:  # Within 0.5% of R3
+                # Additional confirmation: close below open (bearish candle)
+                if close[i] < prices['open'].iloc[i]:
+                    signals[i] = -0.25
+                    position = -1
+                    
         elif position == 1:
-            # Long: exit if price breaks below Donchian low (reversal) or trend changes to downtrend
-            if close[i] < donchian_low[i] or close[i] < ema34_aligned[i]:
+            # Long: exit if price returns to weekly pivot (mean reversion target)
+            # or if price reaches R1 (take profit)
+            if close[i] >= pivot_w[i] * 0.995:  # Near pivot
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above Donchian high (reversal) or trend changes to uptrend
-            if close[i] > donchian_high[i] or close[i] > ema34_aligned[i]:
+            # Short: exit if price returns to weekly pivot
+            # or if price reaches S1 (take profit)
+            if close[i] <= pivot_w[i] * 1.005:  # Near pivot
                 signals[i] = 0.0
                 position = 0
             else:
