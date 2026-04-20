@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_VolumeTrend_v1"
-timeframe = "12h"
+name = "4h_1d_Donchian20_VolumeSpike_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -17,88 +17,93 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Points (previous day) ===
+    # === Daily Donchian Channels (20-period) from previous day ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Previous day's values for pivot calculation
+    # Previous day's values for Donchian calculation
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
     
     # Set first values to avoid look-ahead
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
     
-    # Classic pivot (same for Camarilla)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    # 20-period high and low from previous day's data
+    high_series = pd.Series(prev_high)
+    low_series = pd.Series(prev_low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Camarilla R1 and S1 levels (core breakout levels)
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
+    # Align to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # === 4h ATR for volatility filter and stoploss ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # === Volume Trend Filter ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # === Volume Spike Filter ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Price Trend Filter: 12h EMA34 > EMA89 for long, < for short ===
-    close_series = pd.Series(prices['close'].values)
-    ema34 = close_series.ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema89 = close_series.ewm(span=89, min_periods=89, adjust=False).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Get values
-        close_val = prices['close'].iloc[i]
+        close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
         vol_ratio_val = vol_ratio[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        pivot_val = pivot_aligned[i]
-        ema34_val = ema34[i]
-        ema89_val = ema89[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        atr_val = atr[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(pivot_val) or 
-            np.isnan(ema34_val) or np.isnan(ema89_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(upper) or 
+            np.isnan(lower) or np.isnan(atr_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with volume confirmation and uptrend (EMA34 > EMA89)
-            if close_val > r1_val and vol_ratio_val > 2.0 and ema34_val > ema89_val:
+            # Long: Break above upper Donchian with volume spike
+            if close_val > upper and vol_ratio_val > 2.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume confirmation and downtrend (EMA34 < EMA89)
-            elif close_val < s1_val and vol_ratio_val > 2.0 and ema34_val < ema89_val:
+                entry_price = close_val
+            # Short: Break below lower Donchian with volume spike
+            elif close_val < lower and vol_ratio_val > 2.5:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         
         elif position == 1:
-            # Long exit: Price returns below pivot OR trend breaks down
-            if close_val < pivot_val or ema34_val < ema89_val:
+            # Long: Exit on stoploss or reversal signal
+            if low_val <= entry_price - 2.0 * atr_val or close_val < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot OR trend breaks up
-            if close_val > pivot_val or ema34_val > ema89_val:
+            # Short: Exit on stoploss or reversal signal
+            if high_val >= entry_price + 2.0 * atr_val or close_val > upper:
                 signals[i] = 0.0
                 position = 0
             else:
