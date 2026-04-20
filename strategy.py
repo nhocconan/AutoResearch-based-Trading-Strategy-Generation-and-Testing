@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Load 1d data for regime and trend
@@ -42,7 +42,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if NaN in critical values
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(vol_ratio_1d_aligned[i])):
@@ -61,7 +61,7 @@ def generate_signals(prices):
         trend_down = price < ema_trend
         
         # Volume filter: require above-average volume
-        vol_filter = vol_ratio > 1.3
+        vol_filter = vol_ratio > 1.5
         
         if position == 0:
             # Enter long in uptrend with volume
@@ -75,7 +75,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Exit long: trend reversal or volatility spike
-            if not trend_up or (atr > 3.5 * atr):
+            if not trend_up or atr > 3.0 * atr_14_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,7 +83,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: trend reversal or volatility spike
-            if not trend_down or (atr > 3.5 * atr):
+            if not trend_down or atr > 3.0 * atr_14_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_EMA50_VolumeTrend_v1"
+name = "4h_1d_EMA50_VolumeTrend_v2"
 timeframe = "4h"
 leverage = 1.0
