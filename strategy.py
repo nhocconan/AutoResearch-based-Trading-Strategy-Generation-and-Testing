@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_TrendFilter_v1"
-timeframe = "4h"
+name = "1h_4d_1d_Pivot_R1S1_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 150:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -35,36 +35,53 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 4h timeframe
+    # Align to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # === 4h Trend Filter: 50 EMA ===
+    # === 1h Momentum and Volume ===
     close = prices['close'].values
-    close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # === 4h Volume Confirmation ===
     volume = prices['volume'].values
+    
+    # 24-period EMA for trend filter (1 day)
+    close_series = pd.Series(close)
+    ema24 = close_series.ewm(span=24, adjust=False, min_periods=24).mean().values
+    
+    # Volume ratio (20-period average)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
+    # Momentum: 5-period ROC
+    roc5 = np.zeros_like(close)
+    roc5[5:] = (close[5:] - close[:-5]) / close[:-5] * 100
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(30, n):
+        # Skip outside session
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
         close_val = close[i]
+        roc_val = roc5[i]
         vol_ratio_val = vol_ratio[i]
-        ema50_val = ema50[i]
+        ema24_val = ema24[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(ema50_val) or 
+        if (np.isnan(roc_val) or np.isnan(vol_ratio_val) or np.isnan(ema24_val) or 
             np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -72,33 +89,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R1 with volume and above EMA50
+            # Long: Break above R1 with positive momentum and volume
             if (close_val > r1_val and 
+                roc_val > 0.5 and 
                 vol_ratio_val > 1.5 and
-                close_val > ema50_val):
-                signals[i] = 0.25
+                close_val > ema24_val):
+                signals[i] = 0.20
                 position = 1
-            # Short: Break below S1 with volume and below EMA50
+            # Short: Break below S1 with negative momentum and volume
             elif (close_val < s1_val and 
+                  roc_val < -0.5 and 
                   vol_ratio_val > 1.5 and
-                  close_val < ema50_val):
-                signals[i] = -0.25
+                  close_val < ema24_val):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot or below EMA50
-            if close_val < pivot_val or close_val < ema50_val:
+            # Long exit: Price returns below pivot or momentum turns negative
+            if close_val < pivot_val or roc_val < -0.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Price returns above pivot or above EMA50
-            if close_val > pivot_val or close_val > ema50_val:
+            # Short exit: Price returns above pivot or momentum turns positive
+            if close_val > pivot_val or roc_val > 0.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
