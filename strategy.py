@@ -1,3 +1,11 @@
+# 4h_Pivot_Band_Scalper
+# Hypothesis: Trade mean-reversion within daily pivot bands using 4h candles.
+# In both bull and bear markets, price tends to respect daily pivot levels (R1/S1) with mean-reversion.
+# Entry: Price touches R1 or S1 and shows rejection (wick) with volume confirmation.
+# Exit: Return to pivot (PP) or opposite band.
+# Uses tight stops and limited risk per trade to survive volatile markets.
+# Target: 20-40 trades/year per symbol with ~55% win rate.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,87 +13,81 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE
+    # Load daily data ONCE for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR (14-period)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
-    # Calculate daily EMA (34-period) for trend
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align pivot levels to 4h
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate daily volume average (20-period)
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align daily indicators to 12h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # 12h price arrays
+    # Calculate 4h price action
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.maximum(vol_ma_20, 1e-10)
+    # Volume filter: 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if NaN in aligned data
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
+    for i in range(20, n):  # Start after volume MA warmup
+        # Skip if NaN in pivot levels
+        if np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_34_val = ema_34_1d_aligned[i]
-        atr_val = atr_14_1d_aligned[i]
-        vol_ma_20_val = vol_ma_20_1d_aligned[i]
         price = close[i]
-        vol_ratio_val = vol_ratio[i]
+        vol = volume[i]
+        vol_avg = vol_ma[i]
+        
+        # Volume confirmation: current volume > 1.5x average
+        vol_ok = vol > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price above daily EMA34 + volume expansion + low volatility
-            if (price > ema_34_val and 
-                vol_ratio_val > 1.5 and 
-                atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 50)):
+            # Long setup: price at S1 with rejection (long lower wick) and volume
+            at_s1 = abs(price - s1_4h[i]) < 0.001 * s1_4h[i]  # Within 0.1% of S1
+            lower_wick = (close[i] - low[i]) > 0.6 * (high[i] - low[i])  # Long lower wick
+            if at_s1 and lower_wick and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily EMA34 + volume expansion + low volatility
-            elif (price < ema_34_val and 
-                  vol_ratio_val > 1.5 and 
-                  atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 50)):
+            
+            # Short setup: price at R1 with rejection (long upper wick) and volume
+            at_r1 = abs(price - r1_4h[i]) < 0.001 * r1_4h[i]  # Within 0.1% of R1
+            upper_wick = (high[i] - close[i]) > 0.6 * (high[i] - low[i])  # Long upper wick
+            if at_r1 and upper_wick and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below EMA34 or volatility contraction
-            if price < ema_34_val or vol_ratio_val < 0.8:
+            # Long exit: return to pivot or stop at S1 breach
+            if price >= pivot_4h[i] or price <= s1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above EMA34 or volatility contraction
-            if price > ema_34_val or vol_ratio_val < 0.8:
+            # Short exit: return to pivot or stop at R1 breach
+            if price <= pivot_4h[i] or price >= r1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_VolumeExpansion_VolatilityFilter"
-timeframe = "12h"
+name = "4h_Pivot_Band_Scalper"
+timeframe = "4h"
 leverage = 1.0
