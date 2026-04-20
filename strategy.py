@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1d_Pivot_R1S1_Breakout_VolumeFilter
-# Hypothesis: Daily Pivot R1/S1 breakouts on 4h timeframe with volume confirmation.
-# Uses daily pivot levels as key support/resistance levels that work in both bull and bear markets.
-# Volume filter ensures breakouts have institutional participation, reducing false signals.
-# Target: 20-40 trades/year per symbol for balance between signal quality and frequency.
+# 4h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter
+# Hypothesis: Daily pivot R1/S1 breakouts on 4h timeframe with volume confirmation and trend filter using 1d EMA34.
+# Uses daily pivots for structure, volume spike to confirm breakouts, and daily EMA for trend filter.
+# Designed to work in both bull and bear markets by following the trend while avoiding false breakouts.
+# Target: 20-40 trades/year per symbol.
 
-name = "4h_1d_Pivot_R1S1_Breakout_VolumeFilter"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,9 +23,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data ONCE before loop
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     # Calculate daily pivot points
@@ -40,13 +40,14 @@ def generate_signals(prices):
     # Calculate daily EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate volume average for spike detection (20-period on 4h = ~3.3 days)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume average for spike detection (48 periods = 2 days of 4h bars)
+    vol_ma = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
-    # Align daily indicators to 4h timeframe
+    # Align 1d indicators to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,12 +57,12 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5 * 20-period average volume
-        volume_spike = volume[i] > 1.5 * vol_ma[i]
+        # Volume spike condition: current volume > 1.8 * average volume
+        volume_spike = volume[i] > 1.8 * vol_ma_aligned[i]
         
         if position == 0:
             # Long: price > daily EMA34 (uptrend) and breaks above R1 with volume
