@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-# Enters long when price breaks above 20-day high with weekly uptrend (close > EMA20) and volume > 1.5x average.
-# Enters short when price breaks below 20-day low with weekly downtrend (close < EMA20) and volume > 1.5x average.
-# Exits when price returns to 20-day moving average.
-# Donchian channels capture breakouts in trending markets, weekly EMA filter avoids counter-trend trades.
-# Volume confirmation ensures institutional participation. Target: 50-100 total trades over 4 years (12-25/year).
+# Hypothesis: 12h Williams Alligator + Elder Ray with Volume Confirmation
+# Long when: price > Alligator Jaw, Bull Power > 0, Bear Power < 0, volume > 1.5x avg
+# Short when: price < Alligator Jaw, Bull Power < 0, Bear Power > 0, volume > 1.5x avg
+# Exit when: price crosses Alligator Teeth or power signals reverse
+# Williams Alligator identifies trend, Elder Ray measures bull/bear power, volume confirms conviction.
+# Designed for 12h timeframe to capture multi-day moves with low frequency (target: 50-150 trades over 4 years).
 
-name = "1d_Donchian20_1wEMA20_Volume"
-timeframe = "1d"
+name = "12h_Alligator_ElderRay_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,73 +19,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data ONCE before loop for Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # === Donchian Channels (20-day high/low) ===
+    # === Williams Alligator (13,8,5 SMAs shifted) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # 20-period high and low
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Jaw (13-period SMA, shifted 8 bars)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth (8-period SMA, shifted 5 bars)
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips (5-period SMA, shifted 3 bars)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # === Weekly EMA20 for trend filter ===
-    weekly_close = df_1w['close'].values
-    ema_20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # === Elder Ray (13-period EMA) ===
+    daily_close = df_1d['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    ema13 = pd.Series(daily_close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
+    
+    bull_power = daily_high - ema13
+    bear_power = daily_low - ema13
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # === Volume confirmation ===
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values  # 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(13, n):
         # Get values
         close_val = close[i]
-        high_20_val = high_20[i]
-        low_20_val = low_20[i]
-        ema_val = ema_20_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(high_20_val) or np.isnan(low_20_val) or np.isnan(ema_val) or 
-            np.isnan(vol_ratio_val)):
+        if (np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or 
+            np.isnan(bull_val) or np.isnan(bear_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above 20-day high, weekly uptrend, volume confirmation
-            if close_val > high_20_val and close_val > ema_val and vol_ratio_val > 1.5:
+            # Long entry: price > Jaw, Bull Power > 0, Bear Power < 0, volume confirmation
+            if close_val > jaw_val and bull_val > 0 and bear_val < 0 and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-            # Short entry: price breaks below 20-day low, weekly downtrend, volume confirmation
-            elif close_val < low_20_val and close_val < ema_val and vol_ratio_val > 1.5:
+            # Short entry: price < Jaw, Bull Power < 0, Bear Power > 0, volume confirmation
+            elif close_val < jaw_val and bull_val < 0 and bear_val > 0 and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
         
         elif position == 1:
-            # Long exit: price returns to 20-day EMA or trend breaks
-            if close_val <= ema_val:
+            # Long exit: price crosses below Teeth or power signals reverse
+            if close_val < teeth_val or bull_val <= 0 or bear_val >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to 20-day EMA or trend breaks
-            if close_val >= ema_val:
+            # Short exit: price crosses above Teeth or power signals reverse
+            if close_val > teeth_val or bull_val >= 0 or bear_val <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
