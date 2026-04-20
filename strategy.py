@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_1d_Keltner_Reversal_Strategy
-# Hypothesis: On 6h timeframe, trade mean reversion at 1d Keltner Channel extremes with volume confirmation and ADX filter.
-# In ranging markets (ADX < 25), price reverses at lower/upper Keltner bands; in trending markets (ADX > 25), wait for pullback to EMA20.
-# Targets 50-150 total trades over 4 years by requiring confluence of band touch, volume surge, and regime filter.
-# Works in both bull and bear markets due to adaptive regime filtering and mean reversion logic.
+# 1h_4h_1D_Pivot_R1_S1_Breakout_V1
+# Hypothesis: Trade breakouts at 1d Camarilla R1/S1 levels with volume confirmation, using 4h trend filter to avoid false breakouts.
+# In 4h uptrend (price > EMA20), long breakouts above R1; in 4h downtrend (price < EMA20), short breakdowns below S1.
+# Uses volume spike to confirm breakout strength. Targets 15-30 trades/year by requiring confluence of level, volume, and trend.
+# Works in both bull and bear markets due to adaptive trend filter.
 
-name = "6h_1d_Keltner_Reversal_Strategy"
-timeframe = "6h"
+name = "1h_4h_1D_Pivot_R1_S1_Breakout_V1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -28,58 +28,37 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA20 for Keltner middle line
-    close_1d = df_1d['close'].values
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).values
-    
-    # Calculate 1d ATR(10) for Keltner width
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    close_1d = df_1d['close'].values
     
-    # Keltner Bands: middle = EMA20, width = 2 * ATR(10)
-    keltner_upper = ema_20 + 2 * atr_10
-    keltner_lower = ema_20 - 2 * atr_10
+    # Typical price for pivot calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Align 1d Keltner levels to 6h timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    # Pivot point and ranges
+    pivot_1d = typical_price_1d
+    range_1d = high_1d - low_1d
     
-    # Calculate 1d ADX for trend/ranging filter (14-period)
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Camarilla levels: S1, R1
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
     
-    # Smoothed TR and DM using Wilder smoothing
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])
-        # Subsequent values: Wilder smoothing
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Align 1d levels to 1h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     
-    atr = smooth_wilder(tr, 14)
-    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
-    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth_wilder(dx, 14)
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
     
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema_20 = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20)
     
-    # Volume average for spike detection (20-period)
+    # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -89,74 +68,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Ranging market (ADX < 25): mean reversion at Keltner extremes
-            if adx_aligned[i] < 25:
-                # Long at lower band with volume confirmation
-                if (low[i] <= keltner_lower_aligned[i] * 1.002 and 
-                    close[i] > keltner_lower_aligned[i] and
-                    volume[i] > 2.0 * volume_ma[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # Short at upper band with volume confirmation
-                elif (high[i] >= keltner_upper_aligned[i] * 0.998 and 
-                      close[i] < keltner_upper_aligned[i] and
-                      volume[i] > 2.0 * volume_ma[i]):
-                    signals[i] = -0.25
-                    position = -1
-            # Trending market (ADX > 25): pullback to EMA20
-            elif adx_aligned[i] > 25:
-                # Long pullback to EMA20 in uptrend
-                if (low[i] <= ema_20_aligned[i] * 1.005 and 
-                    close[i] > ema_20_aligned[i] and
+            # 4h uptrend: long breakout above R1
+            if close[i] > ema_20_aligned[i]:
+                if (close[i] > r1_aligned[i] * 1.002 and 
                     volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                     position = 1
-                # Short pullback to EMA20 in downtrend
-                elif (high[i] >= ema_20_aligned[i] * 0.995 and 
-                      close[i] < ema_20_aligned[i] and
-                      volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = -0.25
+            # 4h downtrend: short breakdown below S1
+            elif close[i] < ema_20_aligned[i]:
+                if (close[i] < s1_aligned[i] * 0.998 and 
+                    volume[i] > 1.5 * volume_ma[i]):
+                    signals[i] = -0.20
                     position = -1
         
         elif position == 1:
-            # Long exit: price reaches opposite band or EMA crosses against trend
-            if adx_aligned[i] < 25:
-                # Ranging: exit at upper band
-                if high[i] >= keltner_upper_aligned[i] * 0.998:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: price returns below EMA20 or breaks below S1
+            if close[i] < ema_20_aligned[i] or close[i] < s1_aligned[i] * 0.998:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Trending: exit if price closes below EMA20
-                if close[i] < ema_20_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price reaches opposite band or EMA crosses against trend
-            if adx_aligned[i] < 25:
-                # Ranging: exit at lower band
-                if low[i] <= keltner_lower_aligned[i] * 1.002:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: price returns above EMA20 or breaks above R1
+            if close[i] > ema_20_aligned[i] or close[i] > r1_aligned[i] * 1.002:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Trending: exit if price closes above EMA20
-                if close[i] > ema_20_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
