@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Target_v2"
-timeframe = "4h"
+name = "1h_4h_1d_Camarilla_R1S1_Breakout_Volume_1h"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,11 +27,11 @@ def generate_signals(prices):
     R1 = pivot + (range_1d * 1.1 / 12)
     S1 = pivot - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # === 4h: Price and volume ===
+    # === 1h: Price and volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -40,10 +40,20 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(60, n):
+        # Skip outside session
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
         close_val = close[i]
         r1_val = R1_aligned[i]
@@ -59,28 +69,28 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R1 with volume confirmation (stricter volume filter)
-            if close_val > r1_val and vol_ratio_val > 2.2:
-                signals[i] = 0.25
+            if close_val > r1_val and vol_ratio_val > 2.5:
+                signals[i] = 0.20
                 position = 1
             # Short: Price breaks below S1 with volume confirmation
-            elif close_val < s1_val and vol_ratio_val > 2.2:
-                signals[i] = -0.25
+            elif close_val < s1_val and vol_ratio_val > 2.5:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Long exit: Price returns below R1 or low volume (stricter exit)
-            if close_val < r1_val or vol_ratio_val < 1.1:
+            if close_val < r1_val or vol_ratio_val < 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Short exit: Price returns above S1 or low volume
-            if close_val > s1_val or vol_ratio_val < 1.1:
+            if close_val > s1_val or vol_ratio_val < 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
