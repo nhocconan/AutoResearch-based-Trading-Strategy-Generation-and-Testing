@@ -3,111 +3,103 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1W_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "12h_1d_Vortex_VolumeTrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 36:  # Need at least 3 days of 12h data for 20-period lookback
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # === Daily: KAMA trend direction ===
+    # === 1d: Vortex Indicator (14-period) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Vortex Movement
+    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
+    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
+    
+    # Sum over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # VI+ and VI-
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # === 12h: EMA25 for trend filter ===
     close = prices['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Vectorized calculation for ER
-    er = np.zeros_like(close)
-    for i in range(10, len(close)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    ema_25 = pd.Series(close).ewm(span=25, adjust=False, min_periods=25).mean().values
     
-    # === Daily: RSI(14) ===
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss > 0, avg_loss, np.nan)
-    rsi = 100 - (100 / (1 + rs))
+    # === 12h: Volume ratio (current vs 20-period average) ===
+    volume = prices['volume'].values
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Weekly: Choppiness Index (CHOP) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    atr_1w = np.zeros(len(high_1w))
-    for i in range(1, len(high_1w)):
-        tr = max(high_1w[i] - low_1w[i],
-                 abs(high_1w[i] - close_1w[i-1]),
-                 abs(low_1w[i] - close_1w[i-1]))
-        atr_1w[i] = (atr_1w[i-1] * 13 + tr) / 14 if i > 1 else tr
-    # Sum of true ranges over 14 periods
-    sum_tr = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum().values
-    # Max high - min low over 14 periods
-    max_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_tr / (max_high - min_low)) / np.log10(14)
-    
-    # Align weekly CHOP to daily
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Align 1d Vortex to 12h timeframe
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(34, n):  # Start after Vortex warmup
         # Get values
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        chop_val = chop_aligned[i]
         close_val = close[i]
+        ema_val = ema_25[i]
+        vi_plus_val = vi_plus_aligned[i]
+        vi_minus_val = vi_minus_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(kama_val) or np.isnan(rsi_val) or np.isnan(chop_val)):
+        if (np.isnan(ema_val) or np.isnan(vi_plus_val) or np.isnan(vi_minus_val) or
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: KAMA up, RSI > 50, chop < 61.8 (trending market)
-            if (close_val > kama_val and
-                rsi_val > 50 and
-                chop_val < 61.8):
+            # Long: VI+ > VI- (bullish), price above EMA (uptrend), volume confirmation
+            if (vi_plus_val > vi_minus_val and  # Bullish Vortex
+                close_val > ema_val and         # Uptrend filter
+                vol_ratio_val > 1.5):           # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down, RSI < 50, chop < 61.8 (trending market)
-            elif (close_val < kama_val and
-                  rsi_val < 50 and
-                  chop_val < 61.8):
+            # Short: VI- > VI+ (bearish), price below EMA (downtrend), volume confirmation
+            elif (vi_minus_val > vi_plus_val and  # Bearish Vortex
+                  close_val < ema_val and         # Downtrend filter
+                  vol_ratio_val > 1.5):           # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA down or RSI < 40
-            if close_val < kama_val or rsi_val < 40:
+            # Long exit: VI- crosses above VI+ (trend change) or price breaks below EMA
+            if vi_minus_val > vi_plus_val or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA up or RSI > 60
-            if close_val > kama_val or rsi_val > 60:
+            # Short exit: VI+ crosses above VI- (trend change) or price breaks above EMA
+            if vi_plus_val > vi_minus_val or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
