@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # Strategy: 4h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter
-# Hypothesis: Breakout above daily Camarilla R1 or below S1 with volume confirmation and 1d EMA34 trend filter on 4h timeframe.
-# Uses 4h bars for entries, filtering by 1d trend to avoid counter-trend trades. Volume > 2x 20-period MA confirms institutional interest.
-# ATR-based stoploss limits drawdown. Designed for 20-50 trades/year to minimize fee drag and work in both bull/bear markets.
+# Hypothesis: Breakout above daily Camarilla R1 or below S1 on 4h timeframe with volume confirmation and 1d EMA34 trend filter. Designed for 20-50 trades/year to minimize fee drag while capturing institutional breakouts in both bull and bear markets.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
