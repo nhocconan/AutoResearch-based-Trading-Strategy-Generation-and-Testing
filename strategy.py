@@ -1,12 +1,12 @@
-# 1h_Structure_And_Momentum
-# Hypothesis: Combine market structure (HH/HL/LH/LL) with RSI momentum on 1h timeframe, using 4h trend filter and session filter (08-20 UTC).
-# Market structure identifies swing points; RSI confirms momentum in the direction of structure.
-# 4h EMA filter ensures trades align with higher timeframe trend.
-# Session filter reduces noise during low-volume hours.
-# Target: 15-35 trades/year per symbol to stay within fee limits.
+#!/usr/bin/env python3
+# 6h_WeeklyPivot_R1_S1_Breakout_TrendFilter
+# Hypothesis: Weekly R1/S1 breakouts on 6h timeframe with trend filter capture institutional moves while avoiding counter-trend entries.
+# Uses weekly pivot points from actual 1w data. Trend filter uses 6h EMA50 to ensure trades align with medium-term direction.
+# Works in bull markets by catching breaks above R1 in uptrend; in bear markets by catching breaks below S1 in downtrend.
+# Target: 15-30 trades/year to minimize fee drag.
 
-name = "1h_Structure_And_Momentum"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R1_S1_Breakout_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,103 +23,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
     
-    # RSI(14) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = pivot + (high_1w - low_1w) * 1.1 / 12
+    s1 = pivot - (high_1w - low_1w) * 1.1 / 12
     
-    # Market structure: swing highs/lows (3-bar lookback)
-    swing_high = np.zeros(n, dtype=bool)
-    swing_low = np.zeros(n, dtype=bool)
-    for i in range(2, n-2):
-        if high[i] > high[i-1] and high[i] > high[i-2] and high[i] > high[i+1] and high[i] > high[i+2]:
-            swing_high[i] = True
-        if low[i] < low[i-1] and low[i] < low[i-2] and low[i] < low[i+1] and low[i] < low[i+2]:
-            swing_low[i] = True
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Structure states: track last swing high/low
-    last_swing_high = np.full(n, np.nan)
-    last_swing_low = np.full(n, np.nan)
-    last_high_idx = -1
-    last_low_idx = -1
+    # Trend filter: EMA50 on 6h timeframe
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    for i in range(n):
-        if swing_high[i]:
-            last_high_idx = i
-        if swing_low[i]:
-            last_low_idx = i
-        if last_high_idx != -1:
-            last_swing_high[i] = high[last_high_idx]
-        if last_low_idx != -1:
-            last_swing_low[i] = low[last_low_idx]
-    
-    # Structure signals: bullish if price above last swing low, bearish if below last swing high
-    bullish_structure = close > last_swing_low
-    bearish_structure = close < last_swing_high
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: volume > 1.5x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > (vol_ema20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure RSI and structure are ready
+    start_idx = 50  # Ensure EMA50 is ready
     
     for i in range(start_idx, n):
-        # Skip if required data is not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(last_swing_high[i]) or np.isnan(last_swing_low[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema50[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Require session
-        if not session_filter[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: bullish structure + RSI > 50 + price above 4h EMA (uptrend)
-            if bullish_structure[i] and rsi[i] > 50 and close[i] > ema_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: price breaks above R1 + in uptrend (price > EMA50) + volume confirmation
+            if close[i] > r1_aligned[i] and close[i] > ema50[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: bearish structure + RSI < 50 + price below 4h EMA (downtrend)
-            elif bearish_structure[i] and rsi[i] < 50 and close[i] < ema_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: price breaks below S1 + in downtrend (price < EMA50) + volume confirmation
+            elif close[i] < s1_aligned[i] and close[i] < ema50[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if structure turns bearish or RSI < 40
-            if not bullish_structure[i] or rsi[i] < 40:
+            # Long: exit if price breaks below S1 (mean reversion to weekly support)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if structure turns bullish or RSI > 60
-            if not bearish_structure[i] or rsi[i] > 60:
+            # Short: exit if price breaks above R1 (mean reversion to weekly resistance)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
