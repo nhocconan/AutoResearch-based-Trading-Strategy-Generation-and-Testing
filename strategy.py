@@ -3,122 +3,116 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Keltner Channel breakout with 1-day trend filter and volume confirmation
-# Keltner Channel (EMA20 ± 2*ATR10) identifies volatility-based breakouts
-# In bull market (price > 1-day EMA50): buy upper band breakout, sell lower band breakout
-# In bear market (price < 1-day EMA50): sell upper band breakout, buy lower band breakout
-# Volume confirmation: require volume > 1.5x 20-period average
-# Designed to capture breakouts in trending markets while filtering false signals in ranges
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 1h trend following with 4h ADX filter and 1d volume spike
+# Uses 4h ADX > 25 to identify trending markets (avoids chop)
+# Uses 1d volume > 2x 20-day average to confirm institutional interest
+# Enters long when price > 4h EMA20 and short when price < 4h EMA20
+# Designed to work in both bull and bear markets by only trading strong trends
+# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for trend filter
+    # Load 4h data for trend filter (ADX and EMA)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h ADX(14)
+    plus_dm = np.zeros_like(high_4h)
+    minus_dm = np.zeros_like(low_4h)
+    for i in range(1, len(high_4h)):
+        up = high_4h[i] - high_4h[i-1]
+        down = low_4h[i-1] - low_4h[i]
+        if up > down and up > 0:
+            plus_dm[i] = up
+        if down > up and down > 0:
+            minus_dm[i] = down
+    
+    tr = np.maximum(high_4h - low_4h, 
+                    np.maximum(np.abs(high_4h - np.roll(high_4h, 1)), 
+                               np.abs(low_4h - np.roll(low_4h, 1))))
+    tr[0] = high_4h[0] - low_4h[0]
+    
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    plus_di = 100 * np.where(atr != 0, 
+                             np.convolve(plus_dm, np.ones(14)/14, mode='full')[:len(plus_dm)] / atr, 0)
+    minus_di = 100 * np.where(atr != 0, 
+                              np.convolve(minus_dm, np.ones(14)/14, mode='full')[:len(minus_dm)] / atr, 0)
+    dx = 100 * np.where((plus_di + minus_di) != 0, 
+                        np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = np.convolve(dx, np.ones(14)/14, mode='full')[:len(dx)]
+    adx[:13] = np.nan
+    
+    # Calculate 4h EMA20
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align 4h indicators to 1h
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # Load 1d data for volume spike filter
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (vol_ma_1d * 2.0)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    # Calculate 50-period EMA on daily timeframe for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Calculate ATR for Keltner Channel (using 10-period ATR)
-    high = prices['high'].values
-    low = prices['low'].values
+    # 1h data
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # True Range calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # ATR(10)
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # EMA(20) for Keltner Channel middle line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel bands
-    kc_upper = ema20 + 2 * atr
-    kc_lower = ema20 - 2 * atr
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if NaN in indicators
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(ema20[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(adx_4h_aligned[i]) or np.isnan(ema20_4h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market trend
-        is_bull = close[i] > ema50_1d_aligned[i]
-        is_bear = close[i] < ema50_1d_aligned[i]
-        
-        # Volume confirmation
-        has_volume = vol_filter[i]
-        
-        price = close[i]
-        upper_band = kc_upper[i]
-        lower_band = kc_lower[i]
+        # Trend and volume conditions
+        is_trending = adx_4h_aligned[i] > 25
+        has_volume_spike = vol_spike_1d_aligned[i] > 0.5
+        price_above_ema = close[i] > ema20_4h_aligned[i]
+        price_below_ema = close[i] < ema20_4h_aligned[i]
         
         if position == 0:
-            # Enter long: upper band breakout in bull OR lower band breakout in bear
-            long_signal = False
-            if has_volume:
-                if (is_bull and price > upper_band) or (is_bear and price > upper_band):
-                    long_signal = True
-            
-            # Enter short: lower band breakout in bull OR upper band breakout in bear
-            short_signal = False
-            if has_volume:
-                if (is_bull and price < lower_band) or (is_bear and price < lower_band):
-                    short_signal = True
-            
-            if long_signal:
-                signals[i] = 0.25
+            # Enter long in uptrend with volume spike
+            if is_trending and has_volume_spike and price_above_ema:
+                signals[i] = 0.20
                 position = 1
-            elif short_signal:
-                signals[i] = -0.25
+            # Enter short in downtrend with volume spike
+            elif is_trending and has_volume_spike and price_below_ema:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below middle line (EMA20)
-            exit_signal = False
-            if price < ema20[i]:
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit long: trend weakness or price below EMA
+            if not (is_trending and price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price crosses above middle line (EMA20)
-            exit_signal = False
-            if price > ema20[i]:
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit short: trend weakness or price above EMA
+            if not (is_trending and price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_KeltnerBreakout_TrendFilter_Volume"
-timeframe = "12h"
+name = "1h_ADX_TrendFilter_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
