@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1
-# Hypothesis: Use 1d Camarilla pivot levels (R1/S1) with 4h trend filter and 1h breakout entries.
-# Only trade breakouts aligned with 4h/1d trend with volume confirmation. Target 15-37 trades/year by using 1h timeframe with tight entry conditions.
-# Designed to work in both bull and bear markets by following trend and requiring volume confirmation.
+# 6h_1d_Pivot_R3S3_Fade_Reverse_v1
+# Hypothesis: On 6h timeframe, trade reversals at 1d Camarilla R3/S3 levels with volume confirmation.
+# In ranging markets, price tends to reverse at R3/S3; in trending markets, breaks through R4/S4.
+# Uses 1d ADX to filter ranging (ADX < 25) for reversals and trending (ADX > 25) for breakouts.
+# Targets 15-35 trades/year by requiring confluence of level, volume, and regime filter.
 
-name = "1h_4h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1"
-timeframe = "1h"
+name = "6h_1d_Pivot_R3S3_Fade_Reverse_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -39,31 +40,55 @@ def generate_signals(prices):
     pivot_1d = typical_price_1d
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: R1, S1
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    # Camarilla levels: R3, S3, R4, S4
+    r3_1d = close_1d + (range_1d * 1.1 / 6)
+    s3_1d = close_1d - (range_1d * 1.1 / 6)
+    r4_1d = close_1d + (range_1d * 1.1 / 4)
+    s4_1d = close_1d - (range_1d * 1.1 / 4)
     
-    # Align 1d levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align 1d levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 1d ADX for trend/ranging filter (14-period)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    close_4h_series = pd.Series(close_4h)
-    ema50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Smoothed TR and DM
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period])
+        # Subsequent values: Wilder smoothing
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Volume average for spike detection (20-period)
+    atr = smooth_wilder(tr, 14)
+    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
+    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth_wilder(dx, 14)
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -73,42 +98,56 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume spike and uptrend (both 1d and 4h)
-            if (close[i] > r1_aligned[i] * 1.005 and 
-                volume[i] > 2.5 * volume_ma[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                close[i] > ema50_4h_aligned[i]):
-                signals[i] = 0.20
-                position = 1
-            # Short breakdown: price breaks below S1 with volume spike and downtrend (both 1d and 4h)
-            elif (close[i] < s1_aligned[i] * 0.995 and 
-                  volume[i] > 2.5 * volume_ma[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  close[i] < ema50_4h_aligned[i]):
-                signals[i] = -0.20
-                position = -1
+            # Ranging market (ADX < 25): fade at R3/S3
+            if adx_aligned[i] < 25:
+                # Long near S3 with volume confirmation
+                if (close[i] <= s3_aligned[i] * 1.005 and 
+                    close[i] >= s3_aligned[i] * 0.995 and
+                    volume[i] > 1.5 * volume_ma[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short near R3 with volume confirmation
+                elif (close[i] >= r3_aligned[i] * 0.995 and 
+                      close[i] <= r3_aligned[i] * 1.005 and
+                      volume[i] > 1.5 * volume_ma[i]):
+                    signals[i] = -0.25
+                    position = -1
+            # Trending market (ADX > 25): breakout at R4/S4
+            elif adx_aligned[i] > 25:
+                # Long breakout above R4 with volume
+                if (close[i] > r4_aligned[i] * 1.005 and 
+                    volume[i] > 2.0 * volume_ma[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short breakdown below S4 with volume
+                elif (close[i] < s4_aligned[i] * 0.995 and 
+                      volume[i] > 2.0 * volume_ma[i]):
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or trend reverses (either 1d or 4h)
-            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i] or close[i] < ema50_4h_aligned[i]:
+            # Long exit: reverse at opposite level or ADX shifts to ranging
+            if (adx_aligned[i] < 25 and close[i] >= r3_aligned[i] * 0.995) or \
+               (adx_aligned[i] > 25 and close[i] < s4_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or trend reverses (either 1d or 4h)
-            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i] or close[i] > ema50_4h_aligned[i]:
+            # Short exit: reverse at opposite level or ADX shifts to ranging
+            if (adx_aligned[i] < 25 and close[i] <= s3_aligned[i] * 1.005) or \
+               (adx_aligned[i] > 25 and close[i] > r4_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
