@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) Breakout with 1d Volume Spike and ADX Trend Filter
-# Enters long when price breaks above 20-period high with ADX>25 and volume > 2x average.
-# Enters short when price breaks below 20-period low with ADX>25 and volume > 2x average.
-# Exits when price returns to the 20-period midpoint.
-# Donchian channels identify breakout points; ADX ensures trending markets.
-# Volume surge confirms institutional participation. Target: 20-50 trades/year.
+# Hypothesis: 6h Elder Ray Index with 1-day EMA200 filter
+# Uses bull power (high - EMA13) and bear power (EMA13 - low) with 13-period EMA
+# Long when bull power > 0 and bear power increasing (momentum) and price > daily EMA200
+# Short when bear power < 0 and bull power decreasing and price < daily EMA200
+# Exits when power signals reverse or price crosses EMA13
+# Works in both bull/bear markets by focusing on institutional buying/selling pressure
+# Target: 15-35 trades/year (60-140 total over 4 years)
 
-name = "4h_Donchian20_ADX_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_EMA200_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,114 +20,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for ADX
+    # Get daily data ONCE before loop for EMA200 filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 14-period ADX on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA200 for trend filter
     close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Wilder's smoothing function
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[:period])
-        # Subsequent values
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 4h Donchian Channel (20-period) ===
+    # Calculate EMA13 for Elder Ray (using 6h data)
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Calculate rolling high/low for Donchian channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2.0
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # === Volume confirmation (4h) ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # Buying strength
+    bear_power = ema13 - low   # Selling strength
+    
+    # Calculate EMA of bull/bear power for momentum (13-period)
+    bull_power_ema = pd.Series(bull_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bear_power_ema = pd.Series(bear_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull power momentum: current > EMA (increasing)
+    bull_momentum = bull_power > bull_power_ema
+    # Bear power momentum: current > EMA (increasing selling pressure)
+    bear_momentum = bear_power > bear_power_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
-        # Get values
-        close_val = close[i]
-        high_20_val = high_20[i]
-        low_20_val = low_20[i]
-        mid_val = donchian_mid[i]
-        adx_val = adx_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        
+    for i in range(13, n):
         # Skip if any value is NaN
-        if (np.isnan(high_20_val) or np.isnan(low_20_val) or np.isnan(mid_val) or 
-            np.isnan(adx_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(ema13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        close_val = close[i]
+        ema13_val = ema13[i]
+        ema200_val = ema200_1d_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
+        bull_mom = bull_momentum[i]
+        bear_mom = bear_momentum[i]
+        
         if position == 0:
-            # Long entry: price breaks above 20-period high, ADX>25, volume spike
-            if close_val > high_20_val and adx_val > 25 and vol_ratio_val > 2.0:
+            # Long: bull power positive AND increasing AND price above daily EMA200
+            if bull_val > 0 and bull_mom and close_val > ema200_val:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below 20-period low, ADX>25, volume spike
-            elif close_val < low_20_val and adx_val > 25 and vol_ratio_val > 2.0:
+            # Short: bear power positive AND increasing AND price below daily EMA200
+            elif bear_val > 0 and bear_mom and close_val < ema200_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to midpoint
-            if close_val <= mid_val:
+            # Long exit: bull power turns negative OR price crosses below EMA13
+            if bull_val <= 0 or close_val < ema13_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to midpoint
-            if close_val >= mid_val:
+            # Short exit: bear power turns negative OR price crosses above EMA13
+            if bear_val <= 0 or close_val > ema13_val:
                 signals[i] = 0.0
                 position = 0
             else:
