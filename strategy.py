@@ -1,116 +1,91 @@
 #!/usr/bin/env python3
-# 4h_Vortex_Trend_Strategy
-# Hypothesis: Vortex indicator on 4h chart identifies strong trends (VI+ > VI- for uptrend, VI- > VI+ for downtrend).
-# Filtered by 1d EMA200 to avoid counter-trend trades in strong trends.
-# Uses 1d volume spike (volume > 1.5x 20-period average) to confirm institutional interest.
-# Stops when Vortex signal weakens or reverses.
-# Target: 15-40 trades/year (60-160 total over 4 years) to minimize fee drag.
+# 1d_KAMA_Trend_With_1W_Trend_Filter
+# Hypothesis: KAMA (Kaufman Adaptive Moving Average) on 1d chart adapts to market noise, reducing whipsaw in sideways markets while capturing trends. Combined with 1w EMA34 as a higher-timeframe trend filter to avoid counter-trend trades. Volume confirmation ensures institutional participation. Designed for low trade frequency (~10-25 trades/year) to minimize fee drag and improve generalization to bear markets.
 
-name = "4h_Vortex_Trend_Strategy"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_1W_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, n=1)).rolling(window=er_period, min_periods=1).sum()
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate 1d volume spike confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (vol_ma20_1d * 1.5)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # Calculate KAMA on 1d
+    kama = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
     
-    # Calculate Vortex Indicator on 4h data
-    period = 14
-    
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Vortex Movement
-    vm_plus = np.abs(high[1:] - low[:-1])  # |current high - previous low|
-    vm_minus = np.abs(low[1:] - high[:-1])  # |current low - previous high|
-    vm_plus = np.concatenate([[0], vm_plus])
-    vm_minus = np.concatenate([[0], vm_minus])
-    
-    # Sum of values over period
-    tr_sum = np.full_like(high, np.nan)
-    vm_plus_sum = np.full_like(high, np.nan)
-    vm_minus_sum = np.full_like(high, np.nan)
-    
-    for i in range(len(high)):
-        if i >= period:
-            tr_sum[i] = np.nansum(tr[i-period+1:i+1])
-            vm_plus_sum[i] = np.nansum(vm_plus[i-period+1:i+1])
-            vm_minus_sum[i] = np.nansum(vm_minus[i-period+1:i+1])
-    
-    # Vortex Indicator
-    vi_plus = np.full_like(high, np.nan)
-    vi_minus = np.full_like(high, np.nan)
-    
-    valid = ~np.isnan(tr_sum) & (tr_sum != 0)
-    vi_plus[valid] = vm_plus_sum[valid] / tr_sum[valid]
-    vi_minus[valid] = vm_minus_sum[valid] / tr_sum[valid]
+    # Calculate 1d volume spike confirmation (volume > 1.5x 20-day average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = period
+    start_idx = 34  # Ensure enough data for EMA34 and KAMA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Determine trend from 1d EMA200
-            uptrend = close[i] > ema200_1d_aligned[i]
-            downtrend = close[i] < ema200_1d_aligned[i]
+            # Determine trend from 1w EMA34
+            uptrend = close[i] > ema34_1w_aligned[i]
+            downtrend = close[i] < ema34_1w_aligned[i]
             
-            # Long: uptrend + VI+ > VI- + volume spike
-            if uptrend and vi_plus[i] > vi_minus[i] and vol_spike_1d_aligned[i] > 0.5:
+            # Long: uptrend + price > KAMA + volume spike
+            if uptrend and close[i] > kama[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + VI- > VI+ + volume spike
-            elif downtrend and vi_minus[i] > vi_plus[i] and vol_spike_1d_aligned[i] > 0.5:
+            # Short: downtrend + price < KAMA + volume spike
+            elif downtrend and close[i] < kama[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if trend weakens or reverses
-            if vi_plus[i] <= vi_minus[i] or close[i] < ema200_1d_aligned[i]:
+            # Long: exit if trend weakens or price crosses below KAMA
+            if close[i] < ema34_1w_aligned[i] or close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if trend weakens or reverses
-            if vi_minus[i] <= vi_plus[i] or close[i] > ema200_1d_aligned[i]:
+            # Short: exit if trend weakens or price crosses above KAMA
+            if close[i] > ema34_1w_aligned[i] or close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
