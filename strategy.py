@@ -3,80 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-# - Long when price breaks above Donchian upper(20) on 12h AND close > 1d EMA50 AND volume > 1.5x 20-period avg volume
-# - Short when price breaks below Donchian lower(20) on 12h AND close < 1d EMA50 AND volume > 1.5x 20-period avg volume
-# - Exit when price crosses back through Donchian midpoint (mean of upper/lower) OR trend reverses
-# - Uses volatility breakout with trend and volume filters to capture strong moves while avoiding chop
-# - Designed for 12h timeframe with selective entries to avoid overtrading
-# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
+# Hypothesis: 4h Donchian(20) breakout + 12h VWAP trend filter + volume confirmation
+# - Long when price breaks above Donchian high (20) AND price > 12h VWAP AND volume > 1.5x average
+# - Short when price breaks below Donchian low (20) AND price < 12h VWAP AND volume > 1.5x average
+# - Exit when price crosses back through the Donchian midpoint or volume dries up
+# - Donchian provides clear breakout levels, VWAP filters for institutional trend, volume confirms conviction
+# - Designed for 4h timeframe with selective entries to avoid overtrading
+# - Target: 15-40 trades per year per symbol (60-160 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA50 calculation
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load 12h data for VWAP calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate EMA(50) on 1d timeframe
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate VWAP on 12h timeframe
+    typical_price_12h = (high_12h + low_12h + close_12h) / 3
+    vwap_num = (typical_price_12h * volume_12h).cumsum()
+    vwap_den = volume_12h.cumsum()
+    vwap_12h = vwap_num / vwap_den
+    # Handle division by zero at start
+    vwap_12h = np.where(vwap_den != 0, vwap_12h, typical_price_12h)
     
-    # Calculate Donchian channels (20-period) on 12h timeframe
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # Align 12h VWAP to 4h timeframe
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
     
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high_20 + lowest_low_20) / 2.0
+    # Calculate Donchian channels (20-period) on 4h
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
-    # Calculate volume filter: current volume > 1.5x 20-period average volume
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * avg_volume_20)
+    highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high_20 + lowest_low_20) / 2
+    
+    # Calculate average volume for confirmation
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # Start after Donchian warmup
         # Skip if NaN in indicators
-        if np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(vwap_12h_aligned[i]) or np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        upper = highest_high_20[i]
-        lower = lowest_low_20[i]
-        mid = donchian_mid[i]
-        ema_trend = ema_50_1d_aligned[i]
-        vol_ok = volume_filter[i]
+        price = close_4h[i]
+        vwap = vwap_12h_aligned[i]
+        volume = volume_4h[i]
+        avg_vol = avg_volume_20[i]
+        upper_channel = highest_high_20[i]
+        lower_channel = lowest_low_20[i]
+        mid_channel = donchian_mid[i]
         
         if position == 0:
-            # Long entry: price breaks above upper band AND uptrend AND volume confirmation
-            if price > upper and price > ema_trend and vol_ok:
+            # Long entry: price breaks above upper Donchian AND price > VWAP AND volume > 1.5x average
+            if price > upper_channel and price > vwap and volume > 1.5 * avg_vol:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower band AND downtrend AND volume confirmation
-            elif price < lower and price < ema_trend and vol_ok:
+            # Short entry: price breaks below lower Donchian AND price < VWAP AND volume > 1.5x average
+            elif price < lower_channel and price < vwap and volume > 1.5 * avg_vol:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below midpoint OR trend turns bearish
-            if price < mid or price < ema_trend:
+            # Long exit: price crosses below Donchian midpoint OR volume drops below average
+            if price < mid_channel or volume < avg_vol:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above midpoint OR trend turns bullish
-            if price > mid or price > ema_trend:
+            # Short exit: price crosses above Donchian midpoint OR volume drops below average
+            if price > mid_channel or volume < avg_vol:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_1dEMA50_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian_VWAP_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
