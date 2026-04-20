@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 6h_RSIVolumeBreakout_With_1D_Trend_Filter
-# Hypothesis: 6h RSI(14) breakout with volume confirmation, filtered by 1d EMA200 trend.
-# In bull markets (price > 1d EMA200): long when RSI crosses above 50 with volume > 1.5x average.
-# In bear markets (price < 1d EMA200): short when RSI crosses below 50 with volume > 1.5x average.
-# RSI > 60 or < 40 prevents whipsaw in weak trends. Target: 50-150 total trades over 4 years.
+# 12h_Price_Action_Volume_Strategy
+# Hypothesis: Price action breakouts with volume confirmation and trend filter.
+# Uses 12h chart with 1d trend filter to avoid whipsaw. 
+# Long when price breaks above 12h high with volume spike and above 1d EMA200.
+# Short when price breaks below 12h low with volume spike and below 1d EMA200.
+# Exit when price crosses back through 12h VWAP or trend weakens.
+# Designed for 12h timeframe to keep trade count low (target: 50-150 total over 4 years).
 
-name = "6h_RSIVolumeBreakout_With_1D_Trend_Filter"
-timeframe = "6h"
+name = "12h_Price_Action_Volume_Strategy"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,12 +17,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Get 1d data for trend filter
@@ -33,81 +35,71 @@ def generate_signals(prices):
     ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 12h VWAP for exit signal
+    # VWAP = cumulative (price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    pv = typical_price * volume
+    cum_pv = np.cumsum(pv)
+    cum_vol = np.cumsum(volume)
+    vwap = np.where(cum_vol > 0, cum_pv / cum_vol, 0)
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
+    # Calculate rolling max/min for breakout levels (20-period)
+    lookback = 20
+    high_max = np.full_like(high, np.nan)
+    low_min = np.full_like(low, np.nan)
     
-    # Wilder's smoothing for RSI
-    period = 14
-    if len(close) >= period + 1:
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period + 1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    for i in range(lookback, n):
+        high_max[i] = np.max(high[i-lookback:i])
+        low_min[i] = np.min(low[i-lookback:i])
     
-    rs = np.full_like(close, np.nan)
-    rsi = np.full_like(close, np.nan)
-    valid = avg_loss != 0
-    rs[valid] = avg_gain[valid] / avg_loss[valid]
-    rsi[valid] = 100 - (100 / (1 + rs[valid]))
-    
-    # Calculate average volume (20-period)
+    # Calculate volume spike detector (volume > 1.5x 20-period average)
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    for i in range(lookback, n):
+        vol_ma[i] = np.mean(volume[i-lookback:i])
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(period + 1, 20, 50)
+    start_idx = max(lookback, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(vwap[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Determine trend from 1d EMA200
-            uptrend = close[i] > ema200_1d_aligned[i]
-            downtrend = close[i] < ema200_1d_aligned[i]
-            
-            # Volume filter: current volume > 1.5x average volume
-            vol_filter = volume[i] > 1.5 * vol_ma[i]
-            
-            # Long: uptrend + RSI crosses above 50 + volume filter
-            if uptrend and rsi[i] > 50 and rsi[i-1] <= 50 and vol_filter:
+            # Check for volume spike
+            if not volume_spike[i]:
+                signals[i] = 0.0
+                continue
+                
+            # Long: price breaks above 12h high, volume spike, above 1d EMA200
+            if (close[i] > high_max[i] and 
+                close[i] > ema200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + RSI crosses below 50 + volume filter
-            elif downtrend and rsi[i] < 50 and rsi[i-1] >= 50 and vol_filter:
+            # Short: price breaks below 12h low, volume spike, below 1d EMA200
+            elif (close[i] < low_min[i] and 
+                  close[i] < ema200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
+            else:
+                signals[i] = 0.0
                 
         elif position == 1:
-            # Long: exit if trend weakens or RSI overbought
-            if (close[i] < ema200_1d_aligned[i] or 
-                rsi[i] > 70 or 
-                rsi[i] < 40):
+            # Long: exit if price crosses below VWAP or breaks below recent low
+            if close[i] < vwap[i] or close[i] < low_min[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if trend weakens or RSI oversold
-            if (close[i] > ema200_1d_aligned[i] or 
-                rsi[i] < 30 or 
-                rsi[i] > 60):
+            # Short: exit if price crosses above VWAP or breaks above recent high
+            if close[i] > vwap[i] or close[i] > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
