@@ -3,110 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 12h volume confirmation and ADX trend filter.
-# Breakouts from Donchian channels capture momentum moves. Volume confirms institutional participation.
-# ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranges.
-# Works in both bull and bear markets by following the trend direction of breakouts.
-# Target: 20-40 trades per year to minimize fee drag.
+# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation.
+# Uses 4h RSI(14) for trend direction (RSI > 55 = uptrend, RSI < 45 = downtrend) 
+# and 1h RSI(14) for entry timing (RSI < 30 for long, RSI > 70 for short).
+# Volume confirmation requires current volume > 1.5x 20-period average.
+# Session filter: only trade 08:00-20:00 UTC to avoid low-liquidity hours.
+# This combines mean reversion in ranging markets with trend filtering to avoid 
+# counter-trend trades during strong moves. Designed for 15-30 trades/year.
+# Target: 60-120 total trades over 4 years.
 
-name = "4h_Donchian20_12hVolume_ADXFilter"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # === 12h Volume confirmation ===
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = vol_12h / np.where(vol_ma_12h > 0, vol_ma_12h, np.nan)
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # === 4h RSI(14) for trend direction ===
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / np.where(avg_loss > 0, avg_loss, np.nan)
+    rsi_4h = 100 - (100 / (1 + rs))
+    rsi_4h = rsi_4h.fillna(50).values
+    rsi_4h_trend = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # === ADX trend filter on 4h (14-period) ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 1h RSI(14) for entry timing ===
     close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / np.where(avg_loss > 0, avg_loss, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.nan_to_num(rsi, nan=50.0)
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # === Volume confirmation ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    # DI and DX
-    plus_di = 100 * plus_dm14 / np.where(tr14 > 0, tr14, np.nan)
-    minus_di = 100 * minus_dm14 / np.where(tr14 > 0, tr14, np.nan)
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) > 0, (plus_di + minus_di), np.nan)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # === Donchian channel breakout (20-period) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # === Session filter: 08:00-20:00 UTC ===
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):  # Start after RSI warmup
+        # Skip if outside trading session
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
-        close_val = close[i]
-        highest_high_val = highest_high[i]
-        lowest_low_val = lowest_low[i]
-        adx_val = adx[i]
-        vol_ratio_val = vol_ratio_12h_aligned[i]
+        rsi_val = rsi[i]
+        rsi_4h_val = rsi_4h_trend[i]
+        vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(highest_high_val) or np.isnan(lowest_low_val) or 
-            np.isnan(adx_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(rsi_val) or np.isnan(rsi_4h_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price closes above 20-period high with volume and trend
-            if close_val > highest_high_val and vol_ratio_val > 1.5 and adx_val > 25:
-                signals[i] = 0.25
+            # Long: 4h uptrend (RSI > 55) + 1h oversold (RSI < 30) + volume
+            if rsi_4h_val > 55 and rsi_val < 30 and vol_ratio_val > 1.5:
+                signals[i] = 0.20
                 position = 1
-            # Short breakdown: price closes below 20-period low with volume and trend
-            elif close_val < lowest_low_val and vol_ratio_val > 1.5 and adx_val > 25:
-                signals[i] = -0.25
+            # Short: 4h downtrend (RSI < 45) + 1h overbought (RSI > 70) + volume
+            elif rsi_4h_val < 45 and rsi_val > 70 and vol_ratio_val > 1.5:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below 20-period low or trend weakens
-            if close_val < lowest_low_val or adx_val < 20:
+            # Long exit: 1h RSI > 50 (mean reversion complete) or trend change
+            if rsi_val > 50 or rsi_4h_val < 45:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price closes above 20-period high or trend weakens
-            if close_val > highest_high_val or adx_val < 20:
+            # Short exit: 1h RSI < 50 (mean reversion complete) or trend change
+            if rsi_val < 50 or rsi_4h_val > 55:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
