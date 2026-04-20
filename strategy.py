@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_R2S2_Breakout_Volume_TrendFilter_v2"
-timeframe = "6h"
+name = "12h_1d_1w_Alligator_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,35 +12,44 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
+    # Get 1d data ONCE before loop for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # === 1d: Calculate pivot points (standard) ===
+    # Get 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # === 1d: Williams Alligator (13,8,5) ===
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    median_price_1d = (high_1d + low_1d) / 2.0
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R2 = P + (H - L), S2 = P - (H - L)
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
+    # Jaw (Blue): 13-period SMMA, 8 bars ahead
+    jaw = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth (Red): 8-period SMMA, 5 bars ahead
+    teeth = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips (Green): 5-period SMMA, 3 bars ahead
+    lips = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Align pivot levels
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Align Alligator lines
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # === 6h: Indicators ===
+    # === 1w: EMA50 for trend filter ===
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # === 12h: Indicators ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # EMA34 for trend filter
-    close_s = pd.Series(close)
-    ema34 = close_s.ewm(span=34, min_periods=34, adjust=False).mean().values
     
     # ATR(14) for stop loss
     tr1 = np.abs(high[1:] - low[1:])
@@ -58,51 +67,59 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Get aligned values
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
-        current_ema34 = ema34[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema50_1w_val = ema50_1w_aligned[i]
         current_atr = atr[i]
         current_close = close[i]
         current_volume = volume[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r2) or np.isnan(s2) or np.isnan(current_ema34) or np.isnan(current_atr)):
+        if (np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or 
+            np.isnan(ema50_1w_val) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.5x 24-period 6h average volume ===
-        if i >= 24:
-            vol_ma = np.mean(volume[i-24:i])
-            vol_condition = current_volume > 1.5 * vol_ma
+        # === Volume condition: current volume > 1.8x 28-period 12h average volume ===
+        if i >= 28:
+            vol_ma = np.mean(volume[i-28:i])
+            vol_condition = current_volume > 1.8 * vol_ma
         else:
             vol_condition = False
         
+        # === Alligator alignment conditions ===
+        # Bullish alignment: Lips > Teeth > Jaw (green > red > blue)
+        bullish_aligned = lips_val > teeth_val and teeth_val > jaw_val
+        # Bearish alignment: Jaw > Teeth > Lips (blue > red > green)
+        bearish_aligned = jaw_val > teeth_val and teeth_val > lips_val
+        
         if position == 0:
-            # Long conditions: break above R2 with volume AND above EMA34 (uptrend)
-            if current_close > r2 and vol_condition and current_close > current_ema34:
+            # Long conditions: bullish alignment + price above lips + volume + above weekly EMA50
+            if bullish_aligned and current_close > lips_val and vol_condition and current_close > ema50_1w_val:
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
-            # Short conditions: break below S2 with volume AND below EMA34 (downtrend)
-            elif current_close < s2 and vol_condition and current_close < current_ema34:
+            # Short conditions: bearish alignment + price below jaws + volume + below weekly EMA50
+            elif bearish_aligned and current_close < jaw_val and vol_condition and current_close < ema50_1w_val:
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price fails to hold above R2 OR stop loss
-            if current_close <= r2 or current_close < entry_price - 2.5 * current_atr:
+            # Long exit: bearish alignment OR stop loss
+            if bearish_aligned or current_close < entry_price - 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price fails to hold below S2 OR stop loss
-            if current_close >= s2 or current_close > entry_price + 2.5 * current_atr:
+            # Short exit: bullish alignment OR stop loss
+            if bullish_aligned or current_close > entry_price + 2.5 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
