@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 4h_1d_Momentum_Pullback_Volume_TrendFilter
-# Hypothesis: Buy pullbacks to the 4h EMA20 in strong trends (EMA20 > EMA50) with volume confirmation and 1d trend filter; sell rallies to EMA20 in downtrends. Uses 1d EMA50 to filter counter-trend trades. Designed for low trade frequency (~25/year) to avoid fee drag, works in bull/bear via trend alignment.
+# 4h_12h_Camarilla_P1P2_Breakout_Volume_TrendFilter
+# Hypothesis: Breakouts of 12h Camarilla P1 (inner resistance) and P2 (inner support) levels with volume confirmation and 12h EMA trend filter.
+# Uses daily pivots to filter false breakouts (only trade when price is outside daily P1/P2 range).
+# Target: 20-40 trades per year per symbol to avoid fee drag, works in bull/bear via trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Momentum_Pullback_Volume_TrendFilter"
+name = "4h_12h_Camarilla_P1P2_Breakout_Volume_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,22 +17,49 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for trend filter
+    # Get 12h data ONCE before loop for pivots and EMA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # === Calculate 12h Camarilla P1, P2 levels ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Pivot point and range
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
+    
+    # Camarilla inner levels: P1 = close + (range * 1.1/12), P2 = close - (range * 1.1/12)
+    p1_12h = close_12h + (range_12h * 1.1 / 12)
+    p2_12h = close_12h - (range_12h * 1.1 / 12)
+    
+    # === 12h EMA34 for trend filter ===
+    close_12h_series = pd.Series(close_12h)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # === Daily data for false breakout filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d EMA50 for trend filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === 4h: EMA20 and EMA50 for momentum and dynamic support/resistance ===
-    close = prices['close'].values
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily Camarilla P1, P2 levels
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    p1_1d = close_1d + (range_1d * 1.1 / 12)
+    p2_1d = close_1d - (range_1d * 1.1 / 12)
+    
+    # Align all 12h and daily levels to 4h
+    p1_12h_aligned = align_htf_to_ltf(prices, df_12h, p1_12h)
+    p2_12h_aligned = align_htf_to_ltf(prices, df_12h, p2_12h)
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    p1_1d_aligned = align_htf_to_ltf(prices, df_1d, p1_1d)
+    p2_1d_aligned = align_htf_to_ltf(prices, df_1d, p2_1d)
     
     # === 4h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
@@ -40,49 +69,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA and volume MA warmup
+    for i in range(34, n):  # Start after EMA and volume MA warmup
         # Get values
-        close_val = close[i]
-        ema20_val = ema20[i]
-        ema50_val = ema50[i]
-        ema50_1d_val = ema50_1d_aligned[i]
+        close_val = prices['close'].iloc[i]
+        p1_12h_val = p1_12h_aligned[i]
+        p2_12h_val = p2_12h_aligned[i]
+        ema34_12h_val = ema34_12h_aligned[i]
+        p1_1d_val = p1_1d_aligned[i]
+        p2_1d_val = p2_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema20_val) or np.isnan(ema50_val) or np.isnan(ema50_1d_val) or 
-            np.isnan(vol_ratio_val)):
+        if (np.isnan(p1_12h_val) or np.isnan(p2_12h_val) or np.isnan(ema34_12h_val) or 
+            np.isnan(p1_1d_val) or np.isnan(p2_1d_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price pulls back to EMA20 in uptrend (EMA20 > EMA50 and 1d EMA50 rising)
-            if (close_val <= ema20_val * 1.005 and  # Allow small tolerance for pullback
-                ema20_val > ema50_val and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] if i > 0 else False and  # 1d EMA50 rising
-                vol_ratio_val > 2.0):
+            # Long: Price breaks above 12h P1 with volume confirmation, above 12h EMA34, and outside daily P1/P2 (above daily P1)
+            if (close_val > p1_12h_val and vol_ratio_val > 2.5 and 
+                close_val > ema34_12h_val and close_val > p1_1d_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price rallies to EMA20 in downtrend (EMA20 < EMA50 and 1d EMA50 falling)
-            elif (close_val >= ema20_val * 0.995 and  # Allow small tolerance for rally
-                  ema20_val < ema50_val and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] if i > 0 else False and  # 1d EMA50 falling
-                  vol_ratio_val > 2.0):
+            # Short: Price breaks below 12h P2 with volume confirmation, below 12h EMA34, and outside daily P1/P2 (below daily P2)
+            elif (close_val < p2_12h_val and vol_ratio_val > 2.5 and 
+                  close_val < ema34_12h_val and close_val < p2_1d_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses below EMA50 or loses momentum
-            if close_val < ema50_val or ema20_val < ema50_val:
+            # Long exit: Price returns to or below 12h P2
+            if close_val <= p2_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses above EMA50 or loses momentum
-            if close_val > ema50_val or ema20_val > ema50_val:
+            # Short exit: Price returns to or above 12h P1
+            if close_val >= p1_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
