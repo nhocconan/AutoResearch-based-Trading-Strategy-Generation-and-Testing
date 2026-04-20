@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_VWAP_Trend_Signal
-Hypothesis: Trade VWAP deviation from 1-day VWAP with 4h VWAP trend filter. 
-Long when price > 1d VWAP and 4h VWAP rising; short when price < 1d VWAP and 4h VWAP falling.
-VWAP acts as a dynamic mean and trend filter, working in both bull (buy dips) and bear (sell rallies).
-Target: 80-150 total trades over 4 years with position size 0.25.
-Uses VWAP for institutional alignment and mean reversion with trend filter to avoid chop.
+1d_RangeBound_MeanReversion_With_Weekly_Filter
+Hypothesis: In range-bound markets (weekly ATR < 30d ATR), price reverts to weekly VWAP.
+Long when price < weekly VWAP - 0.5*weekly ATR, short when price > weekly VWAP + 0.5*weekly ATR.
+Exit when price crosses weekly VWAP. Works in both bull/bear by adapting to weekly volatility regime.
+Target: 50-100 total trades over 4 years (12-25/year) with position size 0.25.
 """
 
-name = "4h_1d_VWAP_Trend_Signal"
-timeframe = "4h"
+name = "1d_RangeBound_MeanReversion_With_Weekly_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,88 +20,106 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    # Get weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Calculate daily VWAP (Volume Weighted Average Price)
-    typical_price_daily = (df_daily['high'].values + df_daily['low'].values + df_daily['close'].values) / 3.0
-    vol_daily = df_daily['volume'].values
+    # Calculate weekly VWAP
+    tp_weekly = (df_weekly['high'].values + df_weekly['low'].values + df_weekly['close'].values) / 3.0
+    vol_weekly = df_weekly['volume'].values
+    vwap_weekly = np.full_like(tp_weekly, np.nan)
+    if len(tp_weekly) >= 1:
+        cum_vol = 0
+        cum_tpv = 0
+        for i in range(len(tp_weekly)):
+            cum_vol += vol_weekly[i]
+            cum_tpv += tp_weekly[i] * vol_weekly[i]
+            if cum_vol > 0:
+                vwap_weekly[i] = cum_tpv / cum_vol
+    vwap_weekly_aligned = align_htf_to_ltf(prices, df_weekly, vwap_weekly)
     
-    # Cumulative VWAP for daily
-    cum_vol_price_daily = np.cumsum(typical_price_daily * vol_daily)
-    cum_vol_daily = np.cumsum(vol_daily)
-    vwap_daily = np.divide(cum_vol_price_daily, cum_vol_daily, out=np.full_like(cum_vol_price_daily, np.nan), where=cum_vol_daily!=0)
-    vwap_daily_aligned = align_htf_to_ltf(prices, df_daily, vwap_daily)
+    # Calculate weekly ATR (14-period)
+    tr_weekly = np.maximum(
+        df_weekly['high'].values - df_weekly['low'].values,
+        np.maximum(
+            np.abs(df_weekly['high'].values - np.roll(df_weekly['close'].values, 1)),
+            np.abs(df_weekly['low'].values - np.roll(df_weekly['close'].values, 1))
+        )
+    )
+    tr_weekly[0] = df_weekly['high'].values[0] - df_weekly['low'].values[0]
+    atr_weekly = np.full_like(tr_weekly, np.nan)
+    if len(tr_weekly) >= 14:
+        atr_weekly[13] = np.mean(tr_weekly[:14])
+        for i in range(14, len(tr_weekly)):
+            atr_weekly[i] = (atr_weekly[i-1] * 13 + tr_weekly[i]) / 14
+    atr_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr_weekly)
     
-    # Calculate 4h VWAP for trend filter
-    typical_price = (high + low + close) / 3.0
-    vol_price = typical_price * volume
-    
-    # Rolling 20-period VWAP for 4h trend (enough lookback for trend)
-    window = 20
-    cum_vol_price = np.zeros(n)
-    cum_vol = np.zeros(n)
-    vwap_4h = np.full(n, np.nan)
-    
-    for i in range(n):
-        if i == 0:
-            cum_vol_price[i] = vol_price[i]
-            cum_vol[i] = volume[i]
-        else:
-            cum_vol_price[i] = cum_vol_price[i-1] + vol_price[i]
-            cum_vol[i] = cum_vol[i-1] + volume[i]
-        
-        # Maintain rolling window
-        if i >= window:
-            cum_vol_price[i] -= vol_price[i-window]
-            cum_vol[i] -= volume[i-window]
-        
-        if cum_vol[i] > 0:
-            vwap_4h[i] = cum_vol_price[i] / cum_vol[i]
+    # Calculate daily ATR (30-period) for regime filter
+    tr_daily = np.maximum(
+        high - low,
+        np.maximum(
+            np.abs(high - np.roll(close, 1)),
+            np.abs(low - np.roll(close, 1))
+        )
+    )
+    tr_daily[0] = high[0] - low[0]
+    atr_daily = np.full_like(tr_daily, np.nan)
+    if len(tr_daily) >= 30:
+        atr_daily[29] = np.mean(tr_daily[:30])
+        for i in range(30, len(tr_daily)):
+            atr_daily[i] = (atr_daily[i-1] * 29 + tr_daily[i]) / 30
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # Ensure VWAP calculations are stable
+    start_idx = 30  # Ensure daily ATR is ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vwap_4h[i]) or np.isnan(vwap_daily_aligned[i]) or 
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(vwap_weekly_aligned[i]) or np.isnan(atr_weekly_aligned[i]) or 
+            np.isnan(atr_daily[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        if position == 0:
-            # Long: price above daily VWAP AND 4h VWAP rising
-            if close[i] > vwap_daily_aligned[i] and vwap_4h[i] > vwap_4h[i-1]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price below daily VWAP AND 4h VWAP falling
-            elif close[i] < vwap_daily_aligned[i] and vwap_4h[i] < vwap_4h[i-1]:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Long exit: price below daily VWAP OR 4h VWAP falls
-            if close[i] < vwap_daily_aligned[i] or vwap_4h[i] < vwap_4h[i-1]:
+        # Range-bound regime: weekly ATR < 60% of daily ATR (low volatility)
+        if atr_weekly_aligned[i] < 0.6 * atr_daily[i]:
+            # Entry conditions
+            if position == 0:
+                # Long: price significantly below VWAP
+                if close[i] < vwap_weekly_aligned[i] - 0.5 * atr_weekly_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price significantly above VWAP
+                elif close[i] > vwap_weekly_aligned[i] + 0.5 * atr_weekly_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            
+            elif position == 1:
+                # Long exit: price crosses above VWAP
+                if close[i] > vwap_weekly_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            
+            elif position == -1:
+                # Short exit: price crosses below VWAP
+                if close[i] < vwap_weekly_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            # Trending regime: stay flat
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: price above daily VWAP OR 4h VWAP rises
-            if close[i] > vwap_daily_aligned[i] or vwap_4h[i] > vwap_4h[i-1]:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
