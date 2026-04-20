@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Channel_RSI_Strategy
-# Hypothesis: Keltner Channel breakouts combined with RSI momentum and volume confirmation
-# capture sustained trends in both bull and bear markets. Keltner Channels adapt to volatility,
-# RSI filters for momentum strength, and volume ensures institutional participation.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# 6h_ElderRay_Trend_Momentum_Strategy
+# Hypothesis: Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13) 
+# captures institutional buying/selling pressure. Combined with 13-period EMA trend filter
+# and volume confirmation, it identifies sustained momentum moves in both bull and bear markets.
+# Uses 1-day EMA for multi-timeframe trend alignment to avoid false signals.
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 
-name = "4h_Keltner_Channel_RSI_Strategy"
-timeframe = "4h"
+name = "6h_ElderRay_Trend_Momentum_Strategy"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,42 +24,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR calculation (more stable volatility measure)
+    # Get 1-day data for multi-timeframe trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate ATR (10-period) on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA13 for Elder Ray (same timeframe)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # Buying pressure
+    bear_power = low - ema13   # Selling pressure (negative values)
     
-    # ATR (10-period)
-    atr_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate EMA (20-period) for Keltner Channel middle line
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel bands (20 EMA ± 2 * ATR)
-    kc_upper = ema_20 + 2 * atr_1d_aligned
-    kc_lower = ema_20 - 2 * atr_1d_aligned
-    
-    # RSI (14-period) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 1-day EMA34 for trend filter
+    df_1d_close = pd.Series(df_1d['close'].values)
+    ema34_1d = df_1d_close.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,36 +49,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Ensure EMA and RSI are calculated
+    start_idx = max(34, 20)  # Ensure EMA34 and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
-            np.isnan(rsi[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price closes above Keltner upper + RSI > 55 + volume confirmation
-            if close[i] > kc_upper[i] and rsi[i] > 55 and volume_filter[i]:
+            # Long: Bull Power > 0 (buying pressure) + price above 1D EMA34 + volume
+            if bull_power[i] > 0 and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price closes below Keltner lower + RSI < 45 + volume confirmation
-            elif close[i] < kc_lower[i] and rsi[i] < 45 and volume_filter[i]:
+            # Short: Bear Power < 0 (selling pressure) + price below 1D EMA34 + volume
+            elif bear_power[i] < 0 and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price closes below Keltner middle or RSI weakens
-            if close[i] < ema_20[i] or rsi[i] < 40:
+            # Long: exit if bull power turns negative or price breaks below 1D EMA
+            if bull_power[i] <= 0 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price closes above Keltner middle or RSI weakens
-            if close[i] > ema_20[i] or rsi[i] > 60:
+            # Short: exit if bear power turns positive or price breaks above 1D EMA
+            if bear_power[i] >= 0 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
