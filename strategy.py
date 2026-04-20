@@ -1,98 +1,95 @@
-# 6h_Pivot_R1_S1_Breakout_Volume_ATRFilter
-# Uses 1-day Camarilla pivot levels (R1/S1) with volume and ATR filter for 6h timeframe
-# Long: price breaks above R1 with volume spike and ATR-based momentum
-# Short: price breaks below S1 with volume spike and ATR-based momentum
-# Exit: price returns to pivot point (PP) or ATR-based stop
-# Designed for 50-150 total trades over 4 years (12-37/year) with controlled risk
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h Donchian breakout with 1-week volume spike and weekly EMA50 trend filter
+# Only trade in direction of weekly trend. Long when price breaks above 20-period high
+# in bullish weekly trend with volume spike. Short when price breaks below 20-period low
+# in bearish weekly trend with volume spike. Exit on opposite band break or 2.5x ATR stop.
+# Weekly trend filter prevents counter-trend trades. Volume spike confirms institutional interest.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data ONCE for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for previous day
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Align pivot levels to 6h timeframe (using previous day's values)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 6h indicators
+    # Calculate 12h Donchian channels (20-period high/low)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Volume spike: current volume > 1.5 x 20-period average
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 1.5)
+    # Donchian high: highest high of last 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Donchian low: lowest low of last 20 periods
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # ATR for momentum filter and stop sizing
+    # Calculate 12h ATR for stop sizing
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Price momentum: close > open (bullish) or close < open (bearish)
-    bullish_momentum = close > prices['open'].values
-    bearish_momentum = close < prices['open'].values
+    # Volume spike: 12h volume > 2.0 x 20-period average (less frequent for 12h)
+    volume = prices['volume'].values
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(20, n):
-        # Skip if NaN in critical indicators
-        if np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(atr[i]) or np.isnan(volume_ma_20[i]):
+    for i in range(100, n):
+        # Skip if NaN in indicators
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema50_1w_aligned[i]) or np.isnan(atr_12h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Price levels
+        upper_band = donchian_high[i]
+        lower_band = donchian_low[i]
         price = close[i]
-        pp_level = pp_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
+        
+        # Weekly trend: rising EMA50 = bullish, falling EMA50 = bearish
+        weekly_trend_up = ema50_1w_aligned[i] > ema50_1w_aligned[i-1] if i > 0 else False
+        weekly_trend_down = ema50_1w_aligned[i] < ema50_1w_aligned[i-1] if i > 0 else False
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and bullish momentum
-            if price > r1_level and volume_spike[i] and bullish_momentum[i]:
+            # Long: price breaks above upper band, weekly trend up, volume spike
+            if price > upper_band and weekly_trend_up and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and bearish momentum
-            elif price < s1_level and volume_spike[i] and bearish_momentum[i]:
+                entry_price = price
+            # Short: price breaks below lower band, weekly trend down, volume spike
+            elif price < lower_band and weekly_trend_down and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: price returns to pivot point or ATR-based stop
-            if price <= pp_level or price <= prices['open'].values[i] - 1.5 * atr[i]:
+            # Long exit: stop loss (2.5x ATR below entry) or price breaks below lower band
+            if price <= entry_price - 2.5 * atr_12h[i] or price < lower_band:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to pivot point or ATR-based stop
-            if price >= pp_level or price >= prices['open'].values[i] + 1.5 * atr[i]:
+            # Short exit: stop loss (2.5x ATR above entry) or price breaks above upper band
+            if price >= entry_price + 2.5 * atr_12h[i] or price > upper_band:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_ATRFilter"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyEMA50Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
