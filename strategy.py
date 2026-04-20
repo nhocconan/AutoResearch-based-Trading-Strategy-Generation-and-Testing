@@ -3,126 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_Pivot_R3S3_Breakout_Volume_TrendFilter"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_TF_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need sufficient data for weekly and daily pivots
+    if n < 36:  # Need at least 3 days of 12h data
         return np.zeros(n)
     
-    # Get weekly and daily data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1w) < 10 or len(df_1d) < 20:
+    if len(df_1d) < 20:  # Need at least 20 days for calculations
         return np.zeros(n)
     
-    # === Weekly: Calculate pivot points (using previous week's data) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Use previous week's OHLC for current week's pivot
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    
-    # Set first week's values to NaN
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
-    prev_close_1w[0] = np.nan
-    
-    # Calculate pivot points and R3/S3 levels
-    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    r1_1w = 2 * pivot_1w - prev_low_1w
-    s1_1w = 2 * pivot_1w - prev_high_1w
-    r2_1w = pivot_1w + (prev_high_1w - prev_low_1w)
-    s2_1w = pivot_1w - (prev_high_1w - prev_low_1w)
-    r3_1w = prev_high_1w + 2 * (pivot_1w - prev_low_1w)
-    s3_1w = prev_low_1w - 2 * (prev_high_1w - pivot_1w)
-    
-    # === Daily: Calculate pivot points (using previous day's data) ===
+    # === 1d: Calculate Camarilla pivot levels (using previous day's data) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Use previous day's OHLC for current day's pivot
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
+    # Use previous day's OHLC for today's levels
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
     
     # Set first day's values to NaN
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Calculate pivot points and R3/S3 levels
-    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1_1d = 2 * pivot_1d - prev_low_1d
-    s1_1d = 2 * pivot_1d - prev_high_1d
-    r2_1d = pivot_1d + (prev_high_1d - prev_low_1d)
-    s2_1d = pivot_1d - (prev_high_1d - prev_low_1d)
-    r3_1d = prev_high_1d + 2 * (pivot_1d - prev_low_1d)
-    s3_1d = prev_low_1d - 2 * (prev_high_1d - pivot_1d)
+    # Calculate Camarilla levels: R1, S1
+    # R1 = Close + (High - Low) * 1.1 / 12
+    # S1 = Close - (High - Low) * 1.1 / 12
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align weekly and daily pivot levels to 6h timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align 1d indicators to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 6h: Volume ratio (current vs 20-period average) ===
+    # === 12h: Volume ratio (current vs 10-period average) ===
     close = prices['close'].values
     volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    vol_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    vol_ratio = volume / np.where(vol_ma10 > 0, vol_ma10, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(36, n):  # Start after warmup
         # Get values
         close_val = close[i]
-        r3_1w_val = r3_1w_aligned[i]
-        s3_1w_val = s3_1w_aligned[i]
-        r3_1d_val = r3_1d_aligned[i]
-        s3_1d_val = s3_1d_aligned[i]
+        r1_level = camarilla_r1_aligned[i]
+        s1_level = camarilla_s1_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(r3_1w_val) or np.isnan(s3_1w_val) or 
-            np.isnan(r3_1d_val) or np.isnan(s3_1d_val) or 
-            np.isnan(vol_ratio_val)):
+        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above weekly R3 or daily R3 with volume confirmation
-            if ((close_val > r3_1w_val or close_val > r3_1d_val) and 
-                vol_ratio_val > 1.5):
+            # Long: Price breaks above R1 with volume confirmation
+            if (close_val > r1_level and   # Break above R1
+                vol_ratio_val > 1.5):      # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly S3 or daily S3 with volume confirmation
-            elif ((close_val < s3_1w_val or close_val < s3_1d_val) and 
-                  vol_ratio_val > 1.5):
+            # Short: Price breaks below S1 with volume confirmation
+            elif (close_val < s1_level and   # Break below S1
+                  vol_ratio_val > 1.5):      # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price drops below weekly S3 or daily S3
-            if close_val < s3_1w_val or close_val < s3_1d_val:
+            # Long exit: Price drops back below R1 (reversion to mean)
+            if close_val < r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises above weekly R3 or daily R3
-            if close_val > r3_1w_val or close_val > r3_1d_val:
+            # Short exit: Price rises back above S1 (reversion to mean)
+            if close_val > s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
