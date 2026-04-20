@@ -3,61 +3,44 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index + 1w RSI Mean Reversion
-# - Uses Choppiness Index (14) on 12h to detect ranging markets (CHOP > 61.8)
-# - In ranging markets, uses 1-week RSI(14) for mean reversion: long when RSI < 30, short when RSI > 70
-# - Filters out trending markets (CHOP < 38.2) to avoid false signals
-# - Volume confirmation: current volume > 1.2x 20-period average
-# - Designed for 12h timeframe with low frequency to avoid overtrading
-# - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
+# Hypothesis: 4h Donchian Breakout + 1d EMA Trend + Volume Confirmation
+# - Long when price breaks above 4h Donchian upper (20) + price > 1d EMA50 + volume > 1.5x 20-period average
+# - Short when price breaks below 4h Donchian lower (20) + price < 1d EMA50 + volume > 1.5x 20-period average
+# - Exit when price crosses back through the Donchian midline (10-period average of high/low)
+# - Trend filter uses daily EMA50 to avoid counter-trend trades
+# - Volume filter ensures breakouts have conviction
+# - Designed for 4h timeframe with selective entries to avoid overtrading
+# - Target: 19-50 trades per year per symbol (75-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Load 1d data for EMA calculation
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI(14) on 1w timeframe
-    delta = pd.Series(close_1w).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1w = (100 - (100 / (1 + rs))).values
+    # Calculate EMA(50) on 1d timeframe
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w RSI to 12h timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Choppiness Index on 12h timeframe
+    # Calculate Donchian channels on 4h timeframe
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # ATR(14)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Sum of ATR over 14 periods
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chop = 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(14)
+    # Donchian upper (20-period high)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Donchian lower (20-period low)
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian midline (10-period average of high/low)
+    donch_mid = (pd.Series(high).rolling(window=10, min_periods=10).mean() + 
+                 pd.Series(low).rolling(window=10, min_periods=10).mean()) / 2
+    donch_mid = donch_mid.values
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,9 +48,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after Chop/RSI warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if NaN in indicators
-        if np.isnan(chop[i]) or np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or \
+           np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,28 +61,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Only trade in ranging markets (CHOP > 61.8)
-            if chop[i] > 61.8:
-                # Long entry: RSI < 30 (oversold) + volume confirmation
-                if rsi_1w_aligned[i] < 30 and vol > 1.2 * vol_ma[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short entry: RSI > 70 (overbought) + volume confirmation
-                elif rsi_1w_aligned[i] > 70 and vol > 1.2 * vol_ma[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long entry: price breaks above Donchian upper + price > 1d EMA50 + volume > 1.5x average
+            if price > donch_high[i] and price > ema_1d_aligned[i] and vol > 1.5 * vol_ma[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: price breaks below Donchian lower + price < 1d EMA50 + volume > 1.5x average
+            elif price < donch_low[i] and price < ema_1d_aligned[i] and vol > 1.5 * vol_ma[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: RSI > 50 (mean reversion complete) or market becomes trending
-            if rsi_1w_aligned[i] > 50 or chop[i] < 38.2:
+            # Long exit: price crosses below Donchian midline
+            if price < donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI < 50 (mean reversion complete) or market becomes trending
-            if rsi_1w_aligned[i] < 50 or chop[i] < 38.2:
+            # Short exit: price crosses above Donchian midline
+            if price > donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Chop_1wRSI_MeanReversion"
-timeframe = "12h"
+name = "4h_Donchian_1dEMA_VolumeBreakout"
+timeframe = "4h"
 leverage = 1.0
