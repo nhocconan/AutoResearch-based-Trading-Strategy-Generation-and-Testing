@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1w_1d_Pivot_R1_S1_Breakout_VolumeFilter
-# Hypothesis: Weekly and daily pivot levels (R1/S1) act as strong support/resistance in BTC/ETH.
-# Breakouts with volume confirmation capture sustained moves in both bull and bear markets.
-# Using 12h timeframe reduces trade frequency; weekly trend filter avoids counter-trend trades.
+# 4h_Donchian_Breakout_VolumeTrend_Filter
+# Hypothesis: Donchian channel breakouts with volume confirmation and trend filter capture strong momentum moves.
+# Works in bull markets by catching breakouts to new highs and in bear markets by catching breakdowns to new lows.
+# Volume confirmation ensures institutional participation, while 4h EMA20 filter avoids counter-trend trades.
+# Designed for 4h timeframe to balance trade frequency and signal quality, targeting 20-40 trades/year.
 
-name = "12h_1w_1d_Pivot_R1_S1_Breakout_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_VolumeTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,72 +23,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly and daily data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1w) < 1 or len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly trend filter: price above/below weekly VWAP
-    # VWAP = sum(price * volume) / sum(volume)
-    vwap_num = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3 * df_1w['volume']
-    vwap_den = df_1w['volume']
-    weekly_vwap = (vwap_num.cumsum() / vwap_den.cumsum()).values
-    weekly_vwap_aligned = align_htf_to_ltf(prices, df_1w, weekly_vwap)
+    # Calculate 1d EMA20 for trend filter
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Daily pivot and Camarilla levels (R1/S1)
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
+    # Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Pivot point
-    p = (ph + pl + pc) / 3
-    # Camarilla R1 and S1
-    r1 = p + (ph - pl) * 1.1 / 12
-    s1 = p - (ph - pl) * 1.1 / 12
-    
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma20 * 1.3)
+    volume_filter = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure indicators are ready
+    start_idx = 20  # Wait for Donchian channel to be ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(weekly_vwap_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(ema_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above weekly VWAP (uptrend) + breaks above R1 + volume
-            if close[i] > weekly_vwap_aligned[i] and close[i] > r1_aligned[i] and volume_filter[i]:
+            # Long: price breaks above Donchian high + volume + uptrend (price > 1d EMA20)
+            if close[i] > high_20[i] and volume_filter[i] and close[i] > ema_20_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly VWAP (downtrend) + breaks below S1 + volume
-            elif close[i] < weekly_vwap_aligned[i] and close[i] < s1_aligned[i] and volume_filter[i]:
+            # Short: price breaks below Donchian low + volume + downtrend (price < 1d EMA20)
+            elif close[i] < low_20[i] and volume_filter[i] and close[i] < ema_20_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks below S1 (reversal) or falls below weekly VWAP
-            if close[i] < s1_aligned[i] or close[i] < weekly_vwap_aligned[i]:
+            # Long: exit if price breaks below Donchian low (reversal)
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price breaks above R1 (reversal) or rises above weekly VWAP
-            if close[i] > r1_aligned[i] or close[i] > weekly_vwap_aligned[i]:
+            # Short: exit if price breaks above Donchian high (reversal)
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
