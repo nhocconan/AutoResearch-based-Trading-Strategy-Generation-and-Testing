@@ -83,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyEMA50_VolumeFilter_V3"
-timeframe = "12h"
+name = "1d_WeeklyEMA50_VolumeFilter_V2"
+timeframe = "1d"
 leverage = 1.0
