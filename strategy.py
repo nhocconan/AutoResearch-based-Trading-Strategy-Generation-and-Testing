@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Structure_Trend_With_Pullback_Filter
-Hypothesis: Trade in direction of 12h structure (higher highs/lows for long, lower for short) with 6h pullback to EMA21.
-Works in bull/bear: structure filters countertrend moves, pullback entries reduce slippage and improve risk/reward.
-Volume confirmation ensures institutional participation. Target: 60-120 total trades over 4 years (15-30/year).
+12h_1d_Camarilla_R1S1_Breakout_VolumeFilter
+Hypothesis: Trade daily Camarilla pivot R1/S1 breakouts on 12h timeframe with daily volume confirmation.
+Long when 12h price breaks above daily R1 with volume spike; short when breaks below daily S1 with volume spike.
+Daily Camarilla levels provide strong daily support/resistance. Volume filter ensures institutional participation.
+Works in bull/bear: breaks indicate momentum continuation, volume confirms validity.
+Target: 60-120 total trades over 4 years (15-30/year) with position size 0.25.
 """
 
-name = "6h_Structure_Trend_With_Pullback_Filter"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1S1_Breakout_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,94 +21,81 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for structure determination
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get daily data ONCE before loop for Camarilla levels and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h structure: higher highs and higher lows for uptrend
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate daily volume average for spike detection (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = np.full(len(vol_1d), np.nan)
+    for i in range(len(vol_1d)):
+        if i >= 19:  # 20-period average
+            vol_avg_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Track swing points
-    swing_high = np.full_like(high_12h, np.nan)
-    swing_low = np.full_like(low_12h, np.nan)
+    # Calculate daily Camarilla levels for each daily bar
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Find swing highs and lows (3-bar lookback/forward)
-    for i in range(3, len(high_12h) - 3):
-        if high_12h[i] == np.max(high_12h[i-3:i+4]):
-            swing_high[i] = high_12h[i]
-        if low_12h[i] == np.min(low_12h[i-3:i+4]):
-            swing_low[i] = low_12h[i]
+    # Arrays to store daily R1 and S1 levels
+    daily_r1 = np.full_like(daily_close, np.nan)
+    daily_s1 = np.full_like(daily_close, np.nan)
     
-    # Determine structure state: 1=uptrend (HH and HL), -1=downtrend (LH and LL), 0=unclear
-    structure = np.zeros_like(high_12h)
-    last_swing_high = np.nan
-    last_swing_low = np.nan
+    # Calculate for each daily bar (starting from index 1 to avoid look-ahead)
+    for j in range(1, len(daily_close)):
+        range_val = daily_high[j-1] - daily_low[j-1]
+        if range_val > 0:
+            daily_r1[j] = daily_close[j-1] + (range_val * 1.1 / 12)
+            daily_s1[j] = daily_close[j-1] - (range_val * 1.1 / 12)
     
-    for i in range(len(high_12h)):
-        if not np.isnan(swing_high[i]):
-            last_swing_high = swing_high[i]
-        if not np.isnan(swing_low[i]):
-            last_swing_low = swing_low[i]
-        
-        if not np.isnan(last_swing_high) and not np.isnan(last_swing_low):
-            if len([x for x in swing_high[:i+1] if not np.isnan(x)]) >= 2 and \
-               len([x for x in swing_low[:i+1] if not np.isnan(x)]) >= 2:
-                # Get last two swing points
-                recent_highs = [x for x in swing_high[:i+1] if not np.isnan(x)][-2:]
-                recent_lows = [x for x in swing_low[:i+1] if not np.isnan(x)][-2:]
-                if len(recent_highs) == 2 and len(recent_lows) == 2:
-                    if recent_highs[1] > recent_highs[0] and recent_lows[1] > recent_lows[0]:
-                        structure[i] = 1  # uptrend
-                    elif recent_highs[1] < recent_highs[0] and recent_lows[1] < recent_lows[0]:
-                        structure[i] = -1  # downtrend
-    
-    # Align structure to 6h timeframe
-    structure_aligned = align_htf_to_ltf(prices, df_12h, structure)
-    
-    # Calculate 6h EMA21 for pullback entries
-    close = prices['close'].values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Calculate volume confirmation (20-period average)
-    volume = prices['volume'].values
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    # Align the daily R1/S1 to 12h timeframe
+    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
+    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(21, n):  # Start after EMA21 warmup
-        struct = structure_aligned[i]
-        current_close = close[i]
-        current_ema21 = ema21[i]
-        current_volume = volume[i]
-        current_vol_avg = vol_avg[i]
+    start_idx = 10  # Need enough data for daily alignment
+    
+    for i in range(start_idx, n):
+        current_close = prices['close'].iloc[i]
+        current_volume = prices['volume'].iloc[i]
         
-        # Volume spike: current volume > 1.3x average
-        vol_confirm = current_volume > 1.3 * current_vol_avg
+        # Volume spike: current volume > 1.5x daily average volume
+        vol_spike = (not np.isnan(vol_avg_1d_aligned[i]) and 
+                     current_volume > 1.5 * vol_avg_1d_aligned[i])
         
         if position == 0:
-            # Long: uptrend structure + pullback to EMA21 + volume confirmation
-            if struct == 1 and current_close >= current_ema21 * 0.995 and current_close <= current_ema21 * 1.005 and vol_confirm:
+            # Long: price breaks above daily R1 with volume spike
+            if (not np.isnan(daily_r1_aligned[i]) and 
+                current_close > daily_r1_aligned[i] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend structure + pullback to EMA21 + volume confirmation
-            elif struct == -1 and current_close <= current_ema21 * 1.005 and current_close >= current_ema21 * 0.995 and vol_confirm:
+            # Short: price breaks below daily S1 with volume spike
+            elif (not np.isnan(daily_s1_aligned[i]) and 
+                  current_close < daily_s1_aligned[i] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: structure breaks down or price extends too far from EMA
-            if struct == -1 or current_close > current_ema21 * 1.03:  # 3% extension
+            # Long exit: price breaks below daily S1 or volume dries up
+            if ((not np.isnan(daily_s1_aligned[i]) and 
+                 current_close < daily_s1_aligned[i]) or
+                (not np.isnan(vol_avg_1d_aligned[i]) and 
+                 current_volume < 0.5 * vol_avg_1d_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: structure breaks up or price extends too far from EMA
-            if struct == 1 or current_close < current_ema21 * 0.97:  # 3% extension
+            # Short exit: price breaks above daily R1 or volume dries up
+            if ((not np.isnan(daily_r1_aligned[i]) and 
+                 current_close > daily_r1_aligned[i]) or
+                (not np.isnan(vol_avg_1d_aligned[i]) and 
+                 current_volume < 0.5 * vol_avg_1d_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
