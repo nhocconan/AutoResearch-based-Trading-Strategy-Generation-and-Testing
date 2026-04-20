@@ -11,14 +11,14 @@ def generate_signals(prices):
     # Load daily data for trend and regime filters
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily EMA(34) for intermediate trend
+    # Daily EMA(20) for intermediate trend
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Daily EMA(89) for long-term trend
-    ema_89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    ema_89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
+    # Daily EMA(50) for long-term trend
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
@@ -45,7 +45,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_89_1d_aligned[i]) or 
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -53,8 +53,8 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_trend_short = ema_34_1d_aligned[i]
-        ema_trend_long = ema_89_1d_aligned[i]
+        ema_trend_short = ema_20_1d_aligned[i]
+        ema_trend_long = ema_50_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
         vol_ratio_12h = vol_ratio[i]
         
@@ -68,16 +68,16 @@ def generate_signals(prices):
         vol_filter = (atr > 0.5 * atr_ma_20) and (atr < 3.0 * atr_ma_20)
         
         # Volume filter: require above-average volume
-        vol_filter = vol_filter and (vol_ratio_12h > 1.5)
+        vol_filter = vol_filter and (vol_ratio_12h > 1.3)
         
         if position == 0:
             # Enter long in strong uptrend with volume
             if trend_up and vol_filter:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Enter short in strong downtrend with volume
             elif trend_down and vol_filter:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -86,7 +86,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: trend breakdown or volatility spike
@@ -94,10 +94,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_1d_EMA34_89_Trend_Volume_Filter_v1"
+name = "12h_1d_EMA20_50_Trend_Volume_Filter_v1"
 timeframe = "12h"
 leverage = 1.0
