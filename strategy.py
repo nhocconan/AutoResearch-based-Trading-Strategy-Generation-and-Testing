@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h chart with 1d pivot levels (R1/S1) for mean reversion, confirmed by 1w trend.
-# In ranging markets, price reverts to pivot; in trending markets, breaks through R1/S1 with volume.
-# Works in bull/bear by adapting to regime via 1w trend filter.
+# Hypothesis: 6h chart with 1-week pivot levels (R1/S1) for mean reversion, confirmed by 1-day trend.
+# In ranging markets, price reverts to weekly pivot; in trending markets, breaks through R1/S1 with volume.
+# Works in bull/bear by adapting to regime via 1d trend filter.
 # Target: 15-25 trades/year per symbol.
 
 def generate_signals(prices):
@@ -13,36 +13,36 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for pivot calculation
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily pivot points (standard formula)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Daily EMA(50) for trend
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pivot = (H + L + C)/3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Load 1w data for trend filter
+    # Load 1w data for pivot calculation
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Weekly EMA(20) for trend
+    # Calculate weekly pivot points (standard formula)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Pivot = (H + L + C)/3
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
     # 6h data
     close = prices['close'].values
@@ -50,7 +50,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h ATR(14) for volatility and stop
+    # 6h ATR(14) for volatility
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -69,7 +69,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if NaN in critical values
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,11 +79,11 @@ def generate_signals(prices):
         pivot_val = pivot_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema_trend = ema_20_1w_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
         atr = atr_14[i]
         vol_ratio_6h = vol_ratio[i]
         
-        # Determine market regime from weekly trend
+        # Determine market regime from daily trend
         uptrend = price > ema_trend
         downtrend = price < ema_trend
         
@@ -132,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_R1S1_MeanReversion_TrendFilter_v1"
+name = "6h_1w_Pivot_R1S1_MeanReversion_TrendFilter_v1"
 timeframe = "6h"
 leverage = 1.0
