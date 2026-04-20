@@ -1,150 +1,126 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_With_ADX_And_Volume_Filter
-Hypothesis: Trade KAMA direction with ADX trend filter and volume confirmation.
-KAMA adapts to market noise, reducing whipsaws in ranging markets. ADX ensures
-trending conditions, and volume confirms institutional participation. This
-combination aims to capture strong trends while avoiding false signals in chop,
-working in both bull and bear markets by filtering counter-trend trades.
-Target: 20-50 trades per year with position size 0.25.
+6h_Ichimoku_TK_Cross_Cloud_Filter_v1
+Hypothesis: Use daily Ichimoku cloud as trend filter and TK cross on 6h for entry.
+- TK cross (Tenkan/Kijun) on 6h provides timely entry signals
+- Daily cloud (Senkou Span A/B) acts as trend filter: only go long when price above cloud, short when below
+- Avoids counter-trend trades in strong trends, works in both bull/bear markets
+Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
-name = "4h_KAMA_Direction_With_ADX_And_Volume_Filter"
-timeframe = "4h"
+name = "6h_Ichimoku_TK_Cross_Cloud_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components: tenkan, kijun, senkou_a, senkou_b, chikou"""
+    n = len(high)
+    tenkan = np.full(n, np.nan)
+    kijun = np.full(n, np.nan)
+    senkou_a = np.full(n, np.nan)
+    senkou_b = np.full(n, np.nan)
+    
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period9 = 9
+    for i in range(period9 - 1, n):
+        high9 = np.max(high[i - period9 + 1:i + 1])
+        low9 = np.min(low[i - period9 + 1:i + 1])
+        tenkan[i] = (high9 + low9) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period26 = 26
+    for i in range(period26 - 1, n):
+        high26 = np.max(high[i - period26 + 1:i + 1])
+        low26 = np.min(low[i - period26 + 1:i + 1])
+        kijun[i] = (high26 + low26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    for i in range(n):
+        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
+            senkou_a[i] = (tenkan[i] + kijun[i]) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period52 = 52
+    for i in range(period52 - 1, n):
+        high52 = np.max(high[i - period52 + 1:i + 1])
+        low52 = np.min(low[i - period52 + 1:i + 1])
+        senkou_b[i] = (high52 + low52) / 2
+    
+    return tenkan, kijun, senkou_a, senkou_b
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for ADX and volume average ONCE before loop
+    # Get daily data ONCE before loop for Ichimoku
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 60:
         return np.zeros(n)
     
-    # Calculate ADX (14) on daily
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
+    # Calculate Ichimoku on daily data
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # True Range
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tenkan_daily, kijun_daily, senkou_a_daily, senkou_b_daily = calculate_ichimoku(high_daily, low_daily, close_daily)
     
-    # Directional Movement
-    up_move = high_d[1:] - high_d[:-1]
-    down_move = low_d[:-1] - low_d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Align Ichimoku components to 6h timeframe
+    tenkan_daily_aligned = align_htf_to_ltf(prices, df_daily, tenkan_daily)
+    kijun_daily_aligned = align_htf_to_ltf(prices, df_daily, kijun_daily)
+    senkou_a_daily_aligned = align_htf_to_ltf(prices, df_daily, senkou_a_daily)
+    senkou_b_daily_aligned = align_htf_to_ltf(prices, df_daily, senkou_b_daily)
     
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        smoothed = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return smoothed
-        smoothed[period-1] = np.nansum(arr[1:period])
-        for i in range(period, len(arr)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
-        return smoothed
-    
-    atr_period = 14
-    tr_smoothed = smooth_wilder(tr, atr_period)
-    plus_dm_smoothed = smooth_wilder(plus_dm, atr_period)
-    minus_dm_smoothed = smooth_wilder(minus_dm, atr_period)
-    
-    # DI and DX
-    plus_di = 100 * plus_dm_smoothed / tr_smoothed
-    minus_di = 100 * minus_dm_smoothed / tr_smoothed
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    
-    # ADX
-    adx = np.full_like(dx, np.nan)
-    if len(dx) >= atr_period:
-        adx[2*atr_period-1] = np.nanmean(dx[atr_period:2*atr_period])
-        for i in range(2*atr_period, len(dx)):
-            adx[i] = (adx[i-1] * (atr_period-1) + dx[i]) / atr_period
-    
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
-    
-    # Daily average volume for filter
-    vol_daily = df_daily['volume'].values
-    vol_ma_daily = np.full_like(vol_daily, np.nan)
-    for i in range(20, len(vol_daily)):
-        vol_ma_daily[i] = np.mean(vol_daily[i-20:i])
-    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
-    
-    # Calculate KAMA (10, 2, 30) on 4h close
-    def eratio(close, period):
-        change = np.abs(np.diff(close, period))
-        volatility = np.nansum(np.abs(np.diff(close)), axis=0)
-        er = np.divide(change, volatility, out=np.zeros_like(change, dtype=float), where=volatility!=0)
-        return np.concatenate([np.full(period, np.nan), er])
-    
-    def kama(close, er_period, fast_sc, slow_sc):
-        er = eratio(close, er_period)
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama = np.full_like(close, np.nan)
-        kama[er_period] = close[er_period]
-        for i in range(er_period+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
-    
-    kama_vals = kama(close, 10, 2/(2+1), 2/(30+1))
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (1.5 * vol_ma)
+    # Calculate TK cross on 6h timeframe (using same Ichimoku calculation but on 6h data)
+    tenkan_6h, kijun_6h, _, _ = calculate_ichimoku(high, low, close)
+    tk_cross = tenkan_6h - kijun_6h  # Positive when Tenkan > Kijun (bullish)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 60  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_vals[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_daily_aligned[i]) or np.isnan(close[i]) or 
-            np.isnan(volume[i])):
+        if (np.isnan(tenkan_daily_aligned[i]) or np.isnan(kijun_daily_aligned[i]) or
+            np.isnan(senkou_a_daily_aligned[i]) or np.isnan(senkou_b_daily_aligned[i]) or
+            np.isnan(tk_cross[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
+        # Determine cloud boundaries (Senkou Span A/B)
+        upper_cloud = np.maximum(senkou_a_daily_aligned[i], senkou_b_daily_aligned[i])
+        lower_cloud = np.minimum(senkou_a_daily_aligned[i], senkou_b_daily_aligned[i])
+        
         if position == 0:
-            # Long: price > KAMA + ADX > 25 + volume surge
-            if close[i] > kama_vals[i] and adx_aligned[i] > 25 and volume_filter[i]:
+            # Long: TK cross bullish (Tenkan > Kijun) AND price above cloud
+            if tk_cross[i] > 0 and close[i] > upper_cloud:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA + ADX > 25 + volume surge
-            elif close[i] < kama_vals[i] and adx_aligned[i] > 25 and volume_filter[i]:
+            # Short: TK cross bearish (Tenkan < Kijun) AND price below cloud
+            elif tk_cross[i] < 0 and close[i] < lower_cloud:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < KAMA OR ADX < 20 (trend weakening)
-            if close[i] < kama_vals[i] or adx_aligned[i] < 20:
+            # Long exit: TK cross bearish OR price drops below cloud
+            if tk_cross[i] < 0 or close[i] < lower_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > KAMA OR ADX < 20 (trend weakening)
-            if close[i] > kama_vals[i] or adx_aligned[i] < 20:
+            # Short exit: TK cross bullish OR price rises above cloud
+            if tk_cross[i] > 0 or close[i] > upper_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
