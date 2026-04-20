@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_KAMA_Trend_RSI_MeanReversion_v1"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,92 +12,98 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === KAMA (Kaufman Adaptive Moving Average) trend from daily ===
+    # === Weekly Close for Trend Filter ===
+    close_1w = df_1w['close'].values
+    # Weekly EMA(21) for trend direction
+    close_1w_series = pd.Series(close_1w)
+    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # === Daily Data for Daily Signals ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # === Daily Camarilla Pivot Points (previous day) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, n=10))
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0) if len(close_1d) > 1 else 0
-    # Vectorized ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # === 4h RSI for mean reversion entries ===
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    for i in range(1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Set first values to avoid look-ahead
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # === 4h Volume confirmation ===
+    # Classic pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla R1 and S1 levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
+    
+    # Align to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # === Daily Volume Confirmation ===
     volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma20 > 0, volume / vol_ma20, 0)
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Get values
-        close_val = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi[i]
+        close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        pivot_val = pivot_aligned[i]
+        ema_21_1w_val = ema_21_1w_aligned[i]
         
-        # Skip if any value is NaN or invalid
-        if (np.isnan(kama_val) or np.isnan(rsi_val) or 
-            np.isnan(vol_ratio_val)):
+        # Skip if any value is NaN
+        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(pivot_val) or np.isnan(ema_21_1w_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price below KAMA (dip in uptrend) + RSI oversold + volume confirmation
-            if close_val < kama_val and rsi_val < 30 and vol_ratio_val > 1.5:
+            # Long: Break above R1 with volume confirmation in bullish weekly trend
+            if close_val > r1_val and vol_ratio_val > 2.0 and close_val > ema_21_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price above KAMA (rally in downtrend) + RSI overbought + volume confirmation
-            elif close_val > kama_val and rsi_val > 70 and vol_ratio_val > 1.5:
+            # Short: Break below S1 with volume confirmation in bearish weekly trend
+            elif close_val < s1_val and vol_ratio_val > 2.0 and close_val < ema_21_1w_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses above KAMA OR RSI overbought
-            if close_val > kama_val or rsi_val > 70:
+            # Long exit: Price returns below pivot OR weekly trend turns bearish
+            if close_val < pivot_val or close_val < ema_21_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses below KAMA OR RSI oversold
-            if close_val < kama_val or rsi_val < 30:
+            # Short exit: Price returns above pivot OR weekly trend turns bullish
+            if close_val > pivot_val or close_val > ema_21_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
