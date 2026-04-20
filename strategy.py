@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_R3S3_Fade_With_Volume_Confirmation"
-timeframe = "6h"
+name = "4h_1d_1w_Camarilla_Pivot_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,136 +12,133 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for pivot levels and volume average
+    # Get 1d data ONCE for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
+    # Get 1w data ONCE for higher timeframe trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 5:
+    if len(df_1d) < 10 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d high, low, close for pivot calculation
+    # Calculate 1d Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot points and support/resistance levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
-    r4 = 3 * pivot - 2 * low_1d
-    s4 = 3 * pivot - 2 * high_1d
+    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
+    # H4 = Close + 1.1/2 * (High - Low)
+    # L4 = Close - 1.1/2 * (High - Low)
+    # H3 = Close + 1.1/4 * (High - Low)
+    # L3 = Close - 1.1/4 * (High - Low)
+    # H2 = Close + 1.1/6 * (High - Low)
+    # L2 = Close - 1.1/6 * (High - Low)
+    # H1 = Close + 1.1/12 * (High - Low)
+    # L1 = Close - 1.1/12 * (High - Low)
+    camarilla_calc = (1.1 / 12) * (high_1d - low_1d)
+    h1 = close_1d + camarilla_calc
+    l1 = close_1d - camarilla_calc
+    h2 = close_1d + camarilla_calc * 2
+    l2 = close_1d - camarilla_calc * 2
+    h3 = close_1d + camarilla_calc * 3
+    l3 = close_1d - camarilla_calc * 3
+    h4 = close_1d + camarilla_calc * 4
+    l4 = close_1d - camarilla_calc * 4
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align all levels to 4h timeframe
+    h1_4h = align_htf_to_ltf(prices, df_1d, h1)
+    l1_4h = align_htf_to_ltf(prices, df_1d, l1)
+    h2_4h = align_htf_to_ltf(prices, df_1d, h2)
+    l2_4h = align_htf_to_ltf(prices, df_1d, l2)
+    h3_4h = align_htf_to_ltf(prices, df_1d, h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, l3)
+    h4_4h = align_htf_to_ltf(prices, df_1d, h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, l4)
     
-    # 1d average volume (20-period) for volume confirmation
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # 1w EMA34 for higher timeframe trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # 6h ATR for exit (14-period)
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    # 4h volume average (20-period) for volume confirmation
+    df_4h = get_htf_data(prices, '4h')
+    vol_4h = df_4h['volume'].values
+    vol_avg_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_avg_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_4h)
+    
+    # 4h ATR for stop loss
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Pre-compute hour filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
     start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Get aligned values
-        pivot_val = pivot_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        vol_avg = vol_avg_1d_aligned[i]
-        current_atr = atr[i]
+        h1_val = h1_4h[i]
+        l1_val = l1_4h[i]
+        h2_val = h2_4h[i]
+        l2_val = l2_4h[i]
+        h3_val = h3_4h[i]
+        l3_val = l3_4h[i]
+        h4_val = h4_4h[i]
+        l4_val = l4_4h[i]
+        ema_trend = ema_34_1w_aligned[i]
+        vol_avg = vol_avg_4h_aligned[i]
+        current_atr = atr_4h_aligned[i]
         current_close = prices['close'].iloc[i]
         current_volume = prices['volume'].iloc[i]
         
         # Skip if any value is NaN
-        if np.isnan(pivot_val) or np.isnan(r3_val) or np.isnan(s3_val) or \
-           np.isnan(r4_val) or np.isnan(s4_val) or np.isnan(vol_avg) or np.isnan(current_atr):
+        if (np.isnan(h1_val) or np.isnan(l1_val) or np.isnan(ema_trend) or 
+            np.isnan(vol_avg) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.5x daily average volume
+        # Volume spike: current volume > 1.5x 4h average volume
         vol_spike = current_volume > 1.5 * vol_avg
         
         if position == 0:
-            # Fade at R3/S3: price touches R3/S3 with volume spike
-            if current_close <= r3_val and current_close >= s3_val and vol_spike:
-                # Check if price is closer to R3 or S3 for direction
-                dist_to_r3 = abs(current_close - r3_val)
-                dist_to_s3 = abs(current_close - s3_val)
-                if dist_to_r3 < dist_to_s3:
-                    # Near R3, look for rejection (price < pivot)
-                    if current_close < pivot_val:
-                        signals[i] = -0.25  # short
-                        position = -1
-                        entry_price = current_close
-                else:
-                    # Near S3, look for bounce (price > pivot)
-                    if current_close > pivot_val:
-                        signals[i] = 0.25   # long
-                        position = 1
-                        entry_price = current_close
-            # Breakout at R4/S4: price breaks R4/S4 with volume spike
-            elif current_close >= r4_val and vol_spike:
-                signals[i] = 0.25   # long breakout
+            # Long: price touches or breaks below L3 with volume spike in uptrend
+            if current_close <= l3_val and current_close > l4_val and vol_spike and current_close > ema_trend:
+                signals[i] = 0.25
                 position = 1
                 entry_price = current_close
-            elif current_close <= s4_val and vol_spike:
-                signals[i] = -0.25  # short breakdown
+            # Short: price touches or breaks above H3 with volume spike in downtrend
+            elif current_close >= h3_val and current_close < h4_val and vol_spike and current_close < ema_trend:
+                signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
-            # Long exit: price below pivot or ATR stop loss
-            if current_close < pivot_val:
+            # Long exit: price crosses above H3 or stops below L4
+            if current_close >= h3_val:
                 signals[i] = 0.0
                 position = 0
-            elif current_close < entry_price - 2.5 * current_atr:
+            elif current_close < entry_price - 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above pivot or ATR stop loss
-            if current_close > pivot_val:
+            # Short exit: price crosses below L3 or stops above H4
+            if current_close <= l3_val:
                 signals[i] = 0.0
                 position = 0
-            elif current_close > entry_price + 2.5 * current_atr:
+            elif current_close > entry_price + 2.0 * current_atr:
                 signals[i] = 0.0
                 position = 0
             else:
