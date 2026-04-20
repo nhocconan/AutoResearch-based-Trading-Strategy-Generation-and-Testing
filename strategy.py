@@ -3,87 +3,97 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Donchian_Trend_10_20_Volume_15"
-timeframe = "1h"
+name = "6h_1w_1d_Pivot_R3S3_Breakout_Volume_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:  # Need sufficient data for weekly and daily pivots
         return np.zeros(n)
     
-    # Hour-based session filter (UTC 8-20) computed once
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data ONCE before loop
+    # Get weekly and daily data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    
+    if len(df_1w) < 10 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 4h: 10-period EMA for short-term trend ===
-    close_4h = df_4h['close'].values
-    ema_10_4h = pd.Series(close_4h).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_10_4h)
+    # === Weekly: Calculate pivot points (using previous week's data) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 4h: 20-period EMA for medium-term trend ===
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Use previous week's OHLC for current week's pivot
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w = np.roll(close_1w, 1)
     
-    # === 1d: Donchian channels (20-day high/low) using previous day's data ===
+    # Set first week's values to NaN
+    prev_high_1w[0] = np.nan
+    prev_low_1w[0] = np.nan
+    prev_close_1w[0] = np.nan
+    
+    # Calculate pivot points and R3/S3 levels
+    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
+    r1_1w = 2 * pivot_1w - prev_low_1w
+    s1_1w = 2 * pivot_1w - prev_high_1w
+    r2_1w = pivot_1w + (prev_high_1w - prev_low_1w)
+    s2_1w = pivot_1w - (prev_high_1w - prev_low_1w)
+    r3_1w = prev_high_1w + 2 * (pivot_1w - prev_low_1w)
+    s3_1w = prev_low_1w - 2 * (prev_high_1w - pivot_1w)
+    
+    # === Daily: Calculate pivot points (using previous day's data) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's OHLC (to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Use previous day's OHLC for current day's pivot
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
     
-    # 20-day Donchian channels (highest high, lowest low over 20 days)
-    donchian_high = np.full_like(high_1d, np.nan)
-    donchian_low = np.full_like(low_1d, np.nan)
+    # Set first day's values to NaN
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    for i in range(20, len(high_1d)):
-        donchian_high[i] = np.max(prev_high[i-20:i])
-        donchian_low[i] = np.min(prev_low[i-20:i])
+    # Calculate pivot points and R3/S3 levels
+    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    r1_1d = 2 * pivot_1d - prev_low_1d
+    s1_1d = 2 * pivot_1d - prev_high_1d
+    r2_1d = pivot_1d + (prev_high_1d - prev_low_1d)
+    s2_1d = pivot_1d - (prev_high_1d - prev_low_1d)
+    r3_1d = prev_high_1d + 2 * (pivot_1d - prev_low_1d)
+    s3_1d = prev_low_1d - 2 * (prev_high_1d - pivot_1d)
     
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align weekly and daily pivot levels to 6h timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # === 1h: Volume ratio (current vs 20-period average) ===
+    # === 6h: Volume ratio (current vs 20-period average) ===
+    close = prices['close'].values
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Main loop ===
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
+    for i in range(100, n):  # Start after warmup
         # Get values
-        close_val = prices['close'].iloc[i]
-        ema_10_val = ema_10_4h_aligned[i]
-        ema_20_val = ema_20_4h_aligned[i]
-        upper_donchian = donchian_high_aligned[i]
-        lower_donchian = donchian_low_aligned[i]
+        close_val = close[i]
+        r3_1w_val = r3_1w_aligned[i]
+        s3_1w_val = s3_1w_aligned[i]
+        r3_1d_val = r3_1d_aligned[i]
+        s3_1d_val = s3_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_10_val) or np.isnan(ema_20_val) or 
-            np.isnan(upper_donchian) or np.isnan(lower_donchian) or 
+        if (np.isnan(r3_1w_val) or np.isnan(s3_1w_val) or 
+            np.isnan(r3_1d_val) or np.isnan(s3_1d_val) or 
             np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -91,33 +101,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: EMA10 > EMA20 (uptrend), price above upper Donchian, volume confirmation
-            if (ema_10_val > ema_20_val and  # Uptrend filter
-                close_val > upper_donchian and   # Break above Donchian high
-                vol_ratio_val > 1.5):        # Volume confirmation
-                signals[i] = 0.15
+            # Long: Price breaks above weekly R3 or daily R3 with volume confirmation
+            if ((close_val > r3_1w_val or close_val > r3_1d_val) and 
+                vol_ratio_val > 1.5):
+                signals[i] = 0.25
                 position = 1
-            # Short: EMA10 < EMA20 (downtrend), price below lower Donchian, volume confirmation
-            elif (ema_10_val < ema_20_val and  # Downtrend filter
-                  close_val < lower_donchian and   # Break below Donchian low
-                  vol_ratio_val > 1.5):        # Volume confirmation
-                signals[i] = -0.15
+            # Short: Price breaks below weekly S3 or daily S3 with volume confirmation
+            elif ((close_val < s3_1w_val or close_val < s3_1d_val) and 
+                  vol_ratio_val > 1.5):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: EMA10 < EMA20 (trend change) or price breaks below lower Donchian
-            if ema_10_val < ema_20_val or close_val < lower_donchian:
+            # Long exit: Price drops below weekly S3 or daily S3
+            if close_val < s3_1w_val or close_val < s3_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.15
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: EMA10 > EMA20 (trend change) or price breaks above upper Donchian
-            if ema_10_val > ema_20_val or close_val > upper_donchian:
+            # Short exit: Price rises above weekly R3 or daily R3
+            if close_val > r3_1w_val or close_val > r3_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.15
+                signals[i] = -0.25
     
     return signals
