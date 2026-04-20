@@ -3,102 +3,115 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA + RSI(14) with weekly trend filter and volume confirmation
-# KAMA adapts to market noise, reducing false signals in choppy markets
-# RSI(14) > 50 for long, < 50 for short ensures momentum alignment
-# Weekly EMA20 filter ensures trades align with higher timeframe trend
-# Volume > 1.3x 20-period average confirms institutional participation
-# Designed for 1d timeframe with selective entries to avoid overtrading
-# Target: 7-25 trades per year per symbol (28-100 total over 4 years)
+# Hypothesis: 4h Choppiness Index regime filter + 1-day volume-weighted VWAP deviation
+# Choppiness Index identifies ranging (chop>61.8) vs trending (chop<38.2) markets
+# In ranging markets: mean reversion at VWAP deviation > 1.5 std
+# In trending markets: momentum continuation when price > VWAP + 0.5*std (long) or < VWAP - 0.5*std (short)
+# Volume-weighted VWAP acts as dynamic support/resistance
+# Designed for 4h timeframe with selective entries to avoid overtrading
+# Target: 20-50 trades per year per symbol (80-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1-day data for VWAP and Choppiness Index
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period EMA on weekly timeframe for trend filter
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate 1-day VWAP (volume-weighted average price)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_num = np.cumsum(typical_price_1d * volume_1d)
+    vwap_den = np.cumsum(volume_1d)
+    vwap_1d = vwap_num / vwap_den
     
-    # Calculate KAMA ( Kaufman Adaptive Moving Average )
-    close = prices['close'].values
+    # Calculate 1-day true range for Choppiness Index
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    
+    # Calculate 14-period ATR and highest/lowest for Choppiness Index
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Calculate Choppiness Index (14-period)
+    # CHOP = 100 * log10(sum(ATR14) / (max(HH14) - min(LL14))) / log10(14)
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    hh14_ll14_diff = highest_high_1d - lowest_low_1d
+    # Avoid division by zero
+    chop_raw = np.where(hh14_ll14_diff > 0, sum_atr_14 / hh14_ll14_diff, 1.0)
+    chop_1d = 100 * np.log10(chop_raw) / np.log10(14)
+    
+    # Align 1-day indicators to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-    er = np.zeros_like(change)
-    er[10:] = change[10:] / (volatility[10:] + 1e-10)  # avoid division by zero
+    # Calculate 4h VWAP
+    typical_price = (high + low + close) / 3.0
+    vwap_num_4h = np.cumsum(typical_price * volume)
+    vwap_den_4h = np.cumsum(volume)
+    vwap_4h = vwap_num_4h / vwap_den_4h
     
-    # Smoothing constants
-    fastest = 2 / (2 + 1)   # EMA(2)
-    slowest = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fastest - slowest) + slowest) ** 2
+    # Calculate 4h ATR for stop loss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend NaN for first element
-    rsi = np.concatenate([[np.nan], rsi])
-    
-    # Volume filter: volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
+    # Calculate 20-period standard deviation of price deviation from VWAP
+    price_dev = close - vwap_4h
+    dev_ma = pd.Series(price_dev).rolling(window=20, min_periods=20).mean().values
+    dev_std = pd.Series(price_dev - dev_ma).rolling(window=20, min_periods=20).std().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or \
-           np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(vwap_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or \
+           np.isnan(vwap_4h[i]) or np.isnan(atr_4h[i]) or np.isnan(dev_std[i]) or dev_std[i] == 0:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        is_uptrend = close[i] > ema20_1w_aligned[i]
-        is_downtrend = close[i] < ema20_1w_aligned[i]
+        # Regime classification based on 1-day Choppiness Index
+        is_ranging = chop_1d_aligned[i] > 61.8
+        is_trending = chop_1d_aligned[i] < 38.2
         
-        # KAMA direction
-        kama_up = close[i] > kama[i]
-        kama_down = close[i] < kama[i]
-        
-        # RSI condition
-        rsi_long = rsi[i] > 50
-        rsi_short = rsi[i] < 50
-        
-        # Volume confirmation
-        has_volume = vol_filter[i]
+        # VWAP deviation measures
+        dev_from_vwap = close[i] - vwap_4h[i]
+        dev_normalized = dev_from_vwap / dev_std[i] if dev_std[i] > 0 else 0
         
         price = close[i]
         
         if position == 0:
-            # Long entry: price > KAMA + RSI > 50 + weekly uptrend + volume
-            long_signal = kama_up and rsi_long and is_uptrend and has_volume
-            
-            # Short entry: price < KAMA + RSI < 50 + weekly downtrend + volume
-            short_signal = kama_down and rsi_short and is_downtrend and has_volume
+            if is_ranging:
+                # Mean reversion in ranging markets
+                long_signal = dev_normalized < -1.5  # Price significantly below VWAP
+                short_signal = dev_normalized > 1.5   # Price significantly above VWAP
+            elif is_trending:
+                # Momentum continuation in trending markets
+                long_signal = dev_normalized > 0.5   # Price above VWAP + 0.5*std
+                short_signal = dev_normalized < -0.5  # Price below VWAP - 0.5*std
+            else:
+                # Neutral chop - no clear signal
+                long_signal = False
+                short_signal = False
             
             if long_signal:
                 signals[i] = 0.25
@@ -110,20 +123,22 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price < KAMA or RSI < 40
-            exit_signal = (close[i] < kama[i]) or (rsi[i] < 40)
+            # Long exit: stop loss or mean reversion signal
+            stop_loss = entry_price - 2.0 * atr_4h[i]
+            mean_revert_signal = dev_normalized > 0.2  # Return toward VWAP
             
-            if exit_signal:
+            if stop_loss <= 0 or price <= stop_loss or mean_revert_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > KAMA or RSI > 60
-            exit_signal = (close[i] > kama[i]) or (rsi[i] > 60)
+            # Short exit: stop loss or mean reversion signal
+            stop_loss = entry_price + 2.0 * atr_4h[i]
+            mean_revert_signal = dev_normalized < -0.2  # Return toward VWAP
             
-            if exit_signal:
+            if stop_loss <= 0 or price >= stop_loss or mean_revert_signal:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_WeeklyTrendFilter_Volume"
-timeframe = "1d"
+name = "4h_ChopRegime_VWAPDeviation"
+timeframe = "4h"
 leverage = 1.0
