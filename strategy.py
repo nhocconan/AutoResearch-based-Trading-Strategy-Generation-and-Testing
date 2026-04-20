@@ -3,87 +3,97 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions for mean reversion entries.
-# 1d EMA50 provides trend filter to trade with higher timeframe momentum.
-# Volume surge confirms institutional participation at turning points.
-# This strategy should work in both bull and bear markets by combining mean reversion with trend filtering.
-# Target: 20-30 trades per year to minimize fee drag.
+# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation.
+# The Alligator (three SMAs: Jaw=13, Teeth=8, Lips=5) identifies trend absence (all lines intertwined) 
+# vs presence (lines diverging in order). Trade only when Alligator is "awake" (JAW > TEETH > LIPS for long, 
+# JAW < TEETH < LIPS for short) and price is outside the Alligator's mouth. 
+# 1d EMA200 provides higher-timeframe trend filter to avoid counter-trend trades. 
+# Volume confirmation ensures institutional participation. 
+# This should work in both bull and bear markets by following higher timeframe trend and avoiding range-bound periods.
+# Target: 20-40 trades per year to minimize fee drag.
 
-name = "12h_WilliamsR_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_Alligator_1dEMA200_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for EMA50 trend
+    # Get 1d data ONCE before loop for EMA200 trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d EMA50 for trend direction ===
+    # === 1d EMA200 for trend direction ===
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # === Williams %R (14-period) ===
+    # === Williams Alligator on 4h (Jaw=13, Teeth=8, Lips=5) ===
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    median_price = (high + low) / 2  # Typical price for Alligator
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Avoid division by zero
-    denominator = highest_high - lowest_low
-    williams_r = np.where(denominator != 0, -100 * (highest_high - close) / denominator, -50)
-    
-    # === Volume confirmation ===
+    # === 4h Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after Alligator warmup
         # Get values
-        close_val = close[i]
-        ema_val = ema_50_aligned[i]
-        williams_val = williams_r[i]
+        close_val = prices['close'].iloc[i]
+        ema_val = ema_200_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(williams_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(ema_val) or np.isnan(jaw_val) or np.isnan(teeth_val) or 
+            np.isnan(lips_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + uptrend (price > EMA50) + volume surge
-            if williams_val < -80 and close_val > ema_val and vol_ratio_val > 1.5:
+            # Alligator awake and aligned for long: JAW > TEETH > LIPS (uptrend)
+            # Price above Alligator's mouth (above JAW) with volume confirmation
+            if jaw_val > teeth_val and teeth_val > lips_val and close_val > jaw_val and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) + downtrend (price < EMA50) + volume surge
-            elif williams_val > -20 and close_val < ema_val and vol_ratio_val > 1.5:
+                entry_price = close_val
+            # Alligator awake and aligned for short: JAW < TEETH < LIPS (downtrend)
+            # Price below Alligator's mouth (below LIPS) with volume confirmation
+            elif jaw_val < teeth_val and teeth_val < lips_val and close_val < lips_val and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         
         elif position == 1:
-            # Long exit: Williams %R returns to neutral (> -50) or trend reversal
-            if williams_val > -50 or close_val < ema_val:
+            # Long exit: Alligator sleeping (lines intertwine) or trend reversal
+            # Exit when JAW <= TEETH or price closes below TEETH
+            if jaw_val <= teeth_val or close_val < teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R returns to neutral (< -50) or trend reversal
-            if williams_val < -50 or close_val > ema_val:
+            # Short exit: Alligator sleeping (lines intertwine) or trend reversal
+            # Exit when JAW >= TEETH or price closes above TEETH
+            if jaw_val >= teeth_val or close_val > teeth_val:
                 signals[i] = 0.0
                 position = 0
             else:
