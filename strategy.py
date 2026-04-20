@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Load 1d data for trend and volatility (HTF)
@@ -19,7 +19,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ATR(14) for volatility and stop
+    # 1d ATR(14) for volatility
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -34,19 +34,30 @@ def generate_signals(prices):
     vol_ratio_1d = volume_1d / np.where(vol_ma_20_1d == 0, 1, vol_ma_20_1d)
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # 12h price data (primary timeframe)
+    # 1h price data (primary timeframe)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if NaN in critical values
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(vol_ratio_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,8 +73,11 @@ def generate_signals(prices):
         trend_down = price < ema_trend
         
         # Volatility filter: moderate volatility only
-        atr_ma_20 = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values[i]
-        vol_filter = (atr > 0.3 * atr_ma_20) and (atr < 3.0 * atr_ma_20)
+        if i >= 20:
+            atr_ma_20 = np.mean(atr_14_1d_aligned[i-20:i])
+            vol_filter = (atr > 0.3 * atr_ma_20) and (atr < 3.0 * atr_ma_20)
+        else:
+            vol_filter = False
         
         # Volume filter: require above-average volume
         vol_filter = vol_filter and (vol_ratio > 1.3)
@@ -71,11 +85,11 @@ def generate_signals(prices):
         if position == 0:
             # Long when uptrend + volume confirmation
             if trend_up and vol_filter:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short when downtrend + volume confirmation
             elif trend_down and vol_filter:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -84,7 +98,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: trend reversal or volatility spike
@@ -92,10 +106,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_EMA34_VolumeTrend_Filter_v1"
-timeframe = "12h"
+name = "1h_1d_EMA34_VolumeTrend_Filter_Session_v1"
+timeframe = "1h"
 leverage = 1.0
