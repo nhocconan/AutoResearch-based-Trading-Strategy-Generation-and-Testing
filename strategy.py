@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load 1d HTF data once for pivot levels and volatility
@@ -23,6 +23,8 @@ def generate_signals(prices):
     s1 = 2 * pivot - high_1d
     r2 = pivot + (high_1d - low_1d)
     s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
     # Calculate daily ATR for volatility filter
     tr1 = np.abs(high_1d - low_1d)
@@ -34,12 +36,14 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all 1d indicators to 12h timeframe
+    # Align all 1d indicators to 6h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Main timeframe data
@@ -55,11 +59,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if NaN in critical values
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_filter[i])):
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,6 +77,8 @@ def generate_signals(prices):
         s1_val = s1_aligned[i]
         r2_val = r2_aligned[i]
         s2_val = s2_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         atr_val = atr_1d_aligned[i]
         vol_ok = vol_filter[i]
         
@@ -107,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_PivotMeanReversion_VolumeFilter_v1"
-timeframe = "12h"
+name = "6h_1d_Pivot_S1R1_MeanReversion_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
