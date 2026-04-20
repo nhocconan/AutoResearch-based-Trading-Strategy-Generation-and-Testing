@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R2_S2_Breakout_Volume"
-timeframe = "4h"
+name = "6h_1d_Pivot_R2S2_Breakout_Volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,23 +17,22 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d: Calculate Camarilla pivot points ===
+    # === 1d: Calculate pivot points (standard) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # Pivot = (H + L + C) / 3
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R2 = C + (H - L) * 1.1 / 6
-    # S2 = C - (H - L) * 1.1 / 6
-    r2_1d = close_1d + (high_1d - low_1d) * 1.1 / 6.0
-    s2_1d = close_1d - (high_1d - low_1d) * 1.1 / 6.0
+    # R2 = P + (H - L), S2 = P - (H - L)
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
     
     # Align pivot levels
     r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
-    # === 4h: ATR(14) for volatility and stop loss ===
+    # === 6h: ATR(14) for volatility and stop loss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -65,9 +64,9 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.5x 20-period 4h average volume ===
-        if i >= 20:
-            vol_ma = np.mean(prices['volume'].iloc[i-20:i].values)
+        # === Volume condition: current volume > 1.5x 24-period 6h average volume ===
+        if i >= 24:
+            vol_ma = np.mean(prices['volume'].iloc[i-24:i].values)
             vol_condition = current_volume > 1.5 * vol_ma
         else:
             vol_condition = False
