@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -69,7 +69,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Session filter: only trade 8-20 UTC
         hour = hours[i]
         if hour < 8 or hour > 20:
@@ -122,13 +122,13 @@ def generate_signals(prices):
     
     return signals
 
-# 12h_ADX_Donchian_Breakout_Volume_Session_v2
+# 4h_ADX_Donchian_Breakout_Volume_Session_v1
 # Uses daily ADX for trend strength filter (ADX > 25)
 # Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 12h timeframe with ~15-30 trades/year
-name = "12h_ADX_Donchian_Breakout_Volume_Session_v2"
-timeframe = "12h"
+# Designed for 4h timeframe with ~20-40 trades/year
+name = "4h_ADX_Donchian_Breakout_Volume_Session_v1"
+timeframe = "4h"
 leverage = 1.0
