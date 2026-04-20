@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_WickReversal_VolumeSpike_v1
-Concept: 6h rejection candles (wick > 2x body) at 12h/1d support/resistance with volume spike.
-- Long: Close > Open (bullish) AND (Open - Low) > 2*(Close - Open) AND Close > 12h EMA(50) AND 1d volume > 2x 20-period avg
-- Short: Close < Open (bearish) AND (High - Close) > 2*(Open - Close) AND Close < 12h EMA(50) AND 1d volume > 2x 20-period avg
-- Exit: Opposite wick signal OR loss of 12h EMA(50) filter
+4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v1
+Concept: 4h price breaks above/below 1d Camarilla R1/S1 levels with daily volume spike and chop regime filter.
+- Long: Close > R1 AND daily volume > 2.0x 20-period avg AND CHOP(14) > 61.8 (range regime)
+- Short: Close < S1 AND daily volume > 2.0x 20-period avg AND CHOP(14) > 61.8 (range regime)
+- Exit: Close crosses back through daily pivot point
 - Position sizing: 0.25
-- Works in bull/bear: volume confirms institutional interest, EMA filter adapts to trend
+- Target: 50-150 total trades over 4 years (12-37/year)
+- Works in bull/bear: daily pivot structure adapts, volume confirms institutional interest, chop filter avoids trends
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_WickReversal_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,100 +23,101 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data ONCE before loop
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 12h: EMA Trend Filter (50) ===
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === Daily: Camarilla Pivot Levels ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 1d: Volume MA (20-period) ===
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_hl = high_1d - low_1d
+    r1 = close_1d + (range_hl * 1.1 / 12)
+    s1 = close_1d - (range_hl * 1.1 / 12)
+    
+    # Align Camarilla levels
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === Daily: Volume MA (20-period) ===
     volume_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # === 1d: Current Volume ===
-    volume_1d_vals = df_1d['volume'].values
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_vals)
+    # === Daily: Chopiness Index (14) ===
+    atr_period = 14
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, tr2)
+    tr = np.concatenate([[np.nan], tr])  # align with original index
     
-    # === 6h: Price Action ===
-    open_ = prices['open'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Sum of absolute returns
+    returns = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    sum_returns = pd.Series(returns).rolling(window=atr_period, min_periods=atr_period).sum().values
+    
+    chop = 100 * np.log10(sum_returns / (atr * atr_period)) / np.log10(atr_period)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # === 4h: Price ===
     close = prices['close'].values
-    
-    # Calculate body and wicks
-    body = np.abs(close - open_)
-    lower_wick = np.where(close >= open_, open_ - low, close - low)
-    upper_wick = np.where(close >= open_, high - close, high - open_)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 20  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Get values
-        ema_50 = ema_50_12h_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        pivot_val = pivot_aligned[i]
         vol_ma_20 = vol_ma_20_1d_aligned[i]
-        vol_1d = volume_1d_aligned[i]
-        o = open_[i]
-        h = high[i]
-        l = low[i]
-        c = close[i]
+        chop_val = chop_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_50) or np.isnan(vol_ma_20) or np.isnan(vol_1d) or 
-            np.isnan(o) or np.isnan(h) or np.isnan(l) or np.isnan(c)):
+        if (np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(pivot_val) or 
+            np.isnan(vol_ma_20) or np.isnan(chop_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume condition: current daily volume > 2.0x 20-period average
-        vol_condition = vol_1d > 2.0 * vol_ma_20
+        vol_1d_vals = df_1d['volume'].values
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_vals)
+        current_vol = vol_1d_aligned[i]
+        vol_condition = current_vol > 2.0 * vol_ma_20
         
-        # Wick conditions
-        body_size = np.abs(c - o)
-        # Avoid division by zero - if body is too small, treat as doji
-        if body_size < 1e-8:
-            is_bullish_wick = False
-            is_bearish_wick = False
-        else:
-            # Bullish rejection: long lower wick, small body, close near high
-            is_bullish_wick = (c >= o) and (lower_wick[i] > 2.0 * body_size)
-            # Bearish rejection: long upper wick, small body, close near low
-            is_bearish_wick = (c <= o) and (upper_wick[i] > 2.0 * body_size)
+        # Chop condition: range-bound market
+        chop_condition = chop_val > 61.8
         
         if position == 0:
-            # Long: bullish rejection at support with volume spike and above 12h EMA
-            if is_bullish_wick and c > ema_50 and vol_condition:
+            # Long: price breaks above R1 with volume spike and range regime
+            if close[i] > r1_val and vol_condition and chop_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish rejection at resistance with volume spike and below 12h EMA
-            elif is_bearish_wick and c < ema_50 and vol_condition:
+            # Short: price breaks below S1 with volume spike and range regime
+            elif close[i] < s1_val and vol_condition and chop_condition:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish rejection OR price breaks below 12h EMA
-            if is_bearish_wick or c < ema_50:
+            # Long exit: price crosses below pivot
+            if close[i] < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish rejection OR price breaks above 12h EMA
-            if is_bullish_wick or c > ema_50:
+            # Short exit: price crosses above pivot
+            if close[i] > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
