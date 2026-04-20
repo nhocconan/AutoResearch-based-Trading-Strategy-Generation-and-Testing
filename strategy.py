@@ -10,7 +10,7 @@ def generate_signals(prices):
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 14-period ADX for trend strength
@@ -52,16 +52,11 @@ def generate_signals(prices):
     adx_1d = wilder_smooth(dx, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 20-period Donchian channels
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 10-period Donchian channels (tighter for fewer trades)
+    donch_high_1d = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
     donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
     donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    
-    # Calculate 20-period average volume
-    volume_1d = df_1d['volume'].values
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     # Session filter: 8-20 UTC
     hours = pd.DatetimeIndex(prices["open_time"]).hour  # pre-compute before loop
@@ -83,52 +78,49 @@ def generate_signals(prices):
         adx_val = adx_1d_aligned[i]
         donch_high_val = donch_high_1d_aligned[i]
         donch_low_val = donch_low_1d_aligned[i]
-        vol_val = prices['volume'].iloc[i]
-        vol_avg_val = vol_avg_20_aligned[i]
         
         # Skip if any value is NaN
         if (np.isnan(adx_val) or np.isnan(donch_high_val) or 
-            np.isnan(donch_low_val) or np.isnan(vol_avg_val)):
+            np.isnan(donch_low_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
-            if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
-                signals[i] = 0.25
+            # Long: ADX > 30 (strong trend), price breaks above Donchian high
+            if adx_val > 30 and close_val > donch_high_val:
+                signals[i] = 0.20
                 position = 1
-            # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
-            elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
-                signals[i] = -0.25
+            # Short: ADX > 30 (strong trend), price breaks below Donchian low
+            elif adx_val > 30 and close_val < donch_low_val:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or ADX < 20 (trend weakening)
-            if close_val < donch_low_val or adx_val < 20:
+            # Long exit: price breaks below Donchian low or ADX < 25 (trend weakening)
+            if close_val < donch_low_val or adx_val < 25:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or ADX < 20 (trend weakening)
-            if close_val > donch_high_val or adx_val < 20:
+            # Short exit: price breaks above Donchian high or ADX < 25 (trend weakening)
+            if close_val > donch_high_val or adx_val < 25:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# 4h_ADX_Donchian_Breakout_Volume_Session_v1
-# Uses daily ADX for trend strength filter (ADX > 25)
-# Uses daily Donchian(20) breakouts for entry
-# Requires volume confirmation above 20-period average
+# 1h_ADX_Donchian_Breakout_Session_v2
+# Uses daily ADX for trend strength filter (ADX > 30 for entry, >25 to hold)
+# Uses daily Donchian(10) breakouts for entry (tighter channel for fewer trades)
 # Session filter: 8-20 UTC to avoid low-volume periods
-# Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 4h timeframe with ~20-50 trades/year
-name = "4h_ADX_Donchian_Breakout_Volume_Session_v1"
-timeframe = "4h"
+# Exits when price breaks opposite Donchian level or trend weakens (ADX < 25)
+# Designed for 1h timeframe with ~15-25 trades/year
+name = "1h_ADX_Donchian_Breakout_Session_v2"
+timeframe = "1h"
 leverage = 1.0
