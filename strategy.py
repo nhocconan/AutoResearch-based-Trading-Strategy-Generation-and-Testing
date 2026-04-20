@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian_Trend_Filter_V2
-Hypothesis: Trade daily timeframe using weekly Donchian channels for trend direction with volume confirmation.
-Long when price breaks above weekly Donchian high (20-period) + volume spike; short when breaks below weekly Donchian low.
-Use weekly trend filter to avoid counter-trend trades. Volume spike confirms institutional participation.
-Target: 15-35 trades/year (60-140 total over 4 years) with position size 0.25.
-Works in bull/bear: weekly trend filter avoids counter-trend trades, volume filter reduces false signals.
+6h_1D_Pivot_R2S2_MomentumBreakout
+Hypothesis: Trade 6-hour breakouts with daily pivot levels. Go long when price breaks above R2 with volume confirmation, short when breaks below S2. 
+This targets momentum continuation after breaking key daily support/resistance levels. Works in both bull and bear markets by capturing breakouts in the direction of the daily pivot structure.
+Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Uses daily pivot points (R2/S2) as key institutional levels, volume confirmation to filter false breakouts, and momentum to ensure follow-through.
 """
 
-name = "1d_WeeklyDonchian_Trend_Filter_V2"
-timeframe = "1d"
+name = "6h_1D_Pivot_R2S2_MomentumBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,33 +25,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    # Calculate daily pivot points: P = (H+L+C)/3, R2 = P + (H-L), S2 = P - (H-L)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    donchian_high = np.full_like(high_weekly, np.nan)
-    donchian_low = np.full_like(low_weekly, np.nan)
+    pivot_daily = (high_daily + low_daily + close_daily) / 3.0
+    range_daily = high_daily - low_daily
+    r2_daily = pivot_daily + range_daily
+    s2_daily = pivot_daily - range_daily
     
-    for i in range(len(high_weekly)):
-        if i >= 19:  # 20-period lookback
-            start_idx = i - 19
-            donchian_high[i] = np.max(high_weekly[start_idx:i+1])
-            donchian_low[i] = np.min(low_weekly[start_idx:i+1])
-    
-    # Align weekly Donchian levels to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    # Align daily pivot levels to 6h timeframe (wait for daily close)
+    r2_aligned = align_htf_to_ltf(prices, df_daily, r2_daily)
+    s2_aligned = align_htf_to_ltf(prices, df_daily, s2_daily)
     
     # Calculate volume filter (volume > 1.5x 20-period average)
     vol_ma20 = np.full_like(volume, np.nan)
     for i in range(20, n):
         vol_ma20[i] = np.mean(volume[i-20:i])
     volume_filter = volume > (1.5 * vol_ma20)
+    
+    # Calculate momentum (price change over 3 periods)
+    momentum = np.full_like(close, np.nan)
+    for i in range(3, n):
+        momentum[i] = (close[i] - close[i-3]) / close[i-3]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,32 +62,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(momentum[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Donchian high + volume spike
-            if close[i] > donchian_high_aligned[i] and volume_filter[i]:
+            # Long: price breaks above R2 with volume and momentum
+            if close[i] > r2_aligned[i] and volume_filter[i] and momentum[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian low + volume spike
-            elif close[i] < donchian_low_aligned[i] and volume_filter[i]:
+            # Short: price breaks below S2 with volume and momentum
+            elif close[i] < s2_aligned[i] and volume_filter[i] and momentum[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below weekly Donchian low
-            if close[i] < donchian_low_aligned[i]:
+            # Long exit: price falls back below R2 or momentum turns negative
+            if close[i] < r2_aligned[i] or momentum[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above weekly Donchian high
-            if close[i] > donchian_high_aligned[i]:
+            # Short exit: price rises back above S2 or momentum turns positive
+            if close[i] > s2_aligned[i] or momentum[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
