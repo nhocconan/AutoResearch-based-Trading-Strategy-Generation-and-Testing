@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h breakout above 1d VWAP with volume confirmation and ATR stop
-# - Uses 1-day VWAP as trend filter: price must be above VWAP for long, below for short
-# - Entry: price breaks above VWAP + volume > 2x 20-period average
-# - Exit: price crosses back below VWAP or ATR-based stop hit (2.5x ATR)
-# - VWAP is a strong institutional benchmark; breakouts often carry momentum
-# - Volume surge confirms institutional participation
-# - ATR stop manages risk during adverse moves
+# Hypothesis: 4h Bollinger Bands squeeze breakout with volume and trend confirmation
+# - Uses 20-period BB width percentile to detect low volatility squeeze
+# - Breakout occurs when price closes outside BB bands after squeeze
+# - Trend filter: 50-period EMA on 1d timeframe (price above EMA for long, below for short)
+# - Volume confirmation: volume > 1.5x 20-period average
+# - Exit: price re-enters Bollinger Bands or ATR stop hit (2x ATR)
+# - Designed to work in both bull and bear markets by using volatility contraction/expansion
 # - Target: 20-35 trades per year per symbol (80-140 total over 4 years)
 
 def generate_signals(prices):
@@ -17,40 +17,42 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for VWAP calculation
+    # Load 1d data for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate typical price and VWAP
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume_1d)
-    vwap_denominator = np.cumsum(volume_1d)
-    vwap_1d = vwap_numerator / vwap_denominator
-    vwap_1d[vwap_denominator == 0] = np.nan
+    # Calculate EMA50 on 1d data
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align VWAP to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    
-    # Calculate ATR for stop loss (using 1d data)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # 4h price and volume data
+    # Calculate ATR for stop loss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    
+    # 4h Bollinger Bands
+    bb_period = 20
+    bb_std = 2
+    bb_ma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_ma + bb_std * bb_std_dev
+    bb_lower = bb_ma - bb_std * bb_std_dev
+    bb_width = bb_upper - bb_lower
+    
+    # Bollinger Band width percentile (50-period lookback)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
     
     # Volume confirmation: 20-period average
+    volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,7 +61,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(vwap_aligned[i]) or np.isnan(atr_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(ema_50_4h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(bb_width_percentile[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,28 +72,34 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long entry: price above VWAP + breaks above VWAP + volume surge
-            if price > vwap_aligned[i] and price > vwap_aligned[i-1] and vol > 2.0 * vol_ma[i]:
+            # Long entry: BB squeeze (width < 20th percentile) + price closes above upper BB + above 1d EMA50 + volume surge
+            if (bb_width_percentile[i] < 0.2 and 
+                price > bb_upper[i] and 
+                price > ema_50_4h[i] and 
+                vol > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: price below VWAP + breaks below VWAP + volume surge
-            elif price < vwap_aligned[i] and price < vwap_aligned[i-1] and vol > 2.0 * vol_ma[i]:
+            # Short entry: BB squeeze + price closes below lower BB + below 1d EMA50 + volume surge
+            elif (bb_width_percentile[i] < 0.2 and 
+                  price < bb_lower[i] and 
+                  price < ema_50_4h[i] and 
+                  vol > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price crosses below VWAP OR ATR stop hit (2.5*ATR)
-            if price < vwap_aligned[i] or price < entry_price - 2.5 * atr_aligned[i]:
+            # Long exit: price re-enters Bollinger Bands OR ATR stop hit (2*ATR)
+            if price < bb_upper[i] or price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above VWAP OR ATR stop hit (2.5*ATR)
-            if price > vwap_aligned[i] or price > entry_price + 2.5 * atr_aligned[i]:
+            # Short exit: price re-enters Bollinger Bands OR ATR stop hit (2*ATR)
+            if price > bb_lower[i] or price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_Breakout_Volume_ATRStop"
+name = "4h_BB_Squeeze_Breakout_Volume_EMA50_ATRStop"
 timeframe = "4h"
 leverage = 1.0
