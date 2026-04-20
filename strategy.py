@@ -1,17 +1,17 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-6h_WoodyCCI_Divergence_With_Volume
-Hypothesis: Trade divergences between price and Woody CCI on 6h timeframe, confirmed by volume spikes and aligned with 1d trend.
-Long when bullish divergence (price makes lower low, CCI makes higher low) with volume spike and 1d uptrend.
-Short when bearish divergence (price makes higher high, CCI makes lower high) with volume spike and 1d downtrend.
-Uses Woody CCI (typically more responsive than standard CCI) with period 14.
-Designed for 6h to capture medium-term reversals with confirmation, reducing false signals.
-Works in bull/bear: 1d trend filter ensures trades align with higher timeframe momentum.
-Target: 60-120 total trades over 4 years (15-30/year) with position size 0.25.
+12h_WMA_Trend_Filter_With_Volume_and_RSI
+Hypothesis: Trade 12h price direction using Weighted Moving Average (WMA) trend filter with volume confirmation and RSI filter.
+Long when price > WMA(34) with volume > 1.5x average and RSI < 60; short when price < WMA(34) with volume > 1.5x average and RSI > 40.
+Exit when price crosses back over WMA(34) or volume drops below average.
+Uses 1w trend filter to avoid counter-trend trades in strong trends.
+Designed for 12h timeframe to capture medium-term moves while reducing noise.
+Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Works in bull/bear: 1w trend filter avoids counter-trend trades, volume filter reduces false signals.
 """
 
-name = "6h_WoodyCCI_Divergence_With_Volume"
-timeframe = "6h"
+name = "12h_WMA_Trend_Filter_With_Volume_and_RSI"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -28,14 +28,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 1d EMA20 for trend filter
+    # Calculate WMA(34) on 12h close
+    def wma(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) >= period:
+            weights = np.arange(1, period + 1)
+            weights_sum = weights.sum()
+            for i in range(period-1, len(values)):
+                result[i] = np.dot(values[i-period+1:i+1], weights) / weights_sum
+        return result
+    
+    wma34_12h = wma(close_12h, 34)
+    wma34_12h_aligned = align_htf_to_ltf(prices, df_12h, wma34_12h)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA(20) on 1w close for trend filter
     def ema(values, period):
         result = np.full_like(values, np.nan)
         if len(values) >= period:
@@ -45,66 +67,67 @@ def generate_signals(prices):
                 result[i] = multiplier * values[i] + (1 - multiplier) * result[i-1]
         return result
     
-    ema20_1d = ema(close_1d, 20)
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema20_1w = ema(close_1w, 20)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate Woody CCI on 6h (Typical Price = (H+L+C)/3)
-    tp = (high + low + close) / 3.0
-    # CCI = (TP - SMA(TP,20)) / (0.015 * Mean Deviation)
-    sma_tp = np.full_like(tp, np.nan)
-    md = np.full_like(tp, np.nan)
-    cci = np.full_like(tp, np.nan)
-    
-    for i in range(19, len(tp)):
-        sma_tp[i] = np.mean(tp[i-19:i+1])
-        mean_dev = np.mean(np.abs(tp[i-19:i+1] - sma_tp[i]))
-        if mean_dev > 0:
-            cci[i] = (tp[i] - sma_tp[i]) / (0.015 * mean_dev)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Calculate volume filter (volume > 1.5x 20-period average)
     vol_ma20 = np.full_like(volume, np.nan)
     for i in range(20, len(volume)):
         vol_ma20[i] = np.mean(volume[i-20:i])
     volume_filter = volume > (1.5 * vol_ma20)
     
+    # Calculate RSI(14) on 12h close
+    def rsi(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) >= period:
+            delta = np.diff(values)
+            up = np.where(delta > 0, delta, 0)
+            down = np.where(delta < 0, -delta, 0)
+            roll_up = np.full_like(values, np.nan)
+            roll_down = np.full_like(values, np.nan)
+            for i in range(period, len(values)):
+                roll_up[i] = np.mean(up[i-period+1:i+1])
+                roll_down[i] = np.mean(down[i-period+1:i+1])
+            rs = np.where(roll_down != 0, roll_up / roll_down, 0)
+            result[period-1:] = 100 - (100 / (1 + rs[period-1:]))
+        return result
+    
+    rsi14_12h = rsi(close_12h, 14)
+    rsi14_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi14_12h)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready (34 for WMA + buffer)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(cci[i]) or np.isnan(cci[i-1]) or np.isnan(ema20_1d_aligned[i]) or
-            np.isnan(close[i]) or np.isnan(close[i-1]) or np.isnan(volume[i])):
+        if (np.isnan(wma34_12h_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(rsi14_12h_aligned[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Bullish divergence: price makes lower low, CCI makes higher low
-            bull_div = (close[i] < close[i-1]) and (low[i] < low[i-1]) and (cci[i] > cci[i-1])
-            # Bearish divergence: price makes higher high, CCI makes lower high
-            bear_div = (close[i] > close[i-1]) and (high[i] > high[i-1]) and (cci[i] < cci[i-1])
-            
-            if bull_div and volume_filter[i] and close[i] > ema20_1d_aligned[i]:
+            # Long: price > WMA34 with volume filter AND RSI < 60 AND 1w uptrend (close > EMA20)
+            if close[i] > wma34_12h_aligned[i] and volume_filter[i] and rsi14_12h_aligned[i] < 60 and close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            elif bear_div and volume_filter[i] and close[i] < ema20_1d_aligned[i]:
+            # Short: price < WMA34 with volume filter AND RSI > 40 AND 1w downtrend (close < EMA20)
+            elif close[i] < wma34_12h_aligned[i] and volume_filter[i] and rsi14_12h_aligned[i] > 40 and close[i] < ema20_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish divergence OR price breaks below EMA20
-            bear_div = (close[i] > close[i-1]) and (high[i] > high[i-1]) and (cci[i] < cci[i-1])
-            if bear_div or close[i] < ema20_1d_aligned[i]:
+            # Long exit: price < WMA34 OR volume drops below average OR 1w trend turns down
+            if close[i] < wma34_12h_aligned[i] or not volume_filter[i] or close[i] < ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish divergence OR price breaks above EMA20
-            bull_div = (close[i] < close[i-1]) and (low[i] < low[i-1]) and (cci[i] > cci[i-1])
-            if bull_div or close[i] > ema20_1d_aligned[i]:
+            # Short exit: price > WMA34 OR volume drops below average OR 1w trend turns up
+            if close[i] > wma34_12h_aligned[i] or not volume_filter[i] or close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
