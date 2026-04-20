@@ -3,80 +3,105 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter (EMA34) and volume confirmation.
-# Long when price breaks above Donchian upper band and price > 1d EMA34.
-# Short when price breaks below Donchian lower band and price < 1d EMA34.
-# Uses volume > 1.5x 20-period average for confirmation.
-# Target: 20-40 trades/year per symbol.
+# Hypothesis: 6h with 1d RSI(14) and 1w Chaikin Oscillator for mean reversion in range-bound markets.
+# Long when RSI < 30 and Chaikin Oscillator > 0 (accumulation). Short when RSI > 70 and Chaikin < 0 (distribution).
+# Exit when RSI returns to neutral (40-60). Uses volume accumulation/distribution to filter false signals.
+# Target: 30-60 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for EMA34 trend filter
+    # Load 1d data for RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate EMA34 on daily close
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # 4h data
+    # Wilder's smoothing (alpha = 1/period)
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    for i in range(1, len(gain)):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0] = 50  # neutral for first value
+    
+    # Load 1w data for Chaikin Oscillator
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
+    
+    # Money Flow Multiplier
+    mfm = ((close_1w - low_1w) - (high_1w - close_1w)) / np.where((high_1w - low_1w) == 0, 1, (high_1w - low_1w))
+    mfv = mfm * volume_1w
+    
+    # Chaikin Oscillator = (3-period EMA of MFV) - (10-period EMA of MFV)
+    ema3 = pd.Series(mfv).ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10 = pd.Series(mfv).ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin = ema3 - ema10
+    
+    # Align indicators to 6h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    chaikin_aligned = align_htf_to_ltf(prices, df_1w, chaikin)
+    
+    # 6h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Donchian Channel (20-period)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_filter[i])):
+        if np.isnan(rsi_aligned[i]) or np.isnan(chaikin_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        ema_34 = ema_34_1d_aligned[i]
-        vol_ok = vol_filter[i]
+        rsi_val = rsi_aligned[i]
+        chaikin_val = chaikin_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper, price > EMA34, volume
-            if price > upper and price > ema_34 and vol_ok:
+            # Long: oversold RSI + accumulation
+            if rsi_val < 30 and chaikin_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower, price < EMA34, volume
-            elif price < lower and price < ema_34 and vol_ok:
+            # Short: overbought RSI + distribution
+            elif rsi_val > 70 and chaikin_val < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian lower or price < EMA34
-            if price < lower or price < ema_34:
+            # Long exit: RSI returns to neutral (40-60)
+            if 40 <= rsi_val <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian upper or price > EMA34
-            if price > upper or price > ema_34:
+            # Short exit: RSI returns to neutral (40-60)
+            if 40 <= rsi_val <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA34_Trend_VolumeFilter_v1"
-timeframe = "4h"
+name = "6h_1d_RSI14_1w_ChaikinOscillator_MeanReversion_v1"
+timeframe = "6h"
 leverage = 1.0
