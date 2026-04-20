@@ -1,12 +1,13 @@
-# 1h_1d_Momentum_Filter_Strategy
-# Hypothesis: In 1h timeframe, use 1d momentum (price above/below 200 EMA) for directional bias,
-# and 4h volatility contraction/expansion (BB width percentile) for entry timing.
-# This avoids overtrading by requiring both trend alignment and volatility breakout.
-# Works in bull/bear: long when price>200EMA + BB breakout up, short when price<200EMA + BB breakout down.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+# 6h_WeeklyPivot_Donchian_Breakout_Momentum
+# Hypothesis: Weekly pivot levels (from Monday) act as key support/resistance for 6h trends.
+# Breakouts above weekly pivot + R1 with volume/ADX confirmation capture momentum.
+# Works in bull markets (breakouts continue) and bear markets (rejections at resistance).
+# Weekly pivot provides structural context; 6h timeframe reduces noise vs lower TFs.
+# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 
-name = "1h_1d_Momentum_Filter_Strategy"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Donchian_Breakout_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,101 +19,151 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Extract price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for 200 EMA (trend filter)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get weekly data for pivot calculation (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Calculate 200 EMA on 1d close
-    close_1d = df_1d['close'].values
-    ema_200_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 200:
-        ema_200_1d[199] = np.mean(close_1d[:200])
-        for i in range(200, len(close_1d)):
-            ema_200_1d[i] = (close_1d[i] * 2/201) + (ema_200_1d[i-1] * (1 - 2/201))
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
     
-    # Align 200 EMA to 1h
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Get 4h data for Bollinger Bands (volatility filter)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
+    
+    # Align weekly levels to 6h (wait for weekly bar to close)
+    pivot_6h = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_6h = align_htf_to_ltf(prices, df_weekly, s1)
+    r2_6h = align_htf_to_ltf(prices, df_weekly, r2)
+    s2_6h = align_htf_to_ltf(prices, df_weekly, s2)
+    r3_6h = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_6h = align_htf_to_ltf(prices, df_weekly, s3)
+    
+    # Get 6h data for Donchian channels (20-period)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands (20, 2) on 4h close
-    close_4h = df_4h['close'].values
-    sma_20_4h = np.full_like(close_4h, np.nan)
-    std_20_4h = np.full_like(close_4h, np.nan)
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    for i in range(len(close_4h)):
-        if i >= 19:
-            sma_20_4h[i] = np.mean(close_4h[i-19:i+1])
-            std_20_4h[i] = np.std(close_4h[i-19:i+1])
+    # Calculate Donchian channels (20-period)
+    donchian_high = np.full_like(high_6h, np.nan)
+    donchian_low = np.full_like(high_6h, np.nan)
     
-    upper_bb_4h = sma_20_4h + (2 * std_20_4h)
-    lower_bb_4h = sma_20_4h - (2 * std_20_4h)
-    bb_width_4h = upper_bb_4h - lower_bb_4h
+    for i in range(len(high_6h)):
+        if i >= 19:  # 20-period lookback
+            donchian_high[i] = np.max(high_6h[i-19:i+1])
+            donchian_low[i] = np.min(low_6h[i-19:i+1])
     
-    # Calculate BB width percentile (lookback 50 periods) to detect expansion
-    bb_width_percentile = np.full_like(bb_width_4h, np.nan)
-    for i in range(len(bb_width_4h)):
-        if i >= 49:
-            window = bb_width_4h[i-49:i+1]
-            valid = ~np.isnan(window)
-            if np.sum(valid) >= 10:  # minimum valid samples
-                rank = np.sum(window[valid] <= bb_width_4h[i]) / np.sum(valid)
-                bb_width_percentile[i] = rank * 100
+    # Align Donchian levels to 6h
+    donchian_high_6h = align_htf_to_ltf(prices, df_6h, donchian_high)
+    donchian_low_6h = align_htf_to_ltf(prices, df_6h, donchian_low)
     
-    # Align BB width percentile to 1h
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_4h, bb_width_percentile)
+    # ADX (14-period) for trend strength
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Session filter: 8-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smooth TR and DM (14-period)
+    tr_sum = np.full_like(high, np.nan)
+    dm_plus_sum = np.full_like(high, np.nan)
+    dm_minus_sum = np.full_like(high, np.nan)
+    
+    for i in range(len(high)):
+        if i >= 13:  # 14-period smoothing
+            tr_sum[i] = np.nansum(tr[i-13:i+1])
+            dm_plus_sum[i] = np.nansum(dm_plus[i-13:i+1])
+            dm_minus_sum[i] = np.nansum(dm_minus[i-13:i+1])
+    
+    # Directional Indicators
+    di_plus = np.full_like(high, np.nan)
+    di_minus = np.full_like(high, np.nan)
+    dx = np.full_like(high, np.nan)
+    
+    valid = ~np.isnan(tr_sum) & (tr_sum != 0)
+    di_plus[valid] = 100 * dm_plus_sum[valid] / tr_sum[valid]
+    di_minus[valid] = 100 * dm_minus_sum[valid] / tr_sum[valid]
+    dx[valid] = 100 * np.abs(di_plus[valid] - di_minus[valid]) / (di_plus[valid] + di_minus[valid])
+    
+    # ADX (smoothed DX, 14-period)
+    adx = np.full_like(high, np.nan)
+    for i in range(len(high)):
+        if i >= 27:  # 14 + 13 for ADX smoothing
+            valid_dx = dx[i-13:i+1]
+            if not np.all(np.isnan(valid_dx)):
+                adx[i] = np.nanmean(valid_dx)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma20 * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after all indicators are valid
-    start_idx = max(200, 50)  # 200 for EMA, 50 for BB percentile
+    start_idx = max(28, 20)  # Ensure ADX and Donchian are calculated
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(bb_width_percentile_aligned[i]) or
-            not in_session[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or
+            np.isnan(adx[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price above 1d 200 EMA AND BB width expanding (breakout up)
-        if close[i] > ema_200_1d_aligned[i] and bb_width_percentile_aligned[i] > 80:
-            if position != 1:
-                signals[i] = 0.20
+        if position == 0:
+            # Long: price breaks above weekly R1 + Donchian high + ADX > 25 + volume
+            if (close[i] > r1_6h[i] and close[i] > donchian_high_6h[i] and 
+                adx[i] > 25 and volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            else:
-                signals[i] = 0.20
-        # Short conditions: price below 1d 200 EMA AND BB width expanding (breakout down)
-        elif close[i] < ema_200_1d_aligned[i] and bb_width_percentile_aligned[i] > 80:
-            if position != -1:
-                signals[i] = -0.20
+            # Short: price breaks below weekly S1 + Donchian low + ADX > 25 + volume
+            elif (close[i] < s1_6h[i] and close[i] < donchian_low_6h[i] and 
+                  adx[i] > 25 and volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = -0.20
-        # Exit conditions: BB contraction (low volatility) or opposite momentum
-        elif bb_width_percentile_aligned[i] < 20:  # volatility contraction
-            if position != 0:
+                
+        elif position == 1:
+            # Long: exit if price breaks below weekly pivot or Donchian low or ADX weakens
+            if (close[i] < pivot_6h[i] or close[i] < donchian_low_6h[i] or adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
+                signals[i] = 0.25
+                
+        elif position == -1:
+            # Short: exit if price breaks above weekly pivot or Donchian high or ADX weakens
+            if (close[i] > pivot_6h[i] or close[i] > donchian_high_6h[i] or adx[i] < 20):
                 signals[i] = 0.0
-        # Hold current position
-        else:
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
