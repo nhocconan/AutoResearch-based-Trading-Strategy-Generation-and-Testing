@@ -3,104 +3,101 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WilliamsAlligator_Signal_v2"
-timeframe = "6h"
+name = "12h_1d_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:  # Need sufficient data
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:  # Need at least 20 days
         return np.zeros(n)
     
-    # === 1d: Williams Alligator ===
+    # === 1d: Calculate 20-day trend and Donchian channels (using previous day's data) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Jaw (blue): 13-period SMMA, shifted 8 bars forward
-    # Teeth (red): 8-period SMMA, shifted 5 bars forward  
-    # Lips (green): 5-period SMMA, shifted 3 bars forward
-    def smma(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        sma = np.mean(data[:period])
-        result[period-1] = sma
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Use previous day's OHLC for today's levels
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
     
-    jaw = smma(close_1d, 13)
-    teeth = smma(close_1d, 8)
-    lips = smma(close_1d, 5)
+    # Set first day's values to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Shift jaws forward by 8, teeth by 5, lips by 3
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
+    # 20-day EMA for trend filter
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # For the shifted periods, use original values to avoid look-ahead
-    jaw_shifted[:8] = jaw[:8] if len(jaw) > 8 else np.nan
-    teeth_shifted[:5] = teeth[:5] if len(teeth) > 5 else np.nan
-    lips_shifted[:3] = lips[:3] if len(lips) > 3 else np.nan
+    # 20-day Donchian channels (highest high, lowest low over 20 days)
+    donchian_high = np.full_like(high_1d, np.nan)
+    donchian_low = np.full_like(low_1d, np.nan)
     
-    # Alligator signals: 
-    # Bullish: Lips > Teeth > Jaw (green > red > blue)
-    # Bearish: Jaw > Teeth > Lips (blue > red > green)
-    bullish = (lips_shifted > teeth_shifted) & (teeth_shifted > jaw_shifted)
-    bearish = (jaw_shifted > teeth_shifted) & (teeth_shifted > lips_shifted)
+    for i in range(20, len(high_1d)):
+        donchian_high[i] = np.max(high_1d[i-20:i])
+        donchian_low[i] = np.min(low_1d[i-20:i])
     
-    # Align to 6h timeframe
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish.astype(float))
+    # Align 1d indicators to 12h timeframe
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # === 6h: Price action and volume confirmation ===
+    # === 12h: Volume ratio (current vs 20-period average) ===
     close = prices['close'].values
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):  # Start after warmup
         # Get values
-        bullish_val = bullish_aligned[i]
-        bearish_val = bearish_aligned[i]
-        vol_ma = vol_ma20[i]
+        close_val = close[i]
+        ema_val = ema_20_aligned[i]
+        upper_donchian = donchian_high_aligned[i]
+        lower_donchian = donchian_low_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if np.isnan(bullish_val) or np.isnan(bearish_val) or np.isnan(vol_ma):
+        if (np.isnan(ema_val) or np.isnan(upper_donchian) or 
+            np.isnan(lower_donchian) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bullish alligator alignment + volume confirmation
-            if bullish_val > 0.5 and volume[i] > vol_ma * 1.5:
+            # Long: Price above 20-day EMA (uptrend), breaks above 20-day Donchian high, volume confirmation
+            if (close_val > ema_val and  # Uptrend filter
+                close_val > upper_donchian and   # Break above Donchian high
+                vol_ratio_val > 1.8):    # Increased volume confirmation threshold
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alligator alignment + volume confirmation
-            elif bearish_val > 0.5 and volume[i] > vol_ma * 1.5:
+            # Short: Price below 20-day EMA (downtrend), breaks below 20-day Donchian low, volume confirmation
+            elif (close_val < ema_val and  # Downtrend filter
+                  close_val < lower_donchian and   # Break below Donchian low
+                  vol_ratio_val > 1.8):    # Increased volume confirmation threshold
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bearish alignment or price closes below teeth
-            if bearish_val > 0.5 or close[i] < teeth_shifted[i] if not np.isnan(teeth_shifted[i]) else False:
+            # Long exit: Price drops below 20-day EMA or breaks below 20-day Donchian low (reversal)
+            if close_val < ema_val or close_val < lower_donchian:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bullish alignment or price closes above teeth
-            if bullish_val > 0.5 or close[i] > teeth_shifted[i] if not np.isnan(teeth_shifted[i]) else False:
+            # Short exit: Price rises above 20-day EMA or breaks above 20-day Donchian high (reversal)
+            if close_val > ema_val or close_val > upper_donchian:
                 signals[i] = 0.0
                 position = 0
             else:
