@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_1D_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation
-# Hypothesis: Daily Camarilla pivot levels (R1, S1) provide institutional support/resistance.
-# Breakout above R1 or below S1 with volume confirmation signals institutional interest.
-# Works in both bull and bear markets via directional breakouts. Uses 4h timeframe to
-# balance trade frequency and signal quality. Target: 20-50 trades/year to avoid fee drag.
+# 4h_1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation
+# Hypothesis: 4h price action breaking above/below 1d Camarilla R1/S1 levels with volume confirmation
+# captures institutional breakouts. Works in bull (R1 breakouts) and bear (S1 breakdowns) via
+# directional entries. Volume filter reduces false signals. Target: 20-50 trades/year to avoid fee drag.
 
-name = "4h_1D_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation"
+name = "4h_1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,6 +28,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous day's OHLC
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Where C, H, L are close, high, low of previous day
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
