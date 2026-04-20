@@ -3,101 +3,84 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum strategy with 4h trend filter and session filter
-# - Use 4h EMA(50) for trend direction (long when price > EMA, short when price < EMA)
-# - Enter on 1h RSI(14) pullbacks in trending direction (RSI < 40 for long, RSI > 60 for short)
-# - Add volume confirmation: current volume > 1.2x 20-period average
-# - Time filter: only trade 08-20 UTC to avoid low-volume Asian session
-# - Fixed position size: 0.20 (20% of capital)
-# - Exit on opposite RSI extreme or trend reversal
-# - Target: 20-40 trades per year per symbol (80-160 total over 4 years)
+# Hypothesis: 6h Elder Ray Power with weekly trend filter
+# - Bull Power = High - EMA13(Close) measures bull strength
+# - Bear Power = EMA13(Close) - Low measures bear strength  
+# - Long when Bull Power > 0 AND Bear Power < 0 AND weekly EMA20 rising
+# - Short when Bear Power > 0 AND Bull Power < 0 AND weekly EMA20 falling
+# - Exit when power signals reverse or weekly trend changes
+# - Uses 13-period EMA for sensitivity, weekly trend for direction filter
+# - Target: 12-25 trades per year per symbol (48-100 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Load weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    # Calculate EMA(50) on 4h close
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly EMA20 for trend direction
+    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_weekly_prev = np.roll(ema20_weekly, 1)
+    ema20_weekly_prev[0] = ema20_weekly[0]
+    weekly_uptrend = ema20_weekly > ema20_weekly_prev
+    weekly_downtrend = ema20_weekly < ema20_weekly_prev
+    weekly_uptrend = align_htf_to_ltf(prices, df_weekly, weekly_uptrend.astype(float))
+    weekly_downtrend = align_htf_to_ltf(prices, df_weekly, weekly_downtrend.astype(float))
     
-    # 1h data for entry signals
+    # Calculate 13-period EMA for Elder Ray
     close = prices['close'].values
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray Power
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate RSI(14) on 1h close
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    bull_power = high - ema13  # High - EMA
+    bear_power = ema13 - low   # EMA - Low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or \
+           np.isnan(weekly_uptrend[i]) or np.isnan(weekly_downtrend[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        price = close[i]
-        vol = volume[i]
-        ema_trend = ema_50_4h_aligned[i]
         
         if position == 0:
-            # Long entry: uptrend + RSI pullback + volume
-            if price > ema_trend and rsi[i] < 40 and vol > 1.2 * vol_ma[i]:
-                signals[i] = 0.20
+            # Long entry: Bull Power positive AND Bear Power negative AND weekly uptrend
+            if bull_power[i] > 0 and bear_power[i] < 0 and weekly_uptrend[i] > 0.5:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + RSI bounce + volume
-            elif price < ema_trend and rsi[i] > 60 and vol > 1.2 * vol_ma[i]:
-                signals[i] = -0.20
+            # Short entry: Bear Power positive AND Bull Power negative AND weekly downtrend
+            elif bear_power[i] > 0 and bull_power[i] < 0 and weekly_downtrend[i] > 0.5:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI overbought OR trend reversal
-            if rsi[i] > 60 or price < ema_trend:
+            # Long exit: Power signals reverse OR weekly trend turns down
+            if bull_power[i] <= 0 or bear_power[i] >= 0 or weekly_downtrend[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI oversold OR trend reversal
-            if rsi[i] < 40 or price > ema_trend:
+            # Short exit: Power signals reverse OR weekly trend turns up
+            if bear_power[i] <= 0 or bull_power[i] >= 0 or weekly_uptrend[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA50_RSI_Pullback_Volume_Session"
-timeframe = "1h"
+name = "6h_ElderRay_Power_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
