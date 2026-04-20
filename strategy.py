@@ -1,11 +1,16 @@
-# 6h_MeanReversion_RSI_BollingerBand_1DTrend
-# Hypothesis: Mean-reversion on 6h timeframe using RSI + Bollinger Band reversals,
-# filtered by daily trend to avoid counter-trend trades. Works in both bull and bear markets
-# by only taking mean-reversion trades aligned with higher timeframe momentum.
-# Target: 50-150 total trades over 4 years with position size 0.25.
+#!/usr/bin/env python3
+"""
+12h_TRIX_With_Volume_Spike_and_Chop_Regime
+Hypothesis: Use TRIX (1-period ROC of EMA) for momentum, volume spike for conviction, and Choppiness Index for regime filter.
+Long when TRIX crosses above zero + volume spike + chop > 61.8 (ranging market for mean reversion).
+Short when TRIX crosses below zero + volume spike + chop > 61.8.
+Exit when TRIX crosses back across zero or chop < 38.2 (trending regime).
+Designed to work in both bull and bear markets by focusing on mean reversion in ranging conditions.
+Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+"""
 
-name = "6h_MeanReversion_RSI_BollingerBand_1DTrend"
-timeframe = "6h"
+name = "12h_TRIX_With_Volume_Spike_and_Chop_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,90 +23,123 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA20 for trend context (not direct signal)
     close_daily = df_daily['close'].values
-    ema50_daily = np.full_like(close_daily, np.nan)
-    if len(close_daily) >= 50:
-        multiplier = 2.0 / (50 + 1)
-        ema50_daily[49] = np.mean(close_daily[:50])
-        for i in range(50, len(close_daily)):
-            ema50_daily[i] = multiplier * close_daily[i] + (1 - multiplier) * ema50_daily[i-1]
-    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    ema20_daily = np.full_like(close_daily, np.nan)
+    if len(close_daily) >= 20:
+        multiplier = 2.0 / (20 + 1)
+        ema20_daily[19] = np.mean(close_daily[:20])
+        for i in range(20, len(close_daily)):
+            ema20_daily[i] = multiplier * close_daily[i] + (1 - multiplier) * ema20_daily[i-1]
+    ema20_daily_aligned = align_htf_to_ltf(prices, df_daily, ema20_daily)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate TRIX (1-period rate of change of triple EMA)
+    # EMA1
+    ema1 = np.zeros(n)
+    ema1[0] = close[0]
+    alpha1 = 2.0 / (12 + 1)
+    for i in range(1, n):
+        ema1[i] = alpha1 * close[i] + (1 - alpha1) * ema1[i-1]
     
-    # Wilder's smoothing
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
+    # EMA2 of EMA1
+    ema2 = np.zeros(n)
+    ema2[0] = ema1[0]
+    alpha2 = 2.0 / (12 + 1)
+    for i in range(1, n):
+        ema2[i] = alpha2 * ema1[i] + (1 - alpha2) * ema2[i-1]
+    
+    # EMA3 of EMA2
+    ema3 = np.zeros(n)
+    ema3[0] = ema2[0]
+    alpha3 = 2.0 / (12 + 1)
+    for i in range(1, n):
+        ema3[i] = alpha3 * ema2[i] + (1 - alpha3) * ema3[i-1]
+    
+    # TRIX = 1-period ROC of EMA3
+    trix = np.zeros(n)
+    trix[0] = 0
+    for i in range(1, n):
+        if ema3[i-1] != 0:
+            trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            trix[i] = 0
     
-    rs = np.zeros(n)
-    rsi = np.zeros(n)
-    for i in range(14, n):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
+    # Volume spike: volume > 1.5 * 20-period average
+    vol_ma20 = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma20[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
-            rsi[i] = 100
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    volume_spike = volume > (vol_ma20 * 1.5)
     
-    # Calculate Bollinger Bands (20, 2)
-    sma20 = np.full(n, np.nan)
-    std20 = np.full(n, np.nan)
-    for i in range(20, n):
-        sma20[i] = np.mean(close[i-20:i])
-        std20[i] = np.std(close[i-20:i])
+    # Choppiness Index (14-period)
+    chop = np.full(n, 50.0)  # default neutral
+    atr14 = np.zeros(n)
+    tr = np.zeros(n)
+    for i in range(n):
+        if i == 0:
+            tr[i] = high[i] - low[i]
+        else:
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    upper_band = sma20 + (2 * std20)
-    lower_band = sma20 - (2 * std20)
+    for i in range(13, n):
+        atr14[i] = np.mean(tr[i-13:i+1])
+    
+    for i in range(13, n):
+        if atr14[i] > 0 and (high[i] - low[i]) > 0:
+            sum_tr = np.sum(tr[i-13:i+1])
+            max_high = np.max(high[i-13:i+1])
+            min_low = np.min(low[i-13:i+1])
+            if max_high > min_low:
+                chop[i] = 100 * np.log10(sum_tr / (max_high - min_low)) / np.log10(14)
+            else:
+                chop[i] = 50.0
+        else:
+            chop[i] = 50.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 20  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(sma20[i]) or np.isnan(std20[i]) or 
-            np.isnan(ema50_daily_aligned[i]) or np.isnan(close[i])):
+        if (np.isnan(trix[i]) or np.isnan(ema20_daily_aligned[i]) or 
+            np.isnan(chop[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + price touches lower band + daily uptrend
-            if rsi[i] < 30 and close[i] <= lower_band[i] and close[i] > ema50_daily_aligned[i]:
+            # Long: TRIX crosses above zero + volume spike + chop > 61.8 (ranging)
+            if trix[i] > 0 and trix[i-1] <= 0 and volume_spike[i] and chop[i] > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + price touches upper band + daily downtrend
-            elif rsi[i] > 70 and close[i] >= upper_band[i] and close[i] < ema50_daily_aligned[i]:
+            # Short: TRIX crosses below zero + volume spike + chop > 61.8 (ranging)
+            elif trix[i] < 0 and trix[i-1] >= 0 and volume_spike[i] and chop[i] > 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI > 50 (mean reversion complete) OR price reaches middle band
-            if rsi[i] > 50 or close[i] >= sma20[i]:
+            # Long exit: TRIX crosses below zero OR chop < 38.2 (trending regime)
+            if trix[i] < 0 and trix[i-1] >= 0 or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI < 50 (mean reversion complete) OR price reaches middle band
-            if rsi[i] < 50 or close[i] <= sma20[i]:
+            # Short exit: TRIX crosses above zero OR chop < 38.2 (trending regime)
+            if trix[i] > 0 and trix[i-1] <= 0 or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
