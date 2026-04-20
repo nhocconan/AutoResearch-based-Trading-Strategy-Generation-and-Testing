@@ -3,57 +3,43 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian20_VolumeSpike_ATRFilter"
-timeframe = "4h"
+name = "12h_1d_Trix_DoubleSmooth_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    # === Daily Donchian Channels (20-period) from previous day ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Daily TRIX (Triple Exponential Average) ===
+    close_1d = df_1d['close'].values
+    # EMA1
+    ema1 = pd.Series(close_1d).ewm(span=12, min_periods=12, adjust=False).mean().values
+    # EMA2
+    ema2 = pd.Series(ema1).ewm(span=12, min_periods=12, adjust=False).mean().values
+    # EMA3
+    ema3 = pd.Series(ema2).ewm(span=12, min_periods=12, adjust=False).mean().values
+    # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
+    trix_raw = np.diff(ema3, prepend=ema3[0]) / np.where(ema3[:-1] != 0, ema3[:-1], np.nan) * 100
+    trix_raw = np.append(np.nan, trix_raw[1:])  # align length
+    # Smooth TRIX with 12-period EMA
+    trix = pd.Series(trix_raw).ewm(span=12, min_periods=12, adjust=False).mean().values
     
-    # Previous day's values for Donchian calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
+    # Align TRIX to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Set first values to avoid look-ahead
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # === 12h EMA Trend Filter ===
+    close_series = pd.Series(prices['close'].values)
+    ema34 = close_series.ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema89 = close_series.ewm(span=89, min_periods=89, adjust=False).mean().values
     
-    # 20-period high and low from previous day's data
-    high_series = pd.Series(prev_high)
-    low_series = pd.Series(prev_low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Align to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # === 4h ATR for volatility filter and stoploss ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # === Volume Spike Filter ===
+    # === Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -61,49 +47,43 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Get values
-        close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
+        trix_val = trix_aligned[i]
+        ema34_val = ema34[i]
+        ema89_val = ema89[i]
         vol_ratio_val = vol_ratio[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        atr_val = atr[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(upper) or 
-            np.isnan(lower) or np.isnan(atr_val)):
+        if (np.isnan(trix_val) or np.isnan(ema34_val) or 
+            np.isnan(ema89_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above upper Donchian with volume spike
-            if close_val > upper and vol_ratio_val > 2.5:
+            # Long: TRIX crosses above zero with volume and uptrend
+            if trix_val > 0 and vol_ratio_val > 1.8 and ema34_val > ema89_val:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-            # Short: Break below lower Donchian with volume spike
-            elif close_val < lower and vol_ratio_val > 2.5:
+            # Short: TRIX crosses below zero with volume and downtrend
+            elif trix_val < 0 and vol_ratio_val > 1.8 and ema34_val < ema89_val:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
         
         elif position == 1:
-            # Long: Exit on stoploss or reversal signal
-            if low_val <= entry_price - 2.0 * atr_val or close_val < lower:
+            # Long exit: TRIX crosses below zero OR trend breaks down
+            if trix_val < 0 or ema34_val < ema89_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short: Exit on stoploss or reversal signal
-            if high_val >= entry_price + 2.0 * atr_val or close_val > upper:
+            # Short exit: TRIX crosses above zero OR trend breaks up
+            if trix_val > 0 or ema34_val > ema89_val:
                 signals[i] = 0.0
                 position = 0
             else:
