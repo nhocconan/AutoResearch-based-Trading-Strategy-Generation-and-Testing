@@ -3,71 +3,65 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WilliamsAlligator_Signal"
-timeframe = "6h"
+name = "12h_1w_Camarilla_R1S1_Breakout_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 48:  # Need at least 4 days of 12h data
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 1d: Williams Alligator components ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w: Calculate Camarilla levels from PREVIOUS week (to avoid look-ahead) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Williams Alligator: Jaw (13-period smoothed, 8-period offset)
-    median_1d = (high_1d + low_1d) / 2.0
-    jaw_raw = pd.Series(median_1d).rolling(window=13, min_periods=13).mean()
-    jaw = jaw_raw.shift(8)  # 8-period forward shift (offset)
-    jaw_values = jaw.values
+    # Use previous week's OHLC for this week's levels
+    prev_close = np.roll(close_1w, 1)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
     
-    # Teeth (8-period smoothed, 5-period offset)
-    teeth_raw = pd.Series(median_1d).rolling(window=8, min_periods=8).mean()
-    teeth = teeth_raw.shift(5)  # 5-period forward shift
-    teeth_values = teeth.values
+    # Set first week's values to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Lips (5-period smoothed, 3-period offset)
-    lips_raw = pd.Series(median_1d).rolling(window=5, min_periods=5).mean()
-    lips = lips_raw.shift(3)  # 3-period forward shift
-    lips_values = lips.values
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align Alligator lines to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_values)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_values)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_values)
-    
-    # === 6h: Price action and volume ===
+    # === 12h: EMA25 for trend filter ===
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    ema_25 = pd.Series(close).ewm(span=25, adjust=False, min_periods=25).mean().values
     
-    # Volume filter: current vs 20-period average
+    # === 12h: Volume ratio (current vs 20-period average) ===
+    volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    
+    # Align 1w Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient warmup
+    for i in range(25, n):  # Start after EMA warmup
         # Get values
         close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
+        ema_val = ema_25[i]
+        r1_val = camarilla_r1_aligned[i]
+        s1_val = camarilla_s1_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or
+        if (np.isnan(ema_val) or np.isnan(r1_val) or np.isnan(s1_val) or
             np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -75,32 +69,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bullish alignment (Lips > Teeth > Jaw) + price above all + volume
-            if (lips_val > teeth_val and teeth_val > jaw_val and  # Bullish alignment
-                close_val > lips_val and  # Price above lips
-                vol_ratio_val > 1.3):     # Volume confirmation
+            # Long: Price above EMA (uptrend), breaks above R1, volume confirmation
+            if (close_val > ema_val and  # Uptrend filter
+                close_val > r1_val and   # Break above R1
+                vol_ratio_val > 1.5):    # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment (Lips < Teeth < Jaw) + price below all + volume
-            elif (lips_val < teeth_val and teeth_val < jaw_val and  # Bearish alignment
-                  close_val < lips_val and  # Price below lips
-                  vol_ratio_val > 1.3):     # Volume confirmation
+            # Short: Price below EMA (downtrend), breaks below S1, volume confirmation
+            elif (close_val < ema_val and  # Downtrend filter
+                  close_val < s1_val and   # Break below S1
+                  vol_ratio_val > 1.5):    # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price breaks below Teeth or alignment turns bearish
-            if (close_val < teeth_val or 
-                lips_val < teeth_val or teeth_val < jaw_val):
+            # Long exit: Price drops below EMA or breaks below S1 (reversal)
+            if close_val < ema_val or close_val < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price breaks above Teeth or alignment turns bullish
-            if (close_val > teeth_val or 
-                lips_val > teeth_val or teeth_val > jaw_val):
+            # Short exit: Price rises above EMA or breaks above R1 (reversal)
+            if close_val > ema_val or close_val > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
