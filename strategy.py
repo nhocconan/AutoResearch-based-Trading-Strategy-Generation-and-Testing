@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_RSI20_80_VolumeFilter_V1
-# Hypothesis: KAMA adapts to market efficiency, reducing whipsaw in choppy markets. Combined with RSI extremes (20/80) and volume confirmation, it captures strong momentum moves while avoiding false signals in low volatility. Designed for 12h timeframe to limit trade frequency and avoid fee drag. Works in bull markets via momentum continuation and in bear markets via mean reversion from oversold/overbought levels.
+# 12h_Vortex_Trend_Signal_With_Volume_Filter
+# Hypothesis: Vortex Indicator captures trend direction (VI+ > VI- for uptrend, VI- > VI+ for downtrend).
+# Combining with 1d trend filter (price vs 50 EMA) and volume confirmation creates a robust trend-following system.
+# Works in bull markets by capturing uptrends and in bear markets by capturing downtrends.
+# Volume filter ensures trades occur only with institutional participation, reducing false signals.
+# Designed for 12h timeframe to limit trades to 50-150 over 4 years, minimizing fee drag.
 
-name = "12h_KAMA_Trend_RSI20_80_VolumeFilter_V1"
+name = "12h_Vortex_Trend_Signal_With_Volume_Filter"
 timeframe = "12h"
 leverage = 1.0
 
@@ -15,83 +19,81 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # KAMA parameters
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate Efficiency Ratio and KAMA
-    change = np.abs(np.diff(close, k=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
-    # Handle first 10 periods
-    er = np.full_like(close, np.nan)
-    for i in range(10, len(close)):
-        price_change = np.abs(close[i] - close[i-10])
-        sum_abs_change = np.sum(np.abs(np.diff(close[i-10:i+1])))
-        if sum_abs_change > 0:
-            er[i] = price_change / sum_abs_change
-        else:
-            er[i] = 0
-    # Smooth ER
-    er_smoothed = np.where(np.isnan(er), 0, er)
-    sc = (er_smoothed * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start at index 9
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad RSI to match length
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
+    # Calculate Vortex Indicator components (VI+ and VI-)
+    # VM+ = |high - low_prev|, VM- = |low - high_prev|
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
     
-    # Volume filter: volume > 1.3x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma20 * 1.3)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = np.nan  # First value has no previous close
+    
+    # Sum over 14 periods
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # VI+ and VI-
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # Align 1d EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume filter: volume > 1.8x 30-period average (higher threshold to reduce trades)
+    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (vol_ma30 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Ensure indicators are ready
+    start_idx = max(50, 30)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above KAMA + RSI oversold (<20) + volume confirmation
-            if close[i] > kama[i] and rsi[i] < 20 and volume_filter[i]:
+            # Long: VI+ > VI- (uptrend) + price above 1d EMA50 + volume confirmation
+            if vi_plus[i] > vi_minus[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + RSI overbought (>80) + volume confirmation
-            elif close[i] < kama[i] and rsi[i] > 80 and volume_filter[i]:
+            # Short: VI- > VI+ (downtrend) + price below 1d EMA50 + volume confirmation
+            elif vi_minus[i] > vi_plus[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses below KAMA or RSI overbought (>70)
-            if close[i] < kama[i] or rsi[i] > 70:
+            # Long: exit if trend reverses (VI- > VI+)
+            if vi_minus[i] > vi_plus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if price crosses above KAMA or RSI oversold (<30)
-            if close[i] > kama[i] or rsi[i] < 30:
+            # Short: exit if trend reverses (VI+ > VI-)
+            if vi_plus[i] > vi_minus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
