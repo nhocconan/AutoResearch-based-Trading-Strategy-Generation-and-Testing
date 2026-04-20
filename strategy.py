@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_SupportResistance_Breakout_VolumeTrendFilter_v1
-Concept: Use daily support/resistance levels with 4h trend filter and volume confirmation.
-- Long when price breaks above prior day's high with volume > 2x average and above 4h EMA34
-- Short when price breaks below prior day's low with volume > 2x average and below 4h EMA34
-- Exit when price returns to prior day's close (mean reversion to daily value)
-- Session filter: Only trade 08-20 UTC to avoid low-volume Asian session
-- Conservative sizing: 0.20 to manage drawdown
-- Designed for breakouts in bull markets and mean reversion in bear markets
+12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1
+Concept: Camarilla pivot breakout using daily pivots, with volume confirmation and EMA trend filter.
+- Long when price breaks above R1 with volume > 2x average and above daily EMA34
+- Short when price breaks below S1 with volume > 2x average and below daily EMA34
+- Exit when price returns to previous day's close
+- Conservative sizing (0.25) to manage drawdown in choppy markets
+- Designed for both bull (breakouts work) and bear (mean reversion to daily close works)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_SupportResistance_Breakout_VolumeTrendFilter_v1"
-timeframe = "1h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,71 +22,57 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for barriers
+    # Get daily data ONCE before loop for pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === Calculate daily barriers: previous day's high, low, close ===
+    # === Calculate daily Camarilla pivots ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Use previous day's values (shift by 1) to avoid look-ahead
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
+    # Pivot point and range
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    # Previous day's close for exit
     prev_close_1d = np.roll(close_1d, 1)
-    # Set first day's values to NaN (no previous day)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
     prev_close_1d[0] = np.nan
     
-    # Align barriers to 1h timeframe
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
     
-    # === 4h: EMA34 trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
-        return np.zeros(n)
+    # === 12h: EMA34 trend filter from daily ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    close_4h = df_4h['close'].values
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    
-    # === 1h: Volume ratio (current vs 20-period average) ===
+    # === 12h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # Precompute session hours (08-20 UTC)
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA and volume MA
+    start_idx = 34  # Ensure enough data for EMA34
     
     for i in range(start_idx, n):
-        # Session filter: Only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Get values
-        ema34_val = ema34_4h_aligned[i]
+        ema34_val = ema34_aligned[i]
         close_val = prices['close'].iloc[i]
-        high_val = prev_high_aligned[i]
-        low_val = prev_low_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         close_barrier_val = prev_close_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema34_val) or np.isnan(high_val) or np.isnan(low_val) or 
+        if (np.isnan(ema34_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
             np.isnan(close_barrier_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -95,32 +80,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above prior day's high with volume confirmation and above 4h EMA34
-            breakout_long = close_val > high_val
+            # Long: Price breaks above R1 with volume confirmation and above EMA34
+            breakout_long = close_val > r1_val
             vol_confirm = vol_ratio_val > 2.0
             
             if breakout_long and vol_confirm and close_val > ema34_val:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below prior day's low with volume confirmation and below 4h EMA34
-            elif close_val < low_val and vol_confirm and close_val < ema34_val:
-                signals[i] = -0.20
+            # Short: Price breaks below S1 with volume confirmation and below EMA34
+            elif close_val < s1_val and vol_confirm and close_val < ema34_val:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below prior day's close
+            # Long exit: Price returns to or below previous day's close
             if close_val <= close_barrier_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above prior day's close
+            # Short exit: Price returns to or above previous day's close
             if close_val >= close_barrier_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
