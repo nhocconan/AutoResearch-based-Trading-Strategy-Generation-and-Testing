@@ -3,99 +3,85 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R1S1_Breakout_VolumeTrend_v1"
-timeframe = "1d"
+name = "6h_12h_Turtle_Channel_Breakout_With_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # === Weekly EMA Trend Filter ===
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # === 12h Turtle Channel (20-period Donchian) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === Daily Data (price and volume) ===
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Upper and lower bands (20-period high/low)
+    upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # === Daily Close-based EMA for Trend (used in exit) ===
-    close_series = pd.Series(close)
+    # Align to 6h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower)
+    
+    # === 6h Trend Filter: EMA50 > EMA200 for long bias, < for short bias ===
+    close_series = pd.Series(prices['close'].values)
     ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # === Volume Filter (20-day average) ===
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    # === Volume Filter: Current volume > 1.5x 20-period average ===
+    volume = prices['volume'].values
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Get values
-        close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        vol_ma20_val = vol_ma20[i]
+        close_val = prices['close'].iloc[i]
+        upper_val = upper_aligned[i]
+        lower_val = lower_aligned[i]
         ema50_val = ema50[i]
         ema200_val = ema200[i]
-        ema50_1w_val = ema50_1w[i]
-        ema200_1w_val = ema200_1w[i]
+        vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ma20_val) or np.isnan(ema50_val) or 
-            np.isnan(ema200_val) or np.isnan(ema50_1w_val) or 
-            np.isnan(ema200_1w_val)):
+        if (np.isnan(upper_val) or np.isnan(lower_val) or 
+            np.isnan(ema50_val) or np.isnan(ema200_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate daily pivot from previous day's data
-        if i == 0:
-            prev_high = high[0]
-            prev_low = low[0]
-            prev_close = close[0]
-        else:
-            prev_high = high[i-1]
-            prev_low = low[i-1]
-            prev_close = close[i-1]
-        
-        pivot = (prev_high + prev_low + prev_close) / 3
-        range_val = prev_high - prev_low
-        r1 = pivot + (range_val * 1.1 / 12)
-        s1 = pivot - (range_val * 1.1 / 12)
-        
         if position == 0:
-            # Long: Break above R1 with volume confirmation and weekly uptrend
-            if close_val > r1 and volume[i] > 2.0 * vol_ma20_val and ema50_1w_val > ema200_1w_val:
+            # Long: Break above 12h upper channel with volume and uptrend
+            if close_val > upper_val and vol_ratio_val > 1.5 and ema50_val > ema200_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume confirmation and weekly downtrend
-            elif close_val < s1 and volume[i] > 2.0 * vol_ma20_val and ema50_1w_val < ema200_1w_val:
+            # Short: Break below 12h lower channel with volume and downtrend
+            elif close_val < lower_val and vol_ratio_val > 1.5 and ema50_val < ema200_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below pivot OR weekly trend breaks down
-            if close_val < pivot or ema50_1w_val < ema200_1w_val:
+            # Long: Hold while price above lower channel and trend intact
+            if close_val < lower_val or ema50_val < ema200_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above pivot OR weekly trend breaks up
-            if close_val > pivot or ema50_1w_val > ema200_1w_val:
+            # Short: Hold while price below upper channel and trend intact
+            if close_val > upper_val or ema50_val > ema200_val:
                 signals[i] = 0.0
                 position = 0
             else:
