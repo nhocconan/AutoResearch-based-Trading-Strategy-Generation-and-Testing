@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation.
-# Uses 4h EMA50 for trend direction (trend filter) and 1h RSI(14) for mean reversion entries.
-# Long when RSI < 30 and price > 4h EMA50; short when RSI > 70 and price < 4h EMA50.
-# Volume confirmation requires current volume > 1.5x 20-period average.
-# Includes session filter (08-20 UTC) to avoid low-liquidity hours.
-# Target: 15-35 trades/year (~60-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h Donchian(20) breakout with 1w high/low filter and volume confirmation.
+# Uses weekly Donchian channels as trend filter: only take long breaks above 6h Donchian high
+# when price is above 1w Donchian mean, and short breaks below 6h Donchian low when price
+# is below 1w Donchian mean. Volume confirmation ensures breakout strength.
+# Works in bull/bear by following higher timeframe trend and avoiding counter-trend breakouts.
+# Target: 15-35 trades per year to minimize fee drag.
 
-name = "1h_RSI_MeanRev_4hEMA50_Volume"
-timeframe = "1h"
+name = "6h_Donchian20_1wTrendFilter_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,78 +19,76 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 4h EMA50 for trend direction ===
-    close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # === 1w Donchian mean for trend filter ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_mean_1w = (donchian_high_1w + donchian_low_1w) / 2.0
+    donchian_mean_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_mean_1w)
     
-    # === 1h RSI(14) for mean reversion ===
+    # === 6h Donchian(20) breakout levels ===
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
     
-    # === Volume confirmation ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 6h Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
     
-    # === Session filter: 08-20 UTC ===
-    hours = prices.index.hour  # Pre-compute session hours
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after RSI warmup
-        # Skip if any value is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ratio[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+    for i in range(20, n):
+        # Get values
+        close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
+        dh_6h = donchian_high[i]
+        dl_6h = donchian_low[i]
+        trend_filter = donchian_mean_1w_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        # Skip if any value is NaN
+        if (np.isnan(dh_6h) or np.isnan(dl_6h) or np.isnan(trend_filter) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold (<30) and price above 4h EMA50 (uptrend filter)
-            if rsi[i] < 30 and prices['close'].iloc[i] > ema_50_aligned[i] and vol_ratio[i] > 1.5:
-                signals[i] = 0.20
+            # Long: price breaks above 6h Donchian high, above 1w Donchian mean, with volume
+            if high_val > dh_6h and close_val > trend_filter and vol_ratio_val > 1.5:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) and price below 4h EMA50 (downtrend filter)
-            elif rsi[i] > 70 and prices['close'].iloc[i] < ema_50_aligned[i] and vol_ratio[i] > 1.5:
-                signals[i] = -0.20
+            # Short: price breaks below 6h Donchian low, below 1w Donchian mean, with volume
+            elif low_val < dl_6h and close_val < trend_filter and vol_ratio_val > 1.5:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI returns to neutral (>50) or trend reversal
-            if rsi[i] > 50 or prices['close'].iloc[i] < ema_50_aligned[i]:
+            # Long exit: price closes below 6h Donchian low or trend reverses
+            if close_val < dl_6h or close_val < trend_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI returns to neutral (<50) or trend reversal
-            if rsi[i] < 50 or prices['close'].iloc[i] > ema_50_aligned[i]:
+            # Short exit: price closes above 6h Donchian high or trend reverses
+            if close_val > dh_6h or close_val > trend_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
