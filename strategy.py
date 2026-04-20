@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_P1P2_Breakout_Volume_TrendFilter
-# Hypothesis: Breakouts of 12h Camarilla P1 (inner resistance) and P2 (inner support) levels with volume confirmation and 12h EMA trend filter.
-# Uses daily pivots to filter false breakouts (only trade when price is outside daily P1/P2 range).
-# Target: 12-37 trades per year per symbol to avoid fee drift, works in bull/bear via trend filter.
+# 4h_1d_Trix_VolumeSpike_TrendFilter
+# Hypothesis: TRIX momentum on 1d timeframe combined with volume spike and 1d EMA trend filter to capture sustained moves in both bull and bear markets.
+# Uses 4h for entry timing with strict conditions to limit trades (target: 20-40/year) and avoid fee drag.
+# TRIX filters out noise, volume spike confirms institutional interest, EMA ensures trend alignment.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_P1P2_Breakout_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_1d_Trix_VolumeSpike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,82 +17,92 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for pivots
+    # Get 1d data ONCE before loop for TRIX, EMA, and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Calculate 1d Camarilla P1, P2 levels ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Pivot point and range
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # === Calculate 1d EMA12 of close ===
+    ema12_1d = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    # Camarilla inner levels: P1 = close + (range * 1.1/12), P2 = close - (range * 1.1/12)
-    p1_1d = close_1d + (range_1d * 1.1 / 12)
-    p2_1d = close_1d - (range_1d * 1.1 / 12)
+    # === Calculate 1d EMA12 of EMA12 (for TRIX) ===
+    ema12_of_ema12_1d = pd.Series(ema12_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    # === 12h EMA34 for trend filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # === Calculate 1d EMA12 of EMA12 of EMA12 (for TRIX) ===
+    ema12_of_ema12_of_ema12_1d = pd.Series(ema12_of_ema12_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    close_12h = df_12h['close'].values
-    close_12h_series = pd.Series(close_12h)
-    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # === Calculate TRIX: 100 * (EMA12_of_ema12_of_ema12 - prev) / prev ===
+    trix_raw = 100 * (ema12_of_ema12_of_ema12_1d - np.roll(ema12_of_ema12_of_ema12_1d, 1)) / np.roll(ema12_of_ema12_of_ema12_1d, 1)
+    # Handle first value (no previous)
+    trix_raw[0] = 0
     
-    # Align all daily and 12h levels to 12h
-    p1_1d_aligned = align_htf_to_ltf(prices, df_1d, p1_1d)
-    p2_1d_aligned = align_htf_to_ltf(prices, df_1d, p2_1d)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # === Calculate 1d EMA9 of TRIX (signal line) ===
+    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # === 12h: Volume ratio (current vs 20-period average) ===
+    # === Calculate 1d EMA34 for trend filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # === Calculate 1d volume EMA20 for spike detection ===
+    vol_ema20_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # === Align all 1d indicators to 4h ===
+    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    vol_ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ema20_1d)
+    
+    # === 4h: Volume ratio (current vs 20-period EMA) ===
     volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    vol_ema20_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ema20_4h > 0, vol_ema20_4h, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after EMA and volume MA warmup
+    for i in range(34, n):  # Start after EMA and TRIX warmup
         # Get values
         close_val = prices['close'].iloc[i]
-        ema34_12h_val = ema34_12h_aligned[i]
-        p1_1d_val = p1_1d_aligned[i]
-        p2_1d_val = p2_1d_aligned[i]
+        trix_val = trix_signal_aligned[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        vol_ema20_1d_val = vol_ema20_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema34_12h_val) or np.isnan(p1_1d_val) or np.isnan(p2_1d_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(trix_val) or np.isnan(ema34_1d_val) or 
+            np.isnan(vol_ema20_1d_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above 12h EMA34, above daily P1, with volume confirmation
-            if (close_val > ema34_12h_val and close_val > p1_1d_val and vol_ratio_val > 2.0):
+            # Long: TRIX crosses above signal line with volume spike and above EMA34
+            # Use TRIX > 0 and rising as entry condition to avoid whipsaws
+            if (trix_val > 0 and trix_val > trix_signal[i-1] if i > 0 else False and 
+                vol_ratio_val > 2.0 and close_val > ema34_1d_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below 12h EMA34, below daily P2, with volume confirmation
-            elif (close_val < ema34_12h_val and close_val < p2_1d_val and vol_ratio_val > 2.0):
+            # Short: TRIX crosses below signal line with volume spike and below EMA34
+            elif (trix_val < 0 and trix_val < trix_signal[i-1] if i > 0 else False and 
+                  vol_ratio_val > 2.0 and close_val < ema34_1d_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below daily P2
-            if close_val <= p2_1d_val:
+            # Long exit: TRIX turns negative or volume dries up
+            if trix_val < 0 or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above daily P1
-            if close_val >= p1_1d_val:
+            # Short exit: TRIX turns positive or volume dries up
+            if trix_val > 0 or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
