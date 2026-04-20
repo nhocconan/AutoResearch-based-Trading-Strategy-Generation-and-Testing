@@ -5,14 +5,14 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     # Load daily data
     df_1d = get_htf_data(prices, '1d')
@@ -36,17 +36,13 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate 12h price channel (Donchian) for breakout
-    high_12h = prices['high'].rolling(window=2, min_periods=2).max().values  # 2 periods of 12h = 24h
-    low_12h = prices['low'].rolling(window=2, min_periods=2).min().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(high_12h[i]) or np.isnan(low_12h[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(close_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,30 +52,30 @@ def generate_signals(prices):
         vol = volume_1d[i]
         
         if position == 0:
-            # Long: price breaks above 12h high with weekly uptrend and volume confirmation
-            if (price > high_12h[i] and 
-                price > ema_50_1w_aligned[i] and 
-                vol > 1.5 * vol_ma_1d_aligned[i]):
+            # Long: price above weekly EMA21 with volume confirmation and sufficient volatility
+            if (price > ema_21_1w_aligned[i] and 
+                vol > 1.8 * vol_ma_1d_aligned[i] and 
+                atr_1d_aligned[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 12h low with weekly downtrend and volume confirmation
-            elif (price < low_12h[i] and 
-                  price < ema_50_1w_aligned[i] and 
-                  vol > 1.5 * vol_ma_1d_aligned[i]):
+            # Short: price below weekly EMA21 with volume confirmation and sufficient volatility
+            elif (price < ema_21_1w_aligned[i] and 
+                  vol > 1.8 * vol_ma_1d_aligned[i] and 
+                  atr_1d_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below 12h low or weekly trend turns down
-            if price < low_12h[i] or price < ema_50_1w_aligned[i]:
+            # Long exit: price crosses below weekly EMA21 or volatility drops significantly
+            if price < ema_21_1w_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 12h high or weekly trend turns up
-            if price > high_12h[i] or price > ema_50_1w_aligned[i]:
+            # Short exit: price crosses above weekly EMA21 or volatility drops significantly
+            if price > ema_21_1w_aligned[i] or vol < 0.6 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_12hBreakout_WeeklyTrend_VolumeFilter"
-timeframe = "12h"
+name = "1d_WeeklyEMA21_VolumeFilter_V1"
+timeframe = "1d"
 leverage = 1.0
