@@ -3,92 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1-day pivot reversal zones
-# Williams %R identifies overbought/oversold conditions
-# 1-day pivot levels (S1, S2, R1, R2) act as support/resistance zones
-# Strategy: Buy when Williams %R oversold (< -80) and price near S1/S2 pivot support
-#           Sell when Williams %R overbought (> -20) and price near R1/R2 pivot resistance
-# Works in both bull and bear markets by fading extremes at key pivot levels
+# Hypothesis: 4h Donchian breakout with 1-day volume confirmation and RSI filter
+# In bullish regime (price > 200-day EMA): long on upper band breakout + volume spike + RSI > 50
+# In bearish regime (price < 200-day EMA): short on lower band breakout + volume spike + RSI < 50
+# Uses 4h Donchian channels (20-period), 1-day volume for confirmation, 1-day RSI for regime filter
+# Designed to work in both bull and bear markets by adapting to long-term trend
 # Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1-day data for pivot points
+    # Load daily data for volume and RSI
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    vol_1d = df_1d['volume'].values
     close_1d = df_1d['close'].values
     
-    # Calculate classic pivot points: P = (H+L+C)/3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Support and resistance levels
-    s1 = 2 * pivot - high_1d
-    s2 = pivot - (high_1d - low_1d)
-    r1 = 2 * pivot - low_1d
-    r2 = pivot + (high_1d - low_1d)
+    # Calculate 200-day EMA for regime filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    # Calculate 14-period RSI on daily timeframe
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate Williams %R on 6h timeframe (14-period)
+    # Calculate 20-period average volume on daily timeframe
+    avg_vol_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
+    
+    # Calculate 4h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    wr = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(200, n):
         # Skip if NaN in indicators
-        if np.isnan(wr[i]) or np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]):
+        if np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(avg_vol_20_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
+        volume = prices['volume'].iloc[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-day average
+        volume_confirm = volume > 1.5 * avg_vol_20_aligned[i]
         
         if position == 0:
-            # Long: Williams %R oversold and price near S1 or S2 support
-            long_condition = (wr[i] < -80) and (abs(price - s1_aligned[i]) / s1_aligned[i] < 0.02 or abs(price - s2_aligned[i]) / s2_aligned[i] < 0.02)
-            
-            # Short: Williams %R overbought and price near R1 or R2 resistance
-            short_condition = (wr[i] > -20) and (abs(price - r1_aligned[i]) / r1_aligned[i] < 0.02 or abs(price - r2_aligned[i]) / r2_aligned[i] < 0.02)
-            
-            if long_condition:
-                signals[i] = 0.25
-                position = 1
-            elif short_condition:
-                signals[i] = -0.25
-                position = -1
+            # Bullish regime: price above 200-day EMA
+            if price > ema200_1d_aligned[i]:
+                # Long on upper band breakout + volume confirmation + RSI > 50
+                if price > upper_channel[i] and volume_confirm and rsi_1d_aligned[i] > 50:
+                    signals[i] = 0.25
+                    position = 1
+            # Bearish regime: price below 200-day EMA
+            elif price < ema200_1d_aligned[i]:
+                # Short on lower band breakout + volume confirmation + RSI < 50
+                if price < lower_channel[i] and volume_confirm and rsi_1d_aligned[i] < 50:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: Williams %R returns from oversold or price breaks below S2
-            exit_condition = (wr[i] > -50) or (price < s2_aligned[i])
-            
-            if exit_condition:
+            # Exit long: price crosses below lower channel or RSI < 40
+            if price < lower_channel[i] or rsi_1d_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R returns from overbought or price breaks above R2
-            exit_condition = (wr[i] < -50) or (price > r2_aligned[i])
-            
-            if exit_condition:
+            # Exit short: price crosses above upper channel or RSI > 60
+            if price > upper_channel[i] or rsi_1d_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1d_PivotReversal"
-timeframe = "6h"
+name = "4h_Donchian20_VolumeConfirm_RSIFilter"
+timeframe = "4h"
 leverage = 1.0
