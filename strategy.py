@@ -52,10 +52,6 @@ def generate_signals(prices):
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_filter = volume / np.where(vol_ma_30 == 0, 1, vol_ma_30) > 1.5
     
-    # Additional volume confirmation: require volume > 0.8 * 100-period average
-    vol_ma_100 = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
-    vol_filter_strong = volume / np.where(vol_ma_100 == 0, 1, vol_ma_100) > 0.8
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -63,7 +59,7 @@ def generate_signals(prices):
         # Skip if NaN in critical values
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_filter[i]) or np.isnan(vol_filter_strong[i])):
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,7 +74,7 @@ def generate_signals(prices):
         r2_val = r2_aligned[i]
         s2_val = s2_aligned[i]
         atr_val = atr_1d_aligned[i]
-        vol_ok = vol_filter[i] and vol_filter_strong[i]
+        vol_ok = vol_filter[i]
         
         # Volatility filter: only trade when ATR > 0
         vol_filter_ok = atr_val > 0
@@ -86,11 +82,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above S1 with volume and volatility (mean reversion bounce)
             if high_i > s1_val and vol_ok and vol_filter_ok:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below R1 with volume and volatility (mean reversion fade)
             elif low_i < r1_val and vol_ok and vol_filter_ok:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -99,7 +95,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Short exit: price breaks above pivot OR volatility drops
@@ -107,10 +103,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_1d_PivotMeanReversion_VolumeFilter_v2"
+name = "12h_1d_PivotMeanReversion_VolumeFilter_v1"
 timeframe = "12h"
 leverage = 1.0
