@@ -1,108 +1,116 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1
-Concept: Weekly pivot point breakout with daily volume confirmation on 12h timeframe.
-- Uses weekly pivot points (R1, S1) as long-term support/resistance levels
-- Long when price breaks above R1 with daily volume confirmation and above 12h EMA34
-- Short when price breaks below S1 with daily volume confirmation and below 12h EMA34
-- Exit when price returns to weekly central pivot (mean reversion)
-- Conservative sizing (0.25) to manage drawdown in bear markets
-- Works in bull/bear: Weekly pivots adapt to market conditions, volume confirms breakouts
+4h_1d_Donchian20_Breakout_Volume_ATRStop_v1
+Concept: 4h Donchian(20) breakout with 1d volume confirmation and ATR stop.
+- Long when price breaks above 4h Donchian high(20) with above-average 1d volume
+- Short when price breaks below 4h Donchian low(20) with above-average 1d volume
+- Exit via ATR-based trailing stop (3x ATR from extreme)
+- Works in bull/bear: Breakouts capture momentum, volume confirms institutional participation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1"
-timeframe = "12h"
+name = "4h_1d_Donchian20_Breakout_Volume_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # === Calculate weekly pivot points ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
-    
-    # Align weekly pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Get daily data ONCE before loop for volume confirmation
+    # Get daily data ONCE before loop for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # === Daily: Volume ratio (current vs 20-period average) ===
-    volume_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = volume_1d / np.where(vol_ma20_1d > 0, vol_ma20_1d, np.nan)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
-    
-    # === 12h: EMA34 trend filter ===
+    # === 4h: Donchian channel (20) ===
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate Donchian high/low with min_periods
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 4h: ATR(14) for stop loss ===
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # === 1d: Volume average (20-period) for confirmation ===
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_high = 0.0  # For long trailing stop
+    lowest_low = 0.0    # For short trailing stop
     
-    start_idx = 34  # Ensure enough data for EMA34
+    start_idx = max(20, 14)  # Wait for Donchian and ATR
     
     for i in range(start_idx, n):
         # Get values
-        ema34_val = ema34[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
         close_val = close[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        vol_ratio_val = vol_ratio_1d_aligned[i]
+        atr_val = atr[i]
+        vol_ma_val = vol_ma20_aligned[i]
+        vol_1d_idx = i // 96  # Approximate 1d index from 4h (96 bars per day)
         
-        # Skip if any value is NaN
-        if (np.isnan(ema34_val) or np.isnan(pivot_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(vol_ratio_val)):
+        # Skip if any value is NaN or invalid
+        if (np.isnan(donch_high_val) or np.isnan(donch_low_val) or 
+            np.isnan(atr_val) or np.isnan(vol_ma_val) or 
+            vol_1d_idx >= len(vol_1d)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        vol_1d_val = vol_1d[vol_1d_idx]
+        vol_ma_1d_val = vol_ma20_1d[vol_1d_idx] if vol_1d_idx < len(vol_ma20_1d) else 0
+        
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation and above EMA34
-            breakout_long = close_val > r1_val
-            vol_confirm = vol_ratio_val > 1.5  # Volume above average (stricter for 12h)
+            # Check for volume confirmation (1d volume above 20-day average)
+            vol_confirm = vol_1d_val > vol_ma_1d_val and vol_ma_1d_val > 0
             
-            if breakout_long and vol_confirm and close_val > ema34_val:
+            # Long: Break above Donchian high with volume confirmation
+            if close_val > donch_high_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation and below EMA34
-            elif close_val < s1_val and vol_confirm and close_val < ema34_val:
+                entry_price = close_val
+                highest_high = close_val
+            # Short: Break below Donchian low with volume confirmation
+            elif close_val < donch_low_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
+                lowest_low = close_val
         
         elif position == 1:
-            # Long exit: Price returns to or below central weekly pivot (mean reversion)
-            if close_val <= pivot_val:
+            # Update highest high for trailing stop
+            highest_high = max(highest_high, close_val)
+            # ATR trailing stop: exit if price drops 3*ATR from highest high
+            if close_val <= highest_high - 3.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above central weekly pivot (mean reversion)
-            if close_val >= pivot_val:
+            # Update lowest low for trailing stop
+            lowest_low = min(lowest_low, close_val)
+            # ATR trailing stop: exit if price rises 3*ATR from lowest low
+            if close_val >= lowest_low + 3.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
