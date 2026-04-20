@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_With_Daily_Trend_Filter
-Hypothesis: Trade 12h KAMA direction with daily trend filter. Long when KAMA rising + daily uptrend; short when KAMA falling + daily downtrend.
-KAMA adapts to market noise, reducing whipsaw in ranging markets. Daily trend filter ensures alignment with higher timeframe momentum.
-Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
-Works in bull/bear: daily filter avoids counter-trend trades, KAMA reduces false signals in chop.
+12h_RCI_Pullback_With_Daily_Filter
+Hypothesis: Enter on Relative Strength Index (RSI) pullbacks in the direction of the daily trend.
+Long when RSI < 30 and daily EMA20 up; short when RSI > 70 and daily EMA20 down.
+Uses 12h chart for entry timing and 1d trend filter to avoid counter-trend trades.
+Designed for low trade frequency (target 20-50/year) with position size 0.25.
+Works in bull/bear: daily trend filter ensures alignment with higher timeframe momentum.
 """
 
-name = "12h_KAMA_With_Daily_Trend_Filter"
+name = "12h_RCI_Pullback_With_Daily_Filter"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,7 +25,7 @@ def generate_signals(prices):
     
     # Get daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
     # Calculate daily EMA20 for trend filter
@@ -37,25 +38,24 @@ def generate_signals(prices):
             ema20_daily[i] = multiplier * close_daily[i] + (1 - multiplier) * ema20_daily[i-1]
     ema20_daily_aligned = align_htf_to_ltf(prices, df_daily, ema20_daily)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # ER = |net change| / sum(|changes|)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    direction = np.abs(np.subtract(close, np.roll(close, 1)))
-    direction[0] = 0  # first element
+    # Calculate 12h RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    er = np.zeros(n)
-    for i in range(2, n):  # need at least 2 periods
-        if np.sum(change[i-9:i+1]) > 0:  # 10-period ER
-            er[i] = direction[i] / np.sum(change[i-9:i+1])
-        else:
-            er[i] = 0
-    
-    # Smoothing constants
-    sc = (er * (2.0/(2+1) - 2.0/(30+1)) + 2.0/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.zeros(n)
-    kama[0] = close[0]
+    # Wilder's smoothing
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
     for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        if i < 14:
+            avg_gain[i] = np.mean(gain[:i+1]) if i > 0 else 0
+            avg_loss[i] = np.mean(loss[:i+1]) if i > 0 else 0
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,32 +64,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema20_daily_aligned[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(ema20_daily_aligned[i]) or 
             np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: KAMA rising + daily uptrend
-            if kama[i] > kama[i-1] and close[i] > ema20_daily_aligned[i]:
+            # Long: RSI oversold (<30) + daily uptrend
+            if rsi[i] < 30 and close[i] > ema20_daily_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling + daily downtrend
-            elif kama[i] < kama[i-1] and close[i] < ema20_daily_aligned[i]:
+            # Short: RSI overbought (>70) + daily downtrend
+            elif rsi[i] > 70 and close[i] < ema20_daily_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA falling OR daily trend turns down
-            if kama[i] < kama[i-1] or close[i] < ema20_daily_aligned[i]:
+            # Long exit: RSI overbought (>70) OR daily trend turns down
+            if rsi[i] > 70 or close[i] < ema20_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA rising OR daily trend turns up
-            if kama[i] > kama[i-1] or close[i] > ema20_daily_aligned[i]:
+            # Short exit: RSI oversold (<30) OR daily trend turns up
+            if rsi[i] < 30 or close[i] > ema20_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
