@@ -13,13 +13,27 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 14-period RSI for 1d
+    # Calculate 14-period ADX for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing for RSI
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Wilder's smoothing
     def wilder_smooth(data, period):
         result = np.zeros_like(data)
         alpha = 1.0 / period
@@ -28,27 +42,29 @@ def generate_signals(prices):
             result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
         return result
     
-    avg_gain = wilder_smooth(gain, 14)
-    avg_loss = wilder_smooth(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    atr_1d = wilder_smooth(tr, 14)
+    di_plus_1d = wilder_smooth(dm_plus, 14)
+    di_minus_1d = wilder_smooth(dm_minus, 14)
     
-    # Calculate 20-period Donchian channels for 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Avoid division by zero
+    di_sum = di_plus_1d + di_minus_1d
+    dx = np.where(di_sum != 0, 100 * np.abs(di_plus_1d - di_minus_1d) / di_sum, 0)
+    adx_1d = wilder_smooth(dx, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 20-period Donchian channels
     donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
     donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Calculate 20-period average volume for 1d
+    # Calculate 20-period average volume
     volume_1d = df_1d['volume'].values
     vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     # Session filter: 8-20 UTC
-    hours = prices.index.hour
+    hours = prices.index.hour  # Pre-compute before loop
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,14 +80,14 @@ def generate_signals(prices):
         
         # Get values
         close_val = prices['close'].iloc[i]
-        rsi_val = rsi_1d_aligned[i]
+        adx_val = adx_1d_aligned[i]
         donch_high_val = donch_high_1d_aligned[i]
         donch_low_val = donch_low_1d_aligned[i]
         vol_val = prices['volume'].iloc[i]
         vol_avg_val = vol_avg_20_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(rsi_val) or np.isnan(donch_high_val) or 
+        if (np.isnan(adx_val) or np.isnan(donch_high_val) or 
             np.isnan(donch_low_val) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -79,26 +95,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold), price breaks above Donchian high, volume above average
-            if rsi_val < 30 and close_val > donch_high_val and vol_val > vol_avg_val:
+            # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
+            if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought), price breaks below Donchian low, volume above average
-            elif rsi_val > 70 and close_val < donch_low_val and vol_val > vol_avg_val:
+            # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
+            elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or RSI > 70 (overbought)
-            if close_val < donch_low_val or rsi_val > 70:
+            # Long exit: price breaks below Donchian low or ADX < 20 (trend weakening)
+            if close_val < donch_low_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or RSI < 30 (oversold)
-            if close_val > donch_high_val or rsi_val < 30:
+            # Short exit: price breaks above Donchian high or ADX < 20 (trend weakening)
+            if close_val > donch_high_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,13 +122,13 @@ def generate_signals(prices):
     
     return signals
 
-# 6h_1d_RSI_Donchian_Breakout_Volume_Session
-# Uses daily RSI(14) for overbought/oversold signals (RSI < 30 long, > 70 short)
-# Uses daily Donchian(20) breakouts for entry confirmation
+# 12h_ADX_Donchian_Breakout_Volume_Session
+# Uses daily ADX for trend strength filter (ADX > 25)
+# Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
-# Exits when price breaks opposite Donchian level or RSI reaches opposite extreme
-# Designed for 6h timeframe with ~15-30 trades/year
-name = "6h_1d_RSI_Donchian_Breakout_Volume_Session"
-timeframe = "6h"
+# Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
+# Designed for 12h timeframe with ~15-35 trades/year
+name = "12h_ADX_Donchian_Breakout_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
