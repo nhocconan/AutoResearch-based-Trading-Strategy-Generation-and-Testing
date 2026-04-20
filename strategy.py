@@ -3,9 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Donchian_Breakout_VolumeTrend_v2"
-timezone = "UTC"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Control_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -15,79 +14,97 @@ def generate_signals(prices):
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Daily Donchian Channel (20-day) ===
+    # === Daily Pivot Points (previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-period high and low
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Align to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # === 12h Trend Filter: 30-period EMA ===
+    # Key levels: R1 and S1
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
+    
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # === 4h Momentum and Volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # 20-period EMA for trend filter
     close_series = pd.Series(close)
-    ema30 = close_series.ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # === Volume Confirmation: 20-period average ===
+    # Volume ratio (20-period average)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
+    # Momentum: 5-period ROC
+    roc5 = np.zeros_like(close)
+    roc5[5:] = (close[5:] - close[:-5]) / close[:-5] * 100
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after enough data for indicators
+    for i in range(40, n):
         # Get values
         close_val = close[i]
+        roc_val = roc5[i]
         vol_ratio_val = vol_ratio[i]
-        ema30_val = ema30[i]
-        d_high = donchian_high_aligned[i]
-        d_low = donchian_low_aligned[i]
+        ema20_val = ema20[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        pivot_val = pivot_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(ema30_val) or 
-            np.isnan(d_high) or np.isnan(d_low)):
+        if (np.isnan(roc_val) or np.isnan(vol_ratio_val) or np.isnan(ema20_val) or 
+            np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above Donchian high with volume and above EMA
-            if (close_val > d_high and 
-                vol_ratio_val > 1.8 and
-                close_val > ema30_val):
+            # Long: Break above R1 with positive momentum and volume
+            if (close_val > r1_val and 
+                roc_val > 0.5 and 
+                vol_ratio_val > 1.5 and
+                close_val > ema20_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low with volume and below EMA
-            elif (close_val < d_low and 
-                  vol_ratio_val > 1.8 and
-                  close_val < ema30_val):
+            # Short: Break below S1 with negative momentum and volume
+            elif (close_val < s1_val and 
+                  roc_val < -0.5 and 
+                  vol_ratio_val > 1.5 and
+                  close_val < ema20_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below Donchian low or volume dries up
-            if close_val < d_low or vol_ratio_val < 0.8:
+            # Long exit: Price returns below pivot or momentum turns negative
+            if close_val < pivot_val or roc_val < -0.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above Donchian high or volume dries up
-            if close_val > d_high or vol_ratio_val < 0.8:
+            # Short exit: Price returns above pivot or momentum turns positive
+            if close_val > pivot_val or roc_val > 0.3:
                 signals[i] = 0.0
                 position = 0
             else:
