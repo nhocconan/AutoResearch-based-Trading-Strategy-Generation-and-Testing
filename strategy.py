@@ -3,72 +3,72 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d trend filter + volume confirmation
-# Long: break above 20-period high + price > 1d EMA50 + volume > 1.5x avg
-# Short: break below 20-period low + price < 1d EMA50 + volume > 1.5x avg
-# Exit: opposite breakout OR trend reversal
-# Uses price channel structure with trend filter to avoid false breakouts
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# Hypothesis: 1-day Donchian(20) breakout with 1-week trend filter and volume confirmation
+# In bull market (close > weekly EMA50): buy breakout above 20-day high
+# In bear market (close < weekly EMA50): sell breakdown below 20-day low
+# Volume confirmation: require volume > 1.5x 20-day average to filter false breakouts
+# Designed to work in both bull and bear markets by adapting to trend direction
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load daily data for trend filter
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 50-period EMA on weekly timeframe for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Load daily data for Donchian channels and volume
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 50-period EMA on daily timeframe for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 20-period Donchian channels on daily timeframe
+    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # 4h price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    # Calculate volume filter: volume > 1.5x 20-day average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume_1d > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if NaN in indicators
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
-           np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema50_1w_aligned[i]) or np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market trend
-        is_bull = close[i] > ema50_1d_aligned[i]
-        is_bear = close[i] < ema50_1d_aligned[i]
+        # Determine market trend from weekly EMA50
+        is_bull = close_1d[i] > ema50_1w_aligned[i]
+        is_bear = close_1d[i] < ema50_1w_aligned[i]
         
         # Volume confirmation
         has_volume = vol_filter[i]
         
-        price = close[i]
+        price = close_1d[i]
         
         if position == 0:
-            # Enter long: bullish breakout in bull trend with volume
+            # Enter long: breakout above 20-day high in bull market
             long_signal = False
             if has_volume and is_bull:
-                if price > highest_high[i]:  # Break above 20-period high
+                if price > highest_high_20[i]:
                     long_signal = True
             
-            # Enter short: bearish breakout in bear trend with volume
+            # Enter short: breakdown below 20-day low in bear market
             short_signal = False
             if has_volume and is_bear:
-                if price < lowest_low[i]:  # Break below 20-period low
+                if price < lowest_low_20[i]:
                     short_signal = True
             
             if long_signal:
@@ -79,11 +79,9 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish breakout OR trend reversal to bear
+            # Exit long: price crosses below 20-day low or trend changes to bear
             exit_signal = False
-            if price < lowest_low[i]:  # Break below 20-period low
-                exit_signal = True
-            elif not is_bull:  # Trend turned bearish
+            if price < lowest_low_20[i] or is_bear:
                 exit_signal = True
             
             if exit_signal:
@@ -93,11 +91,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish breakout OR trend reversal to bull
+            # Exit short: price crosses above 20-day high or trend changes to bull
             exit_signal = False
-            if price > highest_high[i]:  # Break above 20-period high
-                exit_signal = True
-            elif not is_bear:  # Trend turned bullish
+            if price > highest_high_20[i] or is_bull:
                 exit_signal = True
             
             if exit_signal:
@@ -108,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_TrendFilter_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
