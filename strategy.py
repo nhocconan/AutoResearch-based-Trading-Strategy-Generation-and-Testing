@@ -8,23 +8,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly and daily data for trend and regime filters
+    # Load weekly data for trend filter (weekly close only)
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
+    close_1w = df_1w['close'].values
     
     # Weekly EMA(12) for long-term trend
-    close_1w = df_1w['close'].values
     ema_12_1w = pd.Series(close_1w).ewm(span=12, adjust=False, min_periods=12).mean().values
     ema_12_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_12_1w)
     
-    # Daily EMA(26) for intermediate trend
-    close_1d = df_1d['close'].values
-    ema_26_1d = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
-    ema_26_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_26_1d)
-    
-    # Daily ATR(14) for volatility filter
+    # Daily data for volatility filter
+    df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Daily ATR(14) for volatility filter
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -34,7 +32,7 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Daily volume ratio (current / 20-period average)
+    # Daily volume ratio for confirmation
     volume_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ratio_1d = volume_1d / np.where(vol_ma_20_1d == 0, 1, vol_ma_20_1d)
@@ -53,9 +51,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema_12_1w_aligned[i]) or np.isnan(ema_26_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_12_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,14 +60,13 @@ def generate_signals(prices):
         
         price = close[i]
         ema_trend_1w = ema_12_1w_aligned[i]
-        ema_trend_1d = ema_26_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
         vol_ratio_1d = vol_ratio_1d_aligned[i]
         vol_ratio_12h = vol_ratio[i]
         
-        # Multi-timeframe trend alignment
-        trend_up = (price > ema_trend_1w) and (ema_trend_1w > ema_trend_1d)
-        trend_down = (price < ema_trend_1w) and (ema_trend_1w < ema_trend_1d)
+        # Trend filter: price above/below weekly EMA
+        trend_up = price > ema_trend_1w
+        trend_down = price < ema_trend_1w
         
         # Volatility filter: avoid extremes
         atr_ma_20 = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values[i]
