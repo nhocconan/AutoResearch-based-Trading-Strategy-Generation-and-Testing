@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Donchian20_WeeklyTrend_VolumeFilter_v1"
-timeframe = "12h"
+name = "1d_1w_Camarilla_R2S2_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get weekly data ONCE before loop
@@ -17,19 +17,45 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === Weekly Donchian Channel (20 periods) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === Weekly Close for Trend Filter ===
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    weekly_trend_up = weekly_close > weekly_ema
     
-    # Upper and lower bands (20-period high/low)
-    upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Align weekly trend to daily
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
     
-    # Align to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
+    # === Daily Data (for Pivot Calculation) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # === 12h Volume Confirmation ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's values for pivot calculation (avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Classic pivot (same for Camarilla)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla R2 and S2 levels (stronger breakout levels)
+    r2 = pivot + (range_val * 1.1 / 6)
+    s2 = pivot - (range_val * 1.1 / 6)
+    
+    # Align to daily timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # === Volume Confirmation ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -38,41 +64,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Get values
         close_val = prices['close'].iloc[i]
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        pivot_val = pivot_aligned[i]
+        weekly_trend = weekly_trend_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(upper_val) or np.isnan(lower_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(r2_val) or 
+            np.isnan(s2_val) or np.isnan(pivot_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above upper Donchian with volume confirmation
-            if close_val > upper_val and vol_ratio_val > 1.5:
+            # Long: Break above R2 with volume confirmation and weekly uptrend
+            if close_val > r2_val and vol_ratio_val > 1.8 and weekly_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower Donchian with volume confirmation
-            elif close_val < lower_val and vol_ratio_val > 1.5:
+            # Short: Break below S2 with volume confirmation and weekly downtrend
+            elif close_val < s2_val and vol_ratio_val > 1.8 and not weekly_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below lower Donchian (opposite side)
-            if close_val < lower_val:
+            # Long exit: Price returns below pivot OR weekly trend turns down
+            if close_val < pivot_val or not weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above upper Donchian (opposite side)
-            if close_val > upper_val:
+            # Short exit: Price returns above pivot OR weekly trend turns up
+            if close_val > pivot_val or weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
