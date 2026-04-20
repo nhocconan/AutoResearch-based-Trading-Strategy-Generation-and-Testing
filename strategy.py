@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1w trend filter and volume confirmation.
-# Uses weekly EMA200 to capture long-term trend direction, 12h Donchian(20) breakout for entry,
-# and volume > 1.5x 20-period average for confirmation. Targets 15-25 trades/year to minimize fee drag.
-# Works in bull/bear by following higher timeframe trend and avoiding counter-trend trades.
+# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and ADX trend filter.
+# Donchian(20) breakouts capture strong momentum moves. Volume confirmation ensures institutional participation.
+# ADX(14) > 25 filters for trending markets, avoiding range-bound periods where breakouts fail.
+# This combination works in both bull and bear markets by following genuine trends with volume confirmation.
+# Target: 25-40 trades per year to minimize fee drag while capturing significant moves.
 
-name = "12h_Donchian20_1wEMA200_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dVolume_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,41 +18,52 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop for EMA200 trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data ONCE before loop for volume analysis
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1w EMA200 for trend direction ===
-    close_1w = df_1w['close'].values
-    ema_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
+    # === 1d Volume confirmation ===
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = vol_1d / np.where(vol_ma_1d > 0, vol_ma_1d, np.nan)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # === 12h Donchian channel (20-period) ===
+    # === 4h Donchian channels (20-period) ===
     high = prices['high'].values
     low = prices['low'].values
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Volume confirmation ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
+    # === 4h ADX(14) for trend strength ===
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - high[:-1]), np.abs(low[1:] - low[:-1])))
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / np.where(atr_14 > 0, atr_14, np.nan)
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / np.where(atr_14 > 0, atr_14, np.nan)
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / np.where((plus_di_14 + minus_di_14) > 0, (plus_di_14 + minus_di_14), np.nan)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(20, n):  # Start after Donchian warmup
         # Get values
+        high_val = prices['high'].iloc[i]
+        low_val = prices['low'].iloc[i]
         close_val = prices['close'].iloc[i]
-        ema_val = ema_200_aligned[i]
-        upper = high_roll[i]
-        lower = low_roll[i]
-        vol_ratio_val = vol_ratio[i]
+        donch_high = high_20[i]
+        donch_low = low_20[i]
+        adx_val = adx[i]
+        vol_ratio_val = vol_ratio_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(upper) or np.isnan(lower) or 
+        if (np.isnan(donch_high) or np.isnan(donch_low) or np.isnan(adx_val) or 
             np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -59,30 +71,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above upper Donchian band with weekly uptrend and volume
-            if close_val > upper and ema_val > 0 and vol_ratio_val > 1.5:
+            # Long entry: price breaks above Donchian high with volume and trend confirmation
+            if high_val > donch_high and vol_ratio_val > 1.3 and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-            # Short: price breaks below lower Donchian band with weekly downtrend and volume
-            elif close_val < lower and ema_val < 0 and vol_ratio_val > 1.5:
+            # Short entry: price breaks below Donchian low with volume and trend confirmation
+            elif low_val < donch_low and vol_ratio_val > 1.3 and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
         
         elif position == 1:
-            # Long exit: price closes below midpoint of Donchian channel
-            midpoint = (upper + lower) / 2
-            if close_val < midpoint:
+            # Long exit: price closes below Donchian low or trend weakens
+            if close_val < donch_low or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above midpoint of Donchian channel
-            midpoint = (upper + lower) / 2
-            if close_val > midpoint:
+            # Short exit: price closes above Donchian high or trend weakens
+            if close_val > donch_high or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
