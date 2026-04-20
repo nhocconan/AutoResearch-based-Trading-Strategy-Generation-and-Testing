@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_Supertrend_Filtered_By_4h_ADX
-Hypothesis: Supertrend(ATR=10,mult=3) on 1h for entry timing, filtered by 4h ADX > 25 for trend strength.
-In bull markets: follow 1h long signals when 4h trend is strong.
-In bear markets: follow 1h short signals when 4h trend is strong.
-Uses 1h only for entry timing, 4h for trend filter to reduce whipsaw and false signals.
-Target: 60-150 total trades over 4 years (15-37/year) with position size 0.20 to manage drawdown.
+6h_RelativeStrengthIndex_RSI14_With_WeeklyTrend_Filter
+Hypothesis: Use weekly trend direction (price above/below weekly SMA200) to filter RSI14 mean-reversion signals on 6h.
+In bull markets (price > weekly SMA200): take RSI < 30 longs, avoid shorts.
+In bear markets (price < weekly SMA200): take RSI > 70 shorts, avoid longs.
+Weekly trend filter reduces whipsaw by aligning with higher timeframe momentum.
+Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
-name = "1h_Supertrend_Filtered_By_4h_ADX"
-timeframe = "1h"
+name = "6h_RelativeStrengthIndex_RSI14_With_WeeklyTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,98 +25,47 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate 4h ADX(14)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First period
-        
-        # Plus Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        # Smooth with Wilder's smoothing (EMA with alpha=1/period)
-        def wilder_smoothing(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            if len(data) >= period:
-                result[period-1] = np.nansum(data[:period]) / period
-                for i in range(period, len(data)):
-                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-            return result
-        
-        atr = wilder_smoothing(tr, period)
-        plus_di = 100 * wilder_smoothing(plus_dm, period) / atr
-        minus_di = 100 * wilder_smoothing(minus_dm, period) / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = wilder_smoothing(dx, period)
-        return adx
+    # Calculate weekly SMA200
+    def sma(arr, period):
+        result = np.full_like(arr, np.nan)
+        for i in range(period - 1, len(arr)):
+            result[i] = np.mean(arr[i - period + 1:i + 1])
+        return result
     
-    adx_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    sma200_weekly = sma(close_weekly, 200)
+    weekly_trend_up = sma200_weekly > 0  # Valid SMA200 value
+    weekly_trend_up = weekly_trend_up & (close_weekly > sma200_weekly)
+    weekly_trend_up = np.where(weekly_trend_up, 1, -1)  # 1 for uptrend, -1 for downtrend
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_weekly, weekly_trend_up)
     
-    # Calculate 1h Supertrend (ATR=10, multiplier=3)
-    def calculate_supertrend(high, low, close, atr_period=10, multiplier=3):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
+    # Calculate RSI(14) on 6h close
+    def rsi(close_prices, period=14):
+        delta = np.diff(close_prices, prepend=close_prices[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
         
-        # ATR
-        atr = np.zeros_like(close)
-        atr[:atr_period-1] = np.nan
-        atr[atr_period-1] = np.mean(tr[:atr_period])
-        for i in range(atr_period, len(tr)):
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+        # Wilder's smoothing
+        avg_gain = np.zeros_like(gain)
+        avg_loss = np.zeros_like(loss)
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
         
-        # Supertrend
-        hl2 = (high + low) / 2
-        upper_band = hl2 + multiplier * atr
-        lower_band = hl2 - multiplier * atr
+        for i in range(period + 1, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i]) / period
         
-        supertrend = np.zeros_like(close)
-        direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-        
-        supertrend[:atr_period] = np.nan
-        direction[:atr_period] = np.nan
-        
-        for i in range(atr_period, len(close)):
-            if close[i] > upper_band[i-1]:
-                direction[i] = 1
-            elif close[i] < lower_band[i-1]:
-                direction[i] = -1
-            else:
-                direction[i] = direction[i-1]
-                if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                    lower_band[i] = lower_band[i-1]
-                if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                    upper_band[i] = upper_band[i-1]
-            
-            if direction[i] == 1:
-                supertrend[i] = lower_band[i]
-            else:
-                supertrend[i] = upper_band[i]
-        
-        return supertrend, direction
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_val = 100 - (100 / (1 + rs))
+        return rsi_val
     
-    supertrend_1h, trend_direction_1h = calculate_supertrend(high, low, close, 10, 3)
+    rsi_values = rsi(close, 14)
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -129,8 +78,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_4h_aligned[i]) or np.isnan(supertrend_1h[i]) or 
-            np.isnan(trend_direction_1h[i]) or np.isnan(close[i])):
+        if (np.isnan(rsi_values[i]) or np.isnan(weekly_trend_up_aligned[i]) or 
+            np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
@@ -144,29 +93,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Supertrend uptrend AND 4h ADX > 25 (strong trend)
-            if trend_direction_1h[i] == 1 and adx_4h_aligned[i] > 25:
-                signals[i] = 0.20
+            # Long: RSI < 30 AND weekly trend up (bull market bias)
+            if rsi_values[i] < 30 and weekly_trend_up_aligned[i] == 1:
+                signals[i] = 0.25
                 position = 1
-            # Short: Supertrend downtrend AND 4h ADX > 25 (strong trend)
-            elif trend_direction_1h[i] == -1 and adx_4h_aligned[i] > 25:
-                signals[i] = -0.20
+            # Short: RSI > 70 AND weekly trend down (bear market bias)
+            elif rsi_values[i] > 70 and weekly_trend_up_aligned[i] == -1:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Supertrend downtrend OR ADX weak (< 20)
-            if trend_direction_1h[i] == -1 or adx_4h_aligned[i] < 20:
+            # Long exit: RSI > 50 (mean reversion complete) OR weekly trend flips down
+            if rsi_values[i] > 50 or weekly_trend_up_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Supertrend uptrend OR ADX weak (< 20)
-            if trend_direction_1h[i] == 1 or adx_4h_aligned[i] < 20:
+            # Short exit: RSI < 50 (mean reversion complete) OR weekly trend flips up
+            if rsi_values[i] < 50 or weekly_trend_up_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
