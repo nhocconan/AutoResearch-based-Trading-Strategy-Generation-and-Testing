@@ -1,3 +1,7 @@
+# 12h_ADX_Donchian_Breakout_Volume_Session_v1
+# Hypothesis: Uses daily ADX > 25 for strong trend filter, daily Donchian(20) breakouts for entry, volume confirmation, and session filter (8-20 UTC). Designed for 12h timeframe to capture medium-term trends while avoiding low-volume periods. Should work in both bull and bear markets by following trends with strict entry conditions to limit overtrading.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -122,13 +126,13 @@ def generate_signals(prices):
     
     return signals
 
-# 1d_ADX_Donchian_Breakout_Volume_Session_v1
+# 12h_ADX_Donchian_Breakout_Volume_Session_v1
 # Uses daily ADX for trend strength filter (ADX > 25)
 # Uses daily Donchian(20) breakouts for entry
 # Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
 # Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 1d timeframe with ~7-25 trades/year
-name = "1d_ADX_Donchian_Breakout_Volume_Session_v1"
-timeframe = "1d"
+# Designed for 12h timeframe with ~15-30 trades/year
+name = "12h_ADX_Donchian_Breakout_Volume_Session_v1"
+timeframe = "12h"
 leverage = 1.0
