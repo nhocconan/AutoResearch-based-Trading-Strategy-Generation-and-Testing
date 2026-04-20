@@ -1,129 +1,117 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1
-Concept: 12h Camarilla pivot breakout with daily volume confirmation and ADX trend filter.
-- Long: Price breaks above R1 AND volume > 1.3x daily average AND ADX > 20 (trending)
-- Short: Price breaks below S1 AND volume > 1.3x daily average AND ADX > 20 (trending)
-- Exit: Price crosses back below R1 (long) or above S1 (short)
+4h_Pivot_R1S1_Breakout_Volume_Trend_v2
+Concept: 4h Camarilla R1/S1 breakout with volume confirmation and EMA trend filter.
+- Long: Price breaks above R1 (resistance) with volume > 1.5x average and price > EMA50
+- Short: Price breaks below S1 (support) with volume > 1.5x average and price < EMA50
+- Exit: Price crosses EMA50 (trend reversal) or opposite S1/R1 level touched
+- Uses daily pivots calculated from previous day's OHLC
 - Position sizing: 0.25
-- Target: 12-37 trades/year (50-150 total over 4 years)
-- Works in bull/bear: ADX ensures we trade only in trending conditions, avoiding chop
+- Target: 20-40 trades/year (80-160 total over 4 years)
+- Works in bull/bear: EMA50 defines trend, pivot breaks capture momentum, volume confirms
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1"
-timeframe = "12h"
+name = "4h_Pivot_R1S1_Breakout_Volume_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close"""
+    pivot = (high + low + close) / 3.0
+    range_ = high - low
+    r1 = close + (range_ * 1.1 / 12)
+    s1 = close - (range_ * 1.1 / 12)
+    r2 = close + (range_ * 1.1 / 6)
+    s2 = close - (range_ * 1.1 / 6)
+    r3 = close + (range_ * 1.1 / 4)
+    s3 = close - (range_ * 1.1 / 4)
+    r4 = close + (range_ * 1.1 / 2)
+    s4 = close - (range_ * 1.1 / 2)
+    return r1, s1, r2, s2, r3, s3, r4, s4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
+    # Get daily data ONCE before loop for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 12h: Close prices ===
+    # === 4h: EMA50 trend filter ===
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # === 4h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === 12h: ADX for trend strength ===
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # === Daily: Calculate Camarilla pivots from previous day's OHLC ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate pivots for each day (using previous day's data)
+    r1_1d = np.full_like(close_1d, np.nan)
+    s1_1d = np.full_like(close_1d, np.nan)
     
-    # Smoothed DM and TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    for i in range(1, len(close_1d)):
+        r1, s1, _, _, _, _, _, _ = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
+        r1_1d[i] = r1
+        s1_1d[i] = s1
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / np.where(tr_smooth > 0, tr_smooth, np.nan)
-    minus_di = 100 * minus_dm_smooth / np.where(tr_smooth > 0, tr_smooth, np.nan)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) > 0, (plus_di + minus_di), np.nan)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # === Daily: Pivot points (Camarilla) ===
-    # Previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Camarilla levels
-    range_ = prev_high - prev_low
-    r1 = prev_close + range_ * 1.1 / 12
-    s1 = prev_close - range_ * 1.1 / 12
-    
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Daily: Volume context ===
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = vol_1d / np.where(vol_ma20_1d > 0, vol_ma20_1d, np.nan)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Align daily pivots to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # Ensure enough data for ADX
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Get values
+        ema50_val = ema50[i]
         close_val = close[i]
-        adx_val = adx[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        vol_ratio_1d_val = vol_ratio_1d_aligned[i]
+        vol_ratio_val = vol_ratio[i]
+        r1_val = r1_1d_aligned[i]
+        s1_val = s1_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(close_val) or np.isnan(adx_val) or np.isnan(r1_val) or 
-            np.isnan(s1_val) or np.isnan(vol_ratio_1d_val)):
+        if (np.isnan(ema50_val) or np.isnan(close_val) or np.isnan(vol_ratio_val) or 
+            np.isnan(r1_val) or np.isnan(s1_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 AND volume confirmation AND trending (ADX > 20)
-            if close_val > r1_val and vol_ratio_1d_val > 1.3 and adx_val > 20:
+            # Long: Price breaks above R1 with volume confirmation and uptrend
+            if close_val > r1_val and vol_ratio_val > 1.5 and close_val > ema50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 AND volume confirmation AND trending (ADX > 20)
-            elif close_val < s1_val and vol_ratio_1d_val > 1.3 and adx_val > 20:
+            # Short: Price breaks below S1 with volume confirmation and downtrend
+            elif close_val < s1_val and vol_ratio_val > 1.5 and close_val < ema50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses back below R1
-            if close_val < r1_val:
+            # Long exit: Price crosses below EMA50 or touches S1
+            if close_val < ema50_val or close_val <= s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses back above S1
-            if close_val > s1_val:
+            # Short exit: Price crosses above EMA50 or touches R1
+            if close_val > ema50_val or close_val >= r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
