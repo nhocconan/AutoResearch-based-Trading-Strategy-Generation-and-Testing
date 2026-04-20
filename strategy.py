@@ -3,50 +3,36 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1-day pivot point breakout strategy
-# Uses S1/S2 support/resistance levels with volume confirmation and ATR-based stops
-# Designed to work in both bull and bear markets by fading extremes at key pivot levels
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-name = "12h_Pivot_S1S2_Breakout_Volume_ATRFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_VolumeTrend_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for pivot points
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d: Calculate pivot points (standard) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d: 20-period EMA for trend direction ===
     close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # S1 = 2*P - H, R1 = 2*P - L
-    s1_1d = 2 * pivot_1d - high_1d
-    r1_1d = 2 * pivot_1d - low_1d
-    # S2 = P - (H - L), R2 = P + (H - L)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    
-    # Align all pivot levels
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    
-    # === 12h: ATR(14) for volatility and stop loss ===
+    # === 4h: Donchian channel (20-period high/low) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    
+    # Calculate Donchian upper and lower bands
+    dc_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 4h: ATR(14) for volatility ===
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -54,66 +40,64 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # === 4h: Volume confirmation (current volume > 1.5x 20-period average) ===
+    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 40  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Get aligned values
-        pivot = pivot_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
+        ema_trend = ema_20_1d_aligned[i]
+        dc_up = dc_upper[i]
+        dc_low = dc_lower[i]
         current_atr = atr[i]
         current_close = prices['close'].iloc[i]
-        current_volume = prices['volume'].iloc[i]
+        current_vol = prices['volume'].iloc[i]
+        vol_avg = vol_ma[i]
         
         # Skip if any value is NaN
-        if (np.isnan(pivot) or np.isnan(s1) or np.isnan(r1) or np.isnan(s2) or np.isnan(r2) or np.isnan(current_atr)):
+        if (np.isnan(ema_trend) or np.isnan(dc_up) or np.isnan(dc_low) or 
+            np.isnan(current_atr) or np.isnan(vol_avg)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.3x 24-period 12h average volume ===
-        if i >= 24:
-            vol_ma = np.mean(prices['volume'].iloc[i-24:i].values)
-            vol_condition = current_volume > 1.3 * vol_ma
-        else:
-            vol_condition = False
+        vol_condition = current_vol > 1.5 * vol_avg
         
         if position == 0:
             # Long conditions:
-            # 1. Price breaks above S1 with volume (bounce from support)
-            # 2. Price is below R1 (not overextended)
-            if (current_close > s1 and
-                vol_condition and
-                current_close < r1):
+            # 1. Price above 1d EMA20 (uptrend)
+            # 2. Price breaks above Donchian upper with volume
+            if (current_close > ema_trend and
+                current_close > dc_up and
+                vol_condition):
                 signals[i] = 0.25
                 position = 1
                 entry_price = current_close
             
             # Short conditions:
-            # 1. Price breaks below R1 with volume (rejection at resistance)
-            # 2. Price is above S1 (not overextended)
-            elif (current_close < r1 and
-                  vol_condition and
-                  current_close > s1):
+            # 1. Price below 1d EMA20 (downtrend)
+            # 2. Price breaks below Donchian lower with volume
+            elif (current_close < ema_trend and
+                  current_close < dc_low and
+                  vol_condition):
                 signals[i] = -0.25
                 position = -1
                 entry_price = current_close
         
         elif position == 1:
             # Long exit conditions:
-            # 1. Price falls below S1 (support broken - stop loss)
-            # 2. Price hits R1 (take profit at resistance)
+            # 1. Price falls below 1d EMA20 (trend change)
+            # 2. Price hits Donchian lower (mean reversion)
             # 3. ATR-based stop loss
-            if (current_close <= s1 or
-                current_close >= r1 or
-                current_close < entry_price - 2.5 * current_atr):
+            if (current_close < ema_trend or
+                current_close <= dc_low or
+                current_close < entry_price - 2.0 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,12 +105,12 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit conditions:
-            # 1. Price rises above R1 (resistance broken - stop loss)
-            # 2. Price hits S1 (take profit at support)
+            # 1. Price rises above 1d EMA20 (trend change)
+            # 2. Price hits Donchian upper (mean reversion)
             # 3. ATR-based stop loss
-            if (current_close >= r1 or
-                current_close <= s1 or
-                current_close > entry_price + 2.5 * current_atr):
+            if (current_close > ema_trend or
+                current_close >= dc_up or
+                current_close > entry_price + 2.0 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
