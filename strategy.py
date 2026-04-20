@@ -3,24 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with volume confirmation and ATR stop
-# - Uses 1d for Donchian channel calculation (stable levels)
-# - Long when price breaks above upper band with volume > 1.5x 10-period average
-# - Short when price breaks below lower band with volume > 1.5x 10-period average
-# - Exit when price crosses back through midline or ATR-based stop hit
-# - Target: 20-30 trades per year per symbol (80-120 total over 4 years)
-# - Designed to work in both bull (breakout continuation) and bear (mean reversion via midline)
+# Hypothesis: 4h Donchian Breakout with Volume Confirmation and ATR Stop
+# - Long when price breaks above 4h Donchian upper band (20-period high) with volume > 1.5x 20-period average
+# - Short when price breaks below 4h Donchian lower band (20-period low) with volume > 1.5x 20-period average
+# - Exit when price crosses back through Donchian midline or ATR-based stop hit
+# - Uses 1d trend filter: only take long if 1d EMA50 > EMA200, short if EMA50 < EMA200
+# - Target: 25-40 trades per year per symbol (100-160 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Donchian channel calculation
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMAs for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema50_1d = close_series_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200_1d = close_series_1d.ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Calculate ATR for stop loss (using 1d data)
     tr1 = high_1d - low_1d
@@ -32,26 +38,21 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate Donchian channel from previous day
-    high_prev = np.roll(high_1d, 1)
-    low_prev = np.roll(low_1d, 1)
-    upper_band = pd.Series(high_prev).rolling(window=20, min_periods=20).max().values
-    lower_band = pd.Series(low_prev).rolling(window=20, min_periods=20).min().values
-    mid_band = (upper_band + lower_band) / 2
-    
-    # Align Donchian levels to 12h timeframe
-    upper_12h = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_12h = align_htf_to_ltf(prices, df_1d, lower_band)
-    mid_12h = align_htf_to_ltf(prices, df_1d, mid_band)
-    
-    # 12h price and volume data
+    # 4h price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: 10-period average
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
+    
+    # Volume confirmation: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,8 +60,9 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or np.isnan(mid_12h[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(atr_1d_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or \
+           np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma[i]) or \
+           np.isnan(atr_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,29 +71,33 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         
+        # Trend filter: 1d EMA50 > EMA200 for long, EMA50 < EMA200 for short
+        bullish_trend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
+        bearish_trend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
+        
         if position == 0:
-            # Long entry: price breaks above upper band + volume surge
-            if price > upper_12h[i] and vol > 1.5 * vol_ma[i]:
+            # Long entry: price breaks above Donchian upper + volume surge + bullish trend
+            if price > donchian_upper[i] and vol > 1.5 * vol_ma[i] and bullish_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: price breaks below lower band + volume surge
-            elif price < lower_12h[i] and vol > 1.5 * vol_ma[i]:
+            # Short entry: price breaks below Donchian lower + volume surge + bearish trend
+            elif price < donchian_lower[i] and vol > 1.5 * vol_ma[i] and bearish_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price crosses below mid band OR ATR stop hit (2*ATR)
-            if price < mid_12h[i] or price < entry_price - 2.0 * atr_1d_aligned[i]:
+            # Long exit: price crosses below Donchian midline OR ATR stop hit (2*ATR)
+            if price < donchian_mid[i] or price < entry_price - 2.0 * atr_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above mid band OR ATR stop hit (2*ATR)
-            if price > mid_12h[i] or price > entry_price + 2.0 * atr_1d_aligned[i]:
+            # Short exit: price crosses above Donchian midline OR ATR stop hit (2*ATR)
+            if price > donchian_mid[i] or price > entry_price + 2.0 * atr_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_ATRStop"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_Trend_ATRStop"
+timeframe = "4h"
 leverage = 1.0
