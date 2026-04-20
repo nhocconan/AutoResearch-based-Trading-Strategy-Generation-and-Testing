@@ -1,121 +1,124 @@
 #!/usr/bin/env python3
 """
-4h_CamarillaPivot_R1S1_Breakout_Volume_Conservative_v1
-Concept: 4h price breakout at Camarilla R1/S1 levels with daily volume confirmation and 12h trend filter.
-- Long: Price > 4h Camarilla R1 AND daily volume > 1.5x 20-period avg AND 12h close > 12h open (bullish candle)
-- Short: Price < 4h Camarilla S1 AND daily volume > 1.5x 20-period avg AND 12h close < 12h open (bearish candle)
-- Exit: Price crosses back through 4h Camarilla Pivot point
+1d_WickReversal_VolumeSpike_v1
+Concept: Daily reversal at extreme wicks with volume confirmation and weekly trend filter.
+- Long: Low touches or breaks below 1w Bollinger lower band AND close > open (bullish candle) AND volume spike
+- Short: High touches or breaks above 1w Bollinger upper band AND close < open (bearish candle) AND volume spike
+- Exit: Opposite signal triggers or price crosses 1w Bollinger middle band
+- Uses 1w Bollinger Bands (20, 2) for trend context and dynamic levels
+- Volume spike: daily volume > 2.0x 20-period average
 - Position sizing: 0.25
-- Target: 75-200 total trades over 4 years
-- Uses Camarilla levels from prior 1d for structure, volume for conviction, 12h for trend filter
+- Target: 30-80 total trades over 4 years (7-20/year)
+- Works in bull/bear: 1w Bollinger adapts to volatility, wick rejection shows exhaustion
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_CamarillaPivot_R1S1_Breakout_Volume_Conservative_v1"
-timeframe = "4h"
+name = "1d_WickReversal_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # === Weekly: Bollinger Bands (20, 2) ===
+    close_1w = df_1w['close'].values
+    bb_length = 20
+    bb_mult = 2.0
     
-    # === 1d: Calculate Camarilla levels from prior day ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    basis = pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).mean().values
+    dev = bb_mult * pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).std().values
+    upper_band = basis + dev
+    lower_band = basis - dev
     
-    # Camarilla levels: based on previous day's range
-    range_1d = high_1d - low_1d
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_r1 = camarilla_pivot + (range_1d * 1.0 / 12.0)
-    camarilla_s1 = camarilla_pivot - (range_1d * 1.0 / 12.0)
+    # Align to daily timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, basis)
     
-    # Align Camarilla levels to 4h (use prior day's levels)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # === 1d: Volume Spike Filter ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    
-    # === 12h: Trend Filter (bullish/bearish candle) ===
-    close_12h = df_12h['close'].values
-    open_12h = df_12h['open'].values
-    bullish_12h = close_12h > open_12h  # True if bullish candle
-    bearish_12h = close_12h < open_12h   # True if bearish candle
-    bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, bullish_12h.astype(float))
-    bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, bearish_12h.astype(float))
-    
-    # === 4h: Price data ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # === Daily: Volume Spike Filter ===
+    volume_1d = df_1w['volume'].values  # Weekly volume for confirmation
+    vol_ma_20_1w = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for indicators
+    start_idx = 20  # Need at least 20 weeks for Bollinger Bands
     
     for i in range(start_idx, n):
         # Get values
-        cp = camarilla_pivot_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        curr_vol = volume_1d_aligned[i]
-        bullish = bullish_12h_aligned[i]
-        bearish = bearish_12h_aligned[i]
+        bb_upper = bb_upper_aligned[i]
+        bb_lower = bb_lower_aligned[i]
+        bb_middle = bb_middle_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(cp) or np.isnan(r1) or np.isnan(s1) or 
-            np.isnan(vol_ma) or np.isnan(curr_vol) or
-            np.isnan(bullish) or np.isnan(bearish)):
+        if (np.isnan(bb_upper) or np.isnan(bb_lower) or np.isnan(bb_middle)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current daily volume > 1.5x 20-period average
-        vol_condition = curr_vol > 1.5 * vol_ma
+        # Price action
+        open_price = prices['open'].iloc[i]
+        high_price = prices['high'].iloc[i]
+        low_price = prices['low'].iloc[i]
+        close_price = prices['close'].iloc[i]
+        
+        # Weekly volume condition: current weekly volume > 2.0x 20-period average
+        # Note: Using weekly volume aligned to daily
+        vol_1w_vals = df_1w['volume'].values
+        vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w_vals)
+        current_vol = vol_1w_aligned[i]
+        vol_condition = current_vol > 2.0 * vol_ma_20_1w_aligned[i]
+        
+        # Wick conditions
+        # Bullish rejection: long lower wick touching/below BB lower with bullish close
+        lower_wick_touch = low_price <= bb_lower
+        bullish_candle = close_price > open_price
+        bullish_wick_reject = lower_wick_touch and bullish_candle
+        
+        # Bearish rejection: long upper wick touching/above BB upper with bearish close
+        upper_wick_touch = high_price >= bb_upper
+        bearish_candle = close_price < open_price
+        bearish_wick_reject = upper_wick_touch and bearish_candle
         
         if position == 0:
-            # Long: price breaks above R1 with bullish 12h and volume spike
-            if close[i] > r1 and bullish > 0.5 and vol_condition:
+            # Long: bullish wick rejection at lower band with volume spike
+            if bullish_wick_reject and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with bearish 12h and volume spike
-            elif close[i] < s1 and bearish > 0.5 and vol_condition:
+            # Short: bearish wick rejection at upper band with volume spike
+            elif bearish_wick_reject and vol_condition:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below Camarilla pivot
-            if close[i] < cp:
+            # Long exit: bearish reversal signal or price crosses above middle band
+            if bearish_wick_reject and vol_condition:
+                signals[i] = 0.0
+                position = 0
+            elif close_price > bb_middle:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Camarilla pivot
-            if close[i] > cp:
+            # Short exit: bullish reversal signal or price crosses below middle band
+            if bullish_wick_reject and vol_condition:
+                signals[i] = 0.0
+                position = 0
+            elif close_price < bb_middle:
                 signals[i] = 0.0
                 position = 0
             else:
