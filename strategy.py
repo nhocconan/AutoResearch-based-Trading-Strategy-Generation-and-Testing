@@ -8,59 +8,57 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 14-period ADX on weekly for trend strength
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate 14-period RSI for mean reversion
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
     # Wilder's smoothing
     def wilder_smooth(data, period):
         result = np.zeros_like(data)
-        alpha = 1.0 / period
+        if len(data) < period:
+            return result
         result[period-1] = np.mean(data[:period])
         for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+            result[i] = (data[i] + (period-1) * result[i-1]) / period
         return result
     
-    atr_1w = wilder_smooth(tr, 14)
-    di_plus_1w = wilder_smooth(dm_plus, 14)
-    di_minus_1w = wilder_smooth(dm_minus, 14)
+    avg_gain = wilder_smooth(gain, 14)
+    avg_loss = wilder_smooth(loss, 14)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    di_sum = di_plus_1w + di_minus_1w
-    dx = np.where(di_sum != 0, 100 * np.abs(di_plus_1w - di_minus_1w) / di_sum, 0)
-    adx_1w = wilder_smooth(dx, 14)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Calculate 14-period ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Calculate 20-period Donchian channels on weekly
-    donch_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donch_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donch_high_1w)
-    donch_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donch_low_1w)
+    def wilder_smooth_tr(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (data[i] + (period-1) * result[i-1]) / period
+        return result
     
-    # Calculate 20-period average volume on weekly
-    volume_1w = df_1w['volume'].values
-    vol_avg_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20)
+    atr_1d = wilder_smooth_tr(tr, 14)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate 50-period EMA for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Session filter: 8-20 UTC
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -79,41 +77,38 @@ def generate_signals(prices):
         
         # Get values
         close_val = prices['close'].iloc[i]
-        adx_val = adx_1w_aligned[i]
-        donch_high_val = donch_high_1w_aligned[i]
-        donch_low_val = donch_low_1w_aligned[i]
-        vol_val = prices['volume'].iloc[i]
-        vol_avg_val = vol_avg_20_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
+        atr_val = atr_1d_aligned[i]
+        ema_val = ema_50_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(adx_val) or np.isnan(donch_high_val) or 
-            np.isnan(donch_low_val) or np.isnan(vol_avg_val)):
+        if (np.isnan(rsi_val) or np.isnan(atr_val) or np.isnan(ema_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: ADX > 25 (trending), price breaks above weekly Donchian high, volume above average
-            if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
+            # Mean reversion: RSI < 30 (oversold) AND price above EMA (uptrend bias) for long
+            # RSI > 70 (overbought) AND price below EMA (downtrend bias) for short
+            if rsi_val < 30 and close_val > ema_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: ADX > 25 (trending), price breaks below weekly Donchian low, volume above average
-            elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
+            elif rsi_val > 70 and close_val < ema_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below weekly Donchian low or ADX < 20 (trend weakening)
-            if close_val < donch_low_val or adx_val < 20:
+            # Exit long: RSI > 50 (mean reversion complete) OR price below EMA (trend change)
+            if rsi_val > 50 or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above weekly Donchian high or ADX < 20 (trend weakening)
-            if close_val > donch_high_val or adx_val < 20:
+            # Exit short: RSI < 50 (mean reversion complete) OR price above EMA (trend change)
+            if rsi_val < 50 or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,13 +116,12 @@ def generate_signals(prices):
     
     return signals
 
-# 1d_ADX_Donchian_Breakout_Volume_Session_v1
-# Uses weekly ADX for trend strength filter (ADX > 25)
-# Uses weekly Donchian(20) breakouts for entry
-# Requires volume confirmation above 20-period average
+# 6h_RSI_EMA_MeanReversion_Session_v1
+# Uses daily RSI for mean reversion signals (oversold/overbought)
+# Uses daily EMA(50) for trend filter (price must be on correct side of EMA)
 # Session filter: 8-20 UTC to avoid low-volume periods
-# Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
-# Designed for 1d timeframe with ~10-20 trades/year
-name = "1d_ADX_Donchian_Breakout_Volume_Session_v1"
-timeframe = "1d"
+# Mean reversion exits at RSI 50 or EMA crossover
+# Designed for 6h timeframe with ~20-50 trades/year
+name = "6h_RSI_EMA_MeanReversion_Session_v1"
+timeframe = "6h"
 leverage = 1.0
