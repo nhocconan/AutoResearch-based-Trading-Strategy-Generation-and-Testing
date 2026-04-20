@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_Volume_Trend_v3"
-timeframe = "4h"
+name = "6h_12h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -32,14 +32,14 @@ def generate_signals(prices):
     R2 = close_1d + (range_1d * 1.1 / 6)
     S2 = close_1d - (range_1d * 1.1 / 6)
     
-    # Align to 4h timeframe (use previous day's levels)
+    # Align to 6h timeframe (use previous day's levels)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
     S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
     
-    # === 4h: Price and volume ===
+    # === 6h: Price and volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -48,7 +48,7 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === 4h: EMA 34 for trend filter ===
+    # === 6h: EMA 34 for trend filter ===
     close_series = pd.Series(close)
     ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
