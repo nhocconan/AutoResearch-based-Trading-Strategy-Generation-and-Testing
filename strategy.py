@@ -34,6 +34,18 @@ def generate_signals(prices):
     vol_ratio_1d = volume_1d / np.where(vol_ma_20_1d == 0, 1, vol_ma_20_1d)
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
+    # 1d Bollinger Bands for regime detection (choppy vs trending)
+    bb_period = 20
+    bb_std = 2.0
+    bb_middle = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_middle + bb_std * bb_std_dev
+    bb_lower = bb_middle - bb_std * bb_std_dev
+    bb_width = bb_upper - bb_lower
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    bb_width_ratio = bb_width / np.where(bb_width_ma == 0, 1, bb_width_ma)
+    bb_width_ratio_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ratio)
+    
     # 4h price data (primary timeframe)
     high = prices['high'].values
     low = prices['low'].values
@@ -45,7 +57,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if NaN in critical values
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i])):
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(bb_width_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,10 +67,14 @@ def generate_signals(prices):
         ema_trend = ema_50_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
         vol_ratio = vol_ratio_1d_aligned[i]
+        bb_width_ratio = bb_width_ratio_aligned[i]
         
         # Trend filter: price relative to daily EMA
         trend_up = price > ema_trend
         trend_down = price < ema_trend
+        
+        # Regime filter: avoid extreme chop (BB width too narrow)
+        regime_filter = bb_width_ratio > 0.8  # Not in extreme squeeze
         
         # Volatility filter: avoid extreme volatility spikes
         atr_ma_20 = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values[i]
@@ -68,26 +84,26 @@ def generate_signals(prices):
         vol_filter = vol_filter and (vol_ratio > 1.3)
         
         if position == 0:
-            # Enter long in uptrend with volume
-            if trend_up and vol_filter:
+            # Enter long in uptrend with volume and regime filter
+            if trend_up and vol_filter and regime_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short in downtrend with volume
-            elif trend_down and vol_filter:
+            # Enter short in downtrend with volume and regime filter
+            elif trend_down and vol_filter and regime_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal or volatility spike
-            if not trend_up or atr > 3.5 * atr_ma_20:
+            # Exit long: trend reversal, volatility spike, or regime breakdown
+            if not trend_up or (atr > 3.5 * atr_ma_20) or (bb_width_ratio < 0.6):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend reversal or volatility spike
-            if not trend_down or atr > 3.5 * atr_ma_20:
+            # Exit short: trend reversal, volatility spike, or regime breakdown
+            if not trend_down or (atr > 3.5 * atr_ma_20) or (bb_width_ratio < 0.6):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_EMA50_VolumeTrend_v3"
+name = "4h_1d_EMA50_VolumeRegime_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
