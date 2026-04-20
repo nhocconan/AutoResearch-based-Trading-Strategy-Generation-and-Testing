@@ -1,103 +1,104 @@
 #!/usr/bin/env python3
 """
-1d_1w_EquityCurveTrend_Breakout_v1
-Concept: Equity curve trend filter (smoothed equity curve slope) + weekly Donchian breakout on 1d timeframe.
-- Uses daily equity curve of a simple 200-day SMA trend to determine market regime
-- Long when price breaks above weekly Donchian high and equity curve slope > 0
-- Short when price breaks below weekly Donchian low and equity curve slope < 0
-- Exit when price crosses 200-day SMA (mean reversion to trend)
-- Conservative sizing (0.25) to manage drawdown
-- Works in bull/bear: equity curve trend adapts, Donchian provides objective breakout levels
+4h_1d_Pivot_R1S1_Breakout_Volume_Trend_v1
+Concept: Daily pivot point breakout with volume confirmation and 1d trend filter on 4h timeframe.
+- Uses daily pivot points (R1, S1) as key support/resistance levels
+- Long when price breaks above R1 with volume confirmation and above 1d EMA50
+- Short when price breaks below S1 with volume confirmation and below 1d EMA50
+- Exit when price returns to central pivot point (mean reversion)
+- Conservative sizing (0.25) to manage drawdown and reduce trade frequency
+- Works in bull/bear: Pivot points adapt to market conditions, volume confirms breakouts
+- Target: 20-40 trades/year to avoid fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_EquityCurveTrend_Breakout_v1"
-timeframe = "1d"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data ONCE before loop for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data ONCE before loop for pivot points and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # === Calculate weekly Donchian channels (20-period) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === Calculate daily pivot points ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian high: highest high over last 20 weekly periods
-    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Donchian low: lowest low over last 20 weekly periods
-    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
-    # Align weekly Donchian levels to daily timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    # Align pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === Daily: 200-day SMA for trend and equity curve ===
+    # === 1d: EMA50 trend filter ===
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # === 4h: Volume ratio (current vs 20-period average) ===
     close = prices['close'].values
-    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
-    
-    # Equity curve: cumulative returns of being long when price > SMA200
-    # Long signal: 1 when price > SMA200, 0 otherwise
-    long_signal = np.where(close > sma200, 1.0, 0.0)
-    # Daily returns
-    daily_returns = np.diff(close, prepend=close[0]) / close
-    # Equity curve: cumulative sum of returns when long signal is active
-    equity_curve = np.cumsum(long_signal * daily_returns)
-    # Equity curve slope: 20-day SMA of equity curve changes (smoothed trend)
-    equity_slope = pd.Series(equity_curve).diff().rolling(window=20, min_periods=20).mean().values
+    volume = prices['volume'].values
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Ensure enough data for SMA200
+    start_idx = 50  # Ensure enough data for EMA50
     
     for i in range(start_idx, n):
         # Get values
-        sma200_val = sma200[i]
         close_val = close[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
-        equity_slope_val = equity_slope[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema50_val = ema50_1d_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(sma200_val) or np.isnan(donch_high_val) or np.isnan(donch_low_val) or 
-            np.isnan(equity_slope_val)):
+        if (np.isnan(ema50_val) or np.isnan(pivot_val) or np.isnan(r1_val) or 
+            np.isnan(s1_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above weekly Donchian high with upward equity trend
-            breakout_long = close_val > donch_high_val
-            if breakout_long and equity_slope_val > 0:
+            # Long: Price breaks above R1 with volume confirmation and above 1d EMA50
+            breakout_long = close_val > r1_val
+            vol_confirm = vol_ratio_val > 1.5  # Higher threshold to reduce trades
+            
+            if breakout_long and vol_confirm and close_val > ema50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly Donchian low with downward equity trend
-            elif close_val < donch_low_val and equity_slope_val < 0:
+            # Short: Price breaks below S1 with volume confirmation and below 1d EMA50
+            elif close_val < s1_val and vol_confirm and close_val < ema50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses below 200-day SMA (mean reversion to trend)
-            if close_val < sma200_val:
+            # Long exit: Price returns to or below central pivot (mean reversion)
+            if close_val <= pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses above 200-day SMA (mean reversion to trend)
-            if close_val > sma200_val:
+            # Short exit: Price returns to or above central pivot (mean reversion)
+            if close_val >= pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
