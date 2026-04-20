@@ -1,125 +1,146 @@
 #!/usr/bin/env python3
+"""
+6h_1w_1d_Camarilla_Breakout_With_Trend_Filter
+Hypothesis:
+- Camarilla pivot levels (R3/S3, R4/S4) on daily timeframe act as strong support/resistance.
+- Breakout beyond R4/S4 with continuation (close beyond level) indicates institutional interest.
+- Weekly trend filter (EMA200) ensures we only take breakouts in direction of higher timeframe trend.
+- Volume confirmation filters false breakouts.
+- Works in bull/bear: trend filter avoids counter-trend breakouts; Camarilla levels adapt to volatility.
+- Target: 15-30 trades/year per symbol (60-120 over 4 years).
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_MultiFilter_Confluence"
-timeframe = "1h"
+name = "6h_1w_1d_Camarilla_Breakout_With_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close):
+    """
+    Calculate Camarilla pivot levels for given high, low, close.
+    Returns: (S3, S2, S1, PP, R1, R2, R3, R4)
+    Formula:
+    PP = (H + L + C) / 3
+    R4 = C + ((H-L) * 1.1/2)
+    R3 = C + ((H-L) * 1.1/4)
+    R2 = C + ((H-L) * 1.1/6)
+    R1 = C + ((H-L) * 1.1/12)
+    S1 = C - ((H-L) * 1.1/12)
+    S2 = C - ((H-L) * 1.1/6)
+    S3 = C - ((H-L) * 1.1/4)
+    S4 = C - ((H-L) * 1.1/2)
+    """
+    typical_range = high - low
+    pp = (high + low + close) / 3.0
+    r4 = close + typical_range * 1.1 / 2.0
+    r3 = close + typical_range * 1.1 / 4.0
+    r2 = close + typical_range * 1.1 / 6.0
+    r1 = close + typical_range * 1.1 / 12.0
+    s1 = close - typical_range * 1.1 / 12.0
+    s2 = close - typical_range * 1.1 / 6.0
+    s3 = close - typical_range * 1.1 / 4.0
+    s4 = close - typical_range * 1.1 / 2.0
+    return s3, s2, s1, pp, r1, r2, r3, r4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # === Multi-timeframe data (load ONCE) ===
-    df_4h = get_htf_data(prices, '4h')
+    # === Get daily data for Camarilla levels (once before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 4h: Trend filter (EMA50) ===
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # === 1d: Regime filter (ADX) ===
+    # Calculate Camarilla for each daily bar using prior day's HLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Shift by 1 to use previous day's levels (avoid look-ahead)
+    camarilla_s3 = np.full_like(close_1d, np.nan)
+    camarilla_r4 = np.full_like(close_1d, np.nan)
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    for i in range(1, len(close_1d)):
+        s3, s2, s1, pp, r1, r2, r3, r4 = calculate_camarilla(
+            high_1d[i-1], low_1d[i-1], close_1d[i-1]
+        )
+        camarilla_s3[i] = s3
+        camarilla_r4[i] = r4
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align to 6h timeframe
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # === Weekly trend filter: EMA200 on weekly close ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # === 1h: Entry signals ===
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # === 6h price and volume ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter (20-period average)
+    # Volume filter: current vs 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
-    # Hour filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
-        # Skip outside trading hours
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
+    for i in range(50, n):
         # Get values
         close_val = close[i]
-        ema_val = ema50_4h_aligned[i]
-        adx_val = adx_aligned[i]
+        s3_val = camarilla_s3_aligned[i]
+        r4_val = camarilla_r4_aligned[i]
+        ema_weekly = ema200_1w_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if np.isnan(ema_val) or np.isnan(adx_val) or np.isnan(vol_ratio_val):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Require trending market (ADX > 25)
-        if adx_val < 25:
+        if (np.isnan(s3_val) or np.isnan(r4_val) or 
+            np.isnan(ema_weekly) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above 4h EMA50 + volume confirmation
-            if (close_val > ema_val and vol_ratio_val > 1.5):
-                signals[i] = 0.20
+            # Long breakout: price closes above R4 in uptrend with volume
+            if (close_val > r4_val and 
+                close_val > ema_weekly and 
+                vol_ratio_val > 1.5):
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 4h EMA50 + volume confirmation
-            elif (close_val < ema_val and vol_ratio_val > 1.5):
-                signals[i] = -0.20
+            # Short breakdown: price closes below S3 in downtrend with volume
+            elif (close_val < s3_val and 
+                  close_val < ema_weekly and 
+                  vol_ratio_val > 1.5):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 4h EMA50 or loss of momentum
-            if close_val < ema_val or vol_ratio_val < 0.8:
+            # Long exit: price breaks below S3 (mean reversion) or trend change
+            if close_val < s3_val or close_val < ema_weekly:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 4h EMA50 or loss of momentum
-            if close_val > ema_val or vol_ratio_val < 0.8:
+            # Short exit: price breaks above R4 (mean reversion) or trend change
+            if close_val > r4_val or close_val > ema_weekly:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
