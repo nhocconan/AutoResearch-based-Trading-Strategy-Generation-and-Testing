@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1S1_Breakout_Volume_TrendFilter_v1
-Concept: 4h timeframe, daily Camarilla pivot breakout with volume confirmation and daily EMA34 trend filter.
-- Long when price breaks above daily R1 with volume > 2x average and above daily EMA34
-- Short when price breaks below daily S1 with volume > 2x average and below daily EMA34
+12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1
+Concept: Camarilla pivot breakout using daily pivots, with volume confirmation and EMA trend filter.
+- Long when price breaks above R1 with volume > 2x average and above daily EMA34
+- Short when price breaks below S1 with volume > 2x average and below daily EMA34
 - Exit when price returns to previous day's close
 - Conservative sizing (0.25) to manage drawdown in choppy markets
 - Designed for both bull (breakouts work) and bear (mean reversion to daily close works)
@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_TrendFilter_v1"
-timeframe = "4h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,16 +43,16 @@ def generate_signals(prices):
     prev_close_1d = np.roll(close_1d, 1)
     prev_close_1d[0] = np.nan
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
     
-    # === 4h: EMA34 trend filter from daily ===
+    # === 12h: EMA34 trend filter from daily ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # === 12h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
