@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_200EMA_Trend_Pullback_Volume
-# Hypothesis: In strong trends (price above/below 200 EMA), pullbacks to the 20 EMA with volume confirmation offer high-probability entries.
-# The 200 EMA defines the trend, 20 EMA provides dynamic support/resistance, and volume confirms institutional interest.
-# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
-# Target: 20-40 trades/year to stay under 160 total over 4 years.
+# 12h_Pivot_R1S1_Breakout_VolumeTrend_Regime
+# Hypothesis: Camarilla pivot levels (R1/S1) from 1-day act as strong support/resistance. 
+# Breakouts with volume confirmation and ADX filter capture momentum. 
+# Works in bull/bear by capturing sustained moves from institutional levels.
+# Target: 20-50 trades/year.
 
-name = "6h_200EMA_Trend_Pullback_Volume"
-timeframe = "6h"
+name = "12h_Pivot_R1S1_Breakout_VolumeTrend_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 210:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,10 +23,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 20 EMA and 200 EMA
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).values
-    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).values
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate ADX (14-period) for trend strength on 12h data
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smooth TR and DM (14-period)
+    tr_sum = np.full_like(high, np.nan)
+    dm_plus_sum = np.full_like(high, np.nan)
+    dm_minus_sum = np.full_like(high, np.nan)
+    
+    for i in range(len(high)):
+        if i >= 13:  # 14-period smoothing
+            tr_sum[i] = np.nansum(tr[i-13:i+1])
+            dm_plus_sum[i] = np.nansum(dm_plus[i-13:i+1])
+            dm_minus_sum[i] = np.nansum(dm_minus[i-13:i+1])
+    
+    # Directional Indicators
+    di_plus = np.full_like(high, np.nan)
+    di_minus = np.full_like(high, np.nan)
+    dx = np.full_like(high, np.nan)
+    
+    valid = ~np.isnan(tr_sum) & (tr_sum != 0)
+    di_plus[valid] = 100 * dm_plus_sum[valid] / tr_sum[valid]
+    di_minus[valid] = 100 * dm_minus_sum[valid] / tr_sum[valid]
+    dx[valid] = 100 * np.abs(di_plus[valid] - di_minus[valid]) / (di_plus[valid] + di_minus[valid])
+    
+    # ADX (smoothed DX)
+    adx = np.full_like(high, np.nan)
+    for i in range(len(high)):
+        if i >= 27:  # 14 + 13 for ADX smoothing
+            valid_dx = dx[i-13:i+1]
+            if not np.all(np.isnan(valid_dx)):
+                adx[i] = np.nanmean(valid_dx)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -35,35 +96,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for 200 EMA
+    start_idx = max(28, 20)  # Ensure ADX and pivots are calculated
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_20[i]) or np.isnan(ema_200[i]) or np.isnan(volume_filter[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: uptrend (price > 200 EMA) + pullback to 20 EMA + volume
-            if close[i] > ema_200[i] and close[i] <= ema_20[i] * 1.005 and volume_filter[i]:
+            # Long: price breaks above R1 + ADX > 25 + volume confirmation
+            if close[i] > r1_aligned[i] and adx[i] > 25 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend (price < 200 EMA) + rally to 20 EMA + volume
-            elif close[i] < ema_200[i] and close[i] >= ema_20[i] * 0.995 and volume_filter[i]:
+            # Short: price breaks below S1 + ADX > 25 + volume confirmation
+            elif close[i] < s1_aligned[i] and adx[i] > 25 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if trend breaks or reversal signals
-            if close[i] < ema_200[i] or close[i] > ema_20[i] * 1.02:
+            # Long: exit if price breaks below S1 or ADX weakens
+            if close[i] < s1_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if trend breaks or reversal signals
-            if close[i] > ema_200[i] or close[i] < ema_20[i] * 0.98:
+            # Short: exit if price breaks above R1 or ADX weakens
+            if close[i] > r1_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
