@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian20_1dTrend_Volume_v2"
+name = "4h_1d_Donchian20_1dTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need at least 10 days of 4h data
+    if n < 60:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need at least 20 days for Donchian and EMA
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # === 1d: Calculate 20-day trend and Donchian channels (using previous day's data) ===
@@ -36,7 +36,6 @@ def generate_signals(prices):
     ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # 20-day Donchian channels (highest high, lowest low over 20 days)
-    # We need to calculate these manually since we're using previous day's data
     donchian_high = np.full_like(high_1d, np.nan)
     donchian_low = np.full_like(low_1d, np.nan)
     
@@ -58,7 +57,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after warmup
+    for i in range(60, n):
         # Get values
         close_val = close[i]
         ema_val = ema_20_aligned[i]
@@ -78,13 +77,13 @@ def generate_signals(prices):
             # Long: Price above 20-day EMA (uptrend), breaks above 20-day Donchian high, volume confirmation
             if (close_val > ema_val and  # Uptrend filter
                 close_val > upper_donchian and   # Break above Donchian high
-                vol_ratio_val > 1.8):    # Increased volume confirmation threshold
+                vol_ratio_val > 2.0):    # Higher volume threshold to reduce trades
                 signals[i] = 0.25
                 position = 1
             # Short: Price below 20-day EMA (downtrend), breaks below 20-day Donchian low, volume confirmation
             elif (close_val < ema_val and  # Downtrend filter
                   close_val < lower_donchian and   # Break below Donchian low
-                  vol_ratio_val > 1.8):    # Increased volume confirmation threshold
+                  vol_ratio_val > 2.0):    # Higher volume threshold to reduce trades
                 signals[i] = -0.25
                 position = -1
         
