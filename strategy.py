@@ -3,102 +3,122 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h chart with 1d Donchian breakout and 1w volume confirmation.
-# Long when price breaks above 20-period 1d Donchian high with 1w volume > 1.5x average.
-# Short when price breaks below 20-period 1d Donchian low with 1w volume > 1.5x average.
-# Uses weekly volume filter to avoid low-conviction breakouts.
-# Target: 15-30 trades/year per symbol.
+# Hypothesis: 1h trend following with 4h Supertrend filter and volume confirmation.
+# Long when 4h Supertrend is bullish, price > 1h EMA20, and volume > 1.5x average.
+# Short when 4h Supertrend is bearish, price < 1h EMA20, and volume > 1.5x average.
+# Uses 4h Supertrend for trend direction (works in both bull/bear markets) and 1h for entry timing.
+# Target: 15-30 trades/year per symbol to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 4h data for Supertrend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 20-period Donchian high/low (previous day to avoid look-ahead)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate ATR for Supertrend
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[0]), np.abs(low_4h[0] - close_4h[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Shift by 1 to use previous day's values
-    donch_high = np.roll(donch_high, 1)
-    donch_low = np.roll(donch_low, 1)
-    donch_high[0] = high_1d[0]
-    donch_low[0] = low_1d[0]
+    # Supertrend calculation
+    hl2 = (high_4h + low_4h) / 2
+    upperband = hl2 + (3.0 * atr)
+    lowerband = hl2 - (3.0 * atr)
     
-    # Align Donchian levels to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    supertrend = np.zeros_like(close_4h)
+    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
     
-    # Load 1w data for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    supertrend[0] = upperband[0]
+    direction[0] = 1
     
-    volume_1w = df_1w['volume'].values
-    vol_ma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_1w / np.where(vol_ma_20 == 0, 1, vol_ma_20)
-    vol_filter = vol_ratio > 1.5
+    for i in range(1, len(close_4h)):
+        if close_4h[i] > upperband[i-1]:
+            direction[i] = 1
+        elif close_4h[i] < lowerband[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
+                lowerband[i] = lowerband[i-1]
+            if direction[i] == -1 and upperband[i] > upperband[i-1]:
+                upperband[i] = upperband[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lowerband[i]
+        else:
+            supertrend[i] = upperband[i]
     
-    # Align volume filter to 12h timeframe
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1w, vol_filter)
+    # Align Supertrend direction to 1h timeframe
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, direction)
     
-    # 12h data
+    # 1h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # EMA20 on 1h
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20, adjust=False).mean().values
+    vol_filter = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if NaN in critical values
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(vol_filter_aligned[i])):
+        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(ema20[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        upper = donch_high_aligned[i]
-        lower = donch_low_aligned[i]
-        vol_ok = vol_filter_aligned[i]
+        st_dir = supertrend_dir_aligned[i]
+        ema20_val = ema20[i]
+        vol_ok = vol_filter[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume confirmation
-            if price > upper and vol_ok:
-                signals[i] = 0.25
+            # Long: 4h Supertrend bullish, price > EMA20, volume confirmation
+            if st_dir == 1 and price > ema20_val and vol_ok:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian low with volume confirmation
-            elif price < lower and vol_ok:
-                signals[i] = -0.25
+            # Short: 4h Supertrend bearish, price < EMA20, volume confirmation
+            elif st_dir == -1 and price < ema20_val and vol_ok:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low
-            if price < lower:
+            # Long exit: 4h Supertrend turns bearish or price < EMA20
+            if st_dir == -1 or price < ema20_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high
-            if price > upper:
+            # Short exit: 4h Supertrend turns bullish or price > EMA20
+            if st_dir == 1 or price > ema20_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_1d_Donchian20_1w_VolumeConfirmation_v1"
-timeframe = "12h"
+name = "1h_4h_Supertrend_EMA20_VolumeFilter_v1"
+timeframe = "1h"
 leverage = 1.0
