@@ -1,119 +1,130 @@
-# Solution
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h chart with 12h Keltner Channel breakout and 1d volume confirmation.
-# In trending markets, price breaks the Keltner channel with volume; in ranging markets,
-# price reverts to the EMA middle band. Uses 1d trend filter to avoid counter-trend trades.
-# Keltner Channel: middle = EMA(20), upper/lower = EMA ± 2*ATR(10).
-# Target: 20-30 trades/year per symbol.
+# Hypothesis: 4h chart with daily pivot levels (R1/S1) for mean reversion, confirmed by 1w trend.
+# In ranging markets, price reverts to pivot; in trending markets, breaks through R1/S1 with volume.
+# Works in bull/bear by adapting to regime via 1w trend filter.
+# Target: 20-40 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for Keltner Channel calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # 12h EMA(20) for middle band
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # 12h ATR(10) for channel width
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10_12h = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # Keltner Channel bands
-    upper_12h = ema_20_12h + 2.0 * atr_10_12h
-    lower_12h = ema_20_12h - 2.0 * atr_10_12h
-    
-    # Align Keltner Channel to 6h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
-    middle_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    
-    # Load 1d data for trend filter and volume confirmation
+    # Load 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily pivot points (standard formula)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1d volume ratio (current / 20-period average)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = vol_1d / np.where(vol_ma_20_1d == 0, 1, vol_ma_20_1d)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Pivot = (H + L + C)/3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
-    # 6h data
+    # Align pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Weekly EMA(20) for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # 4h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # 4h ATR(14) for volatility and stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 4h volume ratio (current / 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        upper = upper_aligned[i]
-        lower = lower_aligned[i]
-        middle = middle_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
-        vol_ratio_1d = vol_ratio_1d_aligned[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_20_1w_aligned[i]
+        atr = atr_14[i]
+        vol_ratio_4h = vol_ratio[i]
         
-        # Trend filter: only trade in direction of 1d trend
+        # Determine market regime from weekly trend
         uptrend = price > ema_trend
         downtrend = price < ema_trend
         
-        # Volume filter: require above-average 1d volume
-        vol_filter = vol_ratio_1d > 1.3
+        # Volatility filter: avoid extreme volatility
+        atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values[i]
+        vol_filter = (atr < 3.0 * atr_ma_20)
+        
+        # Volume filter: require above-average volume
+        vol_filter = vol_filter and (vol_ratio_4h > 1.2)
         
         if position == 0:
-            # Look for long when price breaks above upper channel with volume in uptrend
+            # In uptrend: look for long near S1 (support)
             if uptrend and vol_filter:
-                if price > upper:
+                if price <= s1_val * 1.002:  # Near S1 with small buffer
                     signals[i] = 0.25
                     position = 1
-            # Look for short when price breaks below lower channel with volume in downtrend
+            # In downtrend: look for short near R1 (resistance)
             elif downtrend and vol_filter:
-                if price < lower:
+                if price >= r1_val * 0.998:  # Near R1 with small buffer
+                    signals[i] = -0.25
+                    position = -1
+            # In ranging (no clear trend): fade extremes
+            else:
+                if price <= s1_val * 1.002 and vol_filter:  # Near S1
+                    signals[i] = 0.25
+                    position = 1
+                elif price >= r1_val * 0.998 and vol_filter:  # Near R1
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle band or trend reverses
-            if price <= middle or price < ema_trend:
+            # Long exit: price reaches pivot or stops reversed
+            if price >= pivot_val or (not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle band or trend reverses
-            if price >= middle or price > ema_trend:
+            # Short exit: price reaches pivot or stops reversed
+            if price <= pivot_val or (not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_KeltnerBreakout_1dTrendVolumeFilter_v1"
-timeframe = "6h"
+name = "4h_1d_Pivot_R1S1_MeanReversion_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
