@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1d_1w_KAMA_Trend_With_RSI_Filter
-# Hypothesis: On 1d timeframe, use Kaufman Adaptive Moving Average (KAMA) as trend filter and RSI(14) for mean-reversion entries.
-# In trending markets (price > KAMA), buy dips when RSI < 30; in ranging markets, fade extremes at RSI < 30 or > 70.
-# Uses 1-week ADX to distinguish trend (ADX > 25) from range (ADX < 20) to avoid whipsaws.
-# Targets 10-25 trades/year by requiring confluence of trend, RSI extreme, and volume confirmation.
+# 6h_1d_Pivot_S3_R3_Reversal_V1
+# Hypothesis: On 6h timeframe, trade reversals at 1d Camarilla S3/R3 levels with volume confirmation.
+# In ranging markets (ADX < 25), price tends to reverse at S3/R3; in trending markets (ADX > 25),
+# price breaks through S4/R4. Uses 1d ADX to filter ranging (ADX < 25) for reversals and trending (ADX > 25) for breakouts.
+# Targets 15-35 trades/year by requiring confluence of level, volume, and regime filter.
+# Works in both bull and bear markets due to adaptive regime filtering.
 
-name = "1d_1w_KAMA_Trend_With_RSI_Filter"
-timeframe = "1d"
+name = "6h_1d_Pivot_S3_R3_Reversal_V1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,98 +16,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-week ADX (14-period) for trend/range filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
+    # Typical price for pivot calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    
+    # Pivot point and ranges
+    pivot_1d = typical_price_1d
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: S3, R3, S4, R4
+    s3_1d = close_1d - (range_1d * 1.1 / 6)
+    r3_1d = close_1d + (range_1d * 1.1 / 6)
+    s4_1d = close_1d - (range_1d * 1.1 / 4)
+    r4_1d = close_1d + (range_1d * 1.1 / 4)
+    
+    # Align 1d levels to 6h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    
+    # Calculate 1d ADX for trend/ranging filter (14-period)
     # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    up_move = high_1w[1:] - high_1w[:-1]
-    down_move = low_1w[:-1] - low_1w[1:]
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     plus_dm = np.concatenate([[np.nan], plus_dm])
     minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Wilder smoothing
+    # Smoothed TR and DM
     def smooth_wilder(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
             return result
+        # First value is simple average
         result[period-1] = np.nansum(arr[1:period])
+        # Subsequent values: Wilder smoothing
         for i in range(period, len(arr)):
             result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
     
-    atr_1w = smooth_wilder(tr, 14)
-    plus_di_1w = 100 * smooth_wilder(plus_dm, 14) / atr_1w
-    minus_di_1w = 100 * smooth_wilder(minus_dm, 14) / atr_1w
-    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
-    adx_1w = smooth_wilder(dx_1w, 14)
+    atr = smooth_wilder(tr, 14)
+    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
+    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth_wilder(dx, 14)
     
-    # Align 1w ADX to 1d timeframe
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate KAMA on 1d close (ER=10, fastest=2, slowest=30)
-    def kama(close, er_period=10, fast=2, slow=30):
-        change = np.abs(np.concatenate([[np.nan], close[1:] - close[:-1]]))
-        volatility = np.nansum(np.abs(np.concatenate([[np.nan], close[1:] - close[:-1]])), axis=0) if False else None
-        # Proper volatility calculation: sum of absolute changes over er_period
-        volatility = np.array([np.nansum(np.abs(close[i-er_period+1:i+1] - close[i-er_period:i])) 
-                              if i >= er_period-1 else np.nan for i in range(len(close))])
-        # Avoid division by zero
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama_vals = np.full_like(close, np.nan)
-        kama_vals[0] = close[0]
-        for i in range(1, len(close)):
-            if np.isnan(sc[i]) or np.isnan(kama_vals[i-1]):
-                kama_vals[i] = kama_vals[i-1]
-            else:
-                kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
-        return kama_vals
-    
-    kama_vals = kama(close, er_period=10, fast=2, slow=30)
-    
-    # Calculate RSI(14) on 1d close
-    def rsi(close, period=14):
-        delta = np.concatenate([[np.nan], close[1:] - close[:-1]])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        # Wilder smoothing
-        avg_gain = np.full_like(close, np.nan)
-        avg_loss = np.full_like(close, np.nan)
-        avg_gain[period] = np.nansum(gain[1:period+1]) / period
-        avg_loss[period] = np.nansum(loss[1:period+1]) / period
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_vals = 100 - (100 / (1 + rs))
-        return rsi_vals
-    
-    rsi_vals = rsi(close, period=14)
-    
-    # Volume average for confirmation
+    # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -116,42 +99,53 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or 
-            np.isnan(adx_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Determine market regime using 1w ADX
-            if adx_1w_aligned[i] > 25:  # Trending market
-                # In uptrend (price > KAMA), buy dips when RSI oversold
-                if close[i] > kama_vals[i] and rsi_vals[i] < 30 and volume[i] > 1.5 * volume_ma[i]:
+            # Ranging market (ADX < 25): reverse at S3/R3
+            if adx_aligned[i] < 25:
+                # Long near S3 with volume confirmation
+                if (close[i] <= s3_aligned[i] * 1.005 and 
+                    close[i] >= s3_aligned[i] * 0.995 and
+                    volume[i] > 1.5 * volume_ma[i]):
                     signals[i] = 0.25
                     position = 1
-                # In downtrend (price < KAMA), sell rallies when RSI overbought
-                elif close[i] < kama_vals[i] and rsi_vals[i] > 70 and volume[i] > 1.5 * volume_ma[i]:
+                # Short near R3 with volume confirmation
+                elif (close[i] >= r3_aligned[i] * 0.995 and 
+                      close[i] <= r3_aligned[i] * 1.005 and
+                      volume[i] > 1.5 * volume_ma[i]):
                     signals[i] = -0.25
                     position = -1
-            else:  # Ranging market (ADX <= 25)
-                # Fade extremes at RSI levels with volume confirmation
-                if rsi_vals[i] < 30 and volume[i] > 1.5 * volume_ma[i]:
+            # Trending market (ADX > 25): breakout at S4/R4
+            elif adx_aligned[i] > 25:
+                # Long breakout above R4 with volume
+                if (close[i] > r4_aligned[i] * 1.005 and 
+                    volume[i] > 2.0 * volume_ma[i]):
                     signals[i] = 0.25
                     position = 1
-                elif rsi_vals[i] > 70 and volume[i] > 1.5 * volume_ma[i]:
+                # Short breakdown below S4 with volume
+                elif (close[i] < s4_aligned[i] * 0.995 and 
+                      volume[i] > 2.0 * volume_ma[i]):
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: RSI crosses above 50 or trend changes
-            if rsi_vals[i] > 50 or (adx_1w_aligned[i] > 25 and close[i] < kama_vals[i]):
+            # Long exit: reverse at opposite level or ADX shifts to ranging
+            if (adx_aligned[i] < 25 and close[i] >= r3_aligned[i] * 0.995) or \
+               (adx_aligned[i] > 25 and close[i] < s4_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI crosses below 50 or trend changes
-            if rsi_vals[i] < 50 or (adx_1w_aligned[i] > 25 and close[i] > kama_vals[i]):
+            # Short exit: reverse at opposite level or ADX shifts to ranging
+            if (adx_aligned[i] < 25 and close[i] <= s3_aligned[i] * 1.005) or \
+               (adx_aligned[i] > 25 and close[i] > r4_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
