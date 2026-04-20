@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_1D_Pivot_R3S3_Fade_Signal
-Hypothesis: Fade extreme price moves at 1d Camarilla R3/S3 levels with volume exhaustion and mean reversion.
-In ranging markets (common in 2025 BTC/ETH), price reverts from extreme daily levels.
-Short at R3 with bearish candle and low volume; long at S3 with bullish candle and low volume.
-Exit at R2/S2 or opposite extreme. Works in both bull/bear as mean reversion persists.
-Target: 50-100 total trades over 4 years (12-25/year) with position size 0.25.
+12h_Volume_Weighted_Price_Action_With_1D_Trend_Filter
+Hypothesis: Trade 12h price action using volume-weighted average price (VWAP) deviation with 1d trend filter.
+Long when price closes above VWAP with volume expansion and 1d uptrend; short when price closes below VWAP with volume expansion and 1d downtrend.
+Uses 12h VWAP calculated from typical price and volume, and 1d EMA50 for trend filtering.
+Designed for 12h timeframe to capture medium-term swings with low trade frequency.
+Target: 15-30 total trades over 4 years (4-8/year) with position size 0.25.
+Works in bull/bear: 1d trend filter avoids counter-trend trades, volume filter reduces false signals.
 """
 
-name = "6h_1D_Pivot_R3S3_Fade_Signal"
-timeframe = "6h"
+name = "12h_Volume_Weighted_Price_Action_With_1D_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,82 +27,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate 12h VWAP: cumulative (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    price_volume = typical_price * volume
+    cum_pv = np.cumsum(price_volume)
+    cum_vol = np.cumsum(volume)
+    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d Camarilla levels
-    # Camarilla: Range = H - L
-    # R4 = C + (H-L) * 1.1/2, R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4, S2 = C - (H-L) * 1.1/6
-    range_1d = high_1d - low_1d
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first bar uses its own close
-    
-    r3_1d = close_prev + range_1d * 1.1 / 4
-    s3_1d = close_prev - range_1d * 1.1 / 4
-    r2_1d = close_prev + range_1d * 1.1 / 6
-    s2_1d = close_prev - range_1d * 1.1 / 6
-    
-    # Align 1d levels to 6h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # Volume exhaustion: volume < 0.7 * 20-period average (low volume on test)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = np.full_like(volume, np.nan)
     for i in range(20, len(volume)):
         vol_ma20[i] = np.mean(volume[i-20:i])
-    volume_exhaustion = volume < (0.7 * vol_ma20)
+    volume_filter = volume > (1.5 * vol_ma20)
     
-    # Candles: bullish = close > open, bearish = close < open
-    open_prices = prices['open'].values
-    bullish_candle = close > open_prices
-    bearish_candle = close < open_prices
+    # Get 1d data for trend filter (using daily EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA50 for trend filter
+    def ema(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) >= period:
+            multiplier = 2.0 / (period + 1)
+            result[period-1] = np.mean(values[:period])
+            for i in range(period, len(values)):
+                result[i] = multiplier * values[i] + (1 - multiplier) * result[i-1]
+        return result
+    
+    ema50_1d = ema(close_1d, 50)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or
+        if (np.isnan(vwap[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Fade R3: short at resistance with bearish candle and low volume
-            if close[i] > r3_1d_aligned[i] and bearish_candle[i] and volume_exhaustion[i]:
-                signals[i] = -0.25
-                position = -1
-            # Fade S3: long at support with bullish candle and low volume
-            elif close[i] < s3_1d_aligned[i] and bullish_candle[i] and volume_exhaustion[i]:
+            # Long: price closes above VWAP with volume expansion AND 1d uptrend (close > EMA50)
+            if close[i] > vwap[i] and volume_filter[i] and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-        
-        elif position == -1:
-            # Short exit: price reaches R2 (take profit) or breaks above S3 (stop)
-            if close[i] <= r2_1d_aligned[i] or close[i] > s3_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Short: price closes below VWAP with volume expansion AND 1d downtrend (close < EMA50)
+            elif close[i] < vwap[i] and volume_filter[i] and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price reaches S2 (take profit) or breaks below R3 (stop)
-            if close[i] >= s2_1d_aligned[i] or close[i] < r3_1d_aligned[i]:
+            # Long exit: price closes below VWAP OR 1d trend turns down
+            if close[i] < vwap[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price closes above VWAP OR 1d trend turns up
+            if close[i] > vwap[i] or close[i] > ema50_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
