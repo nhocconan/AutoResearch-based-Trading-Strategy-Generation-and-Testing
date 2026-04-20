@@ -3,7 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_ADXFilter_v2"
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX trend filter
+# Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
+# Uses price channels as objective support/resistance, volume to confirm conviction,
+# and ADX to avoid choppy markets. Target: 20-40 trades/year per symbol.
+
+name = "4h_1d_Donchian20_Breakout_Volume_ADXFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,43 +22,19 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Points (previous day) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1d Volume Confirmation (average volume) ===
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / np.where(vol_ma20_1d > 0, vol_ma20_1d, np.nan)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    
-    # Set first values to avoid look-ahead
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Classic pivot (same for Camarilla)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels - Focus on R1/S1 for breakouts
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
-    
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Volume Confirmation (4h) ===
-    volume = prices['volume'].values
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
-    
-    # === ADX Filter (4h) ===
+    # === 4h Donchian Channel (20) ===
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 4h ADX Filter ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -71,60 +52,64 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) > 0, (plus_di + minus_di), np.nan)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
+    close = prices['close'].values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(100, n):
         # Get values
-        close_val = prices['close'].iloc[i]
-        vol_ratio_val = vol_ratio[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        close_val = close[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        vol_ratio_val = vol_ratio_1d_aligned[i]
         adx_val = adx[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
-            np.isnan(adx_val)):
+        if (np.isnan(donch_high) or np.isnan(donch_low) or 
+            np.isnan(vol_ratio_val) or np.isnan(adx_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Breakout at R1/S1 with volume confirmation and ADX > 25 (trending)
-            if close_val > r1_val and vol_ratio_val > 2.0 and adx_val > 25:
-                # Break above R1
+            # Breakout with volume confirmation and ADX > 25 (trending)
+            if close_val > donch_high and vol_ratio_val > 1.5 and adx_val > 25:
+                # Break above Donchian high
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            elif close_val < s1_val and vol_ratio_val > 2.0 and adx_val > 25:
-                # Break below S1
+            elif close_val < donch_low and vol_ratio_val > 1.5 and adx_val > 25:
+                # Break below Donchian low
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         
         elif position == 1:
-            # Long exit: stop loss or return to S1
-            if close_val <= entry_price - 2.0 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Simplified ATR proxy
+            # Long exit: stop loss or return to Donchian low
+            atr_proxy = (high[i] - low[i])  # Simplified ATR proxy
+            if close_val <= entry_price - 2.0 * atr_proxy:
                 # Stop loss hit
                 signals[i] = 0.0
                 position = 0
-            elif close_val < s1_val:
-                # Return to S1
+            elif close_val < donch_low:
+                # Return to Donchian low
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: stop loss or return to S1
-            if close_val >= entry_price + 2.0 * (prices['high'].iloc[i] - prices['low'].iloc[i]):  # Simplified ATR proxy
+            # Short exit: stop loss or return to Donchian high
+            atr_proxy = (high[i] - low[i])  # Simplified ATR proxy
+            if close_val >= entry_price + 2.0 * atr_proxy:
                 # Stop loss hit
                 signals[i] = 0.0
                 position = 0
-            elif close_val > s1_val:
-                # Return to S1
+            elif close_val > donch_high:
+                # Return to Donchian high
                 signals[i] = 0.0
                 position = 0
             else:
