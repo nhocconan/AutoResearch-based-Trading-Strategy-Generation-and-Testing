@@ -3,41 +3,73 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_DonchianBreakout_Trend_Volume"
-timeframe = "6h"
+name = "4h_1d_Supertrend_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:  # Need sufficient data
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 12h: Trend filter (20-period EMA) ===
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # === 1d: Calculate Supertrend ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 12h: Donchian channels (20-period) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # ATR calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    donchian_high_12h = np.full_like(high_12h, np.nan)
-    donchian_low_12h = np.full_like(low_12h, np.nan)
+    atr_period = 10
+    atr = np.full_like(close_1d, np.nan)
+    for i in range(atr_period, len(close_1d)):
+        if i == atr_period:
+            atr[i] = np.nanmean(tr[1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    for i in range(20, len(high_12h)):
-        donchian_high_12h[i] = np.max(high_12h[i-20:i])
-        donchian_low_12h[i] = np.min(low_12h[i-20:i])
+    # Supertrend calculation
+    factor = 3.0
+    hl2 = (high_1d + low_1d) / 2
+    upperband = hl2 + (factor * atr)
+    lowerband = hl2 - (factor * atr)
     
-    # === Align 12h indicators to 6h timeframe ===
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    donchian_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
-    donchian_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
+    # Initialize arrays
+    supertrend = np.full_like(close_1d, np.nan)
+    uptrend = np.full_like(close_1d, True)
     
-    # === 6h: Volume ratio (current vs 20-period average) ===
+    for i in range(1, len(close_1d)):
+        if np.isnan(atr[i-1]) or np.isnan(close_1d[i-1]):
+            supertrend[i] = np.nan
+            uptrend[i] = uptrend[i-1] if i > 0 else True
+            continue
+            
+        if close_1d[i] > upperband[i-1]:
+            uptrend[i] = True
+        elif close_1d[i] < lowerband[i-1]:
+            uptrend[i] = False
+        else:
+            uptrend[i] = uptrend[i-1]
+            if uptrend[i] and lowerband[i] < lowerband[i-1]:
+                lowerband[i] = lowerband[i-1]
+            if not uptrend[i] and upperband[i] > upperband[i-1]:
+                upperband[i] = upperband[i-1]
+        
+        supertrend[i] = lowerband[i] if uptrend[i] else upperband[i]
+    
+    # Align 1d indicators to 4h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
+    
+    # === 4h: Volume ratio (current vs 20-period average) ===
     close = prices['close'].values
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,47 +78,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Get values
         close_val = close[i]
-        ema_val = ema_20_12h_aligned[i]
-        upper_donchian = donchian_high_12h_aligned[i]
-        lower_donchian = donchian_low_12h_aligned[i]
+        supertrend_val = supertrend_aligned[i]
+        uptrend_val = uptrend_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(ema_val) or np.isnan(upper_donchian) or 
-            np.isnan(lower_donchian) or np.isnan(vol_ratio_val)):
+        if (np.isnan(supertrend_val) or np.isnan(uptrend_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above 12h EMA (uptrend), breaks above 12h Donchian high, volume confirmation
-            if (close_val > ema_val and  # Uptrend filter
-                close_val > upper_donchian and   # Break above Donchian high
+            # Long: Uptrend on 1d, price above Supertrend, volume confirmation
+            if (uptrend_val > 0.5 and  # Uptrend on 1d
+                close_val > supertrend_val and   # Price above Supertrend
                 vol_ratio_val > 1.5):    # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below 12h EMA (downtrend), breaks below 12h Donchian low, volume confirmation
-            elif (close_val < ema_val and  # Downtrend filter
-                  close_val < lower_donchian and   # Break below Donchian low
+            # Short: Downtrend on 1d, price below Supertrend, volume confirmation
+            elif (uptrend_val < 0.5 and  # Downtrend on 1d
+                  close_val < supertrend_val and   # Price below Supertrend
                   vol_ratio_val > 1.5):    # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price drops below 12h EMA or breaks below 12h Donchian low (reversal)
-            if close_val < ema_val or close_val < lower_donchian:
+            # Long exit: Price drops below Supertrend (trend reversal)
+            if close_val < supertrend_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises above 12h EMA or breaks above 12h Donchian high (reversal)
-            if close_val > ema_val or close_val > upper_donchian:
+            # Short exit: Price rises above Supertrend (trend reversal)
+            if close_val > supertrend_val:
                 signals[i] = 0.0
                 position = 0
             else:
