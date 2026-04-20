@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ADX trend strength filter and volume confirmation.
-# Donchian(20) captures breakouts in trending markets. ADX > 25 on daily timeframe ensures
-# we only trade when there is strong trend (works in both bull and bear markets).
-# Volume > 1.5x 20-period average confirms institutional participation.
-# Target: 20-40 trades per year to minimize fee drag.
+# Hypothesis: 12h Bollinger Band Squeeze Breakout with 1d EMA50 trend and volume confirmation.
+# The Bollinger Band Squeeze (low volatility followed by expansion) captures explosive moves.
+# Trade only when BB width is below its 50-period percentile (squeeze) and price breaks out
+# of the bands with volume confirmation. 1d EMA50 filters for higher timeframe trend direction.
+# This works in both bull and bear markets by catching volatility expansions in the direction
+# of the higher timeframe trend. Target: 15-25 trades per year to minimize fee drag.
 
-name = "4h_Donchian20_1dADX25_Volume"
-timeframe = "4h"
+name = "12h_BollingerSqueeze_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,65 +19,34 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for ADX trend strength
+    # Get 1d data ONCE before loop for EMA50 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d ADX for trend strength (period=14) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d EMA50 for trend direction ===
     close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    tr14 = wilders_smoothing(tr, 14)
-    plus_dm14 = wilders_smoothing(plus_dm, 14)
-    minus_dm14 = wilders_smoothing(minus_dm, 14)
-    
-    # DI values
-    plus_di = np.where(tr14 > 0, 100 * plus_dm14 / tr14, 0)
-    minus_di = np.where(tr14 > 0, 100 * minus_dm14 / tr14, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smoothing(dx, 14)
-    adx_14 = adx  # ADX(14)
-    
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # === 4h Donchian(20) channels ===
+    # === Bollinger Bands on 12h (20, 2) ===
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Upper band: highest high of last 20 periods
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Bollinger Bands
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + (2 * std_20)
+    lower_band = sma_20 - (2 * std_20)
+    bb_width = upper_band - lower_band
     
-    # === 4h Volume confirmation ===
+    # Bollinger Band Squeeze: width below 20th percentile of lookback
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    
+    # === 12h Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
@@ -84,44 +54,54 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(50, n):  # Start after warmup
         # Get values
-        close_val = prices['close'].iloc[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        adx_val = adx_14_aligned[i]
+        close_val = close[i]
+        sma_val = sma_20[i]
+        upper_val = upper_band[i]
+        lower_val = lower_band[i]
+        bb_width_val = bb_width[i]
+        bb_width_pct = bb_width_percentile[i]
+        ema_val = ema_50_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(upper) or np.isnan(lower) or np.isnan(adx_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(sma_val) or np.isnan(upper_val) or np.isnan(lower_val) or 
+            np.isnan(bb_width_val) or np.isnan(bb_width_pct) or 
+            np.isnan(ema_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Donchian band with strong trend (ADX > 25) and volume
-            if close_val > upper and adx_val > 25 and vol_ratio_val > 1.5:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below lower Donchian band with strong trend (ADX > 25) and volume
-            elif close_val < lower and adx_val > 25 and vol_ratio_val > 1.5:
-                signals[i] = -0.25
-                position = -1
+            # Bollinger Band Squeeze (low volatility) + breakout in trend direction
+            # Squeeze: BB width below 20th percentile of lookback
+            # Long: price breaks above upper band in uptrend (close > EMA50)
+            # Short: price breaks below lower band in downtrend (close < EMA50)
+            if bb_width_pct < 0.2:  # Squeeze condition
+                if close_val > upper_val and close_val > ema_val:  # Long breakout
+                    if vol_ratio_val > 1.5:  # Volume confirmation
+                        signals[i] = 0.25
+                        position = 1
+                elif close_val < lower_val and close_val < ema_val:  # Short breakout
+                    if vol_ratio_val > 1.5:  # Volume confirmation
+                        signals[i] = -0.25
+                        position = -1
         
         elif position == 1:
-            # Long exit: price retouches middle of channel or trend weakens
-            middle = (upper + lower) / 2
-            if close_val < middle or adx_val < 20:
+            # Long exit: price returns to middle Bollinger Band (mean reversion)
+            # or trend reversal (price closes below EMA50)
+            if close_val < sma_val or close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price retouches middle of channel or trend weakens
-            middle = (upper + lower) / 2
-            if close_val > middle or adx_val < 20:
+            # Short exit: price returns to middle Bollinger Band (mean reversion)
+            # or trend reversal (price closes above EMA50)
+            if close_val > sma_val or close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
