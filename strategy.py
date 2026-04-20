@@ -1,10 +1,10 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_R3S3_Fade_Volume"
-timeframe = "6h"
+name = "4h_12h_1d_Price_Action_Confluence_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,11 +12,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop
+    # Get 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_12h) < 2 or len(df_1d) < 2:
         return np.zeros(n)
+    
+    # === 12h: 20-period EMA for trend direction ===
+    close_12h = df_12h['close'].values
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
     # === 1d: Calculate pivot points (standard) ===
     high_1d = df_1d['high'].values
@@ -44,7 +50,7 @@ def generate_signals(prices):
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # === 6h: ATR(14) for volatility and stop loss ===
+    # === 4h: ATR(14) for volatility and stop loss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -63,6 +69,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Get aligned values
+        ema_trend = ema_20_12h_aligned[i]
         pivot = pivot_1d_aligned[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
@@ -75,59 +82,66 @@ def generate_signals(prices):
         current_volume = prices['volume'].iloc[i]
         
         # Skip if any value is NaN
-        if (np.isnan(pivot) or np.isnan(r1) or np.isnan(s1) or
+        if (np.isnan(ema_trend) or np.isnan(pivot) or np.isnan(r1) or np.isnan(s1) or
             np.isnan(r2) or np.isnan(s2) or np.isnan(r3) or np.isnan(s3) or np.isnan(current_atr)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # === Volume condition: current volume > 1.5x 20-period 6h average volume ===
-        if i >= 20:
-            vol_ma = np.mean(prices['volume'].iloc[i-20:i].values)
-            vol_condition = current_volume > 1.5 * vol_ma
+        # === Volume condition: current volume > 1.3x 24-period 4h average volume ===
+        if i >= 24:
+            vol_ma = np.mean(prices['volume'].iloc[i-24:i].values)
+            vol_condition = current_volume > 1.3 * vol_ma
         else:
             vol_condition = False
         
         if position == 0:
-            # Long fade at S3: price breaks below S3 with volume, then reverses up
-            # But we only enter on reversal confirmation: price closes back above S3
-            # Actually, we'll enter when price shows rejection of S3: closes above S3 after being below
-            # Simpler: long when price crosses above S3 with volume (breakout)
-            # Short when price crosses below S3 with volume (breakdown)
-            # But based on the top performer, we want FADE at R3/S3
-            # So: short at R3 rejection, long at S3 rejection
+            # Long conditions:
+            # 1. Price above 12h EMA20 (uptrend)
+            # 2. Price breaks above R1 with volume
+            # 3. Price is below R2 (not overextended)
+            if (current_close > ema_trend and
+                current_close > r1 and
+                vol_condition and
+                current_close < r2):
+                signals[i] = 0.25
+                position = 1
+                entry_price = current_close
             
-            # Long conditions: price shows rejection of S3 (closes above S3 after being near/below)
-            # We'll use: price > S3 AND price was below S3 in previous bar (rejection bounce)
-            # Plus volume confirmation
-            if i >= 1:
-                prev_close = prices['close'].iloc[i-1]
-                # Long: price crosses above S3 (was at or below, now above) with volume
-                if (prev_close <= s3 and current_close > s3 and
-                    vol_condition):
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = current_close
-                
-                # Short: price crosses below S3 (was at or above, now below) with volume
-                elif (prev_close >= s3 and current_close < s3 and
-                      vol_condition):
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = current_close
+            # Short conditions:
+            # 1. Price below 12h EMA20 (downtrend)
+            # 2. Price breaks below S1 with volume
+            # 3. Price is above S2 (not overextended)
+            elif (current_close < ema_trend and
+                  current_close < s1 and
+                  vol_condition and
+                  current_close > s2):
+                signals[i] = -0.25
+                position = -1
+                entry_price = current_close
         
         elif position == 1:
-            # Long exit: price crosses below S1 (strong support) or trend change
-            if current_close < s1:
+            # Long exit conditions:
+            # 1. Price falls below 12h EMA20 (trend change)
+            # 2. Price hits S1 (strong support - take profit)
+            # 3. ATR-based stop loss
+            if (current_close < ema_trend or
+                current_close <= s1 or
+                current_close < entry_price - 2.5 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above R1 (strong resistance) or trend change
-            if current_close > r1:
+            # Short exit conditions:
+            # 1. Price rises above 12h EMA20 (trend change)
+            # 2. Price hits R1 (strong resistance - take profit)
+            # 3. ATR-based stop loss
+            if (current_close > ema_trend or
+                current_close >= r1 or
+                current_close > entry_price + 2.5 * current_atr):
                 signals[i] = 0.0
                 position = 0
             else:
