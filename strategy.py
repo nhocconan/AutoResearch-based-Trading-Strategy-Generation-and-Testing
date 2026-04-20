@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-# 4h_1d_Pivot_R1S1_Breakout_Volume_Only_v2
-# Hypothesis: Breakouts of daily R1/S1 with volume confirmation on 4h timeframe capture
-# strong directional moves in both bull and bear markets. Exit at midpoint of daily range.
-# Reduced trading frequency by tightening volume threshold to 2.5x average volume.
-# Target: 20-50 trades per year per symbol to avoid fee drag.
+# 12h_1w_Pivot_R1S1_Breakout_Volume_Only_v1
+# Hypothesis: Breakouts of weekly R1/S1 with volume confirmation on 12h timeframe capture strong directional moves in both bull and bear markets. Exit at midpoint of weekly range.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_Only_v2"
-timeframe = "4h"
+name = "12h_1w_Pivot_R1S1_Breakout_Volume_Only_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,32 +15,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop for pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data ONCE before loop for pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === Calculate daily Camarilla pivots ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Calculate weekly Camarilla pivots ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Pivot point and range
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
     # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    r1_1w = close_1w + (range_1w * 1.1 / 12)
+    s1_1w = close_1w - (range_1w * 1.1 / 12)
     # Midpoint for exit: (high + low) / 2
-    midpoint_1d = (high_1d + low_1d) / 2.0
+    midpoint_1w = (high_1w + low_1w) / 2.0
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    midpoint_aligned = align_htf_to_ltf(prices, df_1w, midpoint_1w)
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # === 12h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
@@ -78,7 +75,7 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to or below daily midpoint
+            # Long exit: Price returns to or below weekly midpoint
             if close_val <= midpoint_val:
                 signals[i] = 0.0
                 position = 0
@@ -86,7 +83,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to or above daily midpoint
+            # Short exit: Price returns to or above weekly midpoint
             if close_val >= midpoint_val:
                 signals[i] = 0.0
                 position = 0
