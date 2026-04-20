@@ -1,130 +1,151 @@
 #!/usr/bin/env python3
-# 6h_1d_Donchian_Weekly_Pivot_Breakout
-# Hypothesis: Donchian(20) breakout on 6h with weekly pivot direction and volume confirmation.
-# Weekly pivot provides directional bias: only take longs when above weekly pivot, shorts when below.
-# Donchian breakout captures momentum, volume filter avoids false breakouts.
-# Works in bull/bear: pivot adapts to regime, breakout captures trends in both directions.
-# Target: 50-150 total trades over 4 years (~12-37/year) to minimize fee drag.
+# 12h_1w_1d_VWAP_Reversion_Trend
+# Hypothesis: Price reverts to weekly VWAP during ranging markets (identified by weekly ADX < 20) with 1d volume confirmation.
+# In trending markets (weekly ADX > 25), follow the trend by buying when price pulls back to weekly VWAP from above.
+# Works in both bull and bear: mean reversion in ranges, trend following on pullbacks.
+# Uses 12h timeframe for execution, targeting 15-30 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Donchian_Weekly_Pivot_Breakout"
-timeframe = "6h"
+name = "12h_1w_1d_VWAP_Reversion_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get weekly data ONCE before loop
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 5:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === Weekly Pivot Points ===
-    # Using weekly high, low, close
-    weekly_high = df_w['high'].values
-    weekly_low = df_w['low'].values
-    weekly_close = df_w['close'].values
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Calculate pivot point and support/resistance levels
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
+    # === Weekly VWAP (Volume Weighted Average Price) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Convert to numpy arrays
-    pivot = np.asarray(pivot)
-    r1 = np.asarray(r1)
-    s1 = np.asarray(s1)
-    r2 = np.asarray(r2)
-    s2 = np.asarray(s2)
-    r3 = np.asarray(r3)
-    s3 = np.asarray(s3)
+    # Typical price for VWAP calculation
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    vwap_numerator = np.cumsum(typical_price_1w * volume_1w)
+    vwap_denominator = np.cumsum(volume_1w)
+    vwap_1w = np.where(vwap_denominator > 0, vwap_numerator / vwap_denominator, np.nan)
     
-    # Align weekly pivot data to 6h
-    pivot_aligned = align_htf_to_ltf(prices, df_w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_w, s3)
+    # === Weekly ADX for trend strength ===
+    # Calculate +DM, -DM, TR
+    high_shift = np.roll(high_1w, 1)
+    low_shift = np.roll(low_1w, 1)
+    high_shift[0] = high_1w[0]
+    low_shift[0] = low_1w[0]
     
-    # === 6h: Donchian Channel (20-period) ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
+    plus_dm = np.where((high_1w - high_shift) > (low_shift - low_1w), np.maximum(high_1w - high_shift, 0), 0)
+    minus_dm = np.where((low_shift - low_1w) > (high_1w - high_shift), np.maximum(low_shift - low_1w, 0), 0)
     
-    period = 20
-    donchian_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    donchian_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = high_1w[0] - low_1w[0]
+    tr2[0] = np.abs(high_1w[0] - close_1w[0])
+    tr3[0] = np.abs(low_1w[0] - close_1w[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume ratio (current vs 20-period average)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    # Smooth with Wilder's smoothing (equivalent to RMA)
+    def rma(series, period):
+        result = np.full_like(series, np.nan)
+        if len(series) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(series[:period])
+            # Subsequent values: Wilder smoothing
+            for i in range(period, len(series)):
+                result[i] = (result[i-1] * (period-1) + series[i]) / period
+        return result
+    
+    period_adx = 14
+    atr_1w = rma(tr, period_adx)
+    plus_di_1w = 100 * rma(plus_dm, period_adx) / np.where(atr_1w != 0, atr_1w, np.nan)
+    minus_di_1w = 100 * rma(minus_dm, period_adx) / np.where(atr_1w != 0, atr_1w, np.nan)
+    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / np.where((plus_di_1w + minus_di_1w) != 0, (plus_di_1w + minus_di_1w), np.nan)
+    adx_1w = rma(dx_1w, period_adx)
+    
+    # === Daily Volume Ratio (current vs 20-period average) ===
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / np.where(vol_ma20_1d > 0, vol_ma20_1d, np.nan)
+    
+    # Align all weekly and daily data to 12h
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(30, n):  # Start after warmup
         # Get values
-        close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
-        vol_ratio_val = vol_ratio[i]
+        close_val = prices['close'].iloc[i]
+        vwap_val = vwap_1w_aligned[i]
+        adx_val = adx_1w_aligned[i]
+        vol_ratio_val = vol_ratio_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(pivot_val) or np.isnan(r1_val) or np.isnan(s1_val) or
-            np.isnan(r2_val) or np.isnan(s2_val) or np.isnan(r3_val) or
-            np.isnan(s3_val) or np.isnan(donchian_high_val) or
-            np.isnan(donchian_low_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(vwap_val) or np.isnan(adx_val) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high, above weekly pivot, volume confirmation
-            if (high_val > donchian_high_val and  # Breakout above Donchian high
-                close_val > pivot_val and         # Price above weekly pivot (bullish bias)
-                vol_ratio_val > 1.5):             # Volume confirmation
+            # Long conditions:
+            # 1. In ranging market (ADX < 20): price near VWAP with volume confirmation (mean reversion)
+            # 2. In trending market (ADX > 25): price pulls back to VWAP from above with volume (trend following)
+            price_vwap_ratio = close_val / vwap_val
+            
+            if (adx_val < 20 and  # Ranging market
+                0.98 <= price_vwap_ratio <= 1.02 and  # Near VWAP (±2%)
+                vol_ratio_val > 1.3):  # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low, below weekly pivot, volume confirmation
-            elif (low_val < donchian_low_val and   # Breakout below Donchian low
-                  close_val < pivot_val and        # Price below weekly pivot (bearish bias)
-                  vol_ratio_val > 1.5):            # Volume confirmation
+            elif (adx_val > 25 and  # Trending market
+                  price_vwap_ratio > 1.0 and  # Price above VWAP
+                  1.0 <= price_vwap_ratio <= 1.015 and  # Pullback to VWAP from above (0-1.5%)
+                  vol_ratio_val > 1.3):  # Volume confirmation
+                signals[i] = 0.25
+                position = 1
+            # Short conditions (symmetric)
+            elif (adx_val < 20 and  # Ranging market
+                  0.98 <= price_vwap_ratio <= 1.02 and  # Near VWAP (±2%)
+                  vol_ratio_val > 1.3):  # Volume confirmation
+                signals[i] = -0.25
+                position = -1
+            elif (adx_val > 25 and  # Trending market
+                  price_vwap_ratio < 1.0 and  # Price below VWAP
+                  0.985 <= price_vwap_ratio <= 1.0 and  # Pullback to VWAP from below (-1.5% to 0%)
+                  vol_ratio_val > 1.3):  # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price drops below Donchian low or below weekly pivot
-            if low_val < donchian_low_val or close_val < pivot_val:
+            # Long exit: price moves significantly away from VWAP or ADX weakens
+            price_vwap_ratio = close_val / vwap_val
+            if price_vwap_ratio > 1.03 or price_vwap_ratio < 0.99 or adx_val < 18:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises above Donchian high or above weekly pivot
-            if high_val > donchian_high_val or close_val > pivot_val:
+            # Short exit: price moves significantly away from VWAP or ADX weakens
+            price_vwap_ratio = close_val / vwap_val
+            if price_vwap_ratio < 0.97 or price_vwap_ratio > 1.01 or adx_val < 18:
                 signals[i] = 0.0
                 position = 0
             else:
