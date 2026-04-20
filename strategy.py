@@ -3,81 +3,87 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v3"
+name = "4h_1d_Wick_Reversal_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d: Camarilla pivot levels ===
+    # === 1d: Wick rejection signal ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    open_1d = df_1d['open'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels: R1, S1
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    R1 = close_1d + (range_1d * 1.1 / 12)
-    S1 = close_1d - (range_1d * 1.1 / 12)
+    # Bullish rejection: long lower wick > 2x body, close near high
+    body_1d = np.abs(close_1d - open_1d)
+    lower_wick_1d = np.minimum(open_1d, close_1d) - low_1d
+    upper_wick_1d = high_1d - np.maximum(open_1d, close_1d)
     
-    # Align to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    bullish_wick = (lower_wick_1d > 2 * body_1d) & (close_1d > open_1d)
+    bearish_wick = (upper_wick_1d > 2 * body_1d) & (close_1d < open_1d)
+    
+    bullish_wick_aligned = align_htf_to_ltf(prices, df_1d, bullish_wick.astype(float))
+    bearish_wick_aligned = align_htf_to_ltf(prices, df_1d, bearish_wick.astype(float))
     
     # === 4h: Price and volume ===
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume ratio (current vs 20-period average)
+    # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    vol_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient data
+    for i in range(50, n):
         # Get values
         close_val = close[i]
-        vol_ratio_val = vol_ratio[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
+        high_val = high[i]
+        low_val = low[i]
+        bullish_wick_val = bullish_wick_aligned[i]
+        bearish_wick_val = bearish_wick_aligned[i]
+        vol_spike_val = vol_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(R1_val) or np.isnan(S1_val) or np.isnan(vol_ratio_val):
+        if np.isnan(bullish_wick_val) or np.isnan(bearish_wick_val) or np.isnan(vol_spike_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation
-            if close_val > R1_val and vol_ratio_val > 1.5:
+            # Long: bullish 1d wick rejection + volume spike
+            if bullish_wick_val > 0.5 and vol_spike_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation
-            elif close_val < S1_val and vol_ratio_val > 1.5:
+            # Short: bearish 1d wick rejection + volume spike
+            elif bearish_wick_val > 0.5 and vol_spike_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or loss of momentum
-            if close_val < S1_val or vol_ratio_val < 0.8:
+            # Long exit: bearish wick rejection or loss of momentum
+            if bearish_wick_val > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or loss of momentum
-            if close_val > R1_val or vol_ratio_val < 0.8:
+            # Short exit: bullish wick rejection or loss of momentum
+            if bullish_wick_val > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
