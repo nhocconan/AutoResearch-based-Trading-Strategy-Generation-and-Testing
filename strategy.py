@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for regime and trend (once before loop)
+    # Load 1d data for regime and trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -34,7 +34,7 @@ def generate_signals(prices):
     vol_ratio_1d = volume_1d / np.where(vol_ma_20_1d == 0, 1, vol_ma_20_1d)
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # 1d Bollinger Band width for regime detection (choppy vs trending)
+    # 1d Bollinger Bands for regime detection (choppy vs trending)
     bb_period = 20
     bb_std = 2.0
     bb_middle = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
@@ -46,7 +46,9 @@ def generate_signals(prices):
     bb_width_ratio = bb_width / np.where(bb_width_ma == 0, 1, bb_width_ma)
     bb_width_ratio_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ratio)
     
-    # Price data
+    # 4h price data (primary timeframe)
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     
     signals = np.zeros(n)
@@ -109,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_EMA50_VolumeRegime_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_EMA50_VolumeRegime_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
