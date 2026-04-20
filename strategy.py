@@ -1,11 +1,11 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Load daily data ONCE
@@ -30,20 +30,20 @@ def generate_signals(prices):
     # Daily volume moving average (20-period)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily indicators to 4h timeframe
+    # Align daily indicators to 1d timeframe (no shift needed as we're already on 1d)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    # 4h price data
+    # 1d price data
     close = prices['close'].values
     volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if NaN
         if np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]):
             if position != 0:
@@ -61,27 +61,31 @@ def generate_signals(prices):
         # Volume filter: current volume must be above 20-day average
         vol_filter = vol > vol_ma_val
         
+        # Trend filter: EMA50 above EMA200 for bullish, below for bearish
+        bullish_trend = ema_50_val > ema_200_val
+        bearish_trend = ema_50_val < ema_200_val
+        
         if position == 0:
-            # Long: price above EMA200, volume confirmation, and low volatility
-            if price > ema_200_val and vol_filter and atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 40):
+            # Long: bullish trend, price above EMA50, volume confirmation
+            if bullish_trend and price > ema_50_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA50, volume confirmation, and low volatility
-            elif price < ema_50_val and vol_filter and atr_val < np.nanpercentile(atr_14_1d_aligned[:i+1], 40):
+            # Short: bearish trend, price below EMA50, volume confirmation
+            elif bearish_trend and price < ema_50_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below EMA50 or volatility spikes
-            if price < ema_50_val or atr_val > np.nanpercentile(atr_14_1d_aligned[:i+1], 60):
+            # Long exit: bearish trend or price below EMA200
+            if bearish_trend or price < ema_200_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above EMA200 or volatility spikes
-            if price > ema_200_val or atr_val > np.nanpercentile(atr_14_1d_aligned[:i+1], 60):
+            # Short exit: bullish trend or price above EMA200
+            if bullish_trend or price > ema_200_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA50_EMA200_VolumeVolatilityFilter"
-timeframe = "4h"
+name = "1d_EMA50_EMA200_VolumeTrendFilter"
+timeframe = "1d"
 leverage = 1.0
