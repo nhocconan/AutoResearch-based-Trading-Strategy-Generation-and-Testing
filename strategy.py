@@ -3,84 +3,82 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot Reversal with 1d Trend Filter and Volume Confirmation
-# Camarilla pivot levels (R3/S3) act as strong support/resistance in ranging markets.
-# Price rejection at these levels with volume confirmation indicates reversal.
-# 1d EMA50 filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# ATR-based stop loss manages risk. Designed for 4h with selective entries (<50/year).
-# Works in both bull (buy S3 dips in uptrend) and bear (sell R3 rallies in downtrend).
+# Hypothesis: 1d Weekly Trend Filter with Daily Pullback Entry
+# Uses 1-week EMA20 as trend filter - long when price above weekly EMA20, short when below
+# Entry on daily pullback to EMA50 with RSI confirmation (RSI < 40 for long, > 60 for short)
+# Volume confirmation requires volume > 1.3x 20-day average
+# ATR-based stop loss manages risk (2x ATR)
+# Designed for low-frequency trading (target: 15-25 trades/year) to minimize fee drag
+# Weekly trend filter reduces whipsaws in sideways markets
+# Pullback to EMA50 provides good risk-reward entries in trending markets
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 50-period EMA on 1d timeframe for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 20-period EMA on weekly timeframe for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Typical price = (high + low + close) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    typical_price_vals = typical_price.values
-    
-    # Camarilla levels: 
-    # R4 = close + ((high - low) * 1.500)
-    # R3 = close + ((high - low) * 1.250)
-    # R2 = close + ((high - low) * 1.166)
-    # R1 = close + ((high - low) * 1.083)
-    # S1 = close - ((high - low) * 1.083)
-    # S2 = close - ((high - low) * 1.166))
-    # S3 = close - ((high - low) * 1.250)
-    # S4 = close - ((high - low) * 1.500)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
-    
-    camarilla_calc = ((high_1d - low_1d) * 1.250)  # For S3/R3
-    s3_level = close_1d_vals - camarilla_calc
-    r3_level = close_1d_vals + camarilla_calc
-    
-    # Align S3 and R3 to 4h timeframe (using previous day's levels)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
-    
-    # Calculate ATR for stop loss
+    # Daily indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
+    # Daily EMA50 for pullback entries
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # RSI(14) for entry confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Volume filter: volume > 1.3x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.3)
+    
+    # ATR for stop loss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: volume > 1.3x 20-period average
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or \
-           np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema20_1w_aligned[i]) or np.isnan(ema50[i]) or \
+           np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        is_uptrend = close[i] > ema50_1d_aligned[i]
-        is_downtrend = close[i] < ema50_1d_aligned[i]
+        # Determine weekly trend
+        is_uptrend = close[i] > ema20_1w_aligned[i]
+        is_downtrend = close[i] < ema20_1w_aligned[i]
+        
+        # Price relative to daily EMA50
+        near_ema50_long = abs(close[i] - ema50[i]) / ema50[i] < 0.02  # Within 2% of EMA50
+        near_ema50_short = abs(close[i] - ema50[i]) / ema50[i] < 0.02  # Within 2% of EMA50
+        
+        # RSI conditions
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
         
         # Volume confirmation
         has_volume = vol_filter[i]
@@ -88,40 +86,38 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long entry: price rejects S3 (bounces off) + uptrend + volume
-            # Rejection: price > S3 AND price was <= S3 in previous bar
-            long_rejection = (price > s3_aligned[i]) and (prices['close'].iloc[i-1] <= s3_aligned[i-1]) if i > 0 else False
+            # Long entry: weekly uptrend + pullback to EMA50 + RSI oversold + volume
+            long_signal = is_uptrend and near_ema50_long and rsi_oversold and has_volume
             
-            # Short entry: price rejects R3 (fails to break) + downtrend + volume
-            # Rejection: price < R3 AND price was >= R3 in previous bar
-            short_rejection = (price < r3_aligned[i]) and (prices['close'].iloc[i-1] >= r3_aligned[i-1]) if i > 0 else False
+            # Short entry: weekly downtrend + pullback to EMA50 + RSI overbought + volume
+            short_signal = is_downtrend and near_ema50_short and rsi_overbought and has_volume
             
-            if long_rejection and is_uptrend and has_volume:
+            if long_signal:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_rejection and is_downtrend and has_volume:
+            elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: stop loss or R3 test (take profit near resistance)
+            # Long exit: stop loss or weekly trend change
             stop_loss = entry_price - 2.0 * atr[i]
-            take_profit = price >= r3_aligned[i]  # Take profit near R3 level
+            trend_change = close[i] < ema20_1w_aligned[i]  # Weekly trend turns down
             
-            if stop_loss <= 0 or price <= stop_loss or take_profit:
+            if stop_loss <= 0 or price <= stop_loss or trend_change:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: stop loss or S3 test (take profit near support)
+            # Short exit: stop loss or weekly trend change
             stop_loss = entry_price + 2.0 * atr[i]
-            take_profit = price <= s3_aligned[i]  # Take profit near S3 level
+            trend_change = close[i] > ema20_1w_aligned[i]  # Weekly trend turns up
             
-            if stop_loss <= 0 or price >= stop_loss or take_profit:
+            if stop_loss <= 0 or price >= stop_loss or trend_change:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_S3R3_1dTrendFilter_Volume"
-timeframe = "4h"
+name = "1d_WeeklyTrend_DailyPullback_RSI_Volume"
+timeframe = "1d"
 leverage = 1.0
