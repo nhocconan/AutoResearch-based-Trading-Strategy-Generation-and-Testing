@@ -3,83 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h chart with 1w Williams Fractal filter and 1d pivot point breakout.
-# Long when price breaks above R1 pivot with bullish weekly fractal confirmation.
-# Short when price breaks below S1 pivot with bearish weekly fractal confirmation.
-# Williams Fractals require 2-bar confirmation (center bar + 2 bars after) to avoid look-ahead.
-# Uses weekly fractals to filter trend direction and avoid counter-trend trades.
-# Target: 20-40 trades/year per symbol.
+# Hypothesis: 12h chart with 1d ATR-based Donchian breakout + volume confirmation + chop filter.
+# Long when price breaks above 1d Donchian(20) high with volume > 1.5x avg and chop > 61.8 (ranging).
+# Short when price breaks below 1d Donchian(20) low with volume > 1.5x avg and chop > 61.8.
+# Uses 1d chop filter to avoid trending markets where breakouts fail.
+# Target: 15-30 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for pivot points
+    # Load 1d data for Donchian channels and chop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's pivot points (to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # 1d Donchian channels (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    # 1d Chop index (14-period)
+    atr_14 = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).mean().values
+    sum_tr_14 = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr_14 / (atr_14 * 14)) / np.log10(14)
     
-    # Align pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Load 1w data for Williams Fractals
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Williams Fractals: need 5 points (n-2, n-1, n, n+1, n+2)
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] < high[n+1] > high[n+2]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] > low[n+1] < low[n+2]
-    n_w = len(high_1w)
-    bearish_fractal = np.zeros(n_w, dtype=bool)
-    bullish_fractal = np.zeros(n_w, dtype=bool)
-    
-    for i in range(2, n_w - 2):
-        # Bearish fractal pattern
-        if (high_1w[i-2] < high_1w[i-1] and 
-            high_1w[i-1] > high_1w[i] and 
-            high_1w[i] < high_1w[i+1] and 
-            high_1w[i+1] > high_1w[i+2]):
-            bearish_fractal[i] = True
-        
-        # Bullish fractal pattern
-        if (low_1w[i-2] > low_1w[i-1] and 
-            low_1w[i-1] < low_1w[i] and 
-            low_1w[i] > low_1w[i+1] and 
-            low_1w[i+1] < low_1w[i+2]):
-            bullish_fractal[i] = True
-    
-    # Convert to float arrays (1.0 where fractal exists, 0.0 otherwise)
-    bearish_fractal_float = bearish_fractal.astype(float)
-    bullish_fractal_float = bullish_fractal.astype(float)
-    
-    # Align fractals to 6h timeframe with 2-bar confirmation delay
-    # Williams fractals need 2 additional bars after the center bar for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal_float, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal_float, additional_delay_bars=2)
-    
-    # 6h data
+    # 12h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -92,44 +50,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(vol_filter[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        bearish_fractal_val = bearish_fractal_aligned[i] > 0.5  # True if fractal present
-        bullish_fractal_val = bullish_fractal_aligned[i] > 0.5   # True if fractal present
+        high_20_val = high_20_aligned[i]
+        low_20_val = low_20_aligned[i]
+        chop_val = chop_aligned[i]
         vol_ok = vol_filter[i]
         
+        # Chop filter: > 61.8 indicates ranging market (good for breakout fade? but we use for breakout continuation in ranging?)
+        # Actually, chop > 61.8 = ranging, chop < 38.2 = trending
+        # We want breakouts in ranging markets? No, breakouts work better in trending.
+        # Let's reverse: chop < 38.2 = trending (good for breakout)
+        trending = chop_val < 38.2
+        
         if position == 0:
-            # Long: price breaks above R1, bullish weekly fractal, volume
-            if price > r1_val and bullish_fractal_val and vol_ok:
+            # Long: price breaks above Donchian high, trending market, volume
+            if price > high_20_val and trending and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, bearish weekly fractal, volume
-            elif price < s1_val and bearish_fractal_val and vol_ok:
+            # Short: price breaks below Donchian low, trending market, volume
+            elif price < low_20_val and trending and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or bearish fractal appears
-            if price < s1_val or bearish_fractal_val:
+            # Long exit: price breaks below Donchian low or chop increases (rangy)
+            if price < low_20_val or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or bullish fractal appears
-            if price > r1_val or bullish_fractal_val:
+            # Short exit: price breaks above Donchian high or chop increases (rangy)
+            if price > high_20_val or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_WilliamsFractal_1d_Pivot_Breakout_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_1d_Donchian20_ChopFilter_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
