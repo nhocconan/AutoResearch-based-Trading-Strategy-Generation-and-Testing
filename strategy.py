@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Volume_Regime_Strategy
-# Hypothesis: Weekly trend + volume confirmation + daily regime filter (chop) captures major moves while avoiding whipsaws.
-# In bull markets: go long when price above weekly EMA20 with volume surge and low chop.
-# In bear markets: go short when price below weekly EMA20 with volume surge and low chop.
-# Uses weekly EMA for trend, volume spike for confirmation, daily chop filter to avoid ranging markets.
-# Target: 15-25 trades/year to minimize fee drag.
+# 12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter
+# Hypothesis: Daily Camarilla R1/S1 breakouts on 12h timeframe with volume and ATR filter capture institutional moves while avoiding chop.
+# Works in bull markets by catching breaks above R1; in bear markets by catching breaks below S1.
+# Volume filter ensures institutional participation, ATR filter avoids low-volatility false breakouts.
+# Target: 15-30 trades/year to minimize fee drag.
 
-name = "1d_Weekly_Volume_Regime_Strategy"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,73 +23,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend
-    weekly_close = df_weekly['close'].values
-    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_ema20_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema20)
+    # Calculate daily pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily chop filter (avoid ranging markets)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = pivot + (high_1d - low_1d) * 1.1 / 12
+    s1 = pivot - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align daily Camarilla levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume filter: volume > 2.0x 20-period EMA (more stringent to reduce trades)
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > (vol_ema20 * 2.0)
+    
+    # ATR filter: avoid low-volatility breakouts
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First period
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    range_max_min = max_high - min_low
-    range_max_min = np.where(range_max_min == 0, 1e-10, range_max_min)
-    chop = 100 * np.log10(atr.sum() / range_max_min) / np.log10(14)
-    chop = pd.Series(chop).ewm(span=14, adjust=False, min_periods=14).mean().values
-    chop_filter = chop < 61.8  # Trending market when chop < 61.8
-    
-    # Volume confirmation: volume > 2.0x 20-day EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > (vol_ema20 * 2.0)
+    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr_filter = atr > (atr_ma * 0.7)  # Only trade when volatility is above 70% of its 50-period average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 50  # Ensure ATR MA is ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_ema20_aligned[i]) or np.isnan(chop_filter[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(atr_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above weekly EMA20 + volume surge + trending market
-            if close[i] > weekly_ema20_aligned[i] and volume_filter[i] and chop_filter[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R1 + volume + volatility confirmation
+            if close[i] > r1_aligned[i] and volume_filter[i] and atr_filter[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: price below weekly EMA20 + volume surge + trending market
-            elif close[i] < weekly_ema20_aligned[i] and volume_filter[i] and chop_filter[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S1 + volume + volatility confirmation
+            elif close[i] < s1_aligned[i] and volume_filter[i] and atr_filter[i]:
+                signals[i] = -0.30
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price crosses below weekly EMA20 or chop increases (ranging)
-            if close[i] < weekly_ema20_aligned[i] or not chop_filter[i]:
+            # Long: exit if price breaks below pivot (mean reversion) or volatility drops
+            if close[i] < pivot_aligned[i] or not atr_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:
-            # Short: exit if price crosses above weekly EMA20 or chop increases (ranging)
-            if close[i] > weekly_ema20_aligned[i] or not chop_filter[i]:
+            # Short: exit if price breaks above pivot (mean reversion) or volatility drops
+            if close[i] > pivot_aligned[i] or not atr_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
