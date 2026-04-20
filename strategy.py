@@ -1,115 +1,121 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Donchian_Breakout_VolumeTrend_v2
-Concept: Donchian(20) breakout on 4h with volume confirmation and 1d/1w trend filter.
-- Long: Close > 20-bar high AND volume > 1.5x 20-bar volume MA AND 1d close > 1d EMA50 AND 1w close > 1w EMA50
-- Short: Close < 20-bar low AND volume > 1.5x 20-bar volume MA AND 1d close < 1d EMA50 AND 1w close < 1w EMA50
-- Exit: Close crosses 10-bar EMA (adaptive exit)
-- Position sizing: 0.25 (conservative to limit drawdown)
-- Target: ~150 total trades over 4 years (~38/year) to minimize fee drag
-- Works in bull/bear: Trend filter ensures alignment with higher timeframe direction, volume confirms breakout strength
+1d_Ichimoku_TF_Trend_Follow_v1
+Concept: Ichimoku Cloud trend following on daily timeframe with weekly trend filter.
+- Long: Price above Kumo (cloud) AND Tenkan > Kijun AND weekly trend bullish
+- Short: Price below Kumo (cloud) AND Tenkan < Kijun AND weekly trend bearish
+- Exit: Price crosses opposite Kumo boundary (Senkou Span A or B)
+- Uses Kumo twist (Senkou A/B cross) for early trend change detection
+- Position sizing: 0.25
+- Target: 50-100 total trades over 4 years to balance opportunity and cost
+- Ichimoku works in all markets: cloud acts as dynamic S/R, TK cross confirms momentum
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Donchian_Breakout_VolumeTrend_v2"
-timeframe = "4h"
+name = "1d_Ichimoku_TF_Trend_Follow_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d and 1w data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 10:
+    # Get weekly data ONCE before loop for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 52:
         return np.zeros(n)
     
-    # === 1d: EMA50 for trend filter ===
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === 1w: EMA50 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # === 4h: Indicators ===
-    close = prices['close'].values
+    # === Daily: Ichimoku Components (9, 26, 52) ===
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2.0
     
-    # Volume: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2.0
     
-    # 10-period EMA for exit
-    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = ((tenkan + kijun) / 2.0)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2.0)
+    
+    # === Weekly: Trend Filter (EMA 21/55 cross) ===
+    weekly_close = df_weekly['close'].values
+    ema21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema55 = pd.Series(weekly_close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    weekly_bullish = ema21 > ema55  # True when bullish
+    weekly_bearish = ema21 < ema55  # True when bearish
+    
+    # Align weekly trend to daily
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_weekly, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_weekly, weekly_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 52  # Need full Ichimoku calculation
     
     for i in range(start_idx, n):
         # Get values
-        dc_high = high_20[i]
-        dc_low = low_20[i]
-        vol_ma = vol_ma_20[i]
-        vol_current = volume[i]
-        curr_close = close[i]
-        ema_10_val = ema_10[i]
-        ema_1d = ema_50_1d_aligned[i]
-        ema_1w = ema_50_1w_aligned[i]
+        tenkan_val = tenkan[i]
+        kijun_val = kijun[i]
+        senkou_a_val = senkou_a[i]
+        senkou_b_val = senkou_b[i]
+        weekly_bull = weekly_bullish_aligned[i] > 0.5
+        weekly_bear = weekly_bearish_aligned[i] > 0.5
         
         # Skip if any value is NaN
-        if (np.isnan(dc_high) or np.isnan(dc_low) or np.isnan(vol_ma) or 
-            np.isnan(ema_10_val) or np.isnan(ema_1d) or np.isnan(ema_1w)):
+        if (np.isnan(tenkan_val) or np.isnan(kijun_val) or 
+            np.isnan(senkou_a_val) or np.isnan(senkou_b_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.5x 20-period average
-        vol_condition = vol_current > 1.5 * vol_ma
-        
-        # Trend condition: 1d and 1w close above/below their EMA50
-        # Note: We don't have 1d/1w close directly in 4h array, so we approximate
-        # using the aligned EMA - if price is above EMA, trend is up
-        # For simplicity, we use price vs EMA as trend proxy
-        trend_up = curr_close > ema_1d and curr_close > ema_1w
-        trend_down = curr_close < ema_1d and curr_close < ema_1w
+        # Kumo boundaries (cloud top and bottom)
+        upper_kumo = max(senkou_a_val, senkou_b_val)
+        lower_kumo = min(senkou_a_val, senkou_b_val)
         
         if position == 0:
-            # Long: breakout above Donchian high with volume and trend confirmation
-            if curr_close > dc_high and vol_condition and trend_up:
+            # Long: Price above cloud, TK bullish, weekly bullish
+            if (close[i] > upper_kumo and 
+                tenkan_val > kijun_val and 
+                weekly_bull):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below Donchian low with volume and trend confirmation
-            elif curr_close < dc_low and vol_condition and trend_down:
+            # Short: Price below cloud, TK bearish, weekly bearish
+            elif (close[i] < lower_kumo and 
+                  tenkan_val < kijun_val and 
+                  weekly_bear):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close crosses below 10-period EMA
-            if curr_close < ema_10_val:
+            # Long exit: Price crosses below cloud bottom OR TK bearish cross
+            if (close[i] < lower_kumo or 
+                tenkan_val < kijun_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close crosses above 10-period EMA
-            if curr_close > ema_10_val:
+            # Short exit: Price crosses above cloud top OR TK bullish cross
+            if (close[i] > upper_kumo or 
+                tenkan_val > kijun_val):
                 signals[i] = 0.0
                 position = 0
             else:
