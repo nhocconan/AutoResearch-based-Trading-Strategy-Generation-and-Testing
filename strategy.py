@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1d_Pivot_R2S2_MomentumBreakout_v2
-# Hypothesis: Trade momentum breakouts from 1d R2/S2 levels on 12h timeframe with volume confirmation and volatility filter.
-# Uses a 50-period ATR-based volatility filter to avoid trading in extremely low volatility environments.
-# Focuses on clean breaks with strong volume to capture institutional participation.
-# Designed for 12-37 trades per year by requiring multiple confirmations.
+# 4h_1d_Pivot_R2S2_Breakout_Volume
+# Hypothesis: Trade momentum breakouts from 1d R2/S2 levels on 4h timeframe with volume confirmation.
+# Uses 1-day pivot points (R2/S2) as dynamic support/resistance, requiring price to break these levels with elevated volume.
+# Designed for 20-50 trades per year by requiring both price break and volume surge.
+# Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by trading in direction of breakout.
 
-name = "12h_1d_Pivot_R2S2_MomentumBreakout_v2"
-timeframe = "12h"
+name = "4h_1d_Pivot_R2S2_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -28,74 +28,62 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d R2 and S2 levels using previous day's data
+    # Calculate 1-day pivot points and R2/S2 levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point and range
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    # Pivot point = (H + L + C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Daily range
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: R2 and S2 (momentum breakout levels)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
+    # Camarilla-style R2 and S2 levels (commonly used breakout levels)
+    # R2 = Close + 1.1 * Range / 6
+    # S2 = Close - 1.1 * Range / 6
+    r2_1d = close_1d + (1.1 * range_1d) / 6.0
+    s2_1d = close_1d - (1.1 * range_1d) / 6.0
     
-    # Align 1d levels to 12h timeframe
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Align 1d levels to 4h timeframe (waits for 1d bar to close)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
     # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for volatility filter (50-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Volatility filter: only trade when ATR is above its 50-period median
-        atr_median = np.nanmedian(atr[max(0, i-49):i+1])
-        if atr[i] < 0.5 * atr_median:  # Avoid extremely low volatility
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above R2 with volume surge
-            if (close[i] > r2_aligned[i] * 1.003 and 
-                volume[i] > 2.0 * volume_ma[i]):
+            # Long: price breaks above R2 with volume surge (2x average)
+            if close[i] > r2_aligned[i] and volume[i] > 2.0 * volume_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below S2 with volume surge
-            elif (close[i] < s2_aligned[i] * 0.997 and 
-                  volume[i] > 2.0 * volume_ma[i]):
+            # Short: price breaks below S2 with volume surge (2x average)
+            elif close[i] < s2_aligned[i] and volume[i] > 2.0 * volume_ma[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below S2 or volume drops significantly
-            if close[i] < s2_aligned[i] * 0.997:
+            # Long: hold until price breaks back below S2 (reversal signal)
+            if close[i] < s2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above R2 or volume drops significantly
-            if close[i] > r2_aligned[i] * 1.003:
+            # Short: hold until price breaks back above R2 (reversal signal)
+            if close[i] > r2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
