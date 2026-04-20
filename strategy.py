@@ -1,144 +1,115 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_RSI_Pivot_Confluence_v1
-Concept: RSI mean reversion with 4h/1d trend filter and pivot confluence.
-- Long: RSI(14) < 30 AND 4h EMA(21) > EMA(55) AND 1d EMA(55) > EMA(89) AND price > weekly pivot S1
-- Short: RSI(14) > 70 AND 4h EMA(21) < EMA(55) AND 1d EMA(55) < EMA(89) AND price < weekly pivot R1
-- Exit: RSI crosses back to neutral (40-60) or opposite extreme
-- Session filter: 08-20 UTC only
-- Position sizing: 0.20
-- Target: 80-120 total trades over 4 years (20-30/year)
-- Works in bull/bear: Uses higher timeframe trend alignment to avoid counter-trend trades
+6h_1w_1d_RSI_Divergence_Momentum
+Concept: 6s RSI divergence with weekly trend and daily momentum confirmation.
+- Long: Weekly EMA(20) > EMA(50) AND daily RSI(14) < 30 (oversold) AND 6h RSI(14) > previous 6h RSI(14) (bullish divergence)
+- Short: Weekly EMA(20) < EMA(50) AND daily RSI(14) > 70 (overbought) AND 6h RSI(14) < previous 6h RSI(14) (bearish divergence)
+- Exit: RSI crosses back to neutral (40-60 range) or weekly trend flips
+- Position sizing: 0.25
+- Target: 50-150 total trades over 4 years
+- Works in bull/bear: Weekly trend filter adapts, RSI divergence captures exhaustion points
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_RSI_Pivot_Confluence_v1"
-timeframe = "1h"
+name = "6h_1w_1d_RSI_Divergence_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Get weekly data for pivots ONCE before loop
+    # Get weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 10:
         return np.zeros(n)
     
-    # === 4h: EMA Trend Filter ===
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55_4h = pd.Series(close_4h).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    ema55_4h_aligned = align_htf_to_ltf(prices, df_4h, ema55_4h)
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
     
-    # === 1d: EMA Trend Filter ===
-    close_1d = df_1d['close'].values
-    ema55_1d = pd.Series(close_1d).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    ema55_1d_aligned = align_htf_to_ltf(prices, df_1d, ema55_1d)
-    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
-    
-    # === Weekly: Pivot Points (using prior week) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === Weekly: EMA Trend Filter (20 and 50) ===
     close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate pivots based on prior week
-    pivot = (high_1w + low_1w + close_1w) / 3
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
+    # Align weekly EMAs to 6h
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # === Daily: RSI (14) ===
+    close_1d = df_1d['close'].values
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.fillna(50).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # === 1h: RSI ===
+    # === 6h: RSI (14) for divergence detection ===
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_6h = 100 - (100 / (1 + rs))
+    rsi_6h_values = rsi_6h.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data
+    start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        # Session check
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Get values
-        rsi_val = rsi[i]
-        ema21_4h_val = ema21_4h_aligned[i]
-        ema55_4h_val = ema55_4h_aligned[i]
-        ema55_1d_val = ema55_1d_aligned[i]
-        ema89_1d_val = ema89_1d_aligned[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        ema20 = ema_20_1w_aligned[i]
+        ema50 = ema_50_1w_aligned[i]
+        rsi_daily = rsi_1d_aligned[i]
+        rsi_current = rsi_6h_values[i]
+        rsi_previous = rsi_6h_values[i-1]
         
         # Skip if any value is NaN
-        if (np.isnan(rsi_val) or np.isnan(ema21_4h_val) or np.isnan(ema55_4h_val) or
-            np.isnan(ema55_1d_val) or np.isnan(ema89_1d_val) or np.isnan(pivot_val) or
-            np.isnan(r1_val) or np.isnan(s1_val)):
+        if (np.isnan(ema20) or np.isnan(ema50) or np.isnan(rsi_daily) or 
+            np.isnan(rsi_current) or np.isnan(rsi_previous)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold + 4h/1d uptrend + price above S1
-            if (rsi_val < 30 and ema21_4h_val > ema55_4h_val and 
-                ema55_1d_val > ema89_1d_val and close[i] > s1_val):
-                signals[i] = 0.20
+            # Long: weekly uptrend + daily oversold + bullish RSI divergence
+            if ema20 > ema50 and rsi_daily < 30 and rsi_current > rsi_previous:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought + 4h/1d downtrend + price below R1
-            elif (rsi_val > 70 and ema21_4h_val < ema55_4h_val and 
-                  ema55_1d_val < ema89_1d_val and close[i] < r1_val):
-                signals[i] = -0.20
+            # Short: weekly downtrend + daily overbought + bearish RSI divergence
+            elif ema20 < ema50 and rsi_daily > 70 and rsi_current < rsi_previous:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI returns to neutral or breaks down
-            if rsi_val > 40 or close[i] < s1_val:
+            # Long exit: RSI returns to neutral or weekly trend flips
+            if rsi_current > 40 or ema20 < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI returns to neutral or breaks up
-            if rsi_val < 60 or close[i] > r1_val:
+            # Short exit: RSI returns to neutral or weekly trend flips
+            if rsi_current < 60 or ema20 > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
