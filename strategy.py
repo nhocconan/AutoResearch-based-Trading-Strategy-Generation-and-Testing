@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1-week directional filter and volume confirmation
-# - Long when price breaks above Donchian(20) high and 1-week EMA21 shows uptrend (price > EMA21)
-# - Short when price breaks below Donchian(20) low and 1-week EMA21 shows downtrend (price < EMA21)
-# - Volume must be > 1.5x 20-period average to confirm breakout strength
-# - Weekly EMA21 provides strong trend filter to avoid counter-trend trades
-# - Designed for 6h timeframe with selective breakout entries to avoid overtrading
+# Hypothesis: 12h ADX + 1d Volume Spike + 12h Price Momentum
+# - ADX(14) > 25 on 12h indicates trending market (avoids chop)
+# - Volume spike on 1d (>1.5x 20-period average) confirms institutional interest
+# - Price momentum: 12h close > open (bullish) or close < open (bearish)
+# - Long when ADX>25, volume spike, and bullish candle
+# - Short when ADX>25, volume spike, and bearish candle
+# - Designed for 12h timeframe with selective entries to avoid overtrading
 # - Target: 12-37 trades per year per symbol (50-150 total over 4 years)
 
 def generate_signals(prices):
@@ -16,71 +17,85 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for EMA21 calculation (weekly trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for volume analysis
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
     
-    # Calculate EMA21 on 1w timeframe
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate volume spike on 1d: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = vol_1d > (1.5 * vol_ma_20)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
-    # Align 1w EMA21 to 6h timeframe
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate ADX on 12h timeframe
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Calculate Donchian channels on 6h timeframe
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    volume_6h = prices['volume'].values
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    highest_high_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate volume average for confirmation
-    volume_avg_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_smooth / atr
+    minus_di = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Price momentum: bullish/bearish candle
+    bullish = close > prices['open'].values
+    bearish = close < prices['open'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if NaN in indicators
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(volume_avg_20[i])):
+        if np.isnan(adx[i]) or np.isnan(volume_spike_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
-        volume = volume_6h[i]
-        donchian_high = highest_high_20[i]
-        donchian_low = lowest_low_20[i]
-        ema21w = ema_21_1w_aligned[i]
-        vol_avg = volume_avg_20[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume > 1.5 * vol_avg
-        
         if position == 0:
-            # Long entry: price breaks above Donchian high + weekly uptrend + volume confirmation
-            if price > donchian_high and price > ema21w and volume_confirmed:
+            # Long entry: ADX>25, volume spike, bullish candle
+            if adx[i] > 25 and volume_spike_aligned[i] and bullish[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low + weekly downtrend + volume confirmation
-            elif price < donchian_low and price < ema21w and volume_confirmed:
+            # Short entry: ADX>25, volume spike, bearish candle
+            elif adx[i] > 25 and volume_spike_aligned[i] and bearish[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or weekly trend turns down
-            if price < donchian_low or price < ema21w:
+            # Long exit: ADX drops below 20 or opposite signal
+            if adx[i] < 20 or (adx[i] > 25 and volume_spike_aligned[i] and bearish[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or weekly trend turns up
-            if price > donchian_high or price > ema21w:
+            # Short exit: ADX drops below 20 or opposite signal
+            if adx[i] < 20 or (adx[i] > 25 and volume_spike_aligned[i] and bullish[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_1wEMA21_VolumeConfirmation"
-timeframe = "6h"
+name = "12h_ADX_VolumeSpike_Momentum"
+timeframe = "12h"
 leverage = 1.0
