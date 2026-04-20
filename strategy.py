@@ -1,3 +1,4 @@
+#%%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -42,7 +43,7 @@ def generate_signals(prices):
     ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
     
-    # Main timeframe data (12h)
+    # Main timeframe data (4h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -108,6 +109,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_EMA34_Trend_Regime_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_1d_1w_EMA34_Trend_Regime_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
+# %%
