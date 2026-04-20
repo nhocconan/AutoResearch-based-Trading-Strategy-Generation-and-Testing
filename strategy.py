@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-4h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v2
-Concept: 4h timeframe with daily pivot point breakout, volume confirmation, and EMA trend filter.
+6h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1
+Concept: 6h timeframe with daily pivot point breakout, volume confirmation, and EMA trend filter.
 - Uses daily pivot points (R1, S1) as key support/resistance levels
-- Long when price breaks above R1 with volume confirmation and above 4h EMA50
-- Short when price breaks below S1 with volume confirmation and below 4h EMA50
+- Long when price breaks above R1 with volume confirmation and above 6h EMA50
+- Short when price breaks below S1 with volume confirmation and below 6h EMA50
 - Exit when price returns to central pivot point (mean reversion)
-- Conservative sizing (0.20) to manage drawdown and reduce trade frequency
-- Added minimum hold period of 4 bars to prevent whipsaw
+- Conservative sizing (0.25) to manage drawdown
+- Works in bull/bear: Pivot points adapt to market conditions, volume confirms breakouts
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v2"
-timeframe = "4h"
+name = "6h_1d_Pivot_R1S1_Breakout_Volume_Conservative_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,23 +37,22 @@ def generate_signals(prices):
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 6h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 4h: EMA50 trend filter ===
+    # === 6h: EMA50 trend filter ===
     close = prices['close'].values
     ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # === 4h: Volume ratio (current vs 20-period average) ===
+    # === 6h: Volume ratio (current vs 20-period average) ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_held = 0  # Track bars held to prevent whipsaw
     
     start_idx = 50  # Ensure enough data for EMA50
     
@@ -72,11 +71,7 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_held = 0
             continue
-        
-        if position != 0:
-            bars_held += 1
         
         if position == 0:
             # Long: Price breaks above R1 with volume confirmation and above EMA50
@@ -84,33 +79,27 @@ def generate_signals(prices):
             vol_confirm = vol_ratio_val > 1.3  # Volume above average
             
             if breakout_long and vol_confirm and close_val > ema50_val:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-                bars_held = 0
             # Short: Price breaks below S1 with volume confirmation and below EMA50
             elif close_val < s1_val and vol_confirm and close_val < ema50_val:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
-                bars_held = 0
         
         elif position == 1:
             # Long exit: Price returns to or below central pivot (mean reversion)
-            # OR minimum hold period of 4 bars passed and price below EMA50
-            if close_val <= pivot_val or (bars_held >= 4 and close_val < ema50_val):
+            if close_val <= pivot_val:
                 signals[i] = 0.0
                 position = 0
-                bars_held = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Short exit: Price returns to or above central pivot (mean reversion)
-            # OR minimum hold period of 4 bars passed and price above EMA50
-            if close_val >= pivot_val or (bars_held >= 4 and close_val > ema50_val):
+            if close_val >= pivot_val:
                 signals[i] = 0.0
                 position = 0
-                bars_held = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
