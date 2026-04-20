@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Confirmation and ADX Trend Filter
-Hypothesis: In trending markets, price breaks out of the 20-period Donchian channel with strong volume.
-The ADX filter ensures we only trade in trending conditions (ADX > 25), avoiding whipsaws in ranging markets.
-Volume confirmation (> 1.5x average) filters out weak breakouts.
-This combination works in both bull and bear markets by capturing strong directional moves.
-Target: 25-40 trades per year by requiring multiple confirmations.
+12h KAMA Direction + RSI + Chop Filter
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets.
+Combined with RSI for momentum confirmation and Choppiness Index to filter ranging conditions, this strategy avoids whipsaws.
+Trades only when KAMA slope confirms trend, RSI is not extreme, and market is trending (CHOP < 61.8).
+Targets 12-37 trades per year by requiring confluence of three filters, reducing false signals and fee impact.
+Works in bull markets via trend continuation and in bear markets via avoidance of false breakouts during ranges.
 """
 
 import numpy as np
@@ -14,20 +14,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for ADX calculation
+    # Load daily data once for KAMA, RSI, and Choppiness Index
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 50:
         return np.zeros(n)
     
+    close_daily = df_daily['close'].values
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
     
-    # Calculate ADX (14-period)
-    # True Range
+    # Calculate KAMA ( Kaufman Adaptive Moving Average )
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(close_daily - np.roll(close_daily, 10))
+    change[0:10] = np.abs(close_daily[0:10] - close_daily[0])
+    volatility = np.sum(np.abs(np.diff(close_daily, prepend=close_daily[0])), axis=0) if False else None
+    # Correct volatility calculation: sum of absolute changes over 10 periods
+    volatility = np.zeros_like(close_daily)
+    for i in range(len(close_daily)):
+        if i < 10:
+            volatility[i] = np.sum(np.abs(np.diff(close_daily[0:i+1]))) if i > 0 else 0
+        else:
+            volatility[i] = np.sum(np.abs(np.diff(close_daily[i-9:i+1])))
+    er = np.zeros_like(close_daily)
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close_daily)
+    kama[0] = close_daily[0]
+    for i in range(1, len(close_daily)):
+        kama[i] = kama[i-1] + sc[i] * (close_daily[i] - kama[i-1])
+    
+    # Calculate RSI(14)
+    delta = np.diff(close_daily, prepend=close_daily[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate Choppiness Index (CHOP) over 14 periods
+    atr = np.zeros_like(close_daily)
     tr1 = np.abs(high_daily - low_daily)
     tr2 = np.abs(high_daily - np.roll(close_daily, 1))
     tr3 = np.abs(low_daily - np.roll(close_daily, 1))
@@ -35,84 +65,67 @@ def generate_signals(prices):
     tr2[0] = np.abs(high_daily[0] - close_daily[0])
     tr3[0] = np.abs(low_daily[0] - close_daily[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_daily).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_daily).rolling(window=14, min_periods=14).min().values
+    chop = np.where((max_high - min_low) != 0, 100 * np.log10(atr / (max_high - min_low)) / np.log10(14), 50)
     
-    # Directional Movement
-    up_move = np.diff(high_daily, prepend=high_daily[0])
-    down_move = -np.diff(low_daily, prepend=low_daily[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Align daily indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_daily, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_daily, rsi)
+    chop_aligned = align_htf_to_ltf(prices, df_daily, chop)
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di_14 = 100 * plus_dm_14 / np.where(tr_14 == 0, 1, tr_14)
-    minus_di_14 = 100 * minus_dm_14 / np.where(tr_14 == 0, 1, tr_14)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / np.where((plus_di_14 + minus_di_14) == 0, 1, (plus_di_14 + minus_di_14))
-    adx_daily = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align daily ADX to 4h timeframe
-    adx_daily_aligned = align_htf_to_ltf(prices, df_daily, adx_daily)
-    
-    # Main timeframe data (4h)
+    # Main timeframe data (12h)
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(adx_daily_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        adx = adx_daily_aligned[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
+        chop_val = chop_aligned[i]
         vol_current = volume[i]
         
         # Volume filter: current volume > 1.5x 20-period average
         vol_ma = np.mean(volume[max(0, i-20):i]) if i >= 20 else volume[i]
         vol_ok = vol_current > 1.5 * vol_ma
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx > 25
+        # KAMA slope: positive if current > prior, negative if current < prior
+        kama_slope = kama_val - kama_aligned[i-1] if i > 0 else 0
         
         if position == 0:
-            # Long breakout: price breaks above upper channel with volume and trend confirmation
-            if price > upper_channel and vol_ok and trending:
+            # Long: price above KAMA, RSI not overbought, market trending (CHOP < 61.8), volume confirmation
+            if price > kama_val and rsi_val < 70 and chop_val < 61.8 and vol_ok and kama_slope > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below lower channel with volume and trend confirmation
-            elif price < lower_channel and vol_ok and trending:
+            # Short: price below KAMA, RSI not oversold, market trending (CHOP < 61.8), volume confirmation
+            elif price < kama_val and rsi_val > 30 and chop_val < 61.8 and vol_ok and kama_slope < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below lower channel or trend weakens
-            if price < lower_channel or adx < 20:
+            # Exit long: price crosses below KAMA or RSI overbought
+            if price < kama_val or rsi_val > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above upper channel or trend weakens
-            if price > upper_channel or adx < 20:
+            # Exit short: price crosses above KAMA or RSI oversold
+            if price > kama_val or rsi_val < 25:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADXFilter"
-timeframe = "4h"
+name = "12h_KAMA_Direction_RSI_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
