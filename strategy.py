@@ -1,147 +1,113 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Keltner_Adaptive_Momentum_v1
-Concept: Adaptive Keltner channel with momentum confirmation for trend capture in all regimes.
-- Long: Close > upper_Keltner(ATR multiplier adapts to volatility regime) AND RSI > 50
-- Short: Close < lower_Keltner AND RSI < 50
-- Exit: Opposite Keltner band touch (long exits at lower band, short at upper)
-- Uses 1d trend filter (price > 200 EMA) and 1w volatility regime for adaptive bands
-- Position sizing: 0.28 (balanced for risk/return)
-- Target: ~120 total trades over 4 years to avoid fee drag
-- Works in bull/bear: Adaptive bands prevent whipsaw in high vol, trend filter avoids counter-trend
+4h_1d_1w_TRIX_VolumeSpike_Momentum_v1
+Concept: TRIX momentum with volume spike confirmation and trend filter from weekly EMA.
+- TRIX(12) crossing zero line with volume > 1.8x 20-period average for entry
+- Long: TRIX crosses above zero, volume spike, close > weekly EMA200
+- Short: TRIX crosses below zero, volume spike, close < weekly EMA200
+- Exit: TRIX crosses back through zero in opposite direction
+- Position sizing: 0.28 (balanced for trend capture and drawdown control)
+- Target: ~80-120 trades over 4 years to minimize fee drag
+- Works in bull/bear: TRIX catches momentum shifts, volume filter avoids false signals, weekly EMA ensures trend alignment
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Keltner_Adaptive_Momentum_v1"
+name = "4h_1d_1w_TRIX_VolumeSpike_Momentum_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Get 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 50 or len(df_1w) < 20:
+    if len(df_1d) < 30 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 1d: 200 EMA for trend filter ===
+    # === 1d: TRIX Calculation ===
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # EMA1
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA2
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA3
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX = (EMA3 - prev EMA3) / prev EMA3 * 100
+    trix = np.zeros_like(close_1d)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    trix[0] = 0
     
-    # === 1w: ATR for volatility regime (adaptive multiplier) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === 1w: EMA200 for trend filter ===
     close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # True Range for 1w
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align indicators to 4h
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # ATR(20) on 1w
-    atr_20_1w = pd.Series(tr_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volatility regime: normalize ATR by price
-    atr_norm_1w = atr_20_1w / close_1w
-    atr_norm_ma_1w = pd.Series(atr_norm_1w).rolling(window=10, min_periods=10).mean().values
-    
-    # Adaptive ATR multiplier: higher in high vol, lower in low vol
-    # Base multiplier 1.5, scales with volatility percentile
-    atr_multiplier_base = 1.5
-    atr_percentile = pd.Series(atr_norm_1w).rolling(window=50, min_periods=20).rank(pct=True).values
-    atr_multiplier = atr_multiplier_base * (0.5 + atr_percentile)  # ranges from 0.75x to 2.25x base
-    
-    atr_multiplier_aligned = align_htf_to_ltf(prices, df_1w, atr_multiplier)
-    
-    # === 4h: Price, ATR, RSI for Keltner channels ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 4h: Indicators ===
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Typical Price for Keltner
-    tp = (high + low + close) / 3.0
-    
-    # ATR(10) for 4h
-    tr1_4h = np.abs(high[1:] - low[1:])
-    tr2_4h = np.abs(high[1:] - close[:-1])
-    tr3_4h = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[np.max([tr1_4h[0], tr2_4h[0], tr3_4h[0]])], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
-    atr_10_4h = pd.Series(tr_4h).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # EMA(20) of Typical Price for middle band
-    ema_tp_20 = pd.Series(tp).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Adaptive Keltner bands
-    upper_keltner = ema_tp_20 + (atr_10_4h * atr_multiplier_aligned)
-    lower_keltner = ema_tp_20 - (atr_10_4h * atr_multiplier_aligned)
-    
-    # RSI(14) for momentum confirmation
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend first value as 50 (neutral)
-    rsi = np.concatenate([[50.0], rsi])
+    # Volume: 20-period average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 20  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
         # Get values
-        upper_kelt = upper_keltner[i]
-        lower_kelt = lower_keltner[i]
-        ema_200 = ema_200_1d_aligned[i]
-        rsi_val = rsi[i]
+        trix_val = trix_aligned[i]
+        trix_prev = trix_aligned[i-1] if i > 0 else 0
+        ema200_val = ema200_1w_aligned[i]
+        vol_ma_val = vol_ma[i]
+        current_volume = volume[i]
         current_close = close[i]
         
         # Skip if any value is NaN
-        if (np.isnan(upper_kelt) or np.isnan(lower_kelt) or 
-            np.isnan(ema_200) or np.isnan(rsi_val)):
+        if (np.isnan(trix_val) or np.isnan(trix_prev) or np.isnan(ema200_val) or 
+            np.isnan(vol_ma_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price > 200 EMA for long bias, < for short bias
-        long_bias = current_close > ema_200
-        short_bias = current_close < ema_200
+        # Volume condition: current volume > 1.8x 20-period average
+        vol_condition = current_volume > 1.8 * vol_ma_val
+        
+        # TRIX zero cross detection
+        trix_cross_up = trix_prev <= 0 and trix_val > 0
+        trix_cross_down = trix_prev >= 0 and trix_val < 0
         
         if position == 0:
-            # Long: price above upper Keltner with bullish momentum and trend
-            if current_close > upper_kelt and rsi_val > 50 and long_bias:
+            # Long: TRIX crosses up through zero with volume and above weekly EMA200
+            if trix_cross_up and vol_condition and current_close > ema200_val:
                 signals[i] = 0.28
                 position = 1
-            # Short: price below lower Keltner with bearish momentum and trend
-            elif current_close < lower_kelt and rsi_val < 50 and short_bias:
+            # Short: TRIX crosses down through zero with volume and below weekly EMA200
+            elif trix_cross_down and vol_condition and current_close < ema200_val:
                 signals[i] = -0.28
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches or crosses lower Keltner (mean reversion)
-            if current_close < lower_kelt:
+            # Long exit: TRIX crosses back down through zero
+            if trix_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.28
         
         elif position == -1:
-            # Short exit: price touches or crosses upper Keltner (mean reversion)
-            if current_close > upper_kelt:
+            # Short exit: TRIX crosses back up through zero
+            if trix_cross_up:
                 signals[i] = 0.0
                 position = 0
             else:
