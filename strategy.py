@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_VolumeTrend_v1"
-timeframe = "12h"
+name = "1h_4d_Camarilla_R1S1_Breakout_VolumeTrend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -40,7 +40,7 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align to 12h timeframe
+    # Align to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
@@ -51,15 +51,26 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Price Trend Filter: 12h EMA50 > EMA200 for long, < for short ===
+    # === Price Trend Filter: 1h EMA50 > EMA200 for long, < for short ===
     close_series = pd.Series(prices['close'].values)
     ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
     
+    # === Session Filter: 08-20 UTC ===
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
+        # Skip if outside session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Get values
         close_val = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
@@ -81,11 +92,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Break above R1 with volume confirmation and uptrend (EMA50 > EMA200)
             if close_val > r1_val and vol_ratio_val > 2.0 and ema50_val > ema200_val:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: Break below S1 with volume confirmation and downtrend (EMA50 < EMA200)
             elif close_val < s1_val and vol_ratio_val > 2.0 and ema50_val < ema200_val:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -94,7 +105,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Short exit: Price returns above pivot OR trend breaks up
@@ -102,6 +113,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
