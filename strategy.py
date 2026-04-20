@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_1d_TRIX_SignalLine_Crossover_VolumeConfirm_V1
-# Hypothesis: On 12h timeframe, TRIX (12-period) crossing above/below its signal line (9-period EMA of TRIX)
-# indicates momentum shifts. Combined with 1d ADX > 25 for trending markets and volume > 1.5x 20-period MA,
-# this captures sustained moves. In ranging markets (ADX < 25), we fade at 1d Bollinger Bands (20,2) with volume.
-# Targets 15-35 trades/year by requiring TRIX crossover + volume + regime filter.
+# 4h_1d_Donchian_Breakout_Volume_Trend
+# Hypothesis: On 4h timeframe, trade Donchian channel breakouts with 1d trend filter and volume confirmation.
+# In bull markets, breakouts above upper band with strong volume continue upward.
+# In bear markets, breakouts below lower band with strong volume continue downward.
+# Uses 1d ADX to filter trend strength and avoid whipsaws in ranging markets.
+# Targets 20-40 trades/year by requiring strong volume (2x average) and ADX > 25.
 
-name = "12h_1d_TRIX_SignalLine_Crossover_VolumeConfirm_V1"
-timezone = "UTC"
-timeframe = "12h"
+name = "4h_1d_Donchian_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,33 +26,13 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d TRIX (12-period) and signal line (9-period EMA of TRIX)
-    close_1d = df_1d['close'].values
-    
-    # Triple EMA for TRIX
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    
-    # TRIX = 100 * (EMA3 - previous EMA3) / previous EMA3
-    trix = np.full_like(close_1d, np.nan)
-    trix[13:] = 100 * (ema3[13:] - ema3[12:-1]) / ema3[12:-1]
-    
-    # Signal line = 9-period EMA of TRIX
-    signal_line = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # Calculate 1d Bollinger Bands (20,2) for ranging markets
-    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
-    
-    # Calculate 1d ADX (14-period) for regime filter
+    # Calculate 1d ADX for trend filter (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
     tr1 = high_1d[1:] - low_1d[1:]
@@ -86,74 +66,56 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = smooth_wilder(dx, 14)
     
-    # Align 1d indicators to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    signal_line_aligned = align_htf_to_ltf(prices, df_1d, signal_line)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume average for spike detection (20-period MA)
+    # Calculate 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Volume average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are ready
+    start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix_aligned[i]) or np.isnan(signal_line_aligned[i]) or
-            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Trending market (ADX > 25): TRIX crossover with volume confirmation
-            if adx_aligned[i] > 25:
-                # Bullish crossover: TRIX crosses above signal line
-                if (trix_aligned[i] > signal_line_aligned[i] and 
-                    trix_aligned[i-1] <= signal_line_aligned[i-1] and
-                    volume[i] > 1.5 * volume_ma[i]):
+            # Look for breakouts with volume confirmation and trend filter
+            if adx_aligned[i] > 25:  # Only trade in trending markets
+                # Long breakout above upper Donchian band with volume
+                if (close[i] > highest_high[i] and 
+                    volume[i] > 2.0 * volume_ma[i]):
                     signals[i] = 0.30
                     position = 1
-                # Bearish crossover: TRIX crosses below signal line
-                elif (trix_aligned[i] < signal_line_aligned[i] and 
-                      trix_aligned[i-1] >= signal_line_aligned[i-1] and
-                      volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = -0.30
-                    position = -1
-            # Ranging market (ADX < 25): fade at Bollinger Bands with volume
-            elif adx_aligned[i] < 25:
-                # Long at lower band with volume
-                if (close[i] <= lower_bb_aligned[i] * 1.01 and 
-                    close[i] >= lower_bb_aligned[i] * 0.99 and
-                    volume[i] > 1.5 * volume_ma[i]):
-                    signals[i] = 0.30
-                    position = 1
-                # Short at upper band with volume
-                elif (close[i] >= upper_bb_aligned[i] * 0.99 and 
-                      close[i] <= upper_bb_aligned[i] * 1.01 and
-                      volume[i] > 1.5 * volume_ma[i]):
+                # Short breakdown below lower Donchian band with volume
+                elif (close[i] < lowest_low[i] and 
+                      volume[i] > 2.0 * volume_ma[i]):
                     signals[i] = -0.30
                     position = -1
         
         elif position == 1:
-            # Long exit: TRIX crosses below signal line or ADX drops to ranging
-            if (trix_aligned[i] < signal_line_aligned[i] and 
-                trix_aligned[i-1] >= signal_line_aligned[i-1]) or \
-               (adx_aligned[i] < 25):
+            # Long exit: reverse when price crosses below midline or ADX weakens
+            midline = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] < midline or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: TRIX crosses above signal line or ADX drops to ranging
-            if (trix_aligned[i] > signal_line_aligned[i] and 
-                trix_aligned[i-1] <= signal_line_aligned[i-1]) or \
-               (adx_aligned[i] < 25):
+            # Short exit: reverse when price crosses above midline or ADX weakens
+            midline = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] > midline or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
