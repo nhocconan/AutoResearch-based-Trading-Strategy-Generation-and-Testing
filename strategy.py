@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Get daily data ONCE before loop
@@ -52,16 +52,16 @@ def generate_signals(prices):
     adx_1d = wilder_smooth(dx, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 55-period Donchian channels for stronger breakouts
-    donch_high_1d = pd.Series(high_1d).rolling(window=55, min_periods=55).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=55, min_periods=55).min().values
+    # Calculate 20-period Donchian channels
+    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
     donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Calculate 50-period average volume
+    # Calculate 20-period average volume
     volume_1d = df_1d['volume'].values
-    vol_avg_50 = pd.Series(volume_1d).rolling(window=50, min_periods=50).mean().values
-    vol_avg_50_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_50)
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     # Session filter: 8-20 UTC
     hours = pd.DatetimeIndex(prices["open_time"]).hour  # pre-compute before loop
@@ -69,7 +69,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Session filter: only trade 8-20 UTC
         hour = hours[i]
         if hour < 8 or hour > 20:
@@ -84,7 +84,7 @@ def generate_signals(prices):
         donch_high_val = donch_high_1d_aligned[i]
         donch_low_val = donch_low_1d_aligned[i]
         vol_val = prices['volume'].iloc[i]
-        vol_avg_val = vol_avg_50_aligned[i]
+        vol_avg_val = vol_avg_20_aligned[i]
         
         # Skip if any value is NaN
         if (np.isnan(adx_val) or np.isnan(donch_high_val) or 
@@ -95,26 +95,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Strong trend (ADX > 30), price breaks above 55-period Donchian high, volume above average
-            if adx_val > 30 and close_val > donch_high_val and vol_val > vol_avg_val:
+            # Long: ADX > 25 (trending), price breaks above Donchian high, volume above average
+            if adx_val > 25 and close_val > donch_high_val and vol_val > vol_avg_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Strong trend (ADX > 30), price breaks below 55-period Donchian low, volume above average
-            elif adx_val > 30 and close_val < donch_low_val and vol_val > vol_avg_val:
+            # Short: ADX > 25 (trending), price breaks below Donchian low, volume above average
+            elif adx_val > 25 and close_val < donch_low_val and vol_val > vol_avg_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or trend weakens (ADX < 25)
-            if close_val < donch_low_val or adx_val < 25:
+            # Long exit: price breaks below Donchian low or ADX < 20 (trend weakening)
+            if close_val < donch_low_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or trend weakens (ADX < 25)
-            if close_val > donch_high_val or adx_val < 25:
+            # Short exit: price breaks above Donchian high or ADX < 20 (trend weakening)
+            if close_val > donch_high_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,13 +122,13 @@ def generate_signals(prices):
     
     return signals
 
-# 4h_ADX_Donchian55_Volume_Session_v1
-# Uses daily ADX for trend strength filter (ADX > 30 for entry, >25 to maintain)
-# Uses 55-period daily Donchian breakouts for entry (more stringent than 20-period)
-# Requires volume confirmation above 50-period average
+# 1d_ADX_Donchian_Breakout_Volume_Session_v1
+# Uses daily ADX for trend strength filter (ADX > 25)
+# Uses daily Donchian(20) breakouts for entry
+# Requires volume confirmation above 20-period average
 # Session filter: 8-20 UTC to avoid low-volume periods
-# Exits when price breaks opposite Donchian level or trend weakens (ADX < 25)
-# Designed for 4h timeframe with ~20-40 trades/year
-name = "4h_ADX_Donchian55_Volume_Session_v1"
-timeframe = "4h"
+# Exits when price breaks opposite Donchian level or trend weakens (ADX < 20)
+# Designed for 1d timeframe with ~15-25 trades/year
+name = "1d_ADX_Donchian_Breakout_Volume_Session_v1"
+timeframe = "1d"
 leverage = 1.0
