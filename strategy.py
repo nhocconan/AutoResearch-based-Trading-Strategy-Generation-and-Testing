@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_With_1w_Trend_Filter
-# Hypothesis: Use Kaufman's Adaptive Moving Average (KAMA) on 1d to determine trend direction,
-# filtered by weekly trend (price > weekly KAMA). KAMA adapts to market noise, reducing whipsaw
-# in ranging markets while capturing trends. Weekly filter ensures alignment with higher timeframe
-# momentum, improving performance in both bull and bear markets. Target: 20-60 trades/year.
+# 6h_VolatilityBreakout_With_VolumeAndTrendFilter
+# Hypothesis: 6h volatility breakout (ATR-based) with volume confirmation and 1d EMA50 trend filter.
+# Long when price breaks above recent high + volume spike + uptrend (price > 1d EMA50).
+# Short when price breaks below recent low + volume spike + downtrend (price < 1d EMA50).
+# Uses 10-bar lookback for breakout levels, 20-period ATR for volatility threshold.
+# Volume spike: current volume > 1.5x 20-bar average volume.
+# Designed to capture momentum bursts in both bull and bear markets while avoiding false breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "1d_KAMA_Trend_With_1w_Trend_Filter"
-timeframe = "1d"
+name = "6h_VolatilityBreakout_With_VolumeAndTrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,88 +18,102 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close
-    def kama(close, er_period=10, fast=2, slow=30):
-        n = len(close)
-        kama_arr = np.full(n, np.nan)
-        if n < er_period:
-            return kama_arr
-        
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=er_period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        # Handle first er_period elements
-        er = np.full(n, np.nan)
-        for i in range(er_period, n):
-            if volatility[i] != 0:
-                er[i] = change[i-er_period] / volatility[i]
-            else:
-                er[i] = 0
-        
-        # Smoothing constants
-        fast_sc = 2 / (fast + 1)
-        slow_sc = 2 / (slow + 1)
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        
-        # Initialize KAMA
-        kama_arr[er_period] = close[er_period]
-        for i in range(er_period + 1, n):
-            if not np.isnan(sc[i]):
-                kama_arr[i] = kama_arr[i-1] + sc[i] * (close[i] - kama_arr[i-1])
-            else:
-                kama_arr[i] = kama_arr[i-1]
-        return kama_arr
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate weekly KAMA for trend filter
-    close_1w = df_1w['close'].values
-    kama_1w = kama(close_1w, er_period=10, fast=2, slow=30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Parameters
+    lookback = 10
+    atr_period = 20
+    vol_ma_period = 20
+    vol_threshold = 1.5
+    atr_multiplier = 0.5
     
-    # Calculate daily KAMA
-    kama_daily = kama(close, er_period=10, fast=2, slow=30)
+    # Calculate ATR
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr = np.full_like(high, np.nan)
+    if len(high) >= atr_period:
+        atr[atr_period] = np.nanmean(tr[1:atr_period+1])
+        for i in range(atr_period + 1, len(high)):
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    
+    # Calculate rolling max/high and min/low for breakout levels
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
+    
+    for i in range(lookback, len(high)):
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
+    
+    # Calculate volume moving average
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= vol_ma_period:
+        vol_ma[vol_ma_period] = np.mean(volume[:vol_ma_period])
+        for i in range(vol_ma_period + 1, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * (vol_ma_period - 1) + volume[i]) / vol_ma_period
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 50)  # Ensure sufficient warmup
+    start_idx = max(lookback, atr_period, vol_ma_period, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_daily[i]) or np.isnan(kama_1w_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume spike condition
+        vol_spike = volume[i] > vol_ma[i] * vol_threshold
+        
+        # Breakout conditions
+        breakout_up = close[i] > highest_high[i] + atr[i] * atr_multiplier
+        breakout_down = close[i] < lowest_low[i] - atr[i] * atr_multiplier
+        
+        # Trend filter from 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
+        
         if position == 0:
-            # Long: price > daily KAMA AND price > weekly KAMA (uptrend on both)
-            if close[i] > kama_daily[i] and close[i] > kama_1w_aligned[i]:
+            # Long: uptrend + volume spike + upward breakout
+            if uptrend and vol_spike and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < daily KAMA AND price < weekly KAMA (downtrend on both)
-            elif close[i] < kama_daily[i] and close[i] < kama_1w_aligned[i]:
+            # Short: downtrend + volume spike + downward breakout
+            elif downtrend and vol_spike and breakout_down:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if trend weakens on either timeframe
-            if close[i] < kama_daily[i] or close[i] < kama_1w_aligned[i]:
+            # Long: exit on trend reversal or volatility contraction
+            if not uptrend or not vol_spike or close[i] < highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if trend weakens on either timeframe
-            if close[i] > kama_daily[i] or close[i] > kama_1w_aligned[i]:
+            # Short: exit on trend reversal or volatility contraction
+            if not downtrend or not vol_spike or close[i] > lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
