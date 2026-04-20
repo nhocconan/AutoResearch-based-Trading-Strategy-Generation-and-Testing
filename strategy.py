@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_Pivot_R1S1_Breakout_Volume_SessionFilter
-# Hypothesis: Camarilla pivot R1/S1 breakout on 1h with volume confirmation and session filter (08-20 UTC).
-# Uses 4h trend filter (price > 4h EMA200) for direction: only long in uptrend, short in downtrend.
-# Volume > 1.5x 20-period average confirms breakout strength.
-# Designed for low trade frequency (target 15-35/year) to avoid fee drag on 1h timeframe.
-# Works in bull/bear via trend filter and bidirectional breakout logic.
+# 6h_RSIVolumeBreakout_With_1D_Trend_Filter
+# Hypothesis: 6h RSI(14) breakout with volume confirmation, filtered by 1d EMA200 trend.
+# In bull markets (price > 1d EMA200): long when RSI crosses above 50 with volume > 1.5x average.
+# In bear markets (price < 1d EMA200): short when RSI crosses below 50 with volume > 1.5x average.
+# RSI > 60 or < 40 prevents whipsaw in weak trends. Target: 50-150 total trades over 4 years.
 
-name = "1h_Camarilla_Pivot_R1S1_Breakout_Volume_SessionFilter"
-timeframe = "1h"
+name = "6h_RSIVolumeBreakout_With_1D_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,98 +18,99 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for trend filter and pivot points
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA200 for trend filter
-    close_4h = df_4h['close'].values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate Camarilla pivots from previous 4h bar
-    # Using typical price: (high + low + close) / 3
-    typical_price_4h = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
-    typical_price_4h_vals = typical_price_4h.values
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Previous 4h bar's high, low, close for pivot calculation
-    prev_high_4h = df_4h['high'].shift(1).values
-    prev_low_4h = df_4h['low'].shift(1).values
-    prev_close_4h = df_4h['close'].shift(1).values
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
     
-    # Pivot point and support/resistance levels
-    pivot_4h = (prev_high_4h + prev_low_4h + prev_close_4h) / 3
-    r1_4h = pivot_4h + (1.1/12) * (prev_high_4h - prev_low_4h)
-    s1_4h = pivot_4h - (1.1/12) * (prev_high_4h - prev_low_4h)
-    r2_4h = pivot_4h + (1.1/6) * (prev_high_4h - prev_low_4h)
-    s2_4h = pivot_4h - (1.1/6) * (prev_high_4h - prev_low_4h)
+    # Wilder's smoothing for RSI
+    period = 14
+    if len(close) >= period + 1:
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        for i in range(period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
     
-    # Align pivot levels to 1h timeframe (available after 4h bar closes)
-    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    r2_4h_aligned = align_htf_to_ltf(prices, df_4h, r2_4h)
-    s2_4h_aligned = align_htf_to_ltf(prices, df_4h, s2_4h)
+    rs = np.full_like(close, np.nan)
+    rsi = np.full_like(close, np.nan)
+    valid = avg_loss != 0
+    rs[valid] = avg_gain[valid] / avg_loss[valid]
+    rsi[valid] = 100 - (100 / (1 + rs[valid]))
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Calculate average volume (20-period)
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient warmup for indicators
-    start_idx = max(200, 20)  # EMA200 warmup + volume MA warmup
+    start_idx = max(period + 1, 20, 50)
     
     for i in range(start_idx, n):
-        # Skip if not in trading session or missing data
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
-        if (np.isnan(ema200_4h_aligned[i]) or np.isnan(r1_4h_aligned[i]) or 
-            np.isnan(s1_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(rsi[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Determine trend from 4h EMA200
-            uptrend = close[i] > ema200_4h_aligned[i]
-            downtrend = close[i] < ema200_4h_aligned[i]
+            # Determine trend from 1d EMA200
+            uptrend = close[i] > ema200_1d_aligned[i]
+            downtrend = close[i] < ema200_1d_aligned[i]
             
-            # Long: uptrend + price breaks above R1 + volume confirmation
-            if uptrend and close[i] > r1_4h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.20
+            # Volume filter: current volume > 1.5x average volume
+            vol_filter = volume[i] > 1.5 * vol_ma[i]
+            
+            # Long: uptrend + RSI crosses above 50 + volume filter
+            if uptrend and rsi[i] > 50 and rsi[i-1] <= 50 and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + price breaks below S1 + volume confirmation
-            elif downtrend and close[i] < s1_4h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.20
+            # Short: downtrend + RSI crosses below 50 + volume filter
+            elif downtrend and rsi[i] < 50 and rsi[i-1] >= 50 and vol_filter:
+                signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit if trend weakens or price breaks below S1 (reversal)
-            if (close[i] < ema200_4h_aligned[i]) or (close[i] < s1_4h_aligned[i]):
+            # Long: exit if trend weakens or RSI overbought
+            if (close[i] < ema200_1d_aligned[i] or 
+                rsi[i] > 70 or 
+                rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit if trend weakens or price breaks above R1 (reversal)
-            if (close[i] > ema200_4h_aligned[i]) or (close[i] > r1_4h_aligned[i]):
+            # Short: exit if trend weakens or RSI oversold
+            if (close[i] > ema200_1d_aligned[i] or 
+                rsi[i] < 30 or 
+                rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
