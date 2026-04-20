@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R2S2_Breakout_VolumeTrend_v2"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R2S2_Breakout_VolumeTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,7 +40,7 @@ def generate_signals(prices):
     r2 = pivot + (range_val * 1.1 / 6)
     s2 = pivot - (range_val * 1.1 / 6)
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
     
-    # === Price Trend Filter: 4h EMA50 > EMA200 for long, < for short ===
+    # === Price Trend Filter: 12h EMA50 > EMA200 for long, < for short ===
     close_series = pd.Series(prices['close'].values)
     ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
