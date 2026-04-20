@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_HighLow_Momentum_Reversal
-# Hypothesis: Reversals occur when price moves beyond recent high/low ranges with volume confirmation.
-# Uses recent high/low breakouts filtered by volume spike and ADX trend strength.
-# Works in both bull and bear markets by capturing mean-reversion moves after overextensions.
-# Target: 20-50 trades/year.
+# 1h_Camarilla_R1S1_Breakout_Volume_TrendFilter
+# Hypothesis: 1-hour Camarilla pivot point breakouts (R1/S1 levels) with volume confirmation and 4h trend filter.
+# Uses Camarilla levels for intraday support/resistance, volume for institutional confirmation, 4h EMA34 for trend direction.
+# Designed to work in both bull and bear markets by aligning with higher timeframe trend. Target: 15-35 trades/year.
 
-name = "4h_HighLow_Momentum_Reversal"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_Volume_TrendFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -25,110 +24,81 @@ def generate_signals(prices):
     
     # Get 4h data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 35:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate EMA34 on 4h close for trend filter
     close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Calculate recent high/low (10-period) for mean reversion signals
-    recent_high = np.full_like(high_4h, np.nan)
-    recent_low = np.full_like(low_4h, np.nan)
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    for i in range(len(high_4h)):
-        if i >= 9:  # 10-period lookback
-            recent_high[i] = np.max(high_4h[i-9:i+1])
-            recent_low[i] = np.min(low_4h[i-9:i+1])
+    # Calculate previous day's Camarilla levels (R1, S1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align recent high/low to LTF
-    recent_high_aligned = align_htf_to_ltf(prices, df_4h, recent_high)
-    recent_low_aligned = align_htf_to_ltf(prices, df_4h, recent_low)
+    # Pivot point calculation
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate ADX (14-period) for trend strength filter
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Camarilla levels: R1 = close + range * 1.1/12, S1 = close - range * 1.1/12
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR and DM
-    tr_sum = np.full_like(high, np.nan)
-    dm_plus_sum = np.full_like(high, np.nan)
-    dm_minus_sum = np.full_like(high, np.nan)
-    
-    for i in range(len(high)):
-        if i >= 13:  # 14-period smoothing
-            tr_sum[i] = np.nansum(tr[i-13:i+1])
-            dm_plus_sum[i] = np.nansum(dm_plus[i-13:i+1])
-            dm_minus_sum[i] = np.nansum(dm_minus[i-13:i+1])
-    
-    # Directional Indicators
-    di_plus = np.full_like(high, np.nan)
-    di_minus = np.full_like(high, np.nan)
-    dx = np.full_like(high, np.nan)
-    
-    valid = ~np.isnan(tr_sum) & (tr_sum != 0)
-    di_plus[valid] = 100 * dm_plus_sum[valid] / tr_sum[valid]
-    di_minus[valid] = 100 * dm_minus_sum[valid] / tr_sum[valid]
-    dx[valid] = 100 * np.abs(di_plus[valid] - di_minus[valid]) / (di_plus[valid] + di_minus[valid])
-    
-    # ADX (smoothed DX)
-    adx = np.full_like(high, np.nan)
-    for i in range(len(high)):
-        if i >= 27:  # 14 + 13 for ADX smoothing
-            valid_dx = dx[i-13:i+1]
-            if not np.all(np.isnan(valid_dx)):
-                adx[i] = np.nanmean(valid_dx)
+    # Align Camarilla levels to 1h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma20 * 1.5)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(28, 20)  # Ensure ADX and recent high/low are calculated
+    start_idx = max(34, 20)  # Ensure EMA and volume MA are ready
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(recent_high_aligned[i]) or np.isnan(recent_low_aligned[i]) or
-            np.isnan(adx[i]) or np.isnan(volume_filter[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks below recent low (oversold) + ADX < 30 (weak trend) + volume confirmation
-            if close[i] < recent_low_aligned[i] and adx[i] < 30 and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R1 + above 4h EMA34 + volume confirmation
+            if close[i] > r1_aligned[i] and close[i] > ema_34_4h_aligned[i] and volume_filter[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks above recent high (overbought) + ADX < 30 (weak trend) + volume confirmation
-            elif close[i] > recent_high_aligned[i] and adx[i] < 30 and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S1 + below 4h EMA34 + volume confirmation
+            elif close[i] < s1_aligned[i] and close[i] < ema_34_4h_aligned[i] and volume_filter[i]:
+                signals[i] = -0.20
                 position = -1
                 
         elif position == 1:
-            # Long: exit if price breaks above recent high or ADX strengthens
-            if close[i] > recent_high_aligned[i] or adx[i] > 35:
+            # Long: exit if price breaks below S1 or below 4h EMA34
+            if close[i] < s1_aligned[i] or close[i] < ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:
-            # Short: exit if price breaks below recent low or ADX strengthens
-            if close[i] < recent_low_aligned[i] or adx[i] > 35:
+            # Short: exit if price breaks above R1 or above 4h EMA34
+            if close[i] > r1_aligned[i] or close[i] > ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
