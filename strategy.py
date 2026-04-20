@@ -1,10 +1,16 @@
-# 4h Donchian Breakout with 1d EMA200 and Volume Filter
-# Strategy: Breakout in direction of daily trend with volume confirmation
-# Works in bull/bear markets by following higher timeframe trend
-# Target: 20-40 trades/year to minimize fee drag
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_1dEMA200_Volume"
-timeframe = "4h"
+# Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation.
+# The 1w EMA200 provides long-term trend direction to avoid counter-trend trades.
+# Donchian(20) breakout captures momentum, volume confirms institutional interest.
+# This combination should work in both bull and bear markets by following the higher timeframe trend.
+# Target: 15-25 trades per year to minimize fee drift.
+
+name = "1d_Donchian20_1wEMA200_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,17 +18,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data ONCE before loop for EMA200 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data ONCE before loop for EMA200 trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 1d EMA200 for trend direction ===
-    close_1d = df_1d['close'].values
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    # === 1w EMA200 for trend direction ===
+    close_1w = df_1w['close'].values
+    ema_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
-    # === 4h Donchian channels (20-period) ===
+    # === 1d Donchian channels (20-period) ===
     high = prices['high'].values
     low = prices['low'].values
     
@@ -30,7 +36,7 @@ def generate_signals(prices):
     high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Volume confirmation ===
+    # === 1d Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, np.nan)
