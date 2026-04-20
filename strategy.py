@@ -3,111 +3,86 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_RSI20_Breakout_Volume_V1"
-timeframe = "4h"
+# Hypothesis: 1d CCI + Volume Spike + 1w Trend Filter
+# Uses CCI(20) for mean reversion at extremes, volume confirmation for breakout strength,
+# and weekly EMA filter to avoid counter-trend trades. Works in bull/bear by
+# fading extremes in ranging markets and following trend in trending markets.
+# Target: 15-25 trades/year, low frequency to minimize fee drag.
+
+name = "1d_CCI_VolumeSpike_WeekTrend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === Daily RSI(20) - overbought/oversold levels ===
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === Daily CCI(20) ===
+    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
+    tp_series = pd.Series(typical_price.values)
+    sma_tp = tp_series.rolling(window=20, min_periods=20).mean()
+    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (tp_series - sma_tp) / (0.015 * mad.replace(0, np.nan))
+    cci_values = cci.values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 19 + gain[i]) / 20
-        avg_loss[i] = (avg_loss[i-1] * 19 + loss[i]) / 20
-    
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100)
-    rsi_20 = 100 - (100 / (1 + rs))
-    
-    # RSI levels: oversold < 20, overbought > 80
-    rsi_oversold = 20
-    rsi_overbought = 80
-    
-    # Align RSI levels to 4h
-    oversold_aligned = align_htf_to_ltf(prices, df_1d, rsi_oversold * np.ones_like(rsi_20))
-    overbought_aligned = align_htf_to_ltf(prices, df_1d, rsi_overbought * np.ones_like(rsi_20))
-    
-    # === 4h RSI(14) for entry timing ===
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100)
-    rsi_14 = 100 - (100 / (1 + rs))
-    
-    # === Volume filter ===
+    # === Volume Spike Detection ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume / np.where(vol_ma20.values > 0, vol_ma20.values, np.nan)
+    
+    # === Weekly EMA Trend Filter ===
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Get values
-        close_val = close[i]
-        rsi_14_val = rsi_14[i]
+        cci_val = cci_values[i]
         vol_ratio_val = vol_ratio[i]
-        oversold_val = oversold_aligned[i]
-        overbought_val = overbought_aligned[i]
+        ema50_1w_val = ema50_1w_aligned[i]
+        ema200_1w_val = ema200_1w_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(rsi_14_val) or np.isnan(vol_ratio_val) or 
-            np.isnan(oversold_val) or np.isnan(overbought_val)):
+        if (np.isnan(cci_val) or np.isnan(vol_ratio_val) or 
+            np.isnan(ema50_1w_val) or np.isnan(ema200_1w_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI14 crosses above 20 from below with volume confirmation
-            if (rsi_14_val > 20 and rsi_14[i-1] <= 20 and 
-                vol_ratio_val > 1.8):
+            # Long: CCI < -100 (oversold) + volume spike + weekly uptrend
+            if cci_val < -100 and vol_ratio_val > 2.0 and ema50_1w_val > ema200_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI14 crosses below 80 from above with volume confirmation
-            elif (rsi_14_val < 80 and rsi_14[i-1] >= 80 and 
-                  vol_ratio_val > 1.8):
+            # Short: CCI > 100 (overbought) + volume spike + weekly downtrend
+            elif cci_val > 100 and vol_ratio_val > 2.0 and ema50_1w_val < ema200_1w_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI14 crosses below 50
-            if rsi_14_val < 50 and rsi_14[i-1] >= 50:
+            # Long exit: CCI returns above -50 OR trend breaks down
+            if cci_val > -50 or ema50_1w_val < ema200_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI14 crosses above 50
-            if rsi_14_val > 50 and rsi_14[i-1] <= 50:
+            # Short exit: CCI returns below 50 OR trend breaks up
+            if cci_val < 50 or ema50_1w_val > ema200_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
