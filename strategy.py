@@ -3,66 +3,47 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Choppiness_Donchian_Breakout_Volume_v1"
-timeframe = "12h"
+name = "1d_1w_Donchian20_Volume_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
+    
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Weekly EMA Trend Filter (21)
+    close_1w = df_1w['close'].values
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Daily Choppiness Index (14) for Regime Filter ===
+    # Daily Donchian Channel (20)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Rolling window for Donchian high/low
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # ATR(14)
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of true ranges over 14 periods
-    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chop = 100 * np.log10(sum_tr14 / (atr14 * 14)) / np.log10(14)
-    chop = np.where((hh14 - ll14) > 0, chop, 50)  # Avoid division by zero
-    chop = np.nan_to_num(chop, nan=50.0)
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # === Daily Donchian Channel (20) for Breakout Signals ===
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    
-    # === 12h Price, Volume, and ATR for Position Sizing ===
-    close = prices['close'].values
-    volume = volumes = prices['volume'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # ATR(20) for 12h timeframe
-    tr_12h = np.maximum(high - low, np.maximum(np.abs(high - np.concatenate([[close[0]], close[:-1]])), np.abs(low - np.concatenate([[close[0]], close[:-1]]))))
-    atr_12h = pd.Series(tr_12h).rolling(window=20, min_periods=20).mean().values
+    # Daily EMA Trend Filter (21)
+    close_series = pd.Series(close_1d)
+    ema21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
     
     # Volume ratio (20-period)
+    volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
@@ -70,52 +51,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Get values
-        close_val = close[i]
+        close_val = close_1d[i]
         vol_ratio_val = vol_ratio[i]
-        chop_val = chop_aligned[i]
-        high_20_val = high_20_aligned[i]
-        low_20_val = low_20_aligned[i]
-        atr_val = atr_12h[i]
+        ema21_val = ema21[i]
+        ema21_1w_val = ema21_1w_aligned[i]
+        donchian_high_val = donchian_high[i]
+        donchian_low_val = donchian_low[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(chop_val) or 
-            np.isnan(high_20_val) or np.isnan(low_20_val) or np.isnan(atr_val)):
+        if (np.isnan(vol_ratio_val) or np.isnan(ema21_val) or np.isnan(ema21_1w_val) or 
+            np.isnan(donchian_high_val) or np.isnan(donchian_low_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high in trending market (chop < 61.8) with volume
-            if (close_val > high_20_val and 
-                chop_val < 61.8 and 
-                vol_ratio_val > 1.5):
+            # Long: Price breaks above Donchian high with volume confirmation and uptrend (daily & weekly)
+            if (close_val > donchian_high_val and 
+                vol_ratio_val > 1.5 and 
+                close_val > ema21_val and
+                close_val > ema21_1w_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low in trending market (chop < 61.8) with volume
-            elif (close_val < low_20_val and 
-                  chop_val < 61.8 and 
-                  vol_ratio_val > 1.5):
+            # Short: Price breaks below Donchian low with volume confirmation and downtrend (daily & weekly)
+            elif (close_val < donchian_low_val and 
+                  vol_ratio_val > 1.5 and 
+                  close_val < ema21_val and
+                  close_val < ema21_1w_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns below Donchian low or chop increases (range) or volume dries up
-            if (close_val < low_20_val or 
-                chop_val > 61.8 or 
-                vol_ratio_val < 0.8):
+            # Long exit: Price returns below Donchian low or volume dries up
+            if close_val < donchian_low_val or vol_ratio_val < 0.7:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above Donchian high or chop increases (range) or volume dries up
-            if (close_val > high_20_val or 
-                chop_val > 61.8 or 
-                vol_ratio_val < 0.8):
+            # Short exit: Price returns above Donchian high or volume dries up
+            if close_val > donchian_high_val or vol_ratio_val < 0.7:
                 signals[i] = 0.0
                 position = 0
             else:
