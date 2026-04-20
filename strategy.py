@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
 """
-1d_WickReversal_VolumeSpike_v1
-Concept: Daily reversal at extreme wicks with volume confirmation and weekly trend filter.
-- Long: Low touches or breaks below 1w Bollinger lower band AND close > open (bullish candle) AND volume spike
-- Short: High touches or breaks above 1w Bollinger upper band AND close < open (bearish candle) AND volume spike
-- Exit: Opposite signal triggers or price crosses 1w Bollinger middle band
-- Uses 1w Bollinger Bands (20, 2) for trend context and dynamic levels
-- Volume spike: daily volume > 2.0x 20-period average
+12h_WeeklyTrend_DailyVolume_Breakout_v1
+Concept: 12h price breaks above/below weekly Donchian channel with daily volume confirmation and trend filter.
+- Long: Price > weekly Donchian high(20) AND daily volume > 1.5x 20-period avg AND daily EMA(50) > EMA(200)
+- Short: Price < weekly Donchian low(20) AND daily volume > 1.5x 20-period avg AND daily EMA(50) < EMA(200)
+- Exit: Price crosses back through weekly Donchian midpoint
 - Position sizing: 0.25
-- Target: 30-80 total trades over 4 years (7-20/year)
-- Works in bull/bear: 1w Bollinger adapts to volatility, wick rejection shows exhaustion
+- Target: 50-150 total trades over 4 years (12-37/year)
+- Works in bull/bear: daily EMA trend filter adapts, volume confirms institutional interest
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WickReversal_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_WeeklyTrend_DailyVolume_Breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Get weekly data ONCE before loop
@@ -30,95 +28,86 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === Weekly: Bollinger Bands (20, 2) ===
-    close_1w = df_1w['close'].values
-    bb_length = 20
-    bb_mult = 2.0
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
     
-    basis = pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).mean().values
-    dev = bb_mult * pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).std().values
-    upper_band = basis + dev
-    lower_band = basis - dev
+    # === Weekly: Donchian Channel (20-period) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Align to daily timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, basis)
+    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_mid_1w = (donchian_high_1w + donchian_low_1w) / 2.0
+    
+    donchian_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
+    donchian_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
+    donchian_mid_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid_1w)
     
     # === Daily: Volume Spike Filter ===
-    volume_1d = df_1w['volume'].values  # Weekly volume for confirmation
-    vol_ma_20_1w = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # === Daily: EMA Trend Filter (50 and 200) ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Price arrays
+    close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need at least 20 weeks for Bollinger Bands
+    start_idx = 200  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Get values
-        bb_upper = bb_upper_aligned[i]
-        bb_lower = bb_lower_aligned[i]
-        bb_middle = bb_middle_aligned[i]
+        d_high = donchian_high_1w_aligned[i]
+        d_low = donchian_low_1w_aligned[i]
+        d_mid = donchian_mid_1w_aligned[i]
+        ema50 = ema_50_1d_aligned[i]
+        ema200 = ema_200_1d_aligned[i]
         
         # Skip if any value is NaN
-        if (np.isnan(bb_upper) or np.isnan(bb_lower) or np.isnan(bb_middle)):
+        if (np.isnan(d_high) or np.isnan(d_low) or np.isnan(d_mid) or 
+            np.isnan(ema50) or np.isnan(ema200)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Price action
-        open_price = prices['open'].iloc[i]
-        high_price = prices['high'].iloc[i]
-        low_price = prices['low'].iloc[i]
-        close_price = prices['close'].iloc[i]
-        
-        # Weekly volume condition: current weekly volume > 2.0x 20-period average
-        # Note: Using weekly volume aligned to daily
-        vol_1w_vals = df_1w['volume'].values
-        vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w_vals)
-        current_vol = vol_1w_aligned[i]
-        vol_condition = current_vol > 2.0 * vol_ma_20_1w_aligned[i]
-        
-        # Wick conditions
-        # Bullish rejection: long lower wick touching/below BB lower with bullish close
-        lower_wick_touch = low_price <= bb_lower
-        bullish_candle = close_price > open_price
-        bullish_wick_reject = lower_wick_touch and bullish_candle
-        
-        # Bearish rejection: long upper wick touching/above BB upper with bearish close
-        upper_wick_touch = high_price >= bb_upper
-        bearish_candle = close_price < open_price
-        bearish_wick_reject = upper_wick_touch and bearish_candle
+        # Volume condition: current daily volume > 1.5x 20-period average
+        vol_1d_vals = df_1d['volume'].values
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_vals)
+        current_vol = vol_1d_aligned[i]
+        vol_condition = current_vol > 1.5 * vol_ma_20_1d_aligned[i]
         
         if position == 0:
-            # Long: bullish wick rejection at lower band with volume spike
-            if bullish_wick_reject and vol_condition:
+            # Long: price breaks above weekly Donchian high with uptrend and volume spike
+            if close[i] > d_high and ema50 > ema200 and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish wick rejection at upper band with volume spike
-            elif bearish_wick_reject and vol_condition:
+            # Short: price breaks below weekly Donchian low with downtrend and volume spike
+            elif close[i] < d_low and ema50 < ema200 and vol_condition:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish reversal signal or price crosses above middle band
-            if bearish_wick_reject and vol_condition:
-                signals[i] = 0.0
-                position = 0
-            elif close_price > bb_middle:
+            # Long exit: price crosses below weekly Donchian midpoint
+            if close[i] < d_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish reversal signal or price crosses below middle band
-            if bullish_wick_reject and vol_condition:
-                signals[i] = 0.0
-                position = 0
-            elif close_price < bb_middle:
+            # Short exit: price crosses above weekly Donchian midpoint
+            if close[i] > d_mid:
                 signals[i] = 0.0
                 position = 0
             else:
