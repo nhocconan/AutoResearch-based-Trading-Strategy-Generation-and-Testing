@@ -3,51 +3,45 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_RSI_Momentum_BullBearPower"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Control_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need sufficient data for calculations
+    if n < 50:  # Need sufficient data
         return np.zeros(n)
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need at least 30 days for calculations
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1d: Calculate Elder Ray indicators (Bull Power / Bear Power) ===
+    # === 1d: Calculate Camarilla pivot levels (using previous day's data) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA of close (standard for Elder Ray)
-    close_series = pd.Series(close_1d)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Use previous day's OHLC for today's levels
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
     
-    # Bull Power = High - EMA13
-    bull_power = high_1d - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low_1d - ema13
+    # Set first day's values to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Align 1d indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Calculate Camarilla levels: R1, S1
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # === 6h: RSI(14) for momentum ===
+    # Align 1d indicators to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # === 4h: Volume ratio (current vs 20-period average) ===
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Use Wilder's smoothing (equivalent to RMA)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 6h: Volume confirmation ===
     volume = prices['volume'].values
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
@@ -55,46 +49,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(50, n):
         # Get values
         close_val = close[i]
-        rsi_val = rsi[i]
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
+        r1_level = camarilla_r1_aligned[i]
+        s1_level = camarilla_s1_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if (np.isnan(rsi_val) or np.isnan(bull_val) or np.isnan(bear_val) or np.isnan(vol_ratio_val)):
+        if (np.isnan(r1_level) or np.isnan(s1_level) or np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 (bullish momentum) AND RSI > 50 (uptrend momentum) with volume
-            if (bull_val > 0 and 
-                rsi_val > 50 and 
-                vol_ratio_val > 1.5):
+            # Long: Price breaks above R1 with volume confirmation
+            if (close_val > r1_level and   # Break above R1
+                vol_ratio_val > 2.0):      # Strong volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bearish momentum) AND RSI < 50 (downtrend momentum) with volume
-            elif (bear_val < 0 and 
-                  rsi_val < 50 and 
-                  vol_ratio_val > 1.5):
+            # Short: Price breaks below S1 with volume confirmation
+            elif (close_val < s1_level and   # Break below S1
+                  vol_ratio_val > 2.0):      # Strong volume confirmation
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bull Power turns negative OR RSI drops below 50 (momentum fading)
-            if (bull_val <= 0 or rsi_val <= 50):
+            # Long exit: Price drops back below R1 (reversion to mean)
+            if close_val < r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bear Power turns positive OR RSI rises above 50 (momentum fading)
-            if (bear_val >= 0 or rsi_val >= 50):
+            # Short exit: Price rises back above S1 (reversion to mean)
+            if close_val > s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
