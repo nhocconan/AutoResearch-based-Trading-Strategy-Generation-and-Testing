@@ -1,30 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_KAMA_Trend_RSI_MeanReversion
-# Hypothesis: Use 1d KAMA for trend direction, 4h RSI for mean reversion entries, and volume confirmation.
-# Long when: 1d KAMA rising (uptrend), 4h RSI < 30 (oversold), volume > 1.5x average.
-# Short when: 1d KAMA falling (downtrend), 4h RSI > 70 (overbought), volume > 1.5x average.
-# Exit when RSI returns to neutral (40-60) or trend changes.
-# Designed for 4h timeframe with ~20-50 trades/year to avoid fee drag. Works in both bull and bear markets by following trend and buying dips/selling rallies.
+# 4h_1d_WeeklyPivot_R1S1_Breakout_VolumeTrend
+# Hypothesis: Use weekly pivot levels (R1/S1) from 1W data with 4h breakout, volume confirmation, and 1d EMA50 trend filter.
+# Weekly pivots provide stronger support/resistance than daily, reducing false breakouts. Trend filter ensures alignment with higher timeframe momentum.
+# Volume spike confirms institutional interest. Designed for fewer trades (~20-40/year) to minimize fee drag in both bull and bear markets.
 
-name = "4h_1d_KAMA_Trend_RSI_MeanReversion"
+name = "4h_1d_WeeklyPivot_R1S1_Breakout_VolumeTrend"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_kama(close, er_length=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close)).rolling(window=er_length, min_periods=1).sum()
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,26 +22,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d KAMA for trend
+    # Calculate weekly typical price for pivot
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    
+    # Weekly pivot and R1/S1 levels
+    pivot_1w = typical_price_1w
+    r1_1w = close_1w + (range_1w * 1.1 / 12)
+    s1_1w = close_1w - (range_1w * 1.1 / 12)
+    
+    # Align weekly levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Get daily data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
-    kama_1d = calculate_kama(close_1d, er_length=10, fast=2, slow=30)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 4h RSI for mean reversion
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume average for confirmation
+    # Volume average for spike detection (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,36 +64,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: uptrend (price above KAMA), oversold RSI, volume confirmation
-            if (close[i] > kama_1d_aligned[i] and 
-                rsi[i] < 30 and 
-                volume[i] > 1.5 * volume_ma[i]):
+            # Long breakout: price breaks above R1 with volume spike and uptrend (close > daily EMA50)
+            if (close[i] > r1_aligned[i] * 1.003 and 
+                volume[i] > 2.0 * volume_ma[i] and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend (price below KAMA), overbought RSI, volume confirmation
-            elif (close[i] < kama_1d_aligned[i] and 
-                  rsi[i] > 70 and 
-                  volume[i] > 1.5 * volume_ma[i]):
+            # Short breakdown: price breaks below S1 with volume spike and downtrend (close < daily EMA50)
+            elif (close[i] < s1_aligned[i] * 0.997 and 
+                  volume[i] > 2.0 * volume_ma[i] and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI returns to neutral or trend changes
-            if rsi[i] > 40 or close[i] < kama_1d_aligned[i]:
+            # Long exit: price breaks below S1 or trend reverses (close < daily EMA50)
+            if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI returns to neutral or trend changes
-            if rsi[i] < 60 or close[i] > kama_1d_aligned[i]:
+            # Short exit: price breaks above R1 or trend reverses (close > daily EMA50)
+            if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
