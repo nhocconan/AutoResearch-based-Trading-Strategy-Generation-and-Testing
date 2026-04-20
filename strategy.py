@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Load weekly data for trend filter
@@ -59,7 +59,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if NaN in critical values
         if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA20_ADX25_VolumeFilter"
-timeframe = "1d"
+name = "6h_WeeklyEMA20_ADX25_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
