@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 6h_VolatilityBreakout_With_VolumeAndTrendFilter
-# Hypothesis: 6h volatility breakout (ATR-based) with volume confirmation and 1d EMA50 trend filter.
-# Long when price breaks above recent high + volume spike + uptrend (price > 1d EMA50).
-# Short when price breaks below recent low + volume spike + downtrend (price < 1d EMA50).
-# Uses 10-bar lookback for breakout levels, 20-period ATR for volatility threshold.
-# Volume spike: current volume > 1.5x 20-bar average volume.
-# Designed to capture momentum bursts in both bull and bear markets while avoiding false breakouts.
+# 12h_PriceChannel_Breakout_With_1D_Trend_Filter
+# Hypothesis: Donchian channel breakout on 12h chart filtered by 1d EMA200 trend.
+# In bull markets (price > 1d EMA200): long on upper Donchian breakout.
+# In bear markets (price < 1d EMA200): short on lower Donchian breakout.
+# Uses volume confirmation (>1.5x average volume) to avoid false breakouts.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "6h_VolatilityBreakout_With_VolumeAndTrendFilter"
-timeframe = "6h"
+name = "12h_PriceChannel_Breakout_With_1D_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -31,89 +29,69 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA200 for trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Parameters
-    lookback = 10
-    atr_period = 20
-    vol_ma_period = 20
-    vol_threshold = 1.5
-    atr_multiplier = 0.5
+    # Calculate Donchian channels on 12h data
+    period = 20
     
-    # Calculate ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr = np.full_like(high, np.nan)
-    if len(high) >= atr_period:
-        atr[atr_period] = np.nanmean(tr[1:atr_period+1])
-        for i in range(atr_period + 1, len(high)):
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
-    
-    # Calculate rolling max/high and min/low for breakout levels
+    # Upper channel: highest high of last 20 periods
     highest_high = np.full_like(high, np.nan)
+    for i in range(period - 1, len(high)):
+        highest_high[i] = np.max(high[i - period + 1:i + 1])
+    
+    # Lower channel: lowest low of last 20 periods
     lowest_low = np.full_like(low, np.nan)
+    for i in range(period - 1, len(low)):
+        lowest_low[i] = np.min(low[i - period + 1:i + 1])
     
-    for i in range(lookback, len(high)):
-        highest_high[i] = np.max(high[i-lookback:i])
-        lowest_low[i] = np.min(low[i-lookback:i])
-    
-    # Calculate volume moving average
+    # Calculate average volume for confirmation
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= vol_ma_period:
-        vol_ma[vol_ma_period] = np.mean(volume[:vol_ma_period])
-        for i in range(vol_ma_period + 1, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * (vol_ma_period - 1) + volume[i]) / vol_ma_period
+    for i in range(period - 1, len(volume)):
+        vol_ma[i] = np.mean(volume[i - period + 1:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, atr_period, vol_ma_period, 50)
+    start_idx = max(period, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition
-        vol_spike = volume[i] > vol_ma[i] * vol_threshold
-        
-        # Breakout conditions
-        breakout_up = close[i] > highest_high[i] + atr[i] * atr_multiplier
-        breakout_down = close[i] < lowest_low[i] - atr[i] * atr_multiplier
-        
-        # Trend filter from 1d EMA50
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: uptrend + volume spike + upward breakout
-            if uptrend and vol_spike and breakout_up:
+            # Determine trend from 1d EMA200
+            uptrend = close[i] > ema200_1d_aligned[i]
+            downtrend = close[i] < ema200_1d_aligned[i]
+            
+            # Long: uptrend + price breaks above upper Donchian + volume confirmation
+            if uptrend and close[i] > highest_high[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume spike + downward breakout
-            elif downtrend and vol_spike and breakout_down:
+            # Short: downtrend + price breaks below lower Donchian + volume confirmation
+            elif downtrend and close[i] < lowest_low[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
                 
         elif position == 1:
-            # Long: exit on trend reversal or volatility contraction
-            if not uptrend or not vol_spike or close[i] < highest_high[i]:
+            # Long: exit if price breaks below lower Donchian or trend reverses
+            if close[i] < lowest_low[i] or close[i] < ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:
-            # Short: exit on trend reversal or volatility contraction
-            if not downtrend or not vol_spike or close[i] > lowest_low[i]:
+            # Short: exit if price breaks above upper Donchian or trend reverses
+            if close[i] > highest_high[i] or close[i] > ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
