@@ -3,66 +3,60 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Heikin-Ashi smoothed EMA crossover with 12h RSI filter
-# Uses Heikin-Ashi candles to reduce noise and identify true trends
-# EMA(9) crossing EMA(21) on HA close provides entry signals
-# 12h RSI(14) acts as trend strength filter (RSI>50 for long, RSI<50 for short)
-# Designed to work in both bull and bear markets by following the trend
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 4h 1-day Williams %R extreme with 1-day trend filter and volume confirmation
+# In bull markets: buy when %R crosses above -20 from below and price above 1-day EMA50
+# In bear markets: sell when %R crosses below -80 from above and price below 1-day EMA50
+# Volume filter ensures momentum has participation
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE for RSI filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load daily data ONCE for Williams %R and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h RSI(14)
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    # Calculate 14-period Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
     
-    # Calculate Heikin-Ashi candles
-    ha_close = (prices['open'] + prices['high'] + prices['low'] + prices['close']) / 4
-    ha_open = np.zeros_like(ha_close)
-    ha_open[0] = (prices['open'].iloc[0] + prices['close'].iloc[0]) / 2
-    for i in range(1, n):
-        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
-    ha_high = np.maximum(prices['high'], np.maximum(ha_open, ha_close))
-    ha_low = np.minimum(prices['low'], np.minimum(ha_open, ha_close))
+    # Calculate 1-day EMA50 for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate EMA(9) and EMA(21) on HA close
-    ha_close_series = pd.Series(ha_close.values)
-    ema9 = ha_close_series.ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21 = ha_close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Align daily indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate 6h ATR for stop loss
+    # Calculate 4h ATR for stop sizing
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Precompute hour of day for session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    # Volume filter: 4h volume > 20-period average
+    volume = prices['volume'].values
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if NaN in indicators
-        if np.isnan(ema9[i]) or np.isnan(ema21[i]) or np.isnan(rsi_12h_aligned[i]) or np.isnan(atr_6h[i]):
+        if np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(atr_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,33 +71,37 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Price levels
-        price = ha_close[i]
-        rsi = rsi_12h_aligned[i]
+        # Volume filter
+        vol_filter = volume[i] > volume_ma_20[i]
+        
+        # Indicator values
+        wr = williams_r_aligned[i]
+        ema50 = ema_50_aligned[i]
+        price = close[i]
         
         if position == 0:
-            # Long: EMA9 crosses above EMA21 and RSI > 50 (bullish momentum)
-            if ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1] and rsi > 50:
+            # Long: Williams %R crosses above -20 from below, price above EMA50, with volume
+            if i > 0 and wr > -20 and williams_r_aligned[i-1] <= -20 and price > ema50 and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: EMA9 crosses below EMA21 and RSI < 50 (bearish momentum)
-            elif ema9[i] < ema21[i] and ema9[i-1] >= ema21[i-1] and rsi < 50:
+            # Short: Williams %R crosses below -80 from above, price below EMA50, with volume
+            elif i > 0 and wr < -80 and williams_r_aligned[i-1] >= -80 and price < ema50 and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: EMA9 crosses below EMA21 or stop loss (2x ATR)
-            if ema9[i] < ema21[i] or price <= entry_price - 2.0 * atr_6h[i]:
+            # Long exit: stop loss (2x ATR below entry) or Williams %R crosses below -50
+            if price <= entry_price - 2.0 * atr_4h[i] or (i > 0 and wr < -50 and williams_r_aligned[i-1] >= -50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: EMA9 crosses above EMA21 or stop loss (2x ATR)
-            if ema9[i] > ema21[i] or price >= entry_price + 2.0 * atr_6h[i]:
+            # Short exit: stop loss (2x ATR above entry) or Williams %R crosses above -50
+            if price >= entry_price + 2.0 * atr_4h[i] or (i > 0 and wr > -50 and williams_r_aligned[i-1] <= -50):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_HA_EMA9_21_RSI12h_Filter"
-timeframe = "6h"
+name = "4h_WilliamsR_EMA50_Trend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
