@@ -3,30 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R1S1_Breakout_Volume_Filter"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    # === 1w: Calculate weekly trend using EMA20 ===
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # === 1d: Calculate daily Camarilla pivot levels ===
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
+    # === 1d: Calculate Camarilla pivot levels ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -36,11 +27,20 @@ def generate_signals(prices):
     R1 = pivot + (range_1d * 1.1 / 12)
     S1 = pivot - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 1d (already daily, but for consistency)
+    # Align Camarilla levels to 12h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # === 1d: Price and volume ===
+    # === 1d: ATR for stop loss ===
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_series = pd.Series(true_range)
+    atr = atr_series.rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # === 12h: Price and volume ===
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -51,43 +51,53 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    atr_multiplier = 2.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Get values
         close_val = close[i]
-        ema_20_val = ema_20_1w_aligned[i]
         r1_val = R1_aligned[i]
         s1_val = S1_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        atr_val = atr_aligned[i]
         
         # Skip if any value is NaN
-        if np.isnan(ema_20_val) or np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(vol_ratio_val):
+        if np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(vol_ratio_val) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation AND above weekly EMA20 (uptrend)
-            if close_val > r1_val and vol_ratio_val > 2.0 and close_val > ema_20_val:
+            # Long: Price breaks above R1 with volume confirmation
+            if close_val > r1_val and vol_ratio_val > 2.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume confirmation AND below weekly EMA20 (downtrend)
-            elif close_val < s1_val and vol_ratio_val > 2.0 and close_val < ema_20_val:
+                entry_price = close_val
+            # Short: Price breaks below S1 with volume confirmation
+            elif close_val < s1_val and vol_ratio_val > 2.5:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         
         elif position == 1:
-            # Long exit: Price returns below R1
-            if close_val < r1_val:
+            # Long exit: Stop loss or price returns below R1
+            if close_val < entry_price - atr_multiplier * atr_val:
+                signals[i] = 0.0
+                position = 0
+            elif close_val < r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns above S1
-            if close_val > s1_val:
+            # Short exit: Stop loss or price returns above S1
+            if close_val > entry_price + atr_multiplier * atr_val:
+                signals[i] = 0.0
+                position = 0
+            elif close_val > s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
