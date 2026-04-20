@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter
-# Hypothesis: Daily Camarilla R1/S1 breakouts on 12h timeframe with volume and ATR filter capture institutional moves while avoiding chop.
+# 4h_1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_v3
+# Hypothesis: Daily Camarilla R1/S1 breakouts on 4h timeframe with volume and ATR filter capture institutional moves while avoiding chop.
 # Works in bull markets by catching breaks above R1; in bear markets by catching breaks below S1.
 # Volume filter ensures institutional participation, ATR filter avoids low-volatility false breakouts.
-# Target: 20-50 trades/year to minimize fee drag. 12h timeframe reduces trade frequency vs 4h.
+# Target: 20-50 trades/year to minimize fee discount.
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -37,14 +37,14 @@ def generate_signals(prices):
     r1 = pivot + (high_1d - low_1d) * 1.1 / 12
     s1 = pivot - (high_1d - low_1d) * 1.1 / 12
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: volume > 1.8x 20-period EMA (more stringent to reduce trades)
+    # Volume filter: volume > 2.0x 20-period EMA (more stringent to reduce trades)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > (vol_ema20 * 1.8)
+    volume_filter = volume > (vol_ema20 * 2.0)
     
     # ATR filter: avoid low-volatility breakouts
     tr1 = np.abs(high - low)
