@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Camarilla_R2S2_MomentumBreakout"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R2S2_Breakout_V1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,18 +40,18 @@ def generate_signals(prices):
     r2 = pivot + (range_val * 1.1 / 6)
     s2 = pivot - (range_val * 1.1 / 6)
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # === Volume Confirmation ===
+    # === Volume Confirmation (12h) ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma10 = vol_series.rolling(window=10, min_periods=10).mean().values
     vol_ratio = volume / np.where(vol_ma10 > 0, vol_ma10, np.nan)
     
-    # === Momentum Filter: 6h RSI > 50 for long, < 50 for short ===
+    # === Momentum Filter: 12h RSI > 50 for long, < 50 for short ===
     close_series = pd.Series(prices['close'].values)
     delta = close_series.diff()
     gain = delta.clip(lower=0)
