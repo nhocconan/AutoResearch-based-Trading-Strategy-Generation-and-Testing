@@ -1,117 +1,106 @@
-# 1d_TripleScreen_ElderForce_TrendFollow
-# Triple Screen system: 1w trend filter (Elder Force Index), 1d entry trigger (Force Index divergence), volume confirmation
-# Designed for trend following in both bull and bear markets with controlled trade frequency
-# Target: 15-25 trades/year per symbol
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h chart with 1d ATR-based volatility filter and 1d pivot point breakout.
+# Long when price breaks above R1 pivot with volatility contraction (ATR contraction).
+# Short when price breaks below S1 pivot with volatility contraction.
+# Uses volatility contraction to avoid choppy markets and false breakouts.
+# Target: 20-40 trades/year per symbol.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for primary calculations
+    # Load 1d data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Elder Force Index (13-period) on 1d
-    price_change = np.diff(close_1d, prepend=close_1d[0])
-    force_raw = price_change * volume_1d
-    force_index = pd.Series(force_raw).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Previous day's pivot points (to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Calculate 1d EMA(13) for trend context
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
     
-    # Load 1w data for trend filter (Elder Force Index)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Align pivot levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 14-period ATR on 1d timeframe for volatility filter
+    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.maximum(np.abs(low_1d - np.roll(close_1d, 1)), tr1)
+    tr2[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr2).rolling(window=14, min_periods=14).mean().values
     
-    # Weekly Elder Force Index (13-period)
-    price_change_w = np.diff(close_1w, prepend=close_1w[0])
-    force_raw_w = price_change_w * volume_1w
-    force_index_w = pd.Series(force_raw_w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Align ATR to 4h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Weekly EMA(13) for additional trend confirmation
-    ema_13_w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Align weekly indicators to daily timeframe
-    force_index_w_aligned = align_htf_to_ltf(prices, df_1w, force_index_w)
-    ema_13_w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_w)
-    
-    # Daily price and volume
+    # 4h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.3x 20-day average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20) > 1.3
+    vol_filter = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(force_index[i]) or np.isnan(ema_13[i]) or
-            np.isnan(force_index_w_aligned[i]) or np.isnan(ema_13_w_aligned[i]) or
-            np.isnan(vol_filter[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(atr_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        force_today = force_index[i]
-        ema_today = ema_13[i]
-        force_weekly = force_index_w_aligned[i]
-        ema_weekly = ema_13_w_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        atr_val = atr_aligned[i]
         vol_ok = vol_filter[i]
         
-        # Trend conditions: weekly force and EMA alignment
-        bullish_trend = force_weekly > 0 and price > ema_weekly
-        bearish_trend = force_weekly < 0 and price < ema_weekly
-        
-        # Entry signals: daily force crossing zero with trend alignment
-        bullish_entry = force_today > 0 and force_index[i-1] <= 0 and bullish_trend and vol_ok
-        bearish_entry = force_today < 0 and force_index[i-1] >= 0 and bearish_trend and vol_ok
-        
-        # Exit signals: force reverses or trend breaks
-        bullish_exit = force_today < 0 or (price < ema_today and force_weekly < 0)
-        bearish_exit = force_today > 0 or (price > ema_today and force_weekly > 0)
+        # Volatility contraction filter: current ATR < 0.8 * 20-period ATR average
+        atr_ma_20 = pd.Series(atr_aligned).rolling(window=20, min_periods=20).mean().values
+        vol_contract = atr_val < 0.8 * atr_ma_20[i] if not np.isnan(atr_ma_20[i]) else False
         
         if position == 0:
-            if bullish_entry:
+            # Long: price breaks above R1, volatility contraction, volume
+            if price > r1_val and vol_contract and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            elif bearish_entry:
+            # Short: price breaks below S1, volatility contraction, volume
+            elif price < s1_val and vol_contract and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            if bullish_exit:
+            # Long exit: price breaks below S1 or volatility expansion
+            if price < s1_val or not vol_contract:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            if bearish_exit:
+            # Short exit: price breaks above R1 or volatility expansion
+            if price > r1_val or not vol_contract:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_TripleScreen_ElderForce_TrendFollow"
-timeframe = "1d"
+name = "4h_1d_Pivot_R1S1_VolContract_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
