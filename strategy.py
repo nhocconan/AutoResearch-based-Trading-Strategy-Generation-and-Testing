@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_ParabolicSAR_Trend_Follower
-# Hypothesis: Parabolic SAR (0.02, 0.2) identifies trend direction and trailing stop.
-# Long when price > SAR, short when price < SAR. Position size 0.25.
-# Works in both bull and bear by following the trend with dynamic stop-loss.
-# Low trade frequency due to trend persistence, reducing fee drag.
+# 1d_1w_Keltner_Channel_Breakout_Volume_Confirmation
+# Hypothesis: On daily chart, use 20-period EMA with ATR(10) bands (Keltner Channel) to identify breakouts.
+# Long when price closes above upper band with volume confirmation; short when price closes below lower band with volume confirmation.
+# Weekly trend filter: only take long signals when price is above weekly EMA50, only short when below weekly EMA50.
+# This strategy aims to capture strong trending moves while filtering counter-trend noise.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
 
-name = "4h_ParabolicSAR_Trend_Follower"
-timeframe = "4h"
+name = "1d_1w_Keltner_Channel_Breakout_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,82 +22,82 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Parabolic SAR parameters
-    af_start = 0.02
-    af_increment = 0.02
-    af_max = 0.2
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Initialize arrays
-    psar = np.full_like(close, np.nan)
-    bull = np.full_like(close, False)  # True for uptrend
-    af = np.full_like(close, af_start)
-    ep = np.full_like(close, np.nan)  # Extreme point
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Set initial values
-    psar[0] = low[0]
-    bull[0] = True
-    af[0] = af_start
-    ep[0] = high[0]
+    # Calculate Keltner Channel on daily data
+    kc_period = 20
+    atr_period = 10
+    kc_multiplier = 2.0
     
-    # Calculate PSAR
-    for i in range(1, n):
-        if bull[i-1]:  # Was in uptrend
-            psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
-            # Check for reversal
-            if low[i] <= psar[i]:
-                bull[i] = False  # Reverse to downtrend
-                psar[i] = ep[i-1]  # SAR = prior EP
-                af[i] = af_start
-                ep[i] = low[i]   # New EP = low
-            else:
-                bull[i] = True   # Stay in uptrend
-                if high[i] > ep[i-1]:
-                    ep[i] = high[i]
-                    af[i] = min(af[i-1] + af_increment, af_max)
-                else:
-                    ep[i] = ep[i-1]
-                    af[i] = af[i-1]
-        else:  # Was in downtrend
-            psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
-            # Check for reversal
-            if high[i] >= psar[i]:
-                bull[i] = True   # Reverse to uptrend
-                psar[i] = ep[i-1]  # SAR = prior EP
-                af[i] = af_start
-                ep[i] = high[i]  # New EP = high
-            else:
-                bull[i] = False  # Stay in downtrend
-                if low[i] < ep[i-1]:
-                    ep[i] = low[i]
-                    af[i] = min(af[i-1] + af_increment, af_max)
-                else:
-                    ep[i] = ep[i-1]
-                    af[i] = af[i-1]
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # ATR
+    atr = np.full_like(high, np.nan)
+    if len(high) >= atr_period:
+        atr[atr_period] = np.nanmean(tr[1:atr_period+1])
+        for i in range(atr_period + 1, len(high)):
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    
+    # EMA for Keltner middle line
+    ema_kc = pd.Series(close).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
+    
+    # Keltner Bands
+    upper_band = ema_kc + kc_multiplier * atr
+    lower_band = ema_kc - kc_multiplier * atr
+    
+    # Volume average for confirmation
+    vol_avg = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
-        if np.isnan(psar[i]):
+    start_idx = max(kc_period, atr_period, 50)
+    
+    for i in range(start_idx, n):
+        # Skip if any required data is NaN
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
-            
+        
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        
         if position == 0:
-            if bull[i]:  # Uptrend
+            # Long: price closes above upper band + volume confirmation + weekly uptrend
+            if close[i] > upper_band[i] and vol_confirm and close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            else:  # Downtrend
+            # Short: price closes below lower band + volume confirmation + weekly downtrend
+            elif close[i] < lower_band[i] and vol_confirm and close[i] < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
+                
         elif position == 1:
-            if not bull[i]:  # Trend reversed to downtrend
+            # Long: exit if price closes below middle line (EMA)
+            if close[i] < ema_kc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+                
         elif position == -1:
-            if bull[i]:  # Trend reversed to uptrend
+            # Short: exit if price closes above middle line (EMA)
+            if close[i] > ema_kc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
