@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for regime and trend
+    # Load 1d data for trend and regime
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -46,7 +46,7 @@ def generate_signals(prices):
     bb_width_ratio = bb_width / np.where(bb_width_ma == 0, 1, bb_width_ma)
     bb_width_ratio_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ratio)
     
-    # 4h price data (primary timeframe)
+    # 12h price data (primary timeframe)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_EMA50_VolumeRegime_Filter_v1"
-timeframe = "4h"
+name = "12h_1d_EMA50_VolumeRegime_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
