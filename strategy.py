@@ -3,8 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Ichimoku_CloudBreak_VolumeTrend"
-timeframe = "6h"
+# Hypothesis: 4h Choppiness Index regime filter + Donchian breakout + volume confirmation
+# - Choppiness Index > 61.8 = range (mean revert to Donchian mid)
+# - Choppiness Index < 38.2 = trend (breakout)
+# - Works in bull/bear by adapting to market regime
+# - Low trade frequency: only trade when clear regime + breakout align
+
+name = "4h_Chop_Donchian_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,40 +18,75 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data ONCE before loop
+    # Get daily data for Choppiness Index (needs daily OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # === Daily Ichimoku Components ===
+    # === Daily Choppiness Index (14-period) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    high9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (high9 + low9) / 2
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    high26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (high26 + low26) / 2
+    # ATR(14)
+    atr_period = 14
+    atr = np.zeros_like(tr)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Sum of ATR over 14 periods
+    sum_atr = np.zeros_like(atr)
+    for i in range(atr_period-1, len(atr)):
+        if i == atr_period-1:
+            sum_atr[i] = np.sum(atr[i-atr_period+1:i+1])
+        else:
+            sum_atr[i] = sum_atr[i-1] - atr[i-atr_period] + atr[i]
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    high52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high52 + low52) / 2
+    # Highest high and lowest low over 14 periods
+    max_high = np.zeros_like(high_1d)
+    min_low = np.zeros_like(low_1d)
+    for i in range(len(high_1d)):
+        if i < atr_period-1:
+            max_high[i] = np.max(high_1d[:i+1])
+            min_low[i] = np.min(low_1d[:i+1])
+        else:
+            max_high[i] = np.max(high_1d[i-atr_period+1:i+1])
+            min_low[i] = np.min(low_1d[i-atr_period+1:i+1])
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_a = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_a = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_a = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_a = align_htf_to_ltf(prices, df_1d, senkou_b)
+    # Choppiness Index
+    chop = np.full_like(close_1d, 50.0)  # default neutral
+    for i in range(atr_period-1, len(close_1d)):
+        if sum_atr[i] > 0 and (max_high[i] - min_low[i]) > 0:
+            chop[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(atr_period)
     
-    # === Volume Trend Filter ===
+    # Align Choppiness Index to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # === 4h Donchian Channels (20-period) ===
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    
+    # Upper and lower bands
+    upper = np.full_like(high_4h, np.nan)
+    lower = np.full_like(low_4h, np.nan)
+    
+    for i in range(len(high_4h)):
+        if i >= 19:  # 20 periods needed
+            upper[i] = np.max(high_4h[i-19:i+1])
+            lower[i] = np.min(low_4h[i-19:i+1])
+    
+    # Middle line (for exit)
+    middle = (upper + lower) / 2
+    
+    # === Volume Filter ===
     volume = prices['volume'].values
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -54,52 +95,74 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):
+    for i in range(50, n):  # start after warmup
         # Get values
         close_val = prices['close'].iloc[i]
+        chop_val = chop_aligned[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
+        middle_val = middle[i]
         vol_ratio_val = vol_ratio[i]
-        tenkan_val = tenkan_a[i]
-        kijun_val = kijun_a[i]
-        senkou_a_val = senkou_a_a[i]
-        senkou_b_val = senkou_b_a[i]
         
         # Skip if any value is NaN
-        if (np.isnan(vol_ratio_val) or np.isnan(tenkan_val) or 
-            np.isnan(kijun_val) or np.isnan(senkou_a_val) or 
-            np.isnan(senkou_b_val)):
+        if (np.isnan(chop_val) or np.isnan(upper_val) or 
+            np.isnan(lower_val) or np.isnan(middle_val) or 
+            np.isnan(vol_ratio_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_a_val, senkou_b_val)
-        cloud_bottom = min(senkou_a_val, senkou_b_val)
-        
         if position == 0:
-            # Long: Price above cloud, Tenkan > Kijun (bullish), volume confirmation
-            if close_val > cloud_top and tenkan_val > kijun_val and vol_ratio_val > 1.8:
-                signals[i] = 0.25
-                position = 1
-            # Short: Price below cloud, Tenkan < Kijun (bearish), volume confirmation
-            elif close_val < cloud_bottom and tenkan_val < kijun_val and vol_ratio_val > 1.8:
-                signals[i] = -0.25
-                position = -1
+            # Range regime (chop > 61.8): mean revert at Donchian bands
+            if chop_val > 61.8:
+                if close_val <= lower_val and vol_ratio_val > 1.5:  # long at support
+                    signals[i] = 0.25
+                    position = 1
+                elif close_val >= upper_val and vol_ratio_val > 1.5:  # short at resistance
+                    signals[i] = -0.25
+                    position = -1
+            # Trend regime (chop < 38.2): breakout
+            elif chop_val < 38.2:
+                if close_val > upper_val and vol_ratio_val > 1.5:  # breakout long
+                    signals[i] = 0.25
+                    position = 1
+                elif close_val < lower_val and vol_ratio_val > 1.5:  # breakdown short
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: Price falls below cloud OR Tenkan < Kijun
-            if close_val < cloud_top or tenkan_val < kijun_val:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Long exit: 
+            # - In range: return to middle
+            # - In trend: close below lower band OR chop > 61.8 (range resumption)
+            if chop_val > 61.8:
+                if close_val >= middle_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # trend regime
+                if close_val < lower_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price rises above cloud OR Tenkan > Kijun
-            if close_val > cloud_bottom or tenkan_val > kijun_val:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Short exit:
+            # - In range: return to middle
+            # - In trend: close above upper band OR chop > 61.8 (range resumption)
+            if chop_val > 61.8:
+                if close_val <= middle_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # trend regime
+                if close_val > upper_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
