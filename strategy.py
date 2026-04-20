@@ -3,10 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ADX trend filter + volume confirmation
-# - Donchian(20) breakout on 4h captures breakouts in both bull and bear markets
-# - 1d ADX > 25 filters for trending markets (avoids whipsaws in ranges)
-# - Volume > 1.5x 20-period average confirms breakout strength
+# Hypothesis: 4h Williams %R + 1d Volume Spike + 4h ATR Stop
+# - Williams %R(14) on 4h identifies overbought/oversold conditions
+# - Long when Williams %R < -80 (oversold) and 1d volume > 1.5x 20-period average
+# - Short when Williams %R > -20 (overbought) and 1d volume > 1.5x 20-period average
+# - Williams %R captures mean-reversion in ranging markets; volume spike confirms institutional interest
+# - ATR-based stop loss limits downside during strong trends
 # - Designed for 4h timeframe with selective entries to avoid overtrading
 # - Target: 20-50 trades per year per symbol (80-200 total over 4 years)
 
@@ -15,85 +17,71 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for ADX calculation
+    # Load 1d data for volume analysis
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Calculate ADX(14) on 1d timeframe
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate 1d volume spike: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_1d > (1.5 * vol_ma_20)
+    vol_spike_4h = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian(20) on 4h
+    # Calculate Williams %R(14) on 4h timeframe
     high_4h = prices['high'].values
     low_4h = prices['low'].values
     close_4h = prices['close'].values
-    vol_4h = prices['volume'].values
     
-    highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_4h) / (highest_high_14 - lowest_low_14)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = vol_4h > (1.5 * vol_ma_20)
+    # Calculate ATR(14) for stop loss
+    tr1 = pd.Series(high_4h - low_4h)
+    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
+    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(14, n):
         # Skip if NaN in indicators
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_confirmed[i])):
+        if np.isnan(williams_r[i]) or np.isnan(atr[i]) or np.isnan(vol_spike_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close_4h[i]
-        adx_val = adx_1d_aligned[i]
+        wr = williams_r[i]
+        vol_spike_now = vol_spike_4h[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long entry: price breaks above Donchian high + ADX > 25 + volume confirmed
-            if (price > highest_high_20[i]) and (adx_val > 25) and volume_confirmed[i]:
+            # Long entry: Williams %R oversold (< -80) + volume spike
+            if wr < -80 and vol_spike_now:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low + ADX > 25 + volume confirmed
-            elif (price < lowest_low_20[i]) and (adx_val > 25) and volume_confirmed[i]:
+                entry_price = price
+            # Short entry: Williams %R overbought (> -20) + volume spike
+            elif wr > -20 and vol_spike_now:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or ADX weakens
-            if (price < lowest_low_20[i]) or (adx_val < 20):
+            # Long exit: Williams %R returns above -50 or ATR stop hit
+            if wr > -50 or price < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or ADX weakens
-            if (price > highest_high_20[i]) or (adx_val < 20):
+            # Short exit: Williams %R returns below -50 or ATR stop hit
+            if wr < -50 or price > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dADX_VolumeConfirmation"
+name = "4h_WilliamsR_1dVolumeSpike_ATRStop"
 timeframe = "4h"
 leverage = 1.0
