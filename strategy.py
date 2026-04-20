@@ -1,71 +1,54 @@
-#!/usr/bin/env python3
-"""
-1h_4h_Structure_Entry_With_1d_Trend - 
-Hypothesis: In 1h timeframe, use 4h structure (HH/HL or LH/LL) as direction filter,
-combined with 1d EMA trend filter for long-term bias, and enter on pullbacks to 4h EMA.
-This reduces overtrading by requiring multiple timeframe alignment while keeping
-trades frequent enough (target 15-37/year) for statistical significance.
-Works in bull/bear via 1d trend filter - only trade in direction of higher timeframe trend.
-"""
+# 12h_Camarilla_Pivot_R1S1_Breakout_Volume_Filter
+# This strategy targets 12-37 trades per year on the 12h timeframe by combining daily Camarilla pivot breakouts
+# with volume confirmation and ATR-based risk management. Uses daily pivot levels as dynamic support/resistance
+# that adapt to recent price action, with volume filter ensuring breakouts have conviction.
+# Works in both bull and bear markets by using pivot levels that adapt to recent price action.
+# Target: ~30 trades/year on 12h timeframe, 120 total over 4 years.
 
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # === 1D TREND FILTER (EMA34) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load daily data once for Camarilla pivots and ATR
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # === 4H STRUCTURE AND EMA ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
+    # Calculate daily True Range for ATR
+    tr1 = np.abs(high_daily - low_daily)
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    tr1[0] = high_daily[0] - low_daily[0]
+    tr2[0] = np.abs(high_daily[0] - close_daily[0])
+    tr3[0] = np.abs(low_daily[0] - close_daily[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h EMA21 for dynamic pullback entries
-    ema_21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # Calculate daily Camarilla pivot points
+    # Pivot = (H+L+C)/3
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    pivot_daily = (high_daily + low_daily + close_daily) / 3.0
+    range_daily = high_daily - low_daily
+    r1_daily = close_daily + range_daily * 1.1 / 12
+    s1_daily = close_daily - range_daily * 1.1 / 12
     
-    # 4h structure: Higher Highs/Higher Lows for uptrend, Lower Highs/Lower Lows for downtrend
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Align daily indicators to 12h timeframe
+    atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
+    r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
+    s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
     
-    # Track 4h swing points
-    hh_4h = np.full_like(high_4h, np.nan)  # Higher Highs
-    hl_4h = np.full_like(low_4h, np.nan)   # Higher Lows
-    lh_4h = np.full_like(high_4h, np.nan)  # Lower Highs
-    ll_4h = np.full_like(low_4h, np.nan)   # Lower Lows
-    
-    # Simple swing detection: look for pivot points
-    for i in range(2, len(high_4h)):
-        # Higher High: current high > previous high and previous high > one before
-        if high_4h[i] > high_4h[i-1] and high_4h[i-1] > high_4h[i-2]:
-            hh_4h[i-1] = high_4h[i-1]
-        # Higher Low: current low > previous low and previous low > one before  
-        if low_4h[i] > low_4h[i-1] and low_4h[i-1] > low_4h[i-2]:
-            hl_4h[i-1] = low_4h[i-1]
-        # Lower High: current high < previous high and previous high < one before
-        if high_4h[i] < high_4h[i-1] and high_4h[i-1] < high_4h[i-2]:
-            lh_4h[i-1] = high_4h[i-1]
-        # Lower Low: current low < previous low and previous low < one before
-        if low_4h[i] < low_4h[i-1] and low_4h[i-1] < low_4h[i-2]:
-            ll_4h[i-1] = low_4h[i-1]
-    
-    # Align 4h structure to 1h
-    hh_4h_aligned = align_htf_to_ltf(prices, df_4h, hh_4h)
-    hl_4h_aligned = align_htf_to_ltf(prices, df_4h, hl_4h)
-    lh_4h_aligned = align_htf_to_ltf(prices, df_4h, lh_4h)
-    ll_4h_aligned = align_htf_to_ltf(prices, df_4h, ll_4h)
-    
-    # === 1H DATA ===
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -74,72 +57,52 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_21_4h_aligned[i]) or
-            np.isnan(hh_4h_aligned[i]) or np.isnan(hl_4h_aligned[i]) or
-            np.isnan(lh_4h_aligned[i]) or np.isnan(ll_4h_aligned[i])):
+    for i in range(50, n):
+        # Skip if NaN in critical values
+        if (np.isnan(atr_daily_aligned[i]) or np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema_1d = ema_34_1d_aligned[i]
-        ema_4h = ema_21_4h_aligned[i]
+        atr = atr_daily_aligned[i]
+        r1 = r1_daily_aligned[i]
+        s1 = s1_daily_aligned[i]
+        vol_current = volume[i]
         
-        # Determine 4h trend structure (need recent swing points)
-        lookback = min(50, i//4)  # Look back ~200 hours max
-        start_idx = max(0, i - lookback)
-        
-        # Check for recent HH/HL (uptrend structure) or LH/LL (downtrend structure)
-        recent_hh = hh_4h_aligned[start_idx:i+1]
-        recent_hl = hl_4h_aligned[start_idx:i+1]
-        recent_lh = lh_4h_aligned[start_idx:i+1]
-        recent_ll = ll_4h_aligned[start_idx:i+1]
-        
-        # Valid if we have at least one of each structure type
-        uptrend_structure = (np.nansum(~np.isnan(recent_hh)) >= 1 and 
-                            np.nansum(~np.isnan(recent_hl)) >= 1)
-        downtrend_structure = (np.nansum(~np.isnan(recent_lh)) >= 1 and 
-                              np.nansum(~np.isnan(recent_ll)) >= 1)
-        
-        # Volume filter: current volume > 1.5x 20-period average
-        vol_ma = np.mean(volume[max(0, i-20):i]) if i >= 20 else volume[i]
-        vol_ok = volume[i] > 1.5 * vol_ma
+        # Volume filter: current volume > 2.0x 30-period average (more selective for 12h)
+        vol_ma = np.mean(volume[max(0, i-30):i]) if i >= 30 else volume[i]
+        vol_ok = vol_current > 2.0 * vol_ma
         
         if position == 0:
-            # LONG: 1d uptrend + 4h uptrend structure + pullback to 4h EMA
-            if (price > ema_1d and uptrend_structure and 
-                price <= ema_4h * 1.005 and price >= ema_4h * 0.995 and vol_ok):
-                signals[i] = 0.20
+            # Long breakout: price breaks above R1 with volume confirmation
+            if price > r1 and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 1d downtrend + 4h downtrend structure + pullback to 4h EMA
-            elif (price < ema_1d and downtrend_structure and
-                  price <= ema_4h * 1.005 and price >= ema_4h * 0.995 and vol_ok):
-                signals[i] = -0.20
+            # Short breakdown: price breaks below S1 with volume confirmation
+            elif price < s1 and vol_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # LONG EXIT: 1d trend breaks or 4h structure fails or break below 4h EMA
-            if (price < ema_1d or not uptrend_structure or 
-                price < ema_4h * 0.98):
+            # Long exit: price breaks below S1 (failed breakout) or ATR-based stop
+            if price < s1 or (i > 0 and close[i-1] > s1 and price < close[i-1] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # SHORT EXIT: 1d trend breaks or 4h structure fails or break above 4h EMA
-            if (price > ema_1d or not downtrend_structure or 
-                price > ema_4h * 1.02):
+            # Short exit: price breaks above R1 (failed breakdown) or ATR-based stop
+            if price > r1 or (i > 0 and close[i-1] < r1 and price > close[i-1] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_Structure_Entry_With_1d_Trend"
-timeframe = "1h"
+name = "12h_Camarilla_Pivot_R1S1_Breakout_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
