@@ -3,136 +3,131 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h chart with 1d volatility contraction (BB width percentile) and expansion breakout
-# Low volatility precedes expansion; breakouts with volume capture moves in both bull/bear markets
-# Uses 1w EMA40 for trend filter to avoid counter-trend trades
-# Target: 12-30 trades/year per symbol (50-120 total over 4 years)
+# Hypothesis: 4h chart with 1d pivot levels (R1/S1) for mean reversion, confirmed by 1d trend.
+# In ranging markets, price reverts to pivot; in trending markets, breaks through R1/S1 with volume.
+# Uses 1d trend filter (EMA50) to adapt to bull/bear markets.
+# Target: 20-40 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Bollinger Bands
+    # Load 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate daily pivot points (standard formula)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # BB(20,2)
-    ma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = ma_20 + 2 * std_20
-    lower_bb = ma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / ma_20
     
-    # BB width percentile (252 lookback ~1 year)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_pct = bb_width_series.rolling(window=252, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Pivot = (H + L + C)/3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
-    # Align BB width percentile to 12h
-    bb_width_pct_aligned = align_htf_to_ltf(prices, df_1d, bb_width_pct)
+    # Align pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Load 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Load 1d data for trend filter
+    # Weekly EMA(50) for trend
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    close_1w = df_1w['close'].values
-    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
-    
-    # 12h data
+    # 4h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h ATR(20) for volatility and stop
+    # 4h ATR(14) for volatility and stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h volume ratio (current / 50-period average)
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    vol_ratio = volume / np.where(vol_ma_50 == 0, 1, vol_ma_50)
+    # 4h volume ratio (current / 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma_20 == 0, 1, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(bb_width_pct_aligned[i]) or np.isnan(ema_40_1w_aligned[i]) or
-            np.isnan(atr_20[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        bb_width_pct_val = bb_width_pct_aligned[i]
-        ema_trend = ema_40_1w_aligned[i]
-        atr = atr_20[i]
-        vol_ratio_12h = vol_ratio[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
+        atr = atr_14[i]
+        vol_ratio_4h = vol_ratio[i]
         
-        # Determine market regime from weekly trend
+        # Determine market regime from daily trend
         uptrend = price > ema_trend
         downtrend = price < ema_trend
         
-        # Volatility contraction filter: BB width in lowest 20% percentile
-        vol_contract = bb_width_pct_val < 20.0
+        # Volatility filter: avoid extreme volatility
+        atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values[i]
+        vol_filter = (atr < 3.0 * atr_ma_20)
         
-        # Breakout conditions with volume confirmation
-        # Upper band breakout
-        upper_break = price > upper_bb[-1] if i >= len(upper_bb) else False
-        # Actually need current 12h bar's relation to 1d BB - need to align BB bands
-        # Instead, use: price > previous 1d close + 2*1d ATR as breakout
+        # Volume filter: require above-average volume
+        vol_filter = vol_filter and (vol_ratio_4h > 1.3)
         
-        # Calculate 1d ATR for breakout threshold
-        if i < len(df_1d) * 28:  # Rough alignment: 28 12h bars per 1d
-            idx_1d = i // 28
-            if idx_1d < len(df_1d) and idx_1d >= 20:
-                # Use pre-aligned 1d BB for current 12h bar
-                ma_20_val = ma_20[idx_1d] if idx_1d < len(ma_20) else ma_20[-1]
-                std_20_val = std_20[idx_1d] if idx_1d < len(std_20) else std_20[-1]
-                upper_bb_val = ma_20_val + 2 * std_20_val
-                lower_bb_val = ma_20_val - 2 * std_20_val
-                
-                # Breakout from Bollinger Bands with volume
-                vol_expansion = bb_width_pct_val > 80.0  # High volatility expansion
-                
-                if position == 0 and vol_contract and vol_expansion:
-                    if uptrend and price > upper_bb_val and vol_ratio_12h > 1.5:
-                        signals[i] = 0.30
-                        position = 1
-                    elif downtrend and price < lower_bb_val and vol_ratio_12h > 1.5:
-                        signals[i] = -0.30
-                        position = -1
+        if position == 0:
+            # In uptrend: look for long near S1 (support)
+            if uptrend and vol_filter:
+                if price <= s1_val * 1.002:  # Near S1 with small buffer
+                    signals[i] = 0.25
+                    position = 1
+            # In downtrend: look for short near R1 (resistance)
+            elif downtrend and vol_filter:
+                if price >= r1_val * 0.998:  # Near R1 with small buffer
+                    signals[i] = -0.25
+                    position = -1
+            # In ranging (no clear trend): fade extremes
+            else:
+                if price <= s1_val * 1.002 and vol_filter:  # Near S1
+                    signals[i] = 0.25
+                    position = 1
+                elif price >= r1_val * 0.998 and vol_filter:  # Near R1
+                    signals[i] = -0.25
+                    position = -1
         
-        # Exit conditions
-        if position == 1:
-            # Exit on volatility expansion reversal or middle band
-            if bb_width_pct_val < 50.0 or price < ma_20_val:  # Return to mean
+        elif position == 1:
+            # Long exit: price reaches pivot or stops reversed
+            if price >= pivot_val or (not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
+        
         elif position == -1:
-            # Exit on volatility expansion reversal or middle band
-            if bb_width_pct_val < 50.0 or price > ma_20_val:  # Return to mean
+            # Short exit: price reaches pivot or stops reversed
+            if price <= pivot_val or (not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_1d_BB_Width_Expansion_Breakout_v1"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_MeanReversion_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
