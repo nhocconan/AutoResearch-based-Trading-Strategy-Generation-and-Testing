@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Donchian_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "1h_4h1d_Trend_Pullback_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,25 +12,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 12h: Trend filter (EMA34) ===
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # === 4h: Trend filter (EMA50) ===
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # === 4h: Price and volume ===
+    # === 1d: Trend filter (EMA50) ===
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # === 1h: Price and volume ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Donchian channel (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,48 +57,51 @@ def generate_signals(prices):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
-        ema_val = ema34_12h_aligned[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
+        ema_4h_val = ema50_4h_aligned[i]
+        ema_1d_val = ema50_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # Skip if any value is NaN
-        if np.isnan(ema_val) or np.isnan(donchian_high_val) or np.isnan(donchian_low_val) or np.isnan(vol_ratio_val):
+        if np.isnan(ema_4h_val) or np.isnan(ema_1d_val) or np.isnan(vol_ratio_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Breakout above Donchian high + 12h uptrend + volume confirmation
-            if (close_val > donchian_high_val and
-                close_val > ema_val and
-                vol_ratio_val > 1.5):
-                signals[i] = 0.25
+            # Long: Uptrend on both timeframes + volume confirmation + pullback entry
+            if (close_val > ema_4h_val and           # Price above 4h EMA50 (uptrend)
+                close_val > ema_1d_val and           # Price above 1d EMA50 (uptrend)
+                low_val < ema_4h_val and             # Pullback to 4h EMA (entry opportunity)
+                vol_ratio_val > 1.5):                # Volume confirmation
+                signals[i] = 0.20
                 position = 1
-            # Short: Breakdown below Donchian low + 12h downtrend + volume confirmation
-            elif (close_val < donchian_low_val and
-                  close_val < ema_val and
-                  vol_ratio_val > 1.5):
-                signals[i] = -0.25
+            # Short: Downtrend on both timeframes + volume confirmation + pullback entry
+            elif (close_val < ema_4h_val and         # Price below 4h EMA50 (downtrend)
+                  close_val < ema_1d_val and         # Price below 1d EMA50 (downtrend)
+                  high_val > ema_4h_val and          # Pullback to 4h EMA (entry opportunity)
+                  vol_ratio_val > 1.5):              # Volume confirmation
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: Breakdown below Donchian low or loss of trend
-            if (close_val < donchian_low_val or
-                close_val < ema_val):
+            # Long exit: trend breakdown or loss of momentum
+            if (close_val < ema_4h_val or            # Price below 4h EMA50
+                close_val < ema_1d_val or            # Price below 1d EMA50
+                vol_ratio_val < 0.8):                # Low volume (losing momentum)
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: Breakout above Donchian high or trend reversal
-            if (close_val > donchian_high_val or
-                close_val > ema_val):
+            # Short exit: trend reversal or loss of momentum
+            if (close_val > ema_4h_val or            # Price above 4h EMA50
+                close_val > ema_1d_val or            # Price above 1d EMA50
+                vol_ratio_val < 0.8):                # Low volume (losing momentum)
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
