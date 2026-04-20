@@ -8,43 +8,10 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly HTF data once for regime detection
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    # Load daily data for pivot levels and volatility
+    # Load 1d HTF data once for pivot levels and volatility
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
-    
-    # Calculate weekly ADX for regime detection (trending vs ranging)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]
-    tr2[0] = np.abs(high_1w[0] - close_1w[0])
-    tr3[0] = np.abs(low_1w[0] - close_1w[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    atr_ma = pd.Series(atr_1w).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / np.where(atr_ma == 0, 1, atr_ma)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / np.where(atr_ma == 0, 1, atr_ma)
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
-    adx_1w = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Calculate daily pivot levels (standard formula)
     high_1d = df_1d['high'].values
@@ -67,8 +34,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all indicators to 12h timeframe
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Align all 1d indicators to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -91,9 +57,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -102,7 +68,6 @@ def generate_signals(prices):
         price = close[i]
         high_i = high[i]
         low_i = low[i]
-        adx_val = adx_1w_aligned[i]
         pivot_val = pivot_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
@@ -114,30 +79,27 @@ def generate_signals(prices):
         # Volatility filter: only trade when ATR > 0
         vol_filter_ok = atr_val > 0
         
-        # Regime filter: only trade in ranging markets (ADX < 25)
-        range_filter = adx_val < 25
-        
         if position == 0:
             # Long: price breaks above S1 with volume and volatility (mean reversion bounce)
-            if high_i > s1_val and vol_ok and vol_filter_ok and range_filter:
+            if high_i > s1_val and vol_ok and vol_filter_ok:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below R1 with volume and volatility (mean reversion fade)
-            elif low_i < r1_val and vol_ok and vol_filter_ok and range_filter:
+            elif low_i < r1_val and vol_ok and vol_filter_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below pivot OR volatility drops OR regime changes
-            if low_i < pivot_val or not vol_filter_ok or not range_filter:
+            # Long exit: price breaks below pivot OR volatility drops
+            if low_i < pivot_val or not vol_filter_ok:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above pivot OR volatility drops OR regime changes
-            if high_i > pivot_val or not vol_filter_ok or not range_filter:
+            # Short exit: price breaks above pivot OR volatility drops
+            if high_i > pivot_val or not vol_filter_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -145,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_ADX_1d_PivotMeanReversion_VolumeFilter_v1"
+name = "12h_1d_PivotMeanReversion_VolumeFilter_v1"
 timeframe = "12h"
 leverage = 1.0
