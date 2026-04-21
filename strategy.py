@@ -3,39 +3,27 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(25) breakout with 1d ADX(14) trend filter and volume spike confirmation.
-# Long when price breaks above upper Donchian in uptrend (1d ADX > 25), short when breaks below lower Donchian in downtrend.
-# Volume > 1.6x 20-period average confirms breakout strength. Uses ADX to filter weak trends and avoid chop.
-# Target: 15-30 trades/year by requiring strong trend + volume + breakout alignment.
-# Works in bull/bear: ADX filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
+# Hypothesis: 1d breakout above 20-day high with weekly RSI(7) oversold filter.
+# Long when price breaks above 20-day high and weekly RSI < 30 (oversold bounce).
+# Exit when price breaks below 10-day low or weekly RSI > 70 (overbought).
+# Uses weekly RSI to catch mean-reversion bounces in both bull and bear markets.
+# Target: 10-20 trades/year by requiring breakout + oversold conditions.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d ADX(14) for trend strength filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly RSI(7)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
+    # Wilder's smoothing for RSI
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) >= period:
@@ -44,79 +32,47 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, 14)
+    avg_gain = wilder_smooth(gain, 7)
+    avg_loss = wilder_smooth(loss, 7)
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align weekly RSI to daily timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
     
-    # Calculate 25-period Donchian channels on 12h data
-    high_roll = prices['high'].rolling(window=25, min_periods=25).max()
-    low_roll = prices['low'].rolling(window=25, min_periods=25).min()
-    upper = high_roll.values
-    lower = low_roll.values
-    
-    # Pre-compute volume moving average (20-period)
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    # Calculate daily 20-period high and 10-period low
+    high_20 = prices['high'].rolling(window=20, min_periods=20).max()
+    low_10 = prices['low'].rolling(window=10, min_periods=10).min()
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
-    for i in range(25, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(rsi_aligned[i]) or np.isnan(high_20.iloc[i]) or np.isnan(low_10.iloc[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current price and volume
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume confirmation: current volume > 1.6x 20-period average
-        volume_confirm = volume > 1.6 * vol_ma[i]
-        
-        # Trend filter: strong trend (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            if volume_confirm and strong_trend:
-                # Long: price breaks above upper Donchian
-                if price > upper[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below lower Donchian
-                elif price < lower[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: price breaks above 20-day high AND weekly RSI < 30 (oversold)
+            if price > high_20.iloc[i] and rsi_aligned[i] < 30:
+                signals[i] = 0.25
+                position = 1
         
-        elif position != 0:
-            # Exit conditions
-            exit_signal = False
-            
-            if position == 1:  # long position
-                # Exit if price breaks below lower Donchian (failed breakout) or weak trend
-                if price < lower[i] or adx_aligned[i] < 20:
-                    exit_signal = True
-            
-            elif position == -1:  # short position
-                # Exit if price breaks above upper Donchian (failed breakdown) or weak trend
-                if price > upper[i] or adx_aligned[i] < 20:
-                    exit_signal = True
-            
-            if exit_signal:
+        elif position == 1:
+            # Exit: price breaks below 10-day low OR weekly RSI > 70 (overbought)
+            if price < low_10.iloc[i] or rsi_aligned[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.25
     
     return signals
 
-name = "12h_Donchian25_Breakout_1dADX14_Trend_Volume"
-timeframe = "12h"
+name = "1d_Breakout20_High_WRSI7_Oversold"
+timeframe = "1d"
 leverage = 1.0
