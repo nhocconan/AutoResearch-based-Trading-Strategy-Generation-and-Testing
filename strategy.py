@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_B
-Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (2.0x average). 
+4h_Camarilla_R1_S1_Breakout_1dEMA50_200Trend_VolumeSpike
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50/EMA200 trend alignment and volume spike (2.0x average). 
 ATR(14) stoploss (2.0x) and discrete sizing (0.30). 
-Long when price > R1 and above 1d EMA50 and volume confirmed. 
-Short when price < S1 and below 1d EMA50 and volume confirmed.
-Uses 1d HTF for trend alignment to capture major moves and avoid whipsaw.
+Long when price > R1 and above both 1d EMA50 and EMA200 and volume confirmed. 
+Short when price < S1 and below both 1d EMA50 and EMA200 and volume confirmed.
+Uses 1d HTF for trend alignment to capture major moves and avoid whipsaw in ranging markets.
 Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 """
 
@@ -42,6 +42,10 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # === 1d EMA200 for stronger trend filter ===
+    ema_200_1d = pd.Series(df_1d_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
     # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
@@ -64,7 +68,8 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) 
+            or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,17 +79,18 @@ def generate_signals(prices):
         volume_now = volume[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_50 = ema_50_1d_aligned[i]
+        ema_200 = ema_200_1d_aligned[i]
         vol_avg = vol_ma[i]
         
         # Volume confirmation: current volume > 2.0x average
         volume_confirmed = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Only enter in trending markets (price > 1d EMA50 for long, < for short)
+            # Only enter in strongly trending markets (price > both EMAs for long, < both for short)
             # Volume confirmation required to avoid false breakouts
-            long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
-            short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
+            long_condition = (price > r1) and (price > ema_50) and (price > ema_200) and volume_confirmed
+            short_condition = (price < s1) and (price < ema_50) and (price < ema_200) and volume_confirmed
             
             if long_condition:
                 signals[i] = 0.30
@@ -100,8 +106,8 @@ def generate_signals(prices):
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price < ema_trend:
+            # Trend reversal exit (price below either EMA)
+            elif price < ema_50 or price < ema_200:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,8 +118,8 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price > ema_trend:
+            # Trend reversal exit (price above either EMA)
+            elif price > ema_50 or price > ema_200:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_B"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_200Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
