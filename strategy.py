@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_ThreeSMA_Turn_Cross_v1
-Hypothesis: Trend changes are signaled by crossovers of short, medium, and long SMAs.
-The 6h timeframe captures medium-term momentum, and the 12h SMA acts as a trend filter to avoid whipsaws.
-Entry occurs when SMA10 crosses SMA20 in the direction of the 12h SMA50 trend, with volume confirmation.
-Exit occurs on the opposite SMA crossover. This aims to catch sustained moves while avoiding sideways chop.
-Works in bull markets by buying dips in uptrends and in bear markets by selling rallies in downtrends.
-Target: 15-35 trades per year per symbol.
+12h_Camarilla_Pivot_R1_S1_Breakout_With_Volume
+Hypothesis: Break above Camarilla R1 or below S1 using 1D levels, 
+with volume confirmation and 1D trend filter. Exit at opposite pivot level.
+Works in bull markets by buying breakouts above R1 in uptrends and 
+in bear markets by selling breakdowns below S1 in downtrends. 
+Volume confirmation ensures institutional participation.
+Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -15,68 +15,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 12h SMA50 for trend filter ===
-    close_12h = df_12h['close'].values
-    sma_50_12h = pd.Series(close_12h).rolling(window=50, min_periods=50).mean().values
-    sma_50_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_50_12h)
+    # === Camarilla pivot levels from previous day ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 6h SMA10 and SMA20 ===
-    close = prices['close'].values
-    sma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # Typical price
+    pp = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
     
-    # === Volume confirmation ===
+    # Camarilla levels
+    r1 = pp + (range_hl * 1.1 / 12)
+    s1 = pp - (range_hl * 1.1 / 12)
+    
+    # Align to 12h timeframe (previous day's levels available at open)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === Daily EMA34 for trend filter ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(35, n):  # Start after warmup
         # Skip if indicators not ready
-        if (np.isnan(sma_10[i]) or np.isnan(sma_20[i]) or 
-            np.isnan(sma_50_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        sma10_now = sma_10[i]
-        sma20_now = sma_20[i]
-        sma10_prev = sma_10[i-1]
-        sma20_prev = sma_20[i-1]
-        trend_12h = sma_50_12h_aligned[i]
+        price_close = prices['close'].iloc[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
-        # Bullish crossover: SMA10 crosses above SMA20
-        bullish_cross = (sma10_prev <= sma20_prev) and (sma10_now > sma20_now)
-        # Bearish crossover: SMA10 crosses below SMA20
-        bearish_cross = (sma10_prev >= sma20_prev) and (sma10_now < sma20_now)
-        
         if position == 0:
-            # Long: bullish crossover + price above 12h trend + volume
-            if bullish_cross and (close[i] > trend_12h) and (vol_ratio_val > 1.2):
+            # Long: price breaks above R1 + uptrend + volume
+            if (price_close > r1_level and
+                price_close > ema_trend and
+                vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish crossover + price below 12h trend + volume
-            elif bearish_cross and (close[i] < trend_12h) and (vol_ratio_val > 1.2):
+            # Short: price breaks below S1 + downtrend + volume
+            elif (price_close < s1_level and
+                  price_close < ema_trend and
+                  vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit on opposite crossover
-            if position == 1 and bearish_cross:
+            # Exit when price reaches opposite pivot level
+            if position == 1 and price_close < s1_level:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and bullish_cross:
+            elif position == -1 and price_close > r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ThreeSMA_Turn_Cross_v1"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_R1_S1_Breakout_With_Volume"
+timeframe = "12h"
 leverage = 1.0
