@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter with Donchian(20) breakout and volume confirmation.
+# Hypothesis: 4h Choppiness Index with Donchian(20) breakout and volume confirmation.
 # In trending markets (CHOP < 38.2): follow breakouts (long on upper band break, short on lower band break).
 # In ranging markets (CHOP > 61.8): mean-revert at Donchian bands (short near upper band, long near lower band).
 # Uses volume > 1.3x 20-period average for confirmation. Avoids whipsaws in strong trends and chop.
