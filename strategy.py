@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v2
-Hypothesis: 4h Camarilla R1/S1 breakouts with daily EMA34 trend filter and volume confirmation (>2.0x 20-bar MA) capture momentum in both bull and bear markets. 
-In bull regime (price > daily EMA34), favor longs on R1 breakouts; in bear regime (price < daily EMA34), favor shorts on S1 breakouts. 
-Volume spike ensures institutional participation. ATR-based stoploss (2.5x) and max hold (8 bars = 4 days) control risk. 
-Discrete sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
+6h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_WeeklyPivotFilter_v1
+Hypothesis: On 6h timeframe, Camarilla R1/S1 breakouts with daily EMA34 trend filter and weekly pivot regime filter capture institutional breakouts in both bull and bear markets. 
+In bull regime (price > daily EMA34 AND price > weekly pivot), favor longs on R1 breakouts; in bear regime (price < daily EMA34 AND price < weekly pivot), favor shorts on S1 breakouts. 
+Weekly pivot acts as a higher-timeframe structural filter to avoid counter-trend trades. Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -16,9 +15,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for daily trend)
+    # Load HTF data ONCE before loop (1d for daily trend, 1w for weekly pivot)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 10:
         return np.zeros(n)
     
     # === 1d EMA34 for daily trend regime ===
@@ -26,7 +26,20 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === Weekly pivot points (based on prior week OHLC) ===
+    # Weekly pivot: P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+    weekly_r1 = 2 * weekly_pivot - low_1w
+    weekly_s1 = 2 * weekly_pivot - high_1w
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # === 6h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -37,12 +50,12 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
+    # === 6h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 4h Camarilla levels (based on previous bar's OHLC) ===
+    # === 6h Camarilla levels (based on previous bar's OHLC) ===
     prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
@@ -58,12 +71,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
-    max_hold_bars = 8  # max 4 days (8 * 4h = 32h)
+    max_hold_bars = 8  # max 4 days (8 * 6h = 96h)
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or 
+            np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or 
             np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -73,13 +87,16 @@ def generate_signals(prices):
         
         price = close[i]
         ema_34_1d_val = ema_34_1d_aligned[i]
+        weekly_pivot_val = weekly_pivot_aligned[i]
+        weekly_r1_val = weekly_r1_aligned[i]
+        weekly_s1_val = weekly_s1_aligned[i]
         r1_val = r1[i]
         s1_val = s1[i]
         vol_conf = volume_confirmed[i]
         
-        # Daily trend regime
-        is_bull = price > ema_34_1d_val
-        is_bear = price < ema_34_1d_val
+        # Daily trend regime + Weekly pivot regime
+        is_bull = price > ema_34_1d_val and price > weekly_pivot_val
+        is_bear = price < ema_34_1d_val and price < weekly_pivot_val
         
         if position == 0:
             if is_bull:
@@ -133,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v2"
-timeframe = "4h"
+name = "6h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_WeeklyPivotFilter_v1"
+timeframe = "6h"
 leverage = 1.0
