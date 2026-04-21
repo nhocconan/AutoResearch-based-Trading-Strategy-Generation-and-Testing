@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
-# Long when price breaks above upper Donchian in uptrend (1d ADX > 25), short when breaks below lower Donchian in downtrend.
-# Volume > 1.5x 20-period average confirms breakout strength. Uses ADX to filter weak trends and avoid chop.
-# Target: 25-50 trades/year by requiring strong trend + volume + breakout alignment.
-# Works in bull/bear: ADX filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
+# Hypothesis: 12h Donchian(30) breakout with 1d ATR(14) volatility filter and volume spike confirmation.
+# Long when price breaks above upper Donchian in low volatility (ATR ratio < 0.8), short when breaks below lower Donchian.
+# Volume > 2.0x 30-period average confirms breakout strength. ATR filter avoids false breakouts in high volatility.
+# Target: 20-40 trades/year by requiring low volatility + volume + breakout alignment.
+# Works in bull/bear: ATR filter adapts to market conditions, avoiding chop in ranging markets and catching trends.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ADX(14) for trend strength filter
+    # Calculate 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -29,13 +29,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
+    # Wilder's smoothing for ATR
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) >= period:
@@ -44,30 +38,30 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, 14)
+    atr_14 = wilder_smooth(tr, 14)
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 30-period ATR for volatility ratio (current ATR / 30-period average ATR)
+    atr_30 = wilder_smooth(tr, 30)
+    atr_ratio = atr_14 / atr_30  # < 1 = low volatility, > 1 = high volatility
     
-    # Calculate 20-period Donchian channels on 4h data
-    high_roll = prices['high'].rolling(window=20, min_periods=20).max()
-    low_roll = prices['low'].rolling(window=20, min_periods=20).min()
+    # Align ATR ratio to 12h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Calculate 30-period Donchian channels on 12h data
+    high_roll = prices['high'].rolling(window=30, min_periods=30).max()
+    low_roll = prices['low'].rolling(window=30, min_periods=30).min()
     upper = high_roll.values
     lower = low_roll.values
     
-    # Pre-compute volume moving average (20-period)
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    # Pre-compute volume moving average (30-period)
+    vol_ma = prices['volume'].rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,14 +71,14 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume > 1.5 * vol_ma[i]
+        # Volatility filter: low volatility (ATR ratio < 0.8)
+        low_vol = atr_ratio_aligned[i] < 0.8
         
-        # Trend filter: strong trend (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
+        # Volume confirmation: current volume > 2.0x 30-period average
+        volume_confirm = volume > 2.0 * vol_ma[i]
         
         if position == 0:
-            if volume_confirm and strong_trend:
+            if low_vol and volume_confirm:
                 # Long: price breaks above upper Donchian
                 if price > upper[i]:
                     signals[i] = 0.25
@@ -99,13 +93,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price breaks below lower Donchian (failed breakout) or weak trend
-                if price < lower[i] or adx_aligned[i] < 20:
+                # Exit if price breaks below lower Donchian (failed breakout) or volatility increases
+                if price < lower[i] or atr_ratio_aligned[i] > 1.2:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price breaks above upper Donchian (failed breakdown) or weak trend
-                if price > upper[i] or adx_aligned[i] < 20:
+                # Exit if price breaks above upper Donchian (failed breakdown) or volatility increases
+                if price > upper[i] or atr_ratio_aligned[i] > 1.2:
                     exit_signal = True
             
             if exit_signal:
@@ -117,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dADX14_Trend_Volume"
-timeframe = "4h"
+name = "12h_Donchian30_Breakout_1dATR_Vol_Filter"
+timeframe = "12h"
 leverage = 1.0
