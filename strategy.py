@@ -3,108 +3,105 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA200 Trend Filter and Volume Spike
-# Bull Power = High - EMA(200), Bear Power = EMA(200) - Low
-# Long when Bull Power > 0 and Bear Power < 0 (bullish momentum) and 1d volume > 1.5x 20-period average and price > 1d EMA200
-# Short when Bear Power > 0 and Bull Power < 0 (bearish momentum) and 1d volume > 1.5x 20-period average and price < 1d EMA200
-# Exit when Bull Power and Bear Power have same sign (momentum divergence) or price crosses 1d EMA200
-# Elder Ray measures bull/bear power relative to trend (EMA200), effective in both bull and bear markets
-# Volume spike confirms conviction, EMA200 filter ensures trading with higher timeframe trend
-# Target: 20-40 trades/year by requiring volume spike + clear Elder Ray signal + EMA200 filter
+# Hypothesis: 12h Williams %R Reversal + 1w EMA Trend Filter + Volume Confirmation
+# Long when Williams %R crosses above -80 from below and price > 1w EMA34 and volume > 1.5x 24-period average
+# Short when Williams %R crosses below -20 from above and price < 1w EMA34 and volume > 1.5x 24-period average
+# Exit when Williams %R crosses opposite threshold (-20 for long, -80 for short)
+# Williams %R identifies overbought/oversold conditions for mean reversion
+# 1w EMA filter ensures we trade with the higher-timeframe trend
+# Volume confirmation avoids false reversals in low-volume conditions
+# Target: 15-30 trades/year by requiring all three conditions to align
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
+    # Load 1w and 1d data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(200)
-    close_1d = df_1d['close'].values
-    ema200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1d volume moving average (20-period)
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate Elder Ray components on 1d
+    # Calculate 1d Williams %R(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    bull_power = high_1d - ema200  # Bull Power = High - EMA200
-    bear_power = ema200 - low_1d   # Bear Power = EMA200 - Low
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align to 6h timeframe
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate 1d volume moving average (24-period)
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=24, min_periods=24).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Calculate 6h price and volume
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(14, n):
         # Skip if data not ready
-        if np.isnan(ema200_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or \
-           np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]):
+        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current price and volume (use 1d volume for 6f bar)
-        price = close[i]
-        # Approximate 1d volume for 6h bar (4 6h bars per day)
-        idx_1d = i // 4
-        if idx_1d >= len(df_1d):
-            idx_1d = len(df_1d) - 1
-        volume_1d = df_1d['volume'].iloc[idx_1d]
+        # Current price and volume
+        price = prices['close'].iloc[i]
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        # Volume confirmation: current 1d volume > 1.5x 24-period average
         vol_ma = vol_ma_1d_aligned[i]
-        volume_confirm = volume_1d > 1.5 * vol_ma
+        # For 12h timeframe, 1 bar = 12 hours = 0.5 days
+        # So we need to map 12h bar to corresponding 1d volume
+        # Using integer division: each 1d contains 2 12h bars
+        d_idx = i // 2
+        if d_idx >= len(df_1d):
+            d_idx = len(df_1d) - 1
+        volume = df_1d['volume'].iloc[d_idx]
+        volume_confirm = volume > 1.5 * vol_ma
         
-        # Elder Ray signals
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
-        
-        # Trend filter: price relative to EMA200
-        price_above_ema200 = price > ema200_aligned[i]
-        price_below_ema200 = price < ema200_aligned[i]
+        # Trend filter: price relative to 1w EMA34
+        price_above_ema = price > ema_34_1w_aligned[i]
+        price_below_ema = price < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0, Bear Power < 0 (bullish momentum), price > EMA200, volume spike
-            if bull_power_val > 0 and bear_power_val < 0 and price_above_ema200 and volume_confirm:
+            # Long: Williams %R crosses above -80 from below AND price > EMA AND volume confirmation
+            if (williams_r_aligned[i] > -80 and 
+                williams_r_aligned[i-1] <= -80 and
+                price_above_ema and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power > 0, Bull Power < 0 (bearish momentum), price < EMA200, volume spike
-            elif bear_power_val > 0 and bull_power_val < 0 and price_below_ema200 and volume_confirm:
+            # Short: Williams %R crosses below -20 from above AND price < EMA AND volume confirmation
+            elif (williams_r_aligned[i] < -20 and 
+                  williams_r_aligned[i-1] >= -20 and
+                  price_below_ema and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions:
-            # 1. Elder Ray divergence (both powers same sign = loss of momentum)
-            # 2. Price crosses EMA200 (trend change)
-            bull_power_val = bull_power_aligned[i]
-            bear_power_val = bear_power_aligned[i]
-            
+            # Exit conditions
             exit_signal = False
             
-            # Condition 1: Loss of momentum (both powers same sign)
-            if (bull_power_val > 0 and bear_power_val > 0) or (bull_power_val < 0 and bear_power_val < 0):
-                exit_signal = True
+            if position == 1:  # long position
+                # Exit when Williams %R crosses below -20 (overbought)
+                if williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20:
+                    exit_signal = True
             
-            # Condition 2: Price crosses EMA200
-            elif position == 1 and price_below_ema200:  # Long position, price below EMA200
-                exit_signal = True
-            elif position == -1 and price_above_ema200:  # Short position, price above EMA200
-                exit_signal = True
+            elif position == -1:  # short position
+                # Exit when Williams %R crosses above -80 (oversold)
+                if williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80:
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -115,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1dEMA200_Trend_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_1wEMA34_Trend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
