@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_HTF_1d_TRIX_VolumeSpike_ChopRegime_V1
-Hypothesis: 4h TRIX (triple EMA) momentum with 1d volume spike confirmation and 1d choppiness regime filter. 
-TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. Volume spike (>1.5x 20-period MA) confirms conviction. 
-Choppiness regime (CHOP > 61.8 = range, < 38.2 = trend) ensures we only trade in trending markets on 1d. 
-In trending regime (CHOP < 38.2): long when TRIX crosses above zero, short when crosses below zero. 
-In ranging regime (CHOP > 61.8): fade extremes - long when TRIX < -0.05, short when TRIX > 0.05. 
-This adapts to both bull/bear markets by switching between trend-following and mean-reversion based on 1d chop.
-Target 20-50 trades/year (80-200 total over 4 years). Uses 4h primary timeframe with 1d HTF for volume and chop.
+6h_HTF_1d_Ichimoku_Cloud_Trend_V1
+Hypothesis: 6h price breaking above/below Ichimoku cloud (from 1d) with TK cross confirmation and volume filter. 
+Ichimoku cloud acts as dynamic support/resistance; TK cross confirms momentum. 
+Volume > 1.5x 20-period MA reduces false breakouts. Works in bull/bear by only taking trades aligned with 1d cloud color (green=long bias, red=short bias).
+Target: 12-37 trades/year (50-150 total over 4 years).
+Uses 6h primary timeframe with 1d HTF for Ichimoku cloud and TK cross.
 """
 
 import numpy as np
@@ -19,119 +17,118 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for volume and choppiness)
+    # Load HTF data ONCE before loop (1d for Ichimoku)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:  # Need 52 for Senkou Span B (26*2)
         return np.zeros(n)
     
-    # === 1d Volume MA for spike detection ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # === 1d Choppiness Index (CHOP) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Add first TR (for period 0) as high-low
-    tr = np.concatenate([[high_1d[0] - low_1d[0]], tr])
-    # ATR (14-period)
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Sum of True Range over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    # Chop = 100 * log10(tr_sum / (hh_1d - ll_1d)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh_1d - ll_1d
-    chop_1d = np.where(range_hl > 0, 100 * np.log10(tr_sum / range_hl) / np.log10(14), 50)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # === 4h Indicators (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # === 1d Ichimoku Cloud ===
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    tenkan_sen = (pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
+                  pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
+    tenkan_sen = tenkan_sen.values
+    
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    kijun_sen = (pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max() + 
+                 pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
+    kijun_sen = kijun_sen.values
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    senkou_span_b = (pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
+                     pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2
+    senkou_span_b = senkou_span_b.values
+    
+    # Current cloud (Senkou Span A/B shifted back 26 periods to align with current price)
+    # We need the cloud values from 26 periods ago for current price
+    if len(senkou_span_a) < 26 or len(senkou_span_b) < 26:
+        return np.zeros(n)
+    senkou_span_a_lagged = np.roll(senkou_span_a, 26)
+    senkou_span_b_lagged = np.roll(senkou_span_b, 26)
+    # First 26 values are invalid due to roll
+    senkou_span_a_lagged[:26] = np.nan
+    senkou_span_b_lagged[:26] = np.nan
+    
+    # Cloud top/bottom
+    cloud_top = np.maximum(senkou_span_a_lagged, senkou_span_b_lagged)
+    cloud_bottom = np.minimum(senkou_span_a_lagged, senkou_span_b_lagged)
+    cloud_green = senkou_span_a_lagged > senkou_span_b_lagged  # True = bullish cloud
+    
+    # TK Cross (Tenkan-sen crossing Kijun-sen)
+    tk_cross = tenkan_sen - kijun_sen
+    tk_cross_above = tk_cross > 0  # Tenkan above Kijun = bullish
+    tk_cross_below = tk_cross < 0  # Tenkan below Kijun = bearish
+    
+    # Align all 1d indicators to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    cloud_top_aligned = align_htf_to_ltf(prices, df_1d, cloud_top)
+    cloud_bottom_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom)
+    cloud_green_aligned = align_htf_to_ltf(prices, df_1d, cloud_green.astype(float))  # bool to float
+    tk_cross_above_aligned = align_htf_to_ltf(prices, df_1d, tk_cross_above.astype(float))
+    tk_cross_below_aligned = align_htf_to_ltf(prices, df_1d, tk_cross_below.astype(float))
+    
+    # === 6h Indicators (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # TRIX: triple EMA of close, then ROC
-    # EMA1
-    ema1 = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA2 of EMA1
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA3 of EMA2
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # TRIX = 100 * (EMA3_today - EMA3_yesterday) / EMA3_yesterday
-    trix = np.zeros_like(close_4h)
-    trix[1:] = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
-    # Avoid division by zero in first value
-    trix[0] = 0
+    # Volume MA (20-period) for spike detection
+    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if indicators not ready
-        if (np.isnan(trix[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(cloud_top_aligned[i]) or np.isnan(cloud_bottom_aligned[i]) or 
+            np.isnan(tk_cross_above_aligned[i]) or np.isnan(tk_cross_below_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
-        vol = volume_4h[i]
-        vol_ok = vol > 1.5 * vol_ma_1d_aligned[i]  # volume confirmation
-        chop = chop_1d_aligned[i]
-        trix_val = trix[i]
+        price = close_6h[i]
+        vol = volume_6h[i]
+        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
+        price_above_cloud = price > cloud_top_aligned[i]
+        price_below_cloud = price < cloud_bottom_aligned[i]
+        in_cloud = (price >= cloud_bottom_aligned[i]) & (price <= cloud_top_aligned[i])
         
         if position == 0:
-            # Determine regime: trending (CHOP < 38.2) or ranging (CHOP > 61.8)
-            if chop < 38.2:  # Trending regime
-                # Long: TRIX crosses above zero
-                if trix_val > 0 and trix[i-1] <= 0 and vol_ok:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: TRIX crosses below zero
-                elif trix_val < 0 and trix[i-1] >= 0 and vol_ok:
-                    signals[i] = -0.25
-                    position = -1
-            elif chop > 61.8:  # Ranging regime
-                # Long: TRIX deeply negative (oversold)
-                if trix_val < -0.05 and vol_ok:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: TRIX deeply positive (overbought)
-                elif trix_val > 0.05 and vol_ok:
-                    signals[i] = -0.25
-                    position = -1
-            # Else: choppy regime (38.2 <= CHOP <= 61.8) - no trades
+            # Long: price breaks above cloud + TK cross bullish + volume + green cloud bias
+            if price_above_cloud and tk_cross_above_aligned[i] > 0.5 and vol_ok and cloud_green_aligned[i] > 0.5:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below cloud + TK cross bearish + volume + red cloud bias
+            elif price_below_cloud and tk_cross_below_aligned[i] > 0.5 and vol_ok and cloud_green_aligned[i] < 0.5:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: regime change or TRIX signal reversal
-            if chop > 61.8:  # Entered ranging regime
-                signals[i] = 0.0
-                position = 0
-            elif trix_val < 0:  # TRIX turned bearish
+            # Exit long: price breaks below cloud bottom OR TK cross turns bearish
+            if price < cloud_bottom_aligned[i] or tk_cross_above_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: regime change or TRIX signal reversal
-            if chop > 61.8:  # Entered ranging regime
-                signals[i] = 0.0
-                position = 0
-            elif trix_val > 0:  # TRIX turned bullish
+            # Exit short: price breaks above cloud top OR TK cross turns bullish
+            if price > cloud_top_aligned[i] or tk_cross_below_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_1d_TRIX_VolumeSpike_ChopRegime_V1"
-timeframe = "4h"
+name = "6h_HTF_1d_Ichimoku_Cloud_Trend_V1"
+timeframe = "6h"
 leverage = 1.0
