@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 12h Camarilla R1/S1 breakouts filtered by 1w EMA50 trend and volume spike (>2x average).
-Uses discrete position sizing (0.0, ±0.25) to minimize fee churn and overtrading.
-ATR-based trailing stop with 2.0x ATR distance. Designed for <30 trades/year per symbol.
-Works in bull/bear via 1w trend alignment and volume confirmation to avoid false breakouts.
+4h_KAMA_Regime_Trend_ATRStop_v2
+Hypothesis: 4h KAMA trend + volume spike + chop regime filter with ATR trailing stop.
+KAMA adapts to market efficiency, reducing whipsaw in ranging markets.
+Volume spike confirms breakout strength. Chop regime filter avoids false signals in high-chop environments.
+Designed for 20-40 trades/year per symbol with discrete sizing (0.0, ±0.25) to minimize fee churn.
+Works in bull/bear via KAMA's adaptive trend detection and volume confirmation to avoid false breakouts.
 """
 
 import numpy as np
@@ -16,40 +17,49 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for Camarilla, 1w for trend)
+    # Load HTF data ONCE before loop (1d for chop regime)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 2 or len(df_1w) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    
-    # Align to 1d timeframe (use previous completed 1d bar)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === 1w EMA50 for HTF trend filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === 4h KAMA (adaptive trend) ===
+    close = prices['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i-10] * (close[i] - kama[i-1])
     
     # === ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # === 1d Chop Regime (EWMA of True Range) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Chop = ATR / (highest high - lowest low over 14 periods)
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denom = hh_14 - ll_14
+    chop = np.divide(atr_1d * 100, chop_denom, out=np.full_like(atr_1d, 50.0), where=chop_denom!=0)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,8 +67,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
-            or np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(kama[i]) or np.isnan(atr[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,25 +76,25 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume spike: current volume > 2x 20-period average
+            # Volume spike: current volume > 1.8x 20-period average
             volume = prices['volume'].values
             vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-            vol_spike = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+            vol_spike = volume[i] > 1.8 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
             
-            # Long conditions: price > 1d R1, 1w uptrend, volume spike
-            long_breakout = price > r1_aligned[i]
-            long_trend = price > ema_50_1w_aligned[i]
+            # Long conditions: price > KAMA, low chop (< 45), volume spike
+            long_trend = price > kama[i]
+            long_chop = chop_aligned[i] < 45
             
-            # Short conditions: price < 1d S1, 1w downtrend, volume spike
-            short_breakout = price < s1_aligned[i]
-            short_trend = price < ema_50_1w_aligned[i]
+            # Short conditions: price < KAMA, low chop (< 45), volume spike
+            short_trend = price < kama[i]
+            short_chop = chop_aligned[i] < 45
             
-            # Entry logic - ONLY enter on volume spike + trend alignment
-            if long_breakout and long_trend and vol_spike:
+            # Entry logic - volume spike + trend + low chop
+            if long_trend and long_chop and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and vol_spike:
+            elif short_trend and short_chop and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -95,8 +104,8 @@ def generate_signals(prices):
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below 1d S1 (support broken)
-            elif price < s1_aligned[i]:
+            # Trailing exit: price closes below KAMA (trend broken)
+            elif price < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,8 +116,8 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above 1d R1 (resistance broken)
-            elif price > r1_aligned[i]:
+            # Trailing exit: price closes above KAMA (trend broken)
+            elif price > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_KAMA_Regime_Trend_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
