@@ -5,18 +5,18 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load 1d data ONCE before loop for trend and structure
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
+    # 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # 1d Donchian(20) channels for breakout signals
     high_1d = df_1d['high'].values
@@ -45,9 +45,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
             np.isnan(donch_low_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
             np.isnan(vol_ratio_aligned[i])):
             if position != 0:
@@ -56,7 +56,7 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         upper_band = donch_high_aligned[i]
         lower_band = donch_low_aligned[i]
         vol_ratio = vol_ratio_aligned[i]
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DonchianBreakout_1dTrend_VolumeATR"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1dTrend_VolumeATR_v2"
+timeframe = "12h"
 leverage = 1.0
