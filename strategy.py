@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_WeeklyTrend_ATRStop_v1
-Hypothesis: Daily Camarilla R1/S1 breakouts filtered by weekly EMA34 trend, with ATR-based stoploss.
-Uses discrete position sizing (0.30) to balance risk and reward. Weekly trend filter provides robust
-directional bias across market cycles while reducing false breakouts. Target: 15-25 trades/year per symbol
-for low fee drag and strong test generalization in both bull and bear markets.
+6h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: Camarilla pivot breakouts at R1/S1 on 6h filtered by 1d EMA50 trend and volume spike (>2.0x 20-period average).
+Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to minimize fee churn.
+1d trend filter provides robust directional bias across bull/bear markets while reducing whipsaws.
+Target: 12-37 trades/year per symbol for low fee drag and strong test generalization.
 """
 
 import numpy as np
@@ -13,47 +13,44 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly for EMA34 trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load HTF data ONCE before loop (1d for EMA50 trend filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Daily OHLC for Camarilla calculation ===
+    # === 6h OHLC for Camarilla calculation ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Previous day's OHLC for Camarilla levels (shifted by 1 to avoid look-ahead)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # Set first value to NaN since no previous day exists
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate previous day's Camarilla levels (using prior 6h bar's daily range)
+    # We need daily high/low from 1d data to compute Camarilla for current 6h period
+    cam_high = df_1d['high'].values
+    cam_low = df_1d['low'].values
+    cam_close = df_1d['close'].values
     
-    # Camarilla levels: R1, S1, R2, S2, R3, S3, R4, S4
-    # R4 = Close + 1.5*(High-Low), S4 = Close - 1.5*(High-Low)
-    # R3 = Close + 1.125*(High-Low), S3 = Close - 1.125*(High-Low)
-    # R2 = Close + 0.75*(High-Low), S2 = Close - 0.75*(High-Low)
-    # R1 = Close + 0.5*(High-Low), S1 = Close - 0.5*(High-Low)
-    rng = prev_high - prev_low
-    R1 = prev_close + 0.5 * rng
-    S1 = prev_close - 0.5 * rng
-    R2 = prev_close + 0.75 * rng
-    S2 = prev_close - 0.75 * rng
-    R3 = prev_close + 1.125 * rng
-    S3 = prev_close - 1.125 * rng
-    R4 = prev_close + 1.5 * rng
-    S4 = prev_close - 1.5 * rng
+    # Camarilla levels: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low),
+    # R2 = close + 0.55*(high-low), R1 = close + 0.275*(high-low)
+    # S1 = close - 0.275*(high-low), S2 = close - 0.55*(high-low),
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    rng = cam_high - cam_low
+    r1 = cam_close + 0.275 * rng
+    s1 = cam_close - 0.275 * rng
+    r4 = cam_close + 1.5 * rng
+    s4 = cam_close - 1.5 * rng
     
-    # === Weekly EMA34 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align Camarilla levels to 6h timeframe (use prior day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # === 1d EMA50 for trend filter ===
+    ema_50_1d = pd.Series(cam_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # === ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
@@ -66,9 +63,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,50 +75,55 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long conditions: price > R1 (breakout above resistance) and weekly uptrend
-            long_breakout = price > R1[i]
-            long_trend = price > ema_34_1w_aligned[i]
+            # Volume filter: current volume > 2.0x 20-period average
+            volume = prices['volume'].values
+            vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+            vol_filter = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
             
-            # Short conditions: price < S1 (breakdown below support) and weekly downtrend
-            short_breakout = price < S1[i]
-            short_trend = price < ema_34_1w_aligned[i]
+            # Long conditions: price > R1, 1d uptrend, volume filter
+            long_breakout = price > r1_aligned[i]
+            long_trend = price > ema_50_1d_aligned[i]
             
-            # Entry logic - enter on breakout/breakdown with trend alignment
-            if long_breakout and long_trend:
-                signals[i] = 0.30
+            # Short conditions: price < S1, 1d downtrend, volume filter
+            short_breakout = price < s1_aligned[i]
+            short_trend = price < ema_50_1d_aligned[i]
+            
+            # Entry logic - ONLY enter on volume filter + trend alignment
+            if long_breakout and long_trend and vol_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend:
-                signals[i] = -0.30
+            elif short_breakout and short_trend and vol_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.5 * atr[i]:
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below S1 (breakdown of support)
-            elif price < S1[i]:
+            # Trailing exit: price closes below S1 (breakdown)
+            elif price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.5 * atr[i]:
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above R1 (breakout of resistance)
-            elif price > R1[i]:
+            # Trailing exit: price closes above R1 (breakout)
+            elif price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
