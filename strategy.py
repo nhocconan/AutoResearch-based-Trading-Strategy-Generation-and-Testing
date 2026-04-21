@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
-Hypothesis: Camarilla R1/S1 breakout with volume confirmation (>1.8x 20-bar MA) and ATR-based stoploss works on 4h timeframe for BTC/ETH in both bull and bear markets. Uses 1d timeframe for Camarilla calculation (proven pattern: tight entries, volume confirmation, price channel structure). Target: 15-40 trades/year per symbol (60-160 over 4 years) to avoid fee drag.
+12h_Camarilla_R1_S1_Breakout_VolumeFilter_Tight_V2
+Hypothesis: Tighten entry conditions from V1 to reduce overtrading - increase volume threshold to 2.0x average and require price to close beyond Camarilla levels for confirmation. This should reduce trades from 174/year to target 12-37/year while maintaining edge in both bull and bear markets via mean reversion from extreme daily levels.
 """
 
 import numpy as np
@@ -39,14 +39,14 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + range_1d * 1.1 / 12
     camarilla_s1 = prev_close - range_1d * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume filter: 20-period average on 4h timeframe
+    # Volume filter: 20-period average on 12h timeframe with higher threshold
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
-    # ATR for stoploss and position sizing
+    # ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -73,16 +73,16 @@ def generate_signals(prices):
         price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation (>1.8x average to reduce trades and avoid fee drag)
-        volume_ok = volume > 1.8 * vol_ma[i]
+        # Volume confirmation (>2.0x average to significantly reduce trades)
+        volume_ok = volume > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 with volume
+            # Long: price closes above Camarilla R1 with strong volume
             if price > camarilla_r1_aligned[i]:
                 if volume_ok:
                     signals[i] = 0.25
                     position = 1
-            # Short: price breaks below Camarilla S1 with volume
+            # Short: price closes below Camarilla S1 with strong volume
             elif price < camarilla_s1_aligned[i]:
                 if volume_ok:
                     signals[i] = -0.25
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_VolumeFilter_Tight_V2"
+timeframe = "12h"
 leverage = 1.0
