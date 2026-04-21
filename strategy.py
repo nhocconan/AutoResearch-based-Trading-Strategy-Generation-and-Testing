@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_KAMA_Adaptive_Trend_Regime_v1
-Hypothesis: 6h KAMA adapts to market efficiency (ER) to reduce whipsaws in ranging markets and capture trends. Uses 1d ADX (>25) as regime filter for trending markets. Only takes long when price > KAMA and ADX>25, short when price < KAMA and ADX>25. Volume confirmation (>1.5x 20-period MA) reduces false breakouts. Designed for 6h timeframe with adaptive trend detection to work in both bull and bear markets by requiring HTF trend regime (ADX>25). Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime_v2
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume confirmation (>2.5x 20-period MA), and chop regime filter (Choppiness Index > 61.8 for ranging). Only takes trades when price is above/below 1d EMA34 and in ranging market to avoid trend exhaustion. Uses ATR stop (2.0x) and minimum holding period of 3 bars. Designed for 12h timeframe to capture swing reversals in ranging markets while avoiding strong trends where breakouts fail. Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and fee drag.
 """
 
 import numpy as np
@@ -13,64 +13,40 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for ADX trend regime)
+    # Load HTF data ONCE before loop (1d for EMA trend and chop regime)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # === 1d ADX (14-period) for HTF trend regime ===
+    # === 1d EMA34 for HTF trend regime ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # === 1d Choppiness Index for regime filter (range > 61.8) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
     
     # True Range
     tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d_arr, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d_arr, 1)))
     tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    dm_plus = pd.Series(np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                                 np.maximum(high_1d - np.roll(high_1d, 1), 0), 0))
-    dm_minus = pd.Series(np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                                  np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0))
+    # Highest high and lowest low over 14 periods
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Smoothed DM and TR
-    dm_plus_smooth = dm_plus.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = dm_minus.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    tr_smooth = tr_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Choppiness Index: 100 * log10(sum(atr_1d)/ (hh_1d - ll_1d)) / log10(14)
+    sum_atr_1d = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    range_1d = hh_1d - ll_1d
+    chop_1d = 100 * np.log10(sum_atr_1d / range_1d) / np.log10(14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx_1d = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # === 6h KAMA (adaptive moving average) ===
+    # === 12h ATR (14-period) for stoploss ===
     close = prices['close'].values
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, 10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close, 1)), axis=0)  # 10-period sum of abs changes
-    # Pad arrays to match length
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed with close
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # === 6h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     
@@ -80,9 +56,19 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume confirmation (1.5x 20-period MA) ===
+    # === Volume confirmation (2.5x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === 12h Camarilla pivot levels (R1, S1) ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -91,8 +77,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(kama[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(r1[i]) or np.isnan(s1[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -101,21 +87,27 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        adx_val = adx_1d_aligned[i]
-        kama_val = kama[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
+        chop_val = chop_1d_aligned[i]
         vol_avg = vol_ma[i]
+        r1_val = r1[i]
+        s1_val = s1[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirm = volume_now > 1.5 * vol_avg
+        # Volume confirmation: current volume > 2.5x average (stricter threshold)
+        volume_confirm = volume_now > 2.5 * vol_avg
         
-        # Trend regime: ADX > 25 indicates trending market
-        trending_regime = adx_val > 25
+        # Regime filter: ranging market (Choppiness Index > 61.8)
+        ranging = chop_val > 61.8
+        
+        # Trend alignment: price above EMA for long, below EMA for short
+        uptrend = price > ema_34_1d_val
+        downtrend = price < ema_34_1d_val
         
         if position == 0:
-            # Long: price > KAMA, trending regime, volume confirm
-            long_condition = (price > kama_val) and trending_regime and volume_confirm
-            # Short: price < KAMA, trending regime, volume confirm
-            short_condition = (price < kama_val) and trending_regime and volume_confirm
+            # Long: price breaks above R1, uptrend alignment, volume confirm, ranging market
+            long_condition = (price > r1_val) and uptrend and volume_confirm and ranging
+            # Short: price breaks below S1, downtrend alignment, volume confirm, ranging market
+            short_condition = (price < s1_val) and downtrend and volume_confirm and ranging
             
             if long_condition:
                 signals[i] = 0.25
@@ -142,8 +134,13 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price crosses below KAMA)
-                elif price < kama_val:
+                # Trend reversal exit (price below EMA)
+                elif price < ema_34_1d_val:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Regime change exit (market starts trending)
+                elif chop_val <= 61.8:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -154,8 +151,13 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price crosses above KAMA)
-                elif price > kama_val:
+                # Trend reversal exit (price above EMA)
+                elif price > ema_34_1d_val:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Regime change exit (market starts trending)
+                elif chop_val <= 61.8:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -164,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_KAMA_Adaptive_Trend_Regime_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime_v2"
+timeframe = "12h"
 leverage = 1.0
