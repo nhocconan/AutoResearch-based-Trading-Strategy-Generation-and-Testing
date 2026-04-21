@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_ATRStop_v1
-Hypothesis: On 4h timeframe, Donchian(20) breakouts with volume confirmation (>2.0x 20-bar average) capture strong directional moves. 
-Institutional participation is confirmed by volume spikes. ATR-based stoploss (3.0x ATR) manages risk. 
-Discrete sizing (0.30) limits fee churn. Target: 75-200 total trades over 4 years.
-Works in both bull and bear markets by taking breakouts in direction of the trend.
+6h_ADX_TrendStrength_VolumeSpike_v1
+Hypothesis: On 6h timeframe, ADX > 25 identifies strong trends, while volume > 2.0x 20-period average confirms institutional participation. 
+Enter long when +DI > -DI (bullish momentum) and short when -DI > +DI (bearish momentum) in high-ADX regime. 
+Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years.
+Uses 1d EMA50 as trend filter: only long when price > EMA50_1d, only short when price < EMA50_1d.
 """
 
 import numpy as np
@@ -16,47 +16,64 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for trend filter)
+    # Load HTF data ONCE before loop (1d for EMA50 trend filter)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d EMA34 for daily trend regime ===
+    # === 1d EMA50 for trend filter ===
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h Donchian(20) channels ===
+    # === 6h ADX calculation ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Donchian channels: highest high and lowest low of last 20 periods
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma_20)
-    
-    # === 4h ATR(10) for stoploss ===
+    # True Range
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=10, min_periods=10).mean().values
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM and TR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # === 6h volume confirmation (volume > 2.0x 20-period average) ===
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
-    max_hold_bars = 20  # max 5 days (20 * 4h = 80h)
+    max_hold_bars = 8  # max 2 days (8 * 6h = 48h)
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(volume_confirmed[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx[i]) or 
+            np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,29 +81,37 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        daily_ema = ema_34_1d_aligned[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
+        ema_50 = ema_50_1d_aligned[i]
+        adx_val = adx[i]
+        plus_di_val = plus_di[i]
+        minus_di_val = minus_di[i]
         vol_conf = volume_confirmed[i]
         
-        # Daily trend regime
-        is_bull = price > daily_ema
-        is_bear = price < daily_ema
+        # Trend filter: only trade in direction of 1d EMA50
+        is_uptrend_filter = price > ema_50
+        is_downtrend_filter = price < ema_50
         
         if position == 0:
-            # Look for breakouts with volume confirmation
-            long_breakout = (price > upper_channel) and vol_conf
-            short_breakout = (price < lower_channel) and vol_conf
+            # Strong trend + volume confirmation
+            strong_trend = adx_val > 25
             
-            if is_bull and long_breakout:
-                # In bull regime, take long breakouts
-                signals[i] = 0.30
+            if is_uptrend_filter and strong_trend:
+                # Long when +DI > -DI (bullish momentum)
+                long_condition = (plus_di_val > minus_di_val) and vol_conf
+            elif is_downtrend_filter and strong_trend:
+                # Short when -DI > +DI (bearish momentum)
+                short_condition = (minus_di_val > plus_di_val) and vol_conf
+            else:
+                long_condition = False
+                short_condition = False
+            
+            if is_uptrend_filter and long_condition:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
                 bars_since_entry = 0
-            elif is_bear and short_breakout:
-                # In bear regime, take short breakouts
-                signals[i] = -0.30
+            elif is_downtrend_filter and short_condition:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
                 bars_since_entry = 0
@@ -94,9 +119,9 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Check stoploss (3.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 3.0 * atr[i]:
+                if price < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -106,9 +131,9 @@ def generate_signals(prices):
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 3.0 * atr[i]:
+                if price > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -118,10 +143,10 @@ def generate_signals(prices):
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_ADX_TrendStrength_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
