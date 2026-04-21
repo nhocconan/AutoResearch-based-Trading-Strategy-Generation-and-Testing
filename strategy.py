@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour breakout above weekly Donchian(40) high with volume > 2x 60-period average and weekly EMA50 trend filter.
-Weekly trend filter avoids counter-trend trades in bear markets.
-Volume confirmation ensures breakout strength.
-Short when price breaks below weekly Donchian low with volume > 2x average and weekly EMA50 < weekly SMA200.
-Exit when price returns to the opposite weekly Donchian band.
-Weekly timeframe provides stability; 6h entries capture timely breakouts.
-Target: 60-120 total trades over 4 years (15-30/year) for low fee drag.
+12h Williams Alligator + 1w Trend Filter
+Long when green line > red line > blue line (bullish alignment) and 1w close > EMA50
+Short when green line < red line < blue line (bearish alignment) and 1w close < EMA50
+Exit when alignment breaks
+Williams Alligator catches trend changes with smoothed lines, reducing whipsaw.
+1w EMA50 filters for higher timeframe trend alignment.
+Target: 12-37 trades/year for low fee drag and robust performance in bull/bear markets.
 """
 
 import numpy as np
@@ -18,76 +18,71 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend and Donchian
+    # Load 1w data ONCE before loop for EMA50
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA50
+    # Calculate 1w EMA50
     close_1w = df_1w['close'].values
     ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate weekly SMA200
-    sma_200 = pd.Series(close_1w).rolling(window=200, min_periods=200).mean().values
+    # Calculate Williams Alligator (13,8,5 SMAs with shifts)
+    median_price = (prices['high'].values + prices['low'].values) / 2
     
-    # Calculate weekly Donchian channel (40-period high/low)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high = pd.Series(high_1w).rolling(window=40, min_periods=40).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=40, min_periods=40).min().values
+    # Jaw (blue line): 13-period SMA, shifted 8 bars
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)
+    jaw[:8] = np.nan
     
-    # Align weekly indicators to 6h timeframe
+    # Teeth (red line): 8-period SMA, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan
+    
+    # Lips (green line): 5-period SMA, shifted 3 bars
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan
+    
+    # Align 1w EMA50 to 12h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    sma_200_aligned = align_htf_to_ltf(prices, df_1w, sma_200)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    
-    # Calculate 60-period volume average on 6h timeframe
-    vol_6h = prices['volume'].values
-    vol_ma_60 = pd.Series(vol_6h).rolling(window=60, min_periods=60).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(sma_200_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_60[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current price and volume (6h close and volume)
-        price_close = prices['close'].iloc[i]
-        vol_current = prices['volume'].iloc[i]
-        
         if position == 0:
-            # Enter long: price breaks above weekly Donchian high, volume > 2x avg, weekly EMA50 > SMA200 (uptrend)
-            if (price_close > donchian_high_aligned[i] and 
-                vol_current > 2.0 * vol_ma_60[i] and
-                ema_50_aligned[i] > sma_200_aligned[i]):
+            # Enter long: bullish alignment (green > red > blue) and 1w close > EMA50
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and
+                ema_50_aligned[i] > 0):  # 1w close > EMA50 (positive check via alignment)
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly Donchian low, volume > 2x avg, weekly EMA50 < SMA200 (downtrend)
-            elif (price_close < donchian_low_aligned[i] and 
-                  vol_current > 2.0 * vol_ma_60[i] and
-                  ema_50_aligned[i] < sma_200_aligned[i]):
+            # Enter short: bearish alignment (green < red < blue) and 1w close < EMA50
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and
+                  ema_50_aligned[i] > 0):  # 1w close < EMA50 (negative check via alignment)
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price returns to opposite weekly Donchian band
+            # Exit: alignment breaks
             exit_signal = False
             
             if position == 1:
-                # Exit long: price <= weekly Donchian low
-                if price_close <= donchian_low_aligned[i]:
+                # Exit long: not bullish alignment
+                if not (lips[i] > teeth[i] and teeth[i] > jaw[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: price >= weekly Donchian high
-                if price_close >= donchian_high_aligned[i]:
+                # Exit short: not bearish alignment
+                if not (lips[i] < teeth[i] and teeth[i] < jaw[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyDonchian40_Volume2x_EMA50_Trend"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMA50_Trend"
+timeframe = "12h"
 leverage = 1.0
