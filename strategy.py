@@ -13,7 +13,7 @@ def generate_signals(prices):
     if len(df_1d) < 100:
         return np.zeros(n)
     
-    # === Daily True Range for ATR calculation ===
+    # === Daily ATR for volatility regime ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -25,15 +25,15 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
-    # ATR(20) - volatility measure
+    # ATR(20)
     atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # ATR Percentile (252-day lookback for regime detection)
+    # ATR(20) percentile (252-day lookback for regime)
     atr_percentile = pd.Series(atr_20).rolling(window=252, min_periods=50).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # Align ATR percentile to 12h timeframe
+    # Align ATR percentile to 4h timeframe
     atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
     # === Daily SMA50 for trend filter ===
@@ -90,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ATR_Volatility_Regime_SMA50_Trend_Volume"
-timeframe = "12h"
+name = "4h_ATR_Volatility_Regime_SMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
