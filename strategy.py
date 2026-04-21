@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_A
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike.
-In trending markets (price > EMA50_1d): breakout continuation (long above R1, short below S1).
-In ranging markets: no entries to avoid whipsaw. Uses volume confirmation (2.0x average) to filter false breakouts.
-ATR(14) stoploss (1.5x) and discrete position sizing (0.25) to limit fee drag and drawdown.
-Designed to work in both bull and bear markets by requiring strong trend alignment.
-Timeframe: 12h, uses 1d HTF for trend filter.
-Target: 50-150 total trades over 4 years = 12-37/year.
+4h_TRIX_VolumeSpike_ChopRegime
+Hypothesis: 4h TRIX (triple EMA) crossover + volume spike (2.5x average) + chop regime filter (CHOP<38.2 for trending). 
+Long when TRIX crosses above zero in trending markets, short when crosses below zero. 
+Volume confirmation filters false signals. ATR(14) stoploss (2.0x). Discrete sizing 0.30.
+Works in both bull/bear via regime filter that only allows entries in trending conditions (low chop).
+Timeframe: 4h, uses 1d HTF for chop regime calculation.
+Target: 100-180 total trades over 4 years = 25-45/year.
 """
 
 import numpy as np
@@ -16,41 +15,42 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA50 trend)
+    # Load HTF data ONCE before loop (1d for chop regime)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1d OHLC for EMA50 trend ===
-    df_1d_close = df_1d['close'].values
-    ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
-    df_1d_open = df_1d['open'].values
+    # === 1d OHLC for Chop regime calculation ===
     df_1d_high = df_1d['high'].values
     df_1d_low = df_1d['low'].values
     df_1d_close = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar
-    range_1d = df_1d_high - df_1d_low
-    r1_1d = df_1d_close + 0.275 * range_1d
-    s1_1d = df_1d_close - 0.275 * range_1d
-    h3_1d = df_1d_close + 1.1 * range_1d
-    l3_1d = df_1d_close - 1.1 * range_1d
-    h4_1d = df_1d_close + 1.382 * range_1d
-    l4_1d = df_1d_close - 1.382 * range_1d
+    # True Range for 1d
+    tr1 = pd.Series(df_1d_high - df_1d_low)
+    tr2 = pd.Series(np.abs(df_1d_high - np.roll(df_1d_close, 1)))
+    tr3 = pd.Series(np.abs(df_1d_low - np.roll(df_1d_close, 1)))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d Camarilla levels to 12h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Sum of absolute price changes for Chop denominator
+    abs_changes = pd.Series(np.abs(np.diff(df_1d_close, prepend=df_1d_close[0]))).rolling(window=14, min_periods=14).sum().values
+    
+    # Chop = 100 * log10(sum(TR)/abs_changes) / log10(14)
+    chop_1d = 100 * (np.log10(tr_1d.rolling(window=14, min_periods=14).sum().values) - np.log10(abs_changes)) / np.log10(14)
+    
+    # Align Chop to 4h timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # === 4h TRIX calculation ===
+    close = prices['close'].values
+    # TRIX: triple EMA, then percent change
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = 100 * (pd.Series(ema3).pct_change(periods=1)).values
     
     # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
@@ -59,22 +59,17 @@ def generate_signals(prices):
     # === ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))))
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(chop_1d_aligned[i]) or np.isnan(trix[i]) or np.isnan(vol_ma[i]) 
+            or np.isnan(atr[i]) or np.isnan(trix[i-1])):  # need previous TRIX for crossover
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,67 +77,59 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        h3 = h3_1d_aligned[i]
-        l3 = l3_1d_aligned[i]
-        h4 = h4_1d_aligned[i]
-        l4 = l4_1d_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        chop = chop_1d_aligned[i]
+        trix_now = trix[i]
+        trix_prev = trix[i-1]
         vol_avg = vol_ma[i]
         
-        # Volume confirmation: current volume > 2.0x average (strict filter)
-        volume_confirmed = volume_now > 2.0 * vol_avg
+        # Volume confirmation: current volume > 2.5x average (strict filter)
+        volume_confirmed = volume_now > 2.5 * vol_avg
+        
+        # Chop regime: only allow entries when market is trending (CHOP < 38.2)
+        trending_regime = chop < 38.2
+        
+        # TRIX crossover signals
+        trix_cross_up = (trix_prev <= 0) and (trix_now > 0)
+        trix_cross_down = (trix_prev >= 0) and (trix_now < 0)
         
         if position == 0:
-            # Only enter in trending markets (price > EMA50_1d for long, < for short)
-            # Volume confirmation required to avoid false breakouts
-            long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
-            short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
-            
-            if long_condition:
-                signals[i] = 0.25
+            # Enter long: TRIX crosses above zero in trending market with volume confirmation
+            if trix_cross_up and trending_regime and volume_confirmed:
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
-            elif short_condition:
-                signals[i] = -0.25
+            # Enter short: TRIX crosses below zero in trending market with volume confirmation
+            elif trix_cross_down and trending_regime and volume_confirmed:
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (1.5x ATR)
-            if price < entry_price - 1.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price < ema_trend:
-                signals[i] = 0.0
-                position = 0
-            # Mean reversion exit at H3 (overbought)
-            elif price > h3:
+            # Exit: TRIX crosses below zero
+            elif trix_now < 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Check stoploss (1.5x ATR)
-            if price > entry_price + 1.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price > ema_trend:
-                signals[i] = 0.0
-                position = 0
-            # Mean reversion exit at L3 (oversold)
-            elif price < l3:
+            # Exit: TRIX crosses above zero
+            elif trix_now > 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_A"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopRegime"
+timeframe = "4h"
 leverage = 1.0
