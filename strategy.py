@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1w EMA20 trend and volume spike.
-In trending markets (price > EMA20_1w for long, < for short): breakout continuation (long above R1, short below S1).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike.
+In trending markets (price > EMA50_1d for long, < for short): breakout continuation (long above R1, short below S1).
 Volume confirmation (2.0x average) filters false breakouts. ATR(14) stoploss (2.0x) and discrete sizing (0.25).
-Uses 1w HTF trend to avoid SOL-only bias and improve BTC/ETH generalization. Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year).
+Designed for 4h timeframe to target 75-200 trades over 4 years (19-50/year). Works in bull/bear via trend alignment.
 """
 
 import numpy as np
@@ -16,16 +16,15 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA20 trend and 1d for Camarilla pivot)
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop (1d for EMA50 trend and Camarilla pivot)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 20 or len(df_1d) < 60:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1w EMA20 for trend filter ===
-    df_1w_close = df_1w['close'].values
-    ema_20_1w = pd.Series(df_1w_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # === 1d OHLC for EMA50 trend ===
+    df_1d_close = df_1d['close'].values
+    ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
     df_1d_open = df_1d['open'].values
@@ -42,7 +41,7 @@ def generate_signals(prices):
     h4_1d = df_1d_close + 1.382 * range_1d
     l4_1d = df_1d_close - 1.382 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
@@ -72,7 +71,7 @@ def generate_signals(prices):
     for i in range(60, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,14 +85,14 @@ def generate_signals(prices):
         l3 = l3_1d_aligned[i]
         h4 = h4_1d_aligned[i]
         l4 = l4_1d_aligned[i]
-        ema_trend = ema_20_1w_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
         
         # Volume confirmation: current volume > 2.0x average (strict filter)
         volume_confirmed = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Only enter in trending markets (price > EMA20_1w for long, < for short)
+            # Only enter in trending markets (price > EMA50_1d for long, < for short)
             # Volume confirmation required to avoid false breakouts
             long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
             short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
@@ -141,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
