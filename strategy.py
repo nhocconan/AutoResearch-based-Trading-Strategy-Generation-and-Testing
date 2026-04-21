@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_12hTrendRegime_VolumeSpike_v1
-Hypothesis: 6h Donchian(20) breakouts filtered by 12h EMA50 trend regime (bull/bear/range) and 6h volume spikes.
-In bull regime: long breakouts favored; in bear regime: short breakdowns favored; in range: both directions with stricter filters.
-Volume spike confirms participation. Discrete sizing (0.25) targets 12-37 trades/year on 6h.
-Works in all markets via regime adaptation: follows trend in strong regimes, mean-reverts in chop.
+4h_Camarilla_R1_S1_Breakout_HTF_VolumeRegime_Adaptive_v3
+Hypothesis: Camarilla R1/S1 breakouts with adaptive volume confirmation based on 1d volatility regime (choppy vs trending).
+In high volatility (trending) regime: use 1.5x volume avg for confirmation (more sensitive to breakouts).
+In low volatility (choppy) regime: require 2.5x volume avg (stronger filter against false breakouts).
+Volume spike confirms genuine participation. Discrete sizing (0.25) targets 20-50 trades/year.
+Adapts to market conditions: more aggressive in trends, conservative in chop, improving robustness across BTC/ETH/SOL.
 """
 
 import numpy as np
@@ -16,48 +17,61 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for trend regime)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load HTF data ONCE before loop (1d for volatility regime)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 12h EMA50 for trend regime ===
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === 1d ATR (14-period) for volatility regime ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 12h EMA50 slope for regime classification (trending vs chop) ===
-    ema_slope = np.diff(ema_50_12h, prepend=ema_50_12h[0])
-    ema_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_slope)
+    tr1_1d = pd.Series(high_1d - low_1d)
+    tr2_1d = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3_1d = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
+    atr_14_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Regime: trending up if slope > 0.08% of price, trending down if < -0.08%, else chop
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-    slope_threshold = 0.0008 * close_12h_aligned
-    trending_up = ema_slope_aligned > slope_threshold
-    trending_down = ema_slope_aligned < -slope_threshold
-    ranging = ~(trending_up | trending_down)
+    # 1d ATR percentile (20-period) to define volatility regime
+    atr_percentile = pd.Series(atr_14_1d).rolling(window=20, min_periods=20).quantile(0.5).values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    # === 6h Donchian channel (20-period) ===
+    # Volatility regime: high vol if ATR > median (trending), low vol if ATR <= median (choppy)
+    high_vol_regime = atr_1d_aligned > atr_percentile_aligned
+    low_vol_regime = ~high_vol_regime
+    
+    # === 4h close, EMA20 for dynamic support/resistance ===
+    close = prices['close'].values
+    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Upper band: highest high over last 20 periods
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over last 20 periods
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 6h ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 6h volume confirmation (volume > 1.8x 20-period average) ===
+    # === 4h volume confirmation (adaptive threshold based on 1d vol regime) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.8 * vol_ma_20)
+    # High vol regime: 1.5x avg (more sensitive), Low vol regime: 2.5x avg (stricter)
+    vol_threshold = np.where(high_vol_regime, 1.5, 2.5)
+    volume_confirmed = volume > (vol_threshold * vol_ma_20)
+    
+    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,9 +80,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_confirmed[i]) or 
-            np.isnan(trending_up[i]) or np.isnan(trending_down[i]) or np.isnan(ranging[i])):
+        if (np.isnan(ema_20_4h[i]) or np.isnan(atr[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,29 +89,21 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        upper_band = donchian_upper[i]
-        lower_band = donchian_lower[i]
+        ema_20_4h_val = ema_20_4h[i]
+        r1_val = r1[i]
+        s1_val = s1[i]
         vol_conf = volume_confirmed[i]
         
-        # Regime flags
-        is_trending_up = trending_up[i]
-        is_trending_down = trending_down[i]
-        is_ranging = ranging[i]
-        
         if position == 0:
-            # Regime-adaptive entry conditions
-            if is_trending_up:
-                # Bull regime: favor longs, require breakout above upper band
-                long_condition = (price > upper_band) and vol_conf
-                short_condition = (price < lower_band) and vol_conf and (price < close * 0.995)  # stricter for shorts
-            elif is_trending_down:
-                # Bear regime: favor shorts, require breakdown below lower band
-                long_condition = (price > upper_band) and vol_conf and (price > close * 1.005)  # stricter for longs
-                short_condition = (price < lower_band) and vol_conf
-            else:  # ranging regime
-                # Chop regime: trade both directions but require stronger volume confirmation
-                long_condition = (price > upper_band) and vol_conf and (price > close * 1.002)
-                short_condition = (price < lower_band) and vol_conf and (price < close * 0.998)
+            # Adaptive entry conditions based on volatility regime
+            if high_vol_regime[i]:
+                # High volatility (trending): more sensitive to breakouts
+                long_condition = (price > r1_val) and vol_conf and (price > ema_20_4h_val)
+                short_condition = (price < s1_val) and vol_conf and (price < ema_20_4h_val)
+            else:  # low_vol_regime[i]
+                # Low volatility (choppy): require stronger confirmation
+                long_condition = (price > r1_val) and vol_conf and (price > ema_20_4h_val * 1.005)
+                short_condition = (price < s1_val) and vol_conf and (price < ema_20_4h_val * 0.995)
             
             if long_condition:
                 signals[i] = 0.25
@@ -125,8 +130,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks back below upper band (failed breakout) or strong adverse move
-                elif price < upper_band * 0.995 or price < close * 0.99:
+                # Exit if price breaks below S1 (failed breakout) or strong adverse move
+                elif price < s1_val or price < ema_20_4h_val * 0.99:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -137,8 +142,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks back above lower band (failed breakdown) or strong adverse move
-                elif price > lower_band * 1.005 or price > close * 1.01:
+                # Exit if price breaks above R1 (failed breakdown) or strong adverse move
+                elif price > r1_val or price > ema_20_4h_val * 1.01:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -147,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_12hTrendRegime_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_HTF_VolumeRegime_Adaptive_v3"
+timeframe = "4h"
 leverage = 1.0
