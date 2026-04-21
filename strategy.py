@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Regime_ADX_v1
-Hypothesis: On daily timeframe, Kaufman Adaptive Moving Average (KAMA) identifies trend direction, 
-while ADX > 25 filters for trending markets and RSI(14) < 30/ > 70 provides mean-reversion entries 
-in the trend direction. Weekly EMA34 confirms higher-timeframe trend alignment. 
-Discrete sizing (0.25) minimizes fee churn. Target: 30-100 total trades over 4 years.
+6h_Donchian20_WeeklyPivot_Confluence_v1
+Hypothesis: On 6h timeframe, Donchian(20) breakouts aligned with weekly pivot direction (price > weekly pivot = bullish bias, price < weekly pivot = bearish bias) and volume confirmation (volume > 1.5x 20-period average) captures high-probability trend continuation moves. Weekly pivot acts as institutional reference point reducing false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -16,125 +13,107 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for weekly trend)
+    # Load HTF data ONCE before loop (1w for weekly pivot)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 1w EMA34 for weekly trend regime ===
+    # === Weekly Pivot (standard calculation) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # === Daily KAMA (ER=10, fast=2, slow=30) ===
-    close = prices['close'].values
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close)).cumsum()
-    volatility = np.concatenate([[0], volatility[1:]])
-    
-    er = np.zeros_like(close)
-    for i in range(1, len(close)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # === Daily ADX(14) ===
+    # === 6h Donchian(20) ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Donchian channels
+    dc_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # === Daily RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # === 6h volume confirmation (volume > 1.5x 20-period average) ===
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    bars_since_entry = 0
+    max_hold_bars = 8  # max 2 days (8 * 6h = 48h)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(kama[i]) or np.isnan(adx[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(dc_upper[i]) or 
+            np.isnan(dc_lower[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        adx_val = adx[i]
-        rsi_val = rsi[i]
-        weekly_ema = ema_34_1w_aligned[i]
+        weekly_pivot = pivot_1w_aligned[i]
+        vol_conf = volume_confirmed[i]
         
-        # Trend and regime conditions
-        is_uptrend = price > kama_val
-        is_downtrend = price < kama_val
-        is_trending = adx_val > 25
-        weekly_bull = price > weekly_ema
-        weekly_bear = price < weekly_ema
+        # Weekly pivot bias
+        is_bull_bias = price > weekly_pivot
+        is_bear_bias = price < weekly_pivot
         
         if position == 0:
-            # Long conditions: weekly bull + daily uptrend + trending + RSI oversold
-            if weekly_bull and is_uptrend and is_trending and rsi_val < 30:
+            # Long: price breaks above Donchian upper + bull bias + volume
+            long_condition = (price > dc_upper[i]) and is_bull_bias and vol_conf
+            # Short: price breaks below Donchian lower + bear bias + volume
+            short_condition = (price < dc_lower[i]) and is_bear_bias and vol_conf
+            
+            if long_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: weekly bear + daily downtrend + trending + RSI overbought
-            elif weekly_bear and is_downtrend and is_trending and rsi_val > 70:
+                entry_price = price
+                bars_since_entry = 0
+            elif short_condition:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                bars_since_entry = 0
         
-        elif position == 1:
-            # Exit long: weekly bear OR RSI overbought OR trend weakens
-            if weekly_bear or rsi_val > 70 or adx_val < 20:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit short: weekly bull OR RSI oversold OR trend weakens
-            if weekly_bull or rsi_val < 30 or adx_val < 20:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        elif position != 0:
+            bars_since_entry += 1
+            
+            # Check stoploss (2.5x ATR approximation using Donchian width)
+            donchian_width = dc_upper[i] - dc_lower[i]
+            atr_approx = donchian_width * 0.2  # rough approximation
+            
+            if position == 1:
+                if price < entry_price - 2.5 * atr_approx:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Time-based exit
+                elif bars_since_entry >= max_hold_bars:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
+            else:  # position == -1
+                if price > entry_price + 2.5 * atr_approx:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Time-based exit
+                elif bars_since_entry >= max_hold_bars:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_KAMA_Regime_ADX_v1"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivot_Confluence_v1"
+timeframe = "6h"
 leverage = 1.0
