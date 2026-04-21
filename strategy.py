@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_Volume_ATRStop_v1
-Hypothesis: Donchian(20) breakout on 4h with volume confirmation and ATR-based trailing stop.
-Uses 1d EMA50 for trend filter to work in both bull/bear markets.
-Target: 20-40 trades/year per symbol.
+6h_1d_1w_Camarilla_R3S3_Fade_v1
+Hypothesis: Fade extreme Camarilla levels (R3/S3) on 6h timeframe with 1d trend filter (EMA50) and volume confirmation.
+Works in bull/bear: In uptrend, fade R3 for short; in downtrend, fade S3 for long. Uses 1d EMA for trend, 1w pivot for bias.
+Target: 12-25 trades/year per symbol (50-100 over 4 years).
 """
 
 import numpy as np
@@ -12,56 +12,60 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (EMA50)
+    # Load 1d data once for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla levels: R3, S3 (extreme fade levels)
+    rang = prev_high - prev_low
+    r3 = prev_close + rang * 3.0 / 12
+    s3 = prev_close - rang * 3.0 / 12
+    
+    # Align to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels on 4h
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 1w data for weekly pivot bias (long-term direction)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Donchian(20): 20-period high/low
-    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 4h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_4h, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_4h, low_20)
-    
-    # ATR for volatility filtering and stoploss
-    tr1 = pd.Series(high_4h).shift(1)
-    tr2 = pd.Series(low_4h).shift(1)
-    tr3 = pd.Series(close_4h).shift(1)
-    tr = pd.concat([
-        pd.Series(high_4h) - pd.Series(low_4h),
-        (pd.Series(high_4h) - tr3).abs(),
-        (pd.Series(low_4h) - tr3).abs()
-    ], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
+    # Previous week's OHLC for weekly pivot (simplified: use close as bias)
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_close_1w[0] = np.nan
+    weekly_bias = align_htf_to_ltf(prices, df_1w, prev_close_1w)  # weekly close as trend bias
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(weekly_bias[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,54 +81,65 @@ def generate_signals(prices):
         else:
             volume_ok = False
         
+        # Determine bias: weekly close > previous weekly close = bullish bias
+        weekly_bullish = weekly_bias[i] > weekly_bias[i-1] if i > 0 and not np.isnan(weekly_bias[i-1]) else True
+        
         if position == 0:
-            # Long conditions: break above Donchian high with 1d uptrend and volume
-            if (price > high_20_aligned[i] and 
+            # Long conditions: price < S3 (oversold) AND 1d uptrend AND weekly bullish bias AND volume
+            if (price < s3_aligned[i] and 
                 ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and  # 1d EMA rising
+                weekly_bullish and 
                 volume_ok):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                highest_since_entry = price
-            # Short conditions: break below Donchian low with 1d downtrend and volume
-            elif (price < low_20_aligned[i] and 
+            # Short conditions: price > R3 (overbought) AND 1d downtrend AND weekly bearish bias AND volume
+            elif (price > r3_aligned[i] and 
                   ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and  # 1d EMA falling
+                  not weekly_bullish and 
                   volume_ok):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                lowest_since_entry = price
         
         elif position == 1:
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, price)
-            
-            # Long exit: ATR trailing stop or Donchian low break
-            atr_stop = highest_since_entry - 2.5 * atr_aligned[i]
-            donchian_exit = low_20_aligned[i]
-            
-            if price < max(atr_stop, donchian_exit):
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price > 1d EMA50 (trend exhaustion) or price > R2 (mean reversion fail)
+            # Calculate R2 for exit
+            prev_high_i = high_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_low_i = low_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_close_i = close_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            if not (np.isnan(prev_high_i) or np.isnan(prev_low_i) or np.isnan(prev_close_i)):
+                rang_i = prev_high_i - prev_low_i
+                r2_exit = prev_close_i + rang_i * 2.0 / 12
+                # Align R2 exit level (simplified: use current day's R2)
+                r2_exit_aligned = align_htf_to_ltf(prices, df_1d, 
+                                                  pd.Series([prev_close_i + rang_i * 2.0 / 12] * len(df_1d)).values)
+                if price > ema_50_1d_aligned[i] or (not np.isnan(r2_exit_aligned[i]) and price > r2_exit_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, price)
-            
-            # Short exit: ATR trailing stop or Donchian high break
-            atr_stop = lowest_since_entry + 2.5 * atr_aligned[i]
-            donchian_exit = high_20_aligned[i]
-            
-            if price > min(atr_stop, donchian_exit):
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price < 1d EMA50 (trend exhaustion) or price < S2 (mean reversion fail)
+            prev_high_i = high_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_low_i = low_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_close_i = close_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            if not (np.isnan(prev_high_i) or np.isnan(prev_low_i) or np.isnan(prev_close_i)):
+                rang_i = prev_high_i - prev_low_i
+                s2_exit = prev_close_i - rang_i * 2.0 / 12
+                s2_exit_aligned = align_htf_to_ltf(prices, df_1d, 
+                                                  pd.Series([prev_close_i - rang_i * 2.0 / 12] * len(df_1d)).values)
+                if price < ema_50_1d_aligned[i] or (not np.isnan(s2_exit_aligned[i]) and price < s2_exit_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_Breakout_Volume_ATRStop_v1"
-timeframe = "4h"
+name = "6h_1d_1w_Camarilla_R3S3_Fade_v1"
+timeframe = "6h"
 leverage = 1.0
