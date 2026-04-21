@@ -1,98 +1,92 @@
-# 4h_Angle_of_Attack_V1
-# Hypothesis: On 4h timeframe, measure the angle of price movement over 3 periods as a proxy for momentum strength. 
-# Enter long when angle > 30 degrees (strong upward momentum) with volume confirmation and price above 200 EMA.
-# Enter short when angle < -30 degrees (strong downward momentum) with volume confirmation and price below 200 EMA.
-# Exit when angle returns to neutral range (-10 to 10 degrees) or volume drops.
-# This captures strong momentum moves while avoiding chop. The 200 EMA filter ensures we only trade with the long-term trend.
-# Volume confirmation ensures moves are supported by participation. Designed to work in both bull (catch rallies) and bear (catch crashes) markets.
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+"""
+1d_KAMA_Trend_With_1w_Volume_Filter
+Hypothesis: On 1d timeframe, KAMA captures adaptive trend direction. Combined with 1w volume confirmation (volume > 1.5x 20-period average) to filter breakouts, this strategy works in both bull and bear markets by only taking trades in direction of weekly trend. Uses tight entry criteria to limit trades (7-25/year) and avoid fee drag.
+"""
 
 import numpy as np
 import pandas as pd
-from math import degrees, atan2
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    
+    er = np.zeros_like(close)
+    for i in range(er_length, len(close)):
+        if np.sum(volatility[i-er_length+1:i+1]) > 0:
+            er[i] = np.abs(close[i] - close[i-er_length]) / np.sum(volatility[i-er_length+1:i+1])
+        else:
+            er[i] = 0
+    
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for 200 EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Load weekly data once for trend and volume
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate weekly KAMA for trend
+    close_1w = df_1w['close'].values
+    kama_1w = calculate_kama(close_1w, er_length=10, fast_sc=2, slow_sc=30)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Calculate 4-period price change for angle calculation (3 intervals = 4 points)
-    close = prices['close'].values
-    # Price change over 3 periods (4 points: current and 3 periods ago)
-    price_change = close - np.roll(close, 4)
-    # Time constant: 3 periods * 4 hours = 12 hours in price units
-    # We'll use a fixed time value since we're measuring angle in price-time space
-    time_interval = 3  # 3 periods
-    # Avoid division by zero
-    angles = np.zeros_like(close)
-    for i in range(4, n):
-        if time_interval != 0:
-            # Calculate angle in degrees: arctan(price_change / time_interval) * (180/pi)
-            angles[i] = degrees(atan2(price_change[i], time_interval))
+    # Calculate weekly volume average
+    volume_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
-        # Skip if EMA not ready
-        if np.isnan(ema_200_1d_aligned[i]):
+    for i in range(50, n):
+        # Skip if KAMA or volume MA not ready
+        if np.isnan(kama_1w_aligned[i]) or np.isnan(vol_ma_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        volume = prices['volume'].iloc[i]
+        # Volume confirmation: current weekly volume > 1.5 * 20-period average
+        volume_ok = volume_1w[i] > 1.5 * vol_ma_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.3 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.3 * vol_ma
-        else:
-            volume_ok = False
-        
-        # Trend filter: price > EMA200 for long, price < EMA200 for short
-        trend_long = price > ema_200_1d_aligned[i]
-        trend_short = price < ema_200_1d_aligned[i]
-        
-        # Momentum conditions
-        angle = angles[i]
-        strong_up = angle > 30.0    # >30 degrees = strong upward momentum
-        strong_down = angle < -30.0  # <-30 degrees = strong downward momentum
-        neutral = abs(angle) <= 10.0  # -10 to 10 degrees = neutral/no strong momentum
+        # Trend filter: price > KAMA for long, price < KAMA for short
+        price = prices['close'].iloc[i]
+        trend_long = price > kama_1w_aligned[i]
+        trend_short = price < kama_1w_aligned[i]
         
         if position == 0:
-            # Long: strong upward momentum + volume confirmation + uptrend
-            if strong_up and volume_ok and trend_long:
+            # Long: price above KAMA + volume confirmation + uptrend
+            if trend_long and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: strong downward momentum + volume confirmation + downtrend
-            elif strong_down and volume_ok and trend_short:
+            # Short: price below KAMA + volume confirmation + downtrend
+            elif trend_short and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: momentum turns neutral or down OR trend turns bearish
-            if neutral or strong_down or not trend_long:
+            # Long exit: price crosses below KAMA or volume dries up
+            if not trend_long or not volume_ok:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: momentum turns neutral or up OR trend turns bullish
-            if neutral or strong_up or not trend_short:
+            # Short exit: price crosses above KAMA or volume dries up
+            if not trend_short or not volume_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Angle_of_Attack_V1"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_1w_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
