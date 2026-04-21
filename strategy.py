@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA direction + RSI + chop filter
-# Uses 12h KAMA to determine trend direction, 1d RSI for overbought/oversold levels,
-# and 1d Choppiness Index to filter ranging markets. Long when KAMA up, RSI < 50, and CHOP > 61.8 (ranging).
-# Short when KAMA down, RSI > 50, and CHOP > 61.8. This mean-reversion strategy works in both bull and bear
-# markets by fading moves in ranging conditions while avoiding strong trends.
+# Hypothesis: 4h Camarilla pivot levels from 1d + volume spike + choppiness regime (proven pattern)
+# Long when price crosses above R1 in low chop regime, short when crosses below S1 in low chop regime
+# Volume spike (>2x 20-period average) confirms breakout strength
+# Chop regime filter: Choppiness Index < 38.2 indicates trending market (avoid ranging)
+# Target: 20-40 trades/year by requiring confluence of pivot break, volume, and trend
+# Works in bull/bear: Choppiness filter avoids whipsaws in ranging markets, pivot levels provide clear structure
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,29 +18,7 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d RSI(14)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing for RSI
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    avg_gain = wilder_smooth(gain, 14)
-    avg_loss = wilder_smooth(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)
-    rsi = np.where(avg_gain == 0, 0, rsi)
-    
-    # Calculate 1d Choppiness Index(14)
+    # Calculate 1d Choppiness Index (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -49,88 +28,106 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # first period
     
-    # ATR and sum of ranges
-    atr = wilder_smooth(tr, 14)
-    sum_tr = np.nancumsum(atr) - np.nancumsum(np.where(np.arange(len(atr)) < 14, atr, 0))
-    sum_tr = np.where(np.arange(len(atr)) >= 13, sum_tr, np.nan)
+    # Calculate ATR(14)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    atr_14 = wilder_smooth(tr, 14)
     
-    # Chop = 100 * log10(sum_tr / (hh - ll)) / log10(14)
-    range_hl = hh - ll
-    chop = np.where(range_hl > 0, 100 * np.log10(sum_tr / range_hl) / np.log10(14), 50)
+    # Calculate Choppiness Index: 100 * log(sum(ATR14) / (max(high) - min(low))) / log(14)
+    chop = np.full_like(close_1d, np.nan, dtype=float)
+    for i in range(13, len(close_1d)):
+        if not np.isnan(atr_14[i]):
+            sum_atr = np.nansum(atr_14[i-13:i+1])
+            max_high = np.nanmax(high_1d[i-13:i+1])
+            min_low = np.nanmin(low_1d[i-13:i+1])
+            if max_high > min_low and sum_atr > 0:
+                chop[i] = 100 * np.log10(sum_atr / (max_high - min_low)) / np.log10(14)
     
-    # Align RSI and Chop to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align Choppiness Index to 4h timeframe
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Calculate 12h KAMA(10, 2, 30)
-    close = prices['close'].values
-    direction = np.abs(np.diff(close, k=10, prepend=close[:10]))
-    volatility = np.nancumsum(np.abs(np.diff(close, prepend=close[0]))) - np.nancumsum(np.where(np.arange(len(close)) < 1, np.abs(np.diff(close, prepend=close[0])), 0))
-    er = np.where(volatility != 0, direction / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close, np.nan, dtype=float)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 1d OHLC for Camarilla pivot levels
+    o_1d = df_1d['open'].values
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
     
-    # KAMA direction: 1 if rising, -1 if falling
-    kama_dir = np.where(kama > np.roll(kama, 1), 1, -1)
-    kama_dir[0] = 1
+    # Camarilla levels: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), R2 = C + ((H-L)*1.1/6), R1 = C + ((H-L)*1.1/12)
+    # S1 = C - ((H-L)*1.1/12), S2 = C - ((H-L)*1.1/6), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
+    hl_range = h_1d - l_1d
+    r1 = c_1d + (hl_range * 1.1 / 12)
+    s1 = c_1d - (hl_range * 1.1 / 12)
+    
+    # Align pivot levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Pre-compute volume moving average (20-period)
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
-        if np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]) or np.isnan(kama_dir[i]):
+    for i in range(20, n):
+        # Skip if data not ready
+        if np.isnan(chop_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Only trade in ranging markets (CHOP > 61.8)
-        if chop_aligned[i] <= 61.8:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Current price and volume
+        price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
+        
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirm = volume > 2.0 * vol_ma[i]
+        
+        # Chop filter: trending market (CHOP < 38.2)
+        trending_regime = chop_aligned[i] < 38.2
         
         if position == 0:
-            # Long: KAMA up and RSI < 50
-            if kama_dir[i] == 1 and rsi_aligned[i] < 50:
-                signals[i] = 0.25
-                position = 1
-            # Short: KAMA down and RSI > 50
-            elif kama_dir[i] == -1 and rsi_aligned[i] > 50:
-                signals[i] = -0.25
-                position = -1
+            if volume_confirm and trending_regime:
+                # Long: price crosses above R1
+                if price > r1_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price crosses below S1
+                elif price < s1_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position != 0:
-            # Exit when KAMA direction changes or RSI reverts to 50
+            # Exit conditions
             exit_signal = False
-            if position == 1:  # long
-                if kama_dir[i] == -1 or rsi_aligned[i] >= 50:
+            
+            if position == 1:  # long position
+                # Exit if price crosses below S1 (failed breakout) or chop increases (ranging)
+                if price < s1_aligned[i] or chop_aligned[i] > 50.0:
                     exit_signal = True
-            elif position == -1:  # short
-                if kama_dir[i] == 1 or rsi_aligned[i] <= 50:
+            
+            elif position == -1:  # short position
+                # Exit if price crosses above R1 (failed breakdown) or chop increases (ranging)
+                if price > r1_aligned[i] or chop_aligned[i] > 50.0:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
+                # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12h_KAMA_RSI_Chop_MeanReversion"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dChop14_Volume"
+timeframe = "4h"
 leverage = 1.0
