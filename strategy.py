@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wEMA50_Trend_ATRStop_v1
-Hypothesis: 12h Camarilla R1/S1 breakouts filtered by 1w EMA50 trend regime (bull/bear) with volume confirmation.
-In bull regime (price > 1w EMA50): long breakouts favored; in bear regime (price < 1w EMA50): short breakdowns favored.
-Volume spike confirms institutional participation. Uses 1w HTF for trend alignment to capture multi-week momentum.
-Target: 12-37 trades/year (50-150 total over 4 years) with discrete sizing (0.25) to minimize fee drag.
-ATR stoploss (2.5x) and minimum holding period (6 bars) reduce whipsaw and overtrading.
+4h_Camarilla_R1_S1_Breakout_12hEMA21_Trend_VolumeSpike_v1
+Hypothesis: Camarilla R1/S1 breakouts filtered by 12h EMA21 trend regime and 4h volume spike confirmation.
+In bull regime (price > EMA21): long breakouts favored; in bear regime (price < EMA21): short breakdowns favored.
+Volume spike confirms institutional participation. Uses 12h HTF for trend alignment to reduce whipsaw and capture multi-day momentum.
+Discrete sizing (0.25) targets 20-40 trades/year to minimize fee drag and improve test generalization.
 """
 
 import numpy as np
@@ -17,20 +16,22 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for trend regime)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:
+    # Load HTF data ONCE before loop (12h for trend regime)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 22:
         return np.zeros(n)
     
-    # === 1w EMA50 for trend regime ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === 12h EMA21 for trend regime ===
+    close_12h = df_12h['close'].values
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
     
-    # === 12h ATR (14-period) for stoploss ===
+    # === 4h close ===
+    close = prices['close'].values
+    
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
@@ -38,12 +39,12 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 12h volume confirmation (volume > 1.8x 20-period average) ===
+    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.8 * vol_ma_20)
+    volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 12h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -60,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,24 +70,24 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_50_1w_val = ema_50_1w_aligned[i]
+        ema_21_12h_val = ema_21_12h_aligned[i]
         r1_val = r1[i]
         s1_val = s1[i]
         vol_conf = volume_confirmed[i]
         
         # Trend regime
-        is_bull = price > ema_50_1w_val
-        is_bear = price < ema_50_1w_val
+        is_bull = price > ema_21_12h_val
+        is_bear = price < ema_21_12h_val
         
         if position == 0:
             if is_bull:
                 # Bull regime: long breakouts favored
                 long_condition = (price > r1_val) and vol_conf
-                short_condition = (price < s1_val) and vol_conf and (price < ema_50_1w_val * 0.99)  # stricter for shorts
+                short_condition = (price < s1_val) and vol_conf and (price < ema_21_12h_val * 0.99)  # stricter for shorts
             else:  # bear regime
                 # Bear regime: short breakdowns favored
                 short_condition = (price < s1_val) and vol_conf
-                long_condition = (price > r1_val) and vol_conf and (price > ema_50_1w_val * 1.01)  # stricter for longs
+                long_condition = (price > r1_val) and vol_conf and (price > ema_21_12h_val * 1.01)  # stricter for longs
             
             if long_condition:
                 signals[i] = 0.25
@@ -102,14 +103,14 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 6 bars to reduce churn
-            if bars_since_entry < 6:
+            # Minimum holding period of 4 bars to reduce churn
+            if bars_since_entry < 4:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.5x ATR)
+            # Check stoploss (2.0x ATR)
             if position == 1:
-                if price < entry_price - 2.5 * atr[i]:
+                if price < entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -121,7 +122,7 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.5 * atr[i]:
+                if price > entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -135,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wEMA50_Trend_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA21_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
