@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_MultiTimeframe_Donchian_Breakout_12hTrend_Filter
-Hypothesis: 6-hour Donchian(20) breakouts in the direction of the 12-hour trend (EMA34) yield high-probability moves. Volume confirmation and ATR volatility filter reduce false signals. Works in bull/bear by only taking breakouts aligned with the 12h EMA trend, avoiding counter-trend trades during reversals.
+4h_ChaikinMoneyFlow_1dTrend_Filter_V1
+Hypothesis: Chaikin Money Flow (CMF) on 4h detects institutional buying/selling pressure. 
+Only take long when CMF > 0.05 and price > 1d EMA50 (bullish trend); short when CMF < -0.05 and price < 1d EMA50 (bearish trend).
+Uses 1d EMA50 as trend filter to avoid counter-trend trades. CMF threshold reduces whipsaw.
+Works in bull/bear by aligning with higher timeframe trend.
 """
 
 import numpy as np
@@ -13,80 +16,96 @@ def generate_signals(prices):
     if n < 20:
         return np.zeros(n)
     
-    # Load 12h data once for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load 1d data once for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 1d EMA50
+    close_1d = df_1d['close'].values
+    ema_50 = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        multiplier = 2 / (50 + 1)
+        ema_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50[i] = (close_1d[i] - ema_50[i-1]) * multiplier + ema_50[i-1]
     
-    # 6h Donchian(20) channels
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Calculate Chaikin Money Flow (CMF) on 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # Calculate rolling max/min for Donchian channels
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Volume and volatility filters
     volume = prices['volume'].values
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Calculate ATR(14) for volatility filter
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        atr[i] = np.mean(tr[i-14:i])
+    # Money Flow Multiplier
+    mfm = np.zeros_like(close)
+    for i in range(n):
+        if high[i] == low[i]:
+            mfm[i] = 0.0
+        else:
+            mfm[i] = ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i])
+    
+    # Money Flow Volume
+    mfv = mfm * volume
+    
+    # 20-period CMF
+    cmf = np.zeros(n)
+    for i in range(n):
+        if i < 19:
+            cmf[i] = 0.0
+        else:
+            sum_mfv = np.sum(mfv[i-19:i+1])
+            sum_volume = np.sum(volume[i-19:i+1])
+            if sum_volume > 0:
+                cmf[i] = sum_mfv / sum_volume
+            else:
+                cmf[i] = 0.0
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if any required values are not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_12h_aligned[i])):
+        # Skip if EMA50 not available
+        if np.isnan(ema_50_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
             continue
         
-        # Volume filter: current volume > 20-period average
-        volume_filter = volume[i] > vol_ma[i]
+        price = close[i]
+        ema50 = ema_50_aligned[i]
+        cmf_val = cmf[i]
         
-        # Volatility filter: ATR > 0 (avoid degenerate cases)
-        vol_filter = atr[i] > 0
-        
-        # Trend filter: price above/below 12h EMA34
-        price_above_ema = close[i] > ema_12h_aligned[i]
-        price_below_ema = close[i] < ema_12h_aligned[i]
-        
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
-        
-        # Entry logic
-        if volume_filter and vol_filter:
-            # Long: upward breakout + price above 12h EMA (uptrend)
-            if breakout_up and price_above_ema:
+        if position == 0:
+            # Long: CMF > 0.05 and price above 1d EMA50 (bullish trend)
+            if cmf_val > 0.05 and price > ema50:
                 signals[i] = 0.25
-            # Short: downward breakout + price below 12h EMA (downtrend)
-            elif breakout_down and price_below_ema:
+                position = 1
+            # Short: CMF < -0.05 and price below 1d EMA50 (bearish trend)
+            elif cmf_val < -0.05 and price < ema50:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: CMF turns negative or price drops below EMA50
+            if cmf_val < 0 or price < ema50:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: CMF turns positive or price rises above EMA50
+            if cmf_val > 0 or price > ema50:
+                signals[i] = 0.0
+                position = 0
+            else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_MultiTimeframe_Donchian_Breakout_12hTrend_Filter"
-timeframe = "6h"
+name = "4h_ChaikinMoneyFlow_1dTrend_Filter_V1"
+timeframe = "4h"
 leverage = 1.0
