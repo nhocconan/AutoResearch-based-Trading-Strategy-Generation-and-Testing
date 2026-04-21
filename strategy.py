@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3_S3_Breakout_1wTrend_v1
-Hypothesis: On 1d timeframe, price breaking above Camarilla R3 or below S3 levels from prior 1w session captures multi-day institutional breakouts. Combined with 1w EMA50 trend filter and ATR-based stoploss. Designed for very low trade frequency (<25/year) to minimize fee drag and work in both bull (breakout continuation) and bear (breakdown continuation) regimes by following the weekly trend.
+6h_EMA_Cross_Volume_Regime_v1
+Hypothesis: On 6h timeframe, EMA(9)/EMA(21) cross with volume confirmation and ADX regime filter captures medium-term momentum. Long on bullish cross with rising volume in trending/accumulation regime (ADX>20); short on bearish cross with rising volume in trending/distribution regime. Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull (continuation) and bear (mean reversion via short) regimes.
 """
 
 import numpy as np
@@ -13,36 +13,24 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for Camarilla levels and EMA trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop (1d for volume regime context)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # === 1-week EMA50 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === 1-day average volume for regime filter ===
+    volume_1d = df_1d['volume'].values
+    avg_volume_1d = pd.Series(volume_1d).rolling(window=21, min_periods=21).mean().values
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
-    # === Camarilla levels from prior 1-week session (HLC of previous week) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === EMA(9) and EMA(21) on 6h close ===
+    close = prices['close'].values
+    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Camarilla R3, S3, R4, S4
-    camarilla_r3 = close_1w + (high_1w - low_1w) * 1.1 / 4
-    camarilla_s3 = close_1w - (high_1w - low_1w) * 1.1 / 4
-    camarilla_r4 = close_1w + (high_1w - low_1w) * 1.1 / 2
-    camarilla_s4 = close_1w - (high_1w - low_1w) * 1.1 / 2
-    
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
-    
-    # === ATR for volatility and stoploss (14-period on 1d) ===
+    # === ADX(14) for regime filter ===
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
     # True Range
     tr1 = high - low
@@ -52,52 +40,80 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM and TR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_9[i]) or np.isnan(ema_21[i]) or 
+            np.isnan(adx[i]) or np.isnan(avg_volume_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        price_high = prices['high'].iloc[i]
-        price_low = prices['low'].iloc[i]
-        ema_50 = ema_50_1w_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        r4 = camarilla_r4_aligned[i]
-        s4 = camarilla_s4_aligned[i]
-        atr_val = atr[i]
+        price_open = prices['open'].iloc[i]
+        volume = prices['volume'].iloc[i]
+        ema_9_val = ema_9[i]
+        ema_21_val = ema_21[i]
+        adx_val = adx[i]
+        avg_vol_1d = avg_volume_1d_aligned[i]
+        
+        # Volume confirmation: current 6h volume > 1.5x daily average volume (scaled)
+        # Daily avg volume approximated for 6h: divide by 4 (since 4x 6h in 1d)
+        vol_threshold = avg_vol_1d * 0.375  # 1.5x / 4 = 0.375
+        volume_confirmed = volume > vol_threshold
         
         if position == 0:
-            # Long: price breaks above R3 (bullish breakout) + above 1w EMA50 (uptrend)
-            if price_close > r3 and price_close > ema_50:
+            # Bullish EMA cross: EMA9 crosses above EMA21
+            bullish_cross = ema_9_val > ema_21_val and ema_9[i-1] <= ema_21[i-1]
+            # Bearish EMA cross: EMA9 crosses below EMA21
+            bearish_cross = ema_9_val < ema_21_val and ema_9[i-1] >= ema_21[i-1]
+            
+            # Long: bullish cross + volume confirmed + ADX > 20 (trending or accumulation)
+            if bullish_cross and volume_confirmed and adx_val > 20:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price_close
-            # Short: price breaks below S3 (bearish breakdown) + below 1w EMA50 (downtrend)
-            elif price_close < s3 and price_close < ema_50:
+            # Short: bearish cross + volume confirmed + ADX > 20 (trending or distribution)
+            elif bearish_cross and volume_confirmed and adx_val > 20:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price_close
         
         elif position != 0:
-            # Stoploss: 2 * ATR from entry
+            # Stoploss: 2.5 * ATR from entry
             if position == 1:
-                if price_close < entry_price - 2.0 * atr_val:
+                if price_close < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price_close > entry_price + 2.0 * atr_val:
+                if price_close > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -105,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_v1"
-timeframe = "1d"
+name = "6h_EMA_Cross_Volume_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
