@@ -8,39 +8,40 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for pivot levels, trend, and volume
+    # Load daily data (HTF) ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivot levels (using prior day's OHLC)
+    # Calculate daily pivot levels using previous day's OHLC
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
     vol_d = df_1d['volume'].values
     
+    # Daily pivot calculation
     pivot_d = (high_d + low_d + close_d) / 3
     r1_d = 2 * pivot_d - low_d
     s1_d = 2 * pivot_d - high_d
     r2_d = pivot_d + (high_d - low_d)
     s2_d = pivot_d - (high_d - low_d)
     
-    # Align daily data to 4h (wait for daily close)
+    # Align daily data to 12h timeframe (wait for daily close)
     pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
     r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
     s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
     s2_d_aligned = align_htf_to_ltf(prices, df_1d, s2_d)
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1d EMA34 for trend filter (more responsive than EMA50 for 12h)
+    ema34_1d = pd.Series(close_d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation using 1d volume
     vol_ma_20_1d = pd.Series(vol_d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Pre-compute session hours (08-20 UTC)
+    # Pre-compute session hours (08-20 UTC) for 12h timeframe
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -50,13 +51,13 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(pivot_d_aligned[i]) or np.isnan(r1_d_aligned[i]) or np.isnan(s1_d_aligned[i]) or
             np.isnan(r2_d_aligned[i]) or np.isnan(s2_d_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC
+        # Session filter: 08-20 UTC (same as 4h/12h strategies)
         hour = hours[i]
         in_session = 8 <= hour <= 20
         
@@ -69,7 +70,7 @@ def generate_signals(prices):
         # Current values
         price_close = prices['close'].iloc[i]
         price_open = prices['open'].iloc[i]
-        vol_current = align_htf_to_ltf(prices, df_1d, vol_d)[i]  # 1d volume aligned to 4h
+        vol_current = align_htf_to_ltf(prices, df_1d, vol_d)[i]  # 1d volume aligned to 12h
         
         # Daily pivot levels
         r1_val = r1_d_aligned[i]
@@ -77,9 +78,9 @@ def generate_signals(prices):
         r2_val = r2_d_aligned[i]
         s2_val = s2_d_aligned[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = price_close > ema50_1d_aligned[i]
-        downtrend = price_close < ema50_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = price_close > ema34_1d_aligned[i]
+        downtrend = price_close < ema34_1d_aligned[i]
         
         # Volume confirmation
         volume_confirm = vol_current > 1.5 * vol_ma_20_1d_aligned[i]
@@ -130,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_R1S1_R2S2_BreakoutFade"
-timeframe = "4h"
+name = "12h_DailyPivot_R1S1_R2S2_BreakoutFade"
+timeframe = "12h"
 leverage = 1.0
