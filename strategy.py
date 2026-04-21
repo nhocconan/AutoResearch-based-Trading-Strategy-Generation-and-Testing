@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v3
-Hypothesis: 12h price breaking above/below daily R1/S1 with volume confirmation and aligned weekly trend (EMA34) captures institutional breakouts. Works in bull/bear by filtering with weekly EMA trend. Uses ATR-based stoploss. Target 15-25 trades/year to minimize fee drift. Improved version with better ATR calculation and reduced whipsaw.
+12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_TrendFilter_v4
+Hypothesis: 12h price breaking above/below daily R1/S1 with volume confirmation and aligned weekly trend (EMA34) captures institutional breakouts. Works in bull/bear by filtering with weekly EMA trend. Uses fixed position holding (exit after 4 bars) to reduce whipsaw. Target 15-25 trades/year to minimize fee drift. Improved version with reduced overtrading.
 """
 
 import numpy as np
@@ -93,7 +93,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
+    bars_held = 0
     
     for i in range(20, n):  # Start after warmup
         # Skip if NaN in critical values
@@ -101,6 +101,7 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_held = 0
             continue
         
         price = prices.iloc[i]['close']
@@ -110,47 +111,33 @@ def generate_signals(prices):
         ema34 = ema34_1w_aligned[i]
         vol_confirm = volume_filter[i]
         
-        # Calculate ATR for stoploss (20-period)
-        if i >= 20:
-            tr_values = []
-            for j in range(1, 21):
-                idx = i - j
-                if idx >= 0:
-                    tr = max(prices.iloc[idx]['high'] - prices.iloc[idx]['low'], 
-                             abs(prices.iloc[idx]['high'] - prices.iloc[idx-1]['close']), 
-                             abs(prices.iloc[idx]['low'] - prices.iloc[idx-1]['close']))
-                    tr_values.append(tr)
-            atr = np.mean(tr_values) if tr_values else 0
-        else:
-            atr = 0
-        
-        # Stoploss: 2.5 * ATR from entry
-        if position == 1 and price < entry_price - 2.5 * atr:
-            signals[i] = 0.0
-            position = 0
-            continue
-        elif position == -1 and price > entry_price + 2.5 * atr:
-            signals[i] = 0.0
-            position = 0
-            continue
+        # Exit after 4 bars to reduce whipsaw
+        if position != 0:
+            bars_held += 1
+            if bars_held >= 4:
+                signals[i] = 0.0
+                position = 0
+                bars_held = 0
+                continue
         
         if position == 0:
             # Long: price breaks above R1 with volume confirmation in uptrend (price > weekly EMA34)
             if price > r1 and vol_confirm and price > ema34:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
+                bars_held = 1
             # Short: price breaks below S1 with volume confirmation in downtrend (price < weekly EMA34)
             elif price < s1 and vol_confirm and price < ema34:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
+                bars_held = 1
         
         elif position == 1:
             # Long exit: price returns to pivot point or trend breaks
             if price < pp or price < ema34:
                 signals[i] = 0.0
                 position = 0
+                bars_held = 0
             else:
                 signals[i] = 0.25
         
@@ -159,11 +146,12 @@ def generate_signals(prices):
             if price > pp or price > ema34:
                 signals[i] = 0.0
                 position = 0
+                bars_held = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v3"
+name = "12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_TrendFilter_v4"
 timeframe = "12h"
 leverage = 1.0
