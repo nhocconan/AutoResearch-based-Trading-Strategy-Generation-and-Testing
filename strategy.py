@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using 1-week ATR-based volatility regime filter combined with 1-day EMA trend and 12h price momentum.
-Long when: price > daily EMA34, 12h momentum > 0, and weekly ATR contraction (volatility decreasing).
-Short when: price < daily EMA34, 12h momentum < 0, and weekly ATR contraction.
-Volatility regime filter reduces whipsaws in choppy markets. Targets 15-25 trades/year.
+Hypothesis: 1d strategy using 1-week EMA10 trend filter with 1-day Williams %R reversal signals.
+In uptrend (price > 1w EMA10), buy when daily Williams %R crosses above -80 from oversold.
+In downtrend (price < 1w EMA10), sell when daily Williams %R crosses below -20 from overbought.
+Volume confirmation requires current volume > 1.5x 20-day average to filter weak signals.
+Exit on trend reversal or when Williams %R returns to neutral territory (-50).
+Designed for 10-25 trades/year (40-100 total over 4 years) to minimize fee flood while capturing mean-reversion within trends.
+Works in bull markets via buying oversold dips in uptrends and in bear markets via selling overbought rallies in downtrends.
 """
 
 import numpy as np
@@ -15,77 +18,71 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA34 trend filter
+    # Load 1d data for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Load 1w data for ATR-based volatility regime
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Align Williams %R to 1d timeframe (no additional delay needed as it's based on completed 1d bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Load 1w data for EMA10 trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    ema_10 = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_aligned = align_htf_to_ltf(prices, df_1w, ema_10)
     
-    # Calculate True Range and ATR(14) on weekly data
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Weekly ATR contraction: current ATR < ATR 2 weeks ago
-    atr_contraction = np.zeros(len(atr_1w), dtype=bool)
-    atr_contraction[14:] = atr_1w[14:] < atr_1w[:-14]
-    atr_contraction_aligned = align_htf_to_ltf(prices, df_1w, atr_contraction.astype(float))
-    
-    # 12h price momentum (rate of change over 3 periods)
-    roc_period = 3
-    close_12h = prices['close'].values
-    roc = np.zeros_like(close_12h)
-    roc[roc_period:] = (close_12h[roc_period:] - close_12h[:-roc_period]) / close_12h[:-roc_period]
+    # Volume confirmation (volume > 1.5x 20-day average)
+    vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = prices['volume'].values / vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr_contraction_aligned[i]) or 
-            np.isnan(roc[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_10_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = close_12h[i]
-        ema_trend = ema_34_aligned[i]
-        vol_regime = atr_contraction_aligned[i] > 0.5  # True if volatility contracting
-        momentum = roc[i]
+        price_close = prices['close'].iloc[i]
+        ema_trend = ema_10_aligned[i]
+        williams_r_val = williams_r_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long: uptrend + positive momentum + volatility contraction
-            if (price_close > ema_trend and 
-                momentum > 0 and 
-                vol_regime):
+            # Enter long: Williams %R crosses above -80 from oversold + uptrend + volume confirmation
+            if (williams_r_val > -80 and williams_r_aligned[i-1] <= -80 and
+                price_close > ema_trend and 
+                vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: downtrend + negative momentum + volatility contraction
-            elif (price_close < ema_trend and 
-                  momentum < 0 and 
-                  vol_regime):
+            # Enter short: Williams %R crosses below -20 from overbought + downtrend + volume confirmation
+            elif (williams_r_val < -20 and williams_r_aligned[i-1] >= -20 and
+                  price_close < ema_trend and 
+                  vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: trend reversal OR momentum divergence
+            # Exit: trend reversal OR Williams %R returns to neutral territory
             exit_signal = False
             
             # Trend reversal exit
@@ -94,10 +91,10 @@ def generate_signals(prices):
             elif position == -1 and price_close > ema_trend:
                 exit_signal = True
             
-            # Momentum divergence exit (optional early exit)
-            if position == 1 and momentum < -0.005:  # Strong negative momentum
+            # Williams %R mean reversion exit
+            if position == 1 and williams_r_val > -50:
                 exit_signal = True
-            elif position == -1 and momentum > 0.005:  # Strong positive momentum
+            elif position == -1 and williams_r_val < -50:
                 exit_signal = True
             
             if exit_signal:
@@ -109,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolatilityRegime_EMA34_Momentum"
-timeframe = "12h"
+name = "1d_WilliamsR_1wEMA10_Volume"
+timeframe = "1d"
 leverage = 1.0
