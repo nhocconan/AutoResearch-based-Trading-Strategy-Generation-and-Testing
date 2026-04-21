@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_WeeklyEMA34_Trend_VolumeConfirm
-Hypothesis: Daily Donchian(20) breakout with weekly EMA34 trend filter and volume confirmation captures sustained moves in both bull and bear markets while avoiding whipsaws. Weekly EMA ensures alignment with higher timeframe momentum, volume confirmation filters low-conviction breakouts, and Donchian channels provide objective breakout levels. Designed for low trade frequency (~15-30/year) to minimize fee drag on 1d timeframe.
+6h_WeeklyPivot_Direction_6hEMA20_Crossover
+Hypothesis: In 6h timeframe, use weekly pivot points (from prior week) to determine institutional bias, combined with 6h EMA20 crossover for entry timing. Weekly pivot provides macro direction (long above weekly PP, short below), while EMA20 crossover captures momentum shifts. This reduces false signals by requiring alignment between weekly structure and short-term trend. Designed for low trade frequency (~15-30/year) to minimize fee drag in ranging/bear markets like 2025.
 """
 
 import numpy as np
@@ -10,75 +10,73 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === Daily Donchian(20) channels ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === Weekly Pivot Points from prior week ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly Pivot (PP), Resistance 1 (R1), Support 1 (S1)
+    weekly_pp = (high_1w + low_1w + close_1w) / 3.0
+    weekly_r1 = 2 * weekly_pp - low_1w
+    weekly_s1 = 2 * weekly_pp - high_1w
+    
+    # Align weekly levels to 6h timeframe (completed weekly bar only)
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # === 6h EMA20 for entry timing ===
     close = prices['close'].values
-    
-    # Upper and lower Donchian channels (20-period)
-    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === Weekly EMA34 trend filter ===
-    weekly_close = df_1w['close'].values
-    ema_34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # === Volume confirmation (20-period on daily) ===
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(20, n):
-        # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
-            np.isnan(vol_ratio[i])):
+        # Skip if weekly pivot not ready (first week)
+        if np.isnan(weekly_pp_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
-        weekly_trend = ema_34_1w_aligned[i]
-        vol_confirm = vol_ratio[i]
+        price_close = prices['close'].iloc[i]
+        ema_now = ema_20[i]
+        ema_prev = ema_20[i-1] if i > 0 else ema_now
+        pp = weekly_pp_aligned[i]
+        r1 = weekly_r1_aligned[i]
+        s1 = weekly_s1_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian + weekly uptrend + volume confirmation
-            if price_close > upper_channel[i] and price_close > weekly_trend and vol_confirm > 1.3:
+            # Long: price above weekly PP AND EMA20 bullish crossover (EMA20 crosses above price)
+            if price_close > pp and ema_now > price_close and ema_prev <= prices['close'].iloc[i-1]:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price_close
-            # Short: price breaks below lower Donchian + weekly downtrend + volume confirmation
-            elif price_close < lower_channel[i] and price_close < weekly_trend and vol_confirm > 1.3:
+            # Short: price below weekly PP AND EMA20 bearish crossover (EMA20 crosses below price)
+            elif price_close < pp and ema_now < price_close and ema_prev >= prices['close'].iloc[i-1]:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price_close
         
         elif position != 0:
-            # Exit: price reverts to opposite Donchian channel or weekly trend changes
+            # Exit on opposite EMA20 crossover or price revisits weekly PP
             if position == 1:
-                if price_close < lower_channel[i] or price_close < weekly_trend:
+                # Exit long: EMA20 bearish crossover or price drops below weekly PP
+                if ema_now < price_close and ema_prev >= prices['close'].iloc[i-1] or price_close < pp:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price_close > upper_channel[i] or price_close > weekly_trend:
+                # Exit short: EMA20 bullish crossover or price rises above weekly PP
+                if ema_now > price_close and ema_prev <= prices['close'].iloc[i-1] or price_close > pp:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -86,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_WeeklyEMA34_Trend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_WeeklyPivot_Direction_6hEMA20_Crossover"
+timeframe = "6h"
 leverage = 1.0
