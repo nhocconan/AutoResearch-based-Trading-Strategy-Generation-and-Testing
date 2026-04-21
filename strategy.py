@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Weekly Pivot R1/S1 Breakout with Volume Confirmation and ATR Stop
-Hypothesis: Weekly pivot points R1/S1 act as strong support/resistance levels on 12h chart.
-Breakouts with volume confirmation capture institutional moves in both bull and bear markets.
-ATR-based stops limit losses during false breakouts. Designed for low trade frequency
-(~15-35/year) to minimize fee drag and improve generalization across BTC, ETH, SOL.
+1d Weekly Pivot R1/S1 Breakout with Volume Confirmation and ATR Stop
+Hypothesis: Weekly pivot points R1/S1 act as strong support/resistance levels on daily charts.
+Breakouts with volume confirmation capture institutional moves, while ATR stops limit losses.
+Designed for very low trade frequency (<20/year) to minimize fee drag and improve generalization
+in both bull and bear markets. Weekly pivot adds structural strength vs daily pivots.
 """
 
 import numpy as np
@@ -40,12 +40,12 @@ def generate_signals(prices):
     r1_weekly = 2 * pivot_weekly - low_weekly
     s1_weekly = 2 * pivot_weekly - high_weekly
     
-    # Align weekly indicators to 12h timeframe
+    # Align weekly indicators to daily timeframe
     atr_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr_weekly)
     r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1_weekly)
     s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1_weekly)
     
-    # Main timeframe data (12h)
+    # Main timeframe data (1d)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -68,9 +68,9 @@ def generate_signals(prices):
         s1 = s1_weekly_aligned[i]
         vol_current = volume[i]
         
-        # Volume filter: current volume > 1.8x 20-period average
+        # Volume filter: current volume > 1.5x 20-period average
         vol_ma = np.mean(volume[max(0, i-20):i]) if i >= 20 else volume[i]
-        vol_ok = vol_current > 1.8 * vol_ma
+        vol_ok = vol_current > 1.5 * vol_ma
         
         if position == 0:
             # Long breakout: price breaks above R1 with volume confirmation
@@ -84,7 +84,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Long exit: price breaks below S1 (failed breakout) or ATR-based stop
-            if price < s1 or (i > 0 and close[i-1] > s1 and price < close[i-1] - 2.0 * atr):
+            if price < s1 or (i > 0 and close[i-1] > s1 and price < close[i-1] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,7 +92,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price breaks above R1 (failed breakdown) or ATR-based stop
-            if price > r1 or (i > 0 and close[i-1] < r1 and price > close[i-1] + 2.0 * atr):
+            if price > r1 or (i > 0 and close[i-1] < r1 and price > close[i-1] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "12h"
+name = "1d_WeeklyPivot_R1S1_Breakout_Volume_ATRFilter"
+timeframe = "1d"
 leverage = 1.0
