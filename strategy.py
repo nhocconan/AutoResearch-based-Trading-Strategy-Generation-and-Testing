@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Fade_VolumeFilter
-Hypothesis: Fade extreme Camarilla levels (R3/S3) on 6h timeframe with 1d trend filter.
-Enter short at R3 when 1d EMA50 is below price (bearish bias), enter long at S3 when 1d EMA50 is above price (bullish bias).
-Volume confirmation required to avoid false breaks in low liquidity.
-Designed for low trade frequency (target: 12-25 trades/year) to minimize fee drag.
-Works in bull/bear via 1d EMA50 trend alignment and volume spike filter.
+12h_Camarilla_Pivot_Breakout_1dTrend_VolumeFilter_V2
+Hypothesis: 12h Camarilla pivot (R1/S1) breakouts filtered by daily EMA34 trend and volume spike.
+Enter long when price breaks above 12h R1 with daily uptrend and above-average volume.
+Enter short when price breaks below 12h S1 with daily downtrend and above-average volume.
+Exit on opposite level break or ATR(14) trailing stop (1.5*ATR).
+Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
+Uses 1d HTF for trend and volume context, works in bull/bear via daily trend alignment.
 """
 
 import numpy as np
@@ -17,33 +18,34 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA50 and Camarilla calculation)
+    # Load HTF data ONCE before loop (daily for trend and volume context)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # === 1d EMA50 for trend filter ===
+    # === 12h Camarilla Pivot Levels (R1, S1) ===
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    
+    # Calculate 12h pivot levels using 12h OHLC
+    camarilla_range_12h = (high_12h - low_12h) * 1.1 / 12.0
+    r1_12h = close_12h + camarilla_range_12h
+    s1_12h = close_12h - camarilla_range_12h
+    
+    # === Daily EMA34 for HTF trend filter ===
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Daily Camarilla Pivot Levels (R3, S3) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Daily volume average for confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_range = (high_1d - low_1d) * 1.1 / 4.0
-    r3_1d = close_1d + camarilla_range
-    s3_1d = close_1d - camarilla_range
-    
-    # Align to 1d timeframe (use previous completed daily bar)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # === Volume spike filter (20-period average) ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 12h volume for spike detection ===
+    volume_12h = prices['volume'].values
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     # === ATR (14-period) for stoploss ===
     high = prices['high'].values
@@ -62,9 +64,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) 
-            or np.isnan(atr[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) 
+            or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_12h[i]) 
+            or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,34 +75,36 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume confirmation: current volume > 20-period average
-            vol_confirm = volume[i] > vol_ma[i]
+            # Volume confirmation: 12h volume > 20-period 12h average AND > daily average
+            vol_confirm_12h = volume_12h[i] > vol_ma_12h[i]
+            vol_confirm_1d = volume_12h[i] > vol_ma_1d_aligned[i]  # 12h vol > daily avg vol
+            vol_confirm = vol_confirm_12h and vol_confirm_1d
             
-            # Short conditions: price > daily R3, 1d EMA50 below price (bearish bias), volume spike
-            short_breakout = price > r3_1d_aligned[i]
-            short_trend = ema_50_1d_aligned[i] < price  # EMA below price = bearish
+            # Long conditions: price > 12h R1, daily uptrend, volume spike
+            long_breakout = price > r1_12h[i]
+            long_trend = price > ema_34_1d_aligned[i]
             
-            # Long conditions: price < daily S3, 1d EMA50 above price (bullish bias), volume spike
-            long_breakout = price < s3_1d_aligned[i]
-            long_trend = ema_50_1d_aligned[i] > price  # EMA above price = bullish
+            # Short conditions: price < 12h S1, daily downtrend, volume spike
+            short_breakout = price < s1_12h[i]
+            short_trend = price < ema_34_1d_aligned[i]
             
             # Entry logic
-            if short_breakout and short_trend and vol_confirm:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
-            elif long_breakout and long_trend and vol_confirm:
+            if long_breakout and long_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
+            elif short_breakout and short_trend and vol_confirm:
+                signals[i] = -0.25
+                position = -1
                 entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
+            if price < entry_price - 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above daily S3 (support reclaimed)
-            elif price > s3_1d_aligned[i]:
+            # Trailing exit: price closes below 12h S1 (support broken)
+            elif price < s1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,11 +112,11 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
+            if price > entry_price + 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below daily R3 (resistance reclaimed)
-            elif price < r3_1d_aligned[i]:
+            # Trailing exit: price closes above 12h R1 (resistance broken)
+            elif price > r1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Fade_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Breakout_1dTrend_VolumeFilter_V2"
+timeframe = "12h"
 leverage = 1.0
