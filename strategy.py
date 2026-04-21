@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1S1_Breakout_Volume_EMA34Filter_v2
-Hypothesis: 6h Camarilla R1/S1 breakout with volume confirmation (>1.5x 20-bar MA) and 1d EMA34 trend filter works in both bull and bear markets. Uses 1d timeframe for EMA34 to avoid look-ahead. Target: 12-37 trades/year per symbol (50-150 over 4 years).
+4h_Donchian20_Breakout_VolumeATRFilter_Regime_V2
+Hypothesis: Donchian(20) breakout with volume spike (>1.5x 20-bar MA) and chop regime filter (CHOP(14) > 61.8) works on 4h timeframe for BTC and ETH in both bull and bear markets. Uses 1d timeframe for chop calculation to avoid look-ahead. Target: 20-50 trades/year per symbol (80-200 over 4 years).
 """
 
 import numpy as np
@@ -13,47 +13,46 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for EMA34 trend (HTF)
+    # Load 1d data once for chop regime (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Donchian channels on primary timeframe (4h)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Calculate Camarilla pivot levels from previous 1d bar
+    # Donchian(20): 20-period high/low
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate chop regime on 1d timeframe
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    close_1d = df_1d['close'].values
     
-    # Shift by 1 to use previous day's data for today's pivot
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    high_1d_prev[0] = low_1d_prev[0] = close_1d_prev[0] = np.nan
+    # True Range for chop calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Camarilla calculations
-    rangeprev = high_1d_prev - low_1d_prev
-    R1 = close_1d_prev + rangeprev * 1.1 / 12
-    S1 = close_1d_prev - rangeprev * 1.1 / 12
-    R4 = close_1d_prev + rangeprev * 1.1 / 2
-    S4 = close_1d_prev - rangeprev * 1.1 / 2
+    # Chop = 100 * log10(sum(TR14) / (max_high14 - min_low14)) / log10(14)
+    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * (np.log10(atr_14) - np.log10(max_high_14 - min_low_14)) / np.log10(14)
+    chop[np.isnan(chop) | np.isinf(chop)] = 50  # neutral when invalid
     
-    # Align pivot levels to 6h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Align chop to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     # Volume filter: 20-period average
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     # ATR for stoploss
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -66,9 +65,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(R4_aligned[i]) or 
-            np.isnan(S4_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,31 +78,32 @@ def generate_signals(prices):
         # Volume confirmation (>1.5x average)
         volume_ok = volume > 1.5 * vol_ma[i]
         
-        # 1d EMA34 trend filter
-        uptrend = price > ema34_1d_aligned[i]
-        downtrend = price < ema34_1d_aligned[i]
+        # Chop regime: range-bound market (CHOP > 61.8)
+        chop_ok = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Long: break above R1 with volume and uptrend
-            if price > R1_aligned[i] and volume_ok and uptrend:
-                signals[i] = 0.25
-                position = 1
-            # Short: break below S1 with volume and downtrend
-            elif price < S1_aligned[i] and volume_ok and downtrend:
-                signals[i] = -0.25
-                position = -1
+            # Long: price breaks above Donchian high in choppy market with volume
+            if price > donchian_high[i]:
+                if chop_ok and volume_ok:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: price breaks below Donchian low in choppy market with volume
+            elif price < donchian_low[i]:
+                if chop_ok and volume_ok:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit: price crosses below S1 or stoploss
-            if price < S1_aligned[i] or price < prices['close'].iloc[i-1] - 2.5 * atr[i]:
+            # Exit: price breaks below Donchian low or stoploss
+            if price < donchian_low[i] or price < prices['close'].iloc[i-1] - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above R1 or stoploss
-            if price > R1_aligned[i] or price > prices['close'].iloc[i-1] + 2.5 * atr[i]:
+            # Exit: price breaks above Donchian high or stoploss
+            if price > donchian_high[i] or price > prices['close'].iloc[i-1] + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1S1_Breakout_Volume_EMA34Filter_v2"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_VolumeATRFilter_Regime_V2"
+timeframe = "4h"
 leverage = 1.0
