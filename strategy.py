@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_CloudFilter_1dTrend
-Hypothesis: 6h Ichimoku Tenkan/Kijun cross with 1d cloud filter (price above/below cloud) and volume confirmation. 
-The Ichimoku cloud acts as dynamic support/resistance, while the TK cross signals momentum shifts. 
-Using 1d timeframe for cloud ensures we only trade in alignment with the higher timeframe trend, 
-reducing false signals in choppy markets. Designed for low trade frequency (~15-25/year) to minimize fee drag 
-while capturing strong trending moves in both bull and bear markets via cloud position filter.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter, volume spike (>2.0x 20-period MA), and ATR(14) stoploss (2.0x). 
+Designed for low trade frequency (~12-37/year) to minimize fee drag while capturing strong trending moves in both bull and bear markets via 1d trend alignment.
 """
 
 import numpy as np
@@ -17,44 +14,42 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for Ichimoku cloud)
+    # Load HTF data ONCE before loop (1d for EMA trend and Camarilla)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1d Ichimoku Cloud Calculation ===
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
+    df_1d_open = df_1d['open'].values
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
     
-    tenkan_sen = (pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
-                  pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
-    tenkan_sen = tenkan_sen.values
+    # Calculate Camarilla levels for each 1d bar
+    range_1d = df_1d_high - df_1d_low
+    r1_1d = df_1d_close + 0.275 * range_1d
+    s1_1d = df_1d_close - 0.275 * range_1d
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    kijun_sen = (pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max() + 
-                 pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
-    kijun_sen = kijun_sen.values
+    # Align 1d Camarilla levels to 12h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
-    period_senkou_b = 52
-    senkou_b = (pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
-                pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2
-    senkou_b = senkou_b.values
+    # === 1d EMA50 for trend filter (more responsive than EMA34) ===
+    ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Ichimoku components to 6h timeframe (with proper look-ahead avoidance)
-    # Tenkan and Kijun are aligned with 1-bar delay (completed 1d values)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    # Senkou spans need extra delay because they are plotted ahead
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a, additional_delay_bars=26)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b, additional_delay_bars=26)
+    # === 12h ATR (14-period) for stoploss ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # === 6h Volume Filter (2.0x 20-period MA) ===
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # === Volume spike filter (2.0x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -65,35 +60,28 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) 
-            or np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) 
-            or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
         volume_now = volume[i]
-        tenkan = tenkan_aligned[i]
-        kijun = kijun_aligned[i]
-        senkou_a = senkou_a_aligned[i]
-        senkou_b = senkou_b_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        ema_50 = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_a, senkou_b)
-        cloud_bottom = min(senkou_a, senkou_b)
-        
-        # Volume spike: current volume > 2.0x average
+        # Volume spike: current volume > 2.0x average (stricter for fewer trades)
         volume_spike = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Enter long: price above cloud, TK cross bullish (Tenkan > Kijun), volume spike
-            long_condition = (price > cloud_top) and (tenkan > kijun) and volume_spike
-            # Enter short: price below cloud, TK cross bearish (Tenkan < Kijun), volume spike
-            short_condition = (price < cloud_bottom) and (tenkan < kijun) and volume_spike
+            # Enter only with volume spike, trend alignment, and price closing beyond Camarilla level
+            long_condition = (price > r1) and (price > ema_50) and volume_spike
+            short_condition = (price < s1) and (price < ema_50) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -109,18 +97,31 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Exit conditions
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
+                signals[i] = 0.25 if position == 1 else -0.25
+                continue
+            
+            # Check stoploss (2.0x ATR)
             if position == 1:
-                # Exit long: price falls below cloud bottom OR TK cross turns bearish
-                if (price < cloud_bottom) or (tenkan < kijun):
+                if price < entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Trend reversal exit (price below EMA)
+                elif price < ema_50:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: price rises above cloud top OR TK cross turns bullish
-                if (price > cloud_top) or (tenkan > kijun):
+                if price > entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Trend reversal exit (price above EMA)
+                elif price > ema_50:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -129,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
